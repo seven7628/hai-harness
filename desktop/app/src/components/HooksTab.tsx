@@ -12,6 +12,7 @@ import type {
 import { useT } from '../i18n'
 import { FolderIcon, Gear, HookIcon } from './icons'
 import { DetailHead, FlagRow, SourceCard, Switch } from './SettingsGroups'
+import { ownerValid } from '../lib/owner'
 import Sel from './Sel'
 
 // ─── 钩子设置页（2026-09-21 新增：全局 × 项目两级 + 二级详情面板）───
@@ -106,6 +107,13 @@ export function HooksTab() {
         <p className="set-placeholder">{loading ? t('hook.loading') : t('hook.empty')}</p>
       ) : (
         <>
+          {/* 当前归属：用户级配置的信任按它判定；项目来源各用自己的 workspace 归属。
+             没有活跃会话时显示「未绑定」——此时写操作会被服务端拒绝，不写成全局。 */}
+          <p className="set-desc" style={{ marginBottom: 10 }}>
+            {t('hook.owner.current')}：<span className="mono">{info.owner || '—'}</span>
+            {info.ownerLabel ? ` · ${info.ownerLabel}` : ''}
+          </p>
+          {!ownerValid(String(info.owner ?? '')) && <p className="hook-note warn">{t('hook.owner.unbound')}</p>}
           <div className="src-sec">{t('hook.sec.config')}</div>
           <SourceCard
             icon={<Gear size={14} />}
@@ -171,6 +179,8 @@ function HooksDetail({
   const t = useT()
   const saveHooks = useAppStore((s) => s.saveHooks)
   const trustHooks = useAppStore((s) => s.trustHooks)
+  // 归属非法/缺失时**禁止**点确认：服务端会拒绝（不写全局），但不该让用户点了才看到错误
+  const ownerOk = ownerValid(String(src.owner ?? ''))
   const saving = useAppStore((s) => s.hooksSaving)
   const workspace = scopeKind === 'project' ? src.workspace : undefined
   // 本地可编辑副本：保存成功后 store 回拉（hooksInfo 变化）→ 以磁盘为准重同步
@@ -253,7 +263,9 @@ function HooksDetail({
     setForm(null)
   }
 
-  const trust = info.trust
+  // 信任状态按来源的归属判定（项目来源 → workspace:<该项目>；用户级 → 当前会话归属）。
+  // 没带 trust 的旧响应回退到总览（顶层 trust = 当前归属）。
+  const trust = src.trust ?? info.trust
   const untrustedCmds = commandsOf(body).filter((c) => {
     const st = trust[c] ?? 'untrusted'
     return st === 'untrusted' || st === 'modified'
@@ -277,6 +289,20 @@ function HooksDetail({
       <p className="set-desc">
         {scopeKind === 'project' ? t('hook.project.desc') : t('hook.user.desc')}
       </p>
+      {/* 归属（owner）：信任是**按归属**存的 —— A 智能体/群的确认不会让 B 免确认。
+          展示当前来源的归属，让「确认给谁」在点按钮之前就看得见。 */}
+      <p className="set-desc" style={{ marginBottom: 6 }}>
+        {t('hook.owner.scope')}：<span className="mono">{src.owner || '—'}</span>
+        {src.ownerLabel ? ` · ${src.ownerLabel}` : ''}
+      </p>
+      {!ownerOk && (
+        <p className="hook-note warn">{t('hook.owner.unbound')}</p>
+      )}
+      {!!info.legacyTrust?.length && (
+        <p className="hook-note warn">
+          {t('hook.owner.legacy').replace('{n}', String(info.legacyTrust.length))}
+        </p>
+      )}
 
       {!src.ok && <p className="nwf-err mono" role="alert">{src.error ?? t('hook.parseErr')}</p>}
       {!!src.unknownKeys?.length && (
@@ -289,7 +315,7 @@ function HooksDetail({
         <div className="hook-note">
           <span>{t('hook.trust.hint').replace('{n}', String(untrustedCmds.length))}</span>
           {editable && (
-            <button className="btn primary" onClick={() => void trustHooks(untrustedCmds, 'project')}>
+            <button className="btn primary" disabled={!ownerOk} onClick={() => void trustHooks(untrustedCmds, 'project', src.owner)}>
               {t('hook.trust.action')}
             </button>
           )}
@@ -437,7 +463,7 @@ function HooksDetail({
                         {!st.on && st.reason && <span className="hook-badge" title={t(st.reason)}>{t(st.reason)}</span>}
                         <span className="grow" />
                         {scopeKind === 'project' && !st.on && (trust[h.command ?? ''] ?? 'untrusted') !== 'trusted' && editable && h.command && (
-                          <button className="btn" onClick={() => void trustHooks([h.command as string], 'project')}>{t('hook.trust.one')}</button>
+                          <button className="btn" disabled={!ownerOk} onClick={() => void trustHooks([h.command as string], 'project', src.owner)}>{t('hook.trust.one')}</button>
                         )}
                         {editable && (
                           <>

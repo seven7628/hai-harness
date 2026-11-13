@@ -1,0 +1,36 @@
+name: test
+
+# P2.5-01：干净检出编译门 + 已入库包单测。
+# 背景：仓库历史上大量 *_test.go 只存在于本机 .git/info/exclude，CI 又只在 tag 时
+# 跑 go test ./... —— 结果是 push/PR 全绿、干净检出/发版时才炸。
+# 清单与逐包补全进度见 docs/agent-hub/test-baseline.md。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test compile
+        run: go test ./... -run '^$'
+      - name: go vet
+        run: go vet ./...
+      - name: tracked package tests
+        run: go test ./agenthub/ ./agents/ ./subagent/ ./provider/ ./tools/ ./mcp/ -count=1

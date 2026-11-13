@@ -38,6 +38,12 @@ if (import.meta.env.DEV) {
     // 事件分发也是验证入口：lab/ 的断言要能构造「事件顺序」这类场景
     //（例如运行中插话的 injected 位、子 agent 摘离的任务），而不是只注入最终块。
     w.__dispatch = m.dispatchEvent
+    // Hub store 也是验证入口：发送失败记录（failed 的 clientMsgId / 目标）不是 DOM 属性，
+    // 浏览器回归要断言「重试沿用首发 cid」「群失败有重试」时只能从这里读（见
+    // scripts/shoot-hub-failures.mjs）。同样只在 dev 构建存在。
+    void import('./hub/useHubStore').then((m) => {
+      ;(w as unknown as Record<string, unknown>).__hub = m.useHubStore
+    })
     // markdown 解析缓存（第 2 步）的观测口：切会话/刷新复用的就是它，量内存要用
     void import('./lib/mdPipeline').then((p) => {
       ;(w as unknown as Record<string, unknown>).__mdCache = { stats: p.mdCacheStats, clear: p.clearMdCache }

@@ -3,6 +3,10 @@ import { ctxTokensOf, ctxWindowOf } from '../lib/ctxScope'
 import { fmtTokens, fmtUsd } from './ui'
 import { useT } from '../i18n'
 
+// 窄窗分档（HUB-STATUS-01）：固定 26px 的单行底栏里，段太多时内容会把行高撑到 30/39px
+//（scrollHeight > clientHeight，视觉上被裁一行、叠字）。≤900 先隐藏诊断类读数
+//（cache/ctx/cost），≤700 再隐藏 in/out；其余段一律可压缩 + 省略号兜底，
+// 验收口径是 scrollHeight <= clientHeight 且 document 无横向溢出。
 export default function Statusbar() {
   const t = useT()
   const usage = useAppStore((s) => s.usage)
@@ -37,18 +41,18 @@ export default function Statusbar() {
   const personaLabel = persona === 'work' ? 'Work' : 'Code'
   return (
     <footer className="statusbar">
-      <span>{streaming ? 'running' : 'idle'} · run0</span>
+      <span className="sb-run">{streaming ? 'running' : 'idle'} · run0</span>
       {/* 回合数取 turnsTotal（bridge 权威），不能直接 turns.length：
           打开长会话时 turns 只带尾部若干条（见 bridge MarshalTail），
           用数组长度会把「2 万多回合」显示成「200」。
           取 max 兜住两种情况：实时流式时 turnsTotal 尚未被事件更新（数组已长）；
           正常加载后 turnsTotal 是真实总数（数组可能被截断）。 */}
-      <span>{t('status.turns')} <span className="mono">{Math.max(turnsTotal, turns.length)}</span></span>
-      <span>in/out <span className="mono" style={{ color: 'var(--text-2)' }}>{fmtTokens(usage.input)}/{fmtTokens(usage.output)}</span></span>
-      <span>total <span className="mono">{fmtTokens(totalTokens)}</span></span>
-      <span title={cacheTitle}>{t('status.cache')} <span style={{ color: 'var(--success)' }}>{cachePct}%</span></span>
-      <span>ctx <span style={{ color: 'var(--running)' }}>{fmtTokens(ctxTokens ?? 0)}/{fmtTokens(window)}</span></span>
-      <span>cost <span style={{ color: 'var(--warning)' }}>{fmtUsd(costUsd)}</span></span>
+      <span className="sb-turns">{t('status.turns')} <span className="mono">{Math.max(turnsTotal, turns.length)}</span></span>
+      <span className="sb-io">in/out <span className="mono" style={{ color: 'var(--text-2)' }}>{fmtTokens(usage.input)}/{fmtTokens(usage.output)}</span></span>
+      <span className="sb-total">total <span className="mono">{fmtTokens(totalTokens)}</span></span>
+      <span className="sb-cache" title={cacheTitle}>{t('status.cache')} <span style={{ color: 'var(--success)' }}>{cachePct}%</span></span>
+      <span className="sb-ctx">ctx <span style={{ color: 'var(--running)' }}>{fmtTokens(ctxTokens ?? 0)}/{fmtTokens(window)}</span></span>
+      <span className="sb-cost">cost <span style={{ color: 'var(--warning)' }}>{fmtUsd(costUsd)}</span></span>
       <span
         className={`status-git ${git.is_repo && git.clean ? 'clean' : ''}`}
         title={git.is_repo ? `${git.branch}${t('status.clickViewChanges')}` : t('status.notRepo')}
@@ -56,7 +60,7 @@ export default function Statusbar() {
         onClick={() => { setRightTab('git'); setRightExpanded(true) }}
       >⑂ <span className="mono">{git.is_repo ? (git.branch || 'detached') : 'no git'}</span>{git.is_repo && !git.clean && <span className="git-modified"> M {git.modified + git.untracked}</span>}</span>
       <span className="grow" />
-      <span style={{ color: 'var(--text-3)' }}>{bridgeStatus === 'running' ? `${personaLabel} · ${model} · ${t('status.mode.' + mode) ?? mode}` : bridgeStatus}</span>
+      <span className="sb-bridge" style={{ color: 'var(--text-3)' }}>{bridgeStatus === 'running' ? `${personaLabel} · ${model} · ${t('status.mode.' + mode) ?? mode}` : bridgeStatus}</span>
     </footer>
   )
 }

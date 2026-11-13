@@ -91,6 +91,11 @@ func (pc *providerConfig) allProviders() []string {
 func (m *manager) providerBilling(c command) {
 	m.billingLoadDiskOnce() // 冷启动先显示上次值（≤24h），而不是一片空白
 	name := strings.TrimSpace(str(c.Payload, "provider"))
+	// BR-08：key 不在 settings.json，非活跃 provider 也没有 env 兜底 —— 单家查询时随命令下发。
+	// 不指定 provider（查全部）时无法用一把 key 注入，各家用 env/已注入的内存值。
+	if name != "" {
+		m.provCfg.applyPayloadKey(c.Payload, name)
+	}
 	refresh := boolVal(c.Payload["refresh"])
 
 	var targets []string

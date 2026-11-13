@@ -381,9 +381,10 @@ npm run lint                  # eslint
 npm run build                 # 生产打包 + bridge 二进制
 ```
 
-本仓库是开发仓库的**可发布子集**：内核、bridge、客户端。内部设计文档、单元/E2E 测试套件与
-开发期工具链不在发布范围 —— 因此这里的 `go test ./...` 按设计就是空的，桌面端 `package.json`
-也只保留能在已发布源码上跑通的命令。风格：Go 用 `gofmt`；TypeScript 两空格缩进、单引号、ESM。
+本仓库是开发仓库的**可发布子集**：内核、bridge、客户端。Go 测试已部分入库；push/PR CI 目前
+跑编译门（`go test ./... -run '^$'`）以及 `agenthub`、`agents`、`subagent`、`provider`、`tools`、
+`mcp` 的单元套件。完整的已入库/仍缺失清单见 `docs/agent-hub/test-baseline.md`。内部设计文档与
+开发期工具链不在发布范围。风格：Go 用 `gofmt`；TypeScript 两空格缩进、单引号、ESM。
 
 ## 目录结构
 

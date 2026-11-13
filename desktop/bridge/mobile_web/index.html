@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111113">
+  <meta name="theme-color" content="#1a1614">
   <title>HAI 遥控器</title>
   <link rel="stylesheet" href="tokens.css">
   <link rel="stylesheet" href="style.css">
@@ -12,6 +12,8 @@
   <header id="bar">
     <button id="back" class="icon" hidden>‹</button>
     <div id="title">HAI</div>
+    <button id="hub-search-btn" class="icon" title="搜索" aria-label="搜索 Hub 消息" hidden>⌕</button>
+    <button id="theme" class="icon" title="外观" aria-label="外观" hidden>◐</button>
     <button id="menu" class="icon" hidden>⋯</button>
   </header>
 
@@ -33,9 +35,53 @@
       <button id="ws-manage" class="icon" title="管理工作区">⚙</button>
     </div>
     <button id="new-session" class="primary">新建会话</button>
+    <button id="open-hub" class="hub-entry">
+      <span class="hub-entry-main">Agent Hub</span>
+      <span class="hub-entry-sub">群组 · 私聊 · Needs you</span>
+    </button>
     <button id="copy-link" class="ghost" style="width:100%;margin:-4px 0 8px">复制免配对链接</button>
     <ul id="sessions"></ul>
     <p id="list-empty" class="hint" hidden>这个工作区还没有会话。</p>
+  </main>
+
+  <!-- Agent Hub 首页 -->
+  <main id="screen-hub" class="screen" hidden>
+    <div id="hub-alerts" class="hub-alerts" hidden></div>
+    <button id="hub-needs" class="hub-entry">
+      <span class="hub-entry-main">Needs you <span id="hub-needs-count" class="hub-badge" hidden></span></span>
+      <span class="hub-entry-sub">审批 · 提问 · 交接</span>
+    </button>
+    <h2 class="hub-section">群组</h2>
+    <ul id="hub-groups" class="hub-list"></ul>
+    <p id="hub-groups-empty" class="hint" hidden>还没有群组。</p>
+    <h2 class="hub-section">私聊</h2>
+    <ul id="hub-dms" class="hub-list"></ul>
+    <p id="hub-dms-empty" class="hint" hidden>还没有智能体。</p>
+    <p id="hub-error" class="error" hidden></p>
+  </main>
+
+  <!-- Agent Hub：群时间线 -->
+  <main id="screen-hub-group" class="screen hub-screen" hidden>
+    <div id="hub-group-head" class="hub-head"></div>
+    <div id="hub-group-tools" class="hub-tools"></div>
+    <div id="hub-group-messages" class="hub-messages"></div>
+    <div id="hub-group-status" class="hub-status" hidden></div>
+    <div class="hub-composer">
+      <button id="hub-group-at" class="icon hub-at" title="提及成员">@</button>
+      <textarea id="hub-group-input" rows="1" placeholder="在群里说点什么…"></textarea>
+      <button id="hub-group-send" class="primary">发送</button>
+    </div>
+  </main>
+
+  <!-- Agent Hub：DM 时间线 -->
+  <main id="screen-hub-dm" class="screen hub-screen" hidden>
+    <div id="hub-dm-head" class="hub-head"></div>
+    <div id="hub-dm-messages" class="hub-messages"></div>
+    <div id="hub-dm-status" class="hub-status" hidden></div>
+    <div class="hub-composer">
+      <textarea id="hub-dm-input" rows="1" placeholder="对智能体说点什么…"></textarea>
+      <button id="hub-dm-send" class="primary">发送</button>
+    </div>
   </main>
 
   <!-- 工作区管理 -->
@@ -75,6 +121,19 @@
     </div>
   </main>
 
+  <!-- 外观：跟随系统 / 墨 / 宣纸（持久化在 hai.theme） -->
+  <div id="theme-sheet" class="sheet" hidden>
+    <div class="sheet-head">外观</div>
+    <div id="theme-options" class="theme-options" role="radiogroup" aria-label="外观">
+      <button type="button" class="theme-option" data-theme-mode="system" role="radio" aria-checked="false">跟随系统</button>
+      <button type="button" class="theme-option" data-theme-mode="ink" role="radio" aria-checked="false">墨（深色）</button>
+      <button type="button" class="theme-option" data-theme-mode="paper" role="radio" aria-checked="false">宣纸（浅色）</button>
+    </div>
+    <div class="sheet-actions">
+      <button id="theme-close" class="ghost">关闭</button>
+    </div>
+  </div>
+
   <!-- HITL：审批 -->
   <div id="approval" class="sheet" hidden>
     <div class="sheet-head">需要你确认</div>
@@ -104,6 +163,49 @@
     </div>
   </div>
 
+  <!-- Hub：任务板 / Needs / 派任务 抽屉 -->
+  <div id="hub-sheet" class="sheet hub-sheet" hidden>
+    <div class="sheet-head" id="hub-sheet-title"></div>
+    <div id="hub-sheet-body" class="hub-sheet-body"></div>
+    <div class="sheet-actions">
+      <button id="hub-sheet-close" class="ghost">关闭</button>
+    </div>
+  </div>
+
+  <!-- Hub：全历史搜索（跨群 + 私聊；结果点开即跳到命中附近） -->
+  <div id="hub-search" class="sheet hub-search-sheet" hidden>
+    <div class="sheet-head">搜索</div>
+    <div class="hub-search-box">
+      <input id="hub-search-input" type="search" placeholder="搜索群聊与私聊…" autocomplete="off" enterkeyhint="search" aria-label="搜索 Hub 全部历史">
+    </div>
+    <div id="hub-search-scopes" class="hub-search-scopes" role="tablist" aria-label="搜索范围">
+      <button type="button" role="tab" data-search-scope="all" aria-selected="true">全部</button>
+      <button type="button" role="tab" data-search-scope="group" aria-selected="false">群聊</button>
+      <button type="button" role="tab" data-search-scope="dm" aria-selected="false">私聊</button>
+    </div>
+    <div id="hub-search-results" class="hub-search-results" aria-live="polite"></div>
+    <p id="hub-search-error" class="error" hidden></p>
+    <div class="sheet-actions">
+      <button id="hub-search-more" class="ghost" hidden>更早的结果</button>
+      <button id="hub-search-clear" class="ghost">清空</button>
+      <button id="hub-search-close" class="ghost">关闭</button>
+    </div>
+  </div>
+
+  <!-- Hub：全屏 @ 选择器 -->
+  <div id="mention-picker" class="mention-picker" hidden>
+    <div class="mention-head">
+      <button id="mention-back" class="icon" title="返回">‹</button>
+      <input id="mention-filter" placeholder="筛选成员…" autocomplete="off">
+    </div>
+    <div id="mention-list" class="mention-list" role="listbox" aria-label="群成员"></div>
+    <p id="mention-empty" class="hint" hidden>没有匹配的成员。</p>
+  </div>
+
+  <script src="hub_model.js"></script>
+  <script src="mascot-bots.js"></script>
+  <script src="luna-face.js"></script>
+  <script src="avatar_model.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

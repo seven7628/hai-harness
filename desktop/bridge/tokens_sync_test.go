@@ -17,12 +17,31 @@ import (
 // 只校验「手机端出现的十六进制颜色都能在桌面端找到」——反向不要求（桌面有分类色
 // 手机用不到）。字体同理。
 func TestMobileTokensMatchDesktop(t *testing.T) {
-	const desktopPath = "../app/src/index.css"
+	// 桌面调色板不只在 index.css：sigil v2 的 8 个色相/状态色由 Hub 自己持有
+	// （hub.css 的 --sigil-* 与 avatar.ts 的 HUES 表），手机 avatar_model.js
+	// 是从这两处逐字复制的。取样必须覆盖它们，否则会把「同源复制」误判成
+	// 「手机另起色板」。本意不变：手机出现的颜色必须能在桌面端找到。
+	desktopPaths := []string{
+		"../app/src/index.css",
+		"../app/src/hub/hub.css",
+		"../app/src/hub/avatar.ts",
+		// demo 源码移植后的 Luna 头像色板与暖色 token（手机端共用同一份）。
+		"../app/src/hub/lunaAvatar.ts",
+		"../app/src/hub/demo.css",
+	}
 	const mobilePath = "mobile_web/tokens.css"
 
-	desktop, err := os.ReadFile(desktopPath)
+	desktop, err := os.ReadFile(desktopPaths[0])
 	if err != nil {
 		t.Fatalf("读桌面样式失败: %v", err)
+	}
+	palette := string(desktop)
+	for _, f := range desktopPaths[1:] {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("读桌面调色板 %s 失败: %v", f, err)
+		}
+		palette += "\n" + string(b)
 	}
 	mobile, err := os.ReadFile(mobilePath)
 	if err != nil {
@@ -31,13 +50,36 @@ func TestMobileTokensMatchDesktop(t *testing.T) {
 
 	hexRe := regexp.MustCompile(`#[0-9a-fA-F]{3,8}\b`)
 	desktopSet := map[string]bool{}
-	for _, c := range hexRe.FindAllString(string(desktop), -1) {
+	for _, c := range hexRe.FindAllString(palette, -1) {
 		desktopSet[strings.ToLower(c)] = true
 	}
-	for _, c := range hexRe.FindAllString(string(mobile), -1) {
-		if !desktopSet[strings.ToLower(c)] {
-			t.Errorf("手机端颜色 %s 在桌面端不存在（不要另起色板）", c)
+	// P4-03c：不只 token 层，主题色可能出现在 index.html 的 theme-color、
+	// app.js/hub_model.js 的主题常量里 —— 这些也必须是桌面已有的颜色。
+	for _, f := range []string{
+		"mobile_web/tokens.css",
+		"mobile_web/style.css",
+		"mobile_web/app.js",
+		"mobile_web/hub_model.js",
+		"mobile_web/avatar_model.js",
+		"mobile_web/index.html",
+	} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("读手机文件 %s 失败: %v", f, err)
 		}
+		for _, c := range hexRe.FindAllString(string(b), -1) {
+			if !desktopSet[strings.ToLower(c)] {
+				t.Errorf("%s 的颜色 %s 在桌面端不存在（不要另起色板）", f, c)
+			}
+		}
+	}
+
+	index, err := os.ReadFile("mobile_web/index.html")
+	if err != nil {
+		t.Fatalf("读手机 index.html 失败: %v", err)
+	}
+	if !strings.Contains(string(index), `name="theme-color"`) {
+		t.Error("手机页面缺少 meta theme-color（P4-03c 主题切换要求）")
 	}
 
 	for _, font := range []string{"IBM Plex Sans", "IBM Plex Mono"} {

@@ -32,6 +32,18 @@ const (
 	//（模型据此遵循该技能，与模型 load_skill 的工具结果同构），但 collectUserContents /
 	// 标题 fallback / 历史恢复渲染只认 text 块 → 不算用户输入、不污染会话标题与对话正文。
 	ContentTypeSkill = "skill"
+	// ContentTypeHubTask Agent Hub 派发任务的 header 块（assign_task / hub_task_create，
+	// 见方案 §6.6.2）：user 角色 + 非 text 块，Content 是 headerJSON（task_id/origin/
+	// callback/deadline/note）。provider 对非 image 块一律按文本送出 → 模型能看到 header；
+	// 正文另有 text 块（UI 显示、也算「用户输入」）。**只有 hub_task 块的 user 消息不算
+	// 用户输入**（collectUserContents 只认 text/image），所以纯 header 消息不会触发
+	// UserInputsConsumed、不污染会话标题。与 ContentTypeMeshFrom 同一套语义。
+	ContentTypeHubTask = "hub_task"
+	// ContentTypeHubGroupWake Agent Hub 群 @ 唤醒的隐藏块（P3b-01a）：
+	// user 角色 + 非 text 块，Content 首行是 GroupWakeHeader JSON、其后是本轮群快照。
+	// provider 按文本送出（模型看到快照），UI 只渲染紧随的 text 块（触发消息原文），
+	// 因此快照不进用户气泡；与 hub_task 同属宿主协议块，不算普通用户输入。
+	ContentTypeHubGroupWake = "hub_group_wake"
 	// ContentTypeMeshFrom 跨会话/远程投递消息的来源提示块（session_send / mesh 入站注入）：
 	// user 角色 + 非 text 块 —— provider 按文本翻译送 LLM（模型看到「来自哪个会话」可回信），
 	// 但 collectUserTexts / 标题 fallback / UI 只认 text 块 → 来源提示不进对话正文、
@@ -164,8 +176,20 @@ func NewTaskResultMessage(taskID, name, result string, err error) Message {
 	return NewTaskResultMessageWithStatus(taskID, name, result, status, err)
 }
 
+// TaskResultMessagePrefix 返回 task_result 消息正文的固定开头（`〔后台任务 <id> `）。
+//
+// 单一事实来源：构造方（NewTaskResultMessageWithStatus）与需要从文本识别
+// 「这次 run 是不是被这条结果回推唤起的」的调用方（desktop/bridge 的群会话：
+// 群 run 的 AgentStart.Content 就是这条 task_result 正文）共用，避免两处各写
+// 一份格式后静默失配 —— 失配的表现是总结气泡永远不出现，且没有任何告警。
+func TaskResultMessagePrefix(taskID string) string {
+	return "〔后台任务 " + taskID + " "
+}
+
 // NewTaskResultMessageWithStatus 构造后台任务终态消息：user 角色 + task_result 内容块。
-// status 是 completed/interrupted/failed/abandoned；result 原样嵌入、不截断、不解释。
+// status 是 completed/interrupted/failed/abandoned/canceled/declined；result 原样嵌入、
+// 不截断、不解释。canceled/declined 只有 Hub 智能体任务（assign_task）会产生：
+// 任务没执行，文案不能让模型当成「完成」继续。
 func NewTaskResultMessageWithStatus(taskID, name, result, status string, err error) Message {
 	var b strings.Builder
 	label := "完成"
@@ -176,8 +200,16 @@ func NewTaskResultMessageWithStatus(taskID, name, result, status string, err err
 		label = "失败"
 	case "abandoned":
 		label = "已弃置"
+	case "blocked_budget":
+		label = "预算阻断"
+	case "canceled":
+		label = "已取消"
+	case "declined":
+		label = "已被拒绝"
 	}
-	fmt.Fprintf(&b, "〔后台任务 %s %s〕", taskID, label)
+	b.WriteString(TaskResultMessagePrefix(taskID))
+	b.WriteString(label)
+	b.WriteString("〕")
 	if name != "" {
 		fmt.Fprintf(&b, "（%s）", name)
 	}
@@ -194,6 +226,12 @@ func NewTaskResultMessageWithStatus(taskID, name, result, status string, err err
 	}
 	if status == "interrupted" {
 		b.WriteString("\n\n—— 该任务未完成，不要将其视为成功结果；按当前用户意图继续。")
+	} else if status == "blocked_budget" {
+		b.WriteString("\n\n—— 该任务因预算被拦下，结果可能不完整；不要自动重试，等用户决定是否提高预算。")
+	} else if status == "canceled" {
+		b.WriteString("\n\n—— 该任务已取消，没有执行；不要当作已完成结果，可按需改派或向用户汇报。")
+	} else if status == "declined" {
+		b.WriteString("\n\n—— 执行者拒绝了这个任务，没有执行；不要当作已完成结果，可按需改派或向用户汇报。")
 	} else {
 		b.WriteString("\n\n—— 后台任务结果，据此继续当前工作。")
 	}
@@ -224,8 +262,10 @@ func (m *Message) Validate() error {
 		// summary：LLM 压缩器生成的摘要消息类型（provider 翻译时按文本发送）；
 		// command：内部指令消息（命令框架，仅 Session.Command 注入，不持久化）；
 		// task_result：后台任务完成消息（仅 Session.PushTaskResult 注入，非用户输入）；
-		// skill：用户主动加载的技能指令（命令框架，仅 agents 注入，非用户输入）
-		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom && c.Type != ContentTypeSkill {
+		// skill：用户主动加载的技能指令（命令框架，仅 agents 注入，非用户输入）；
+		// hub_task：Agent Hub 派发的任务 header（正文另起 text 块，header 不算用户输入）
+		// hub_group_wake：Agent Hub 群 @ 唤醒 header + 快照（正文另起 text 块）
+		if c.Type != "" && c.Type != ContentTypeText && c.Type != ContentTypeImage && c.Type != ContentTypeSummary && c.Type != ContentTypeCommand && c.Type != ContentTypeTaskResult && c.Type != ContentTypeMeshFrom && c.Type != ContentTypeSkill && c.Type != ContentTypeHubTask && c.Type != ContentTypeHubGroupWake {
 			return fmt.Errorf("content[%d] has invalid type %q", i, c.Type)
 		}
 	}

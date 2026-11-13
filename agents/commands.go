@@ -24,10 +24,16 @@ import (
 //     输入可能含命令消息；onTurn 检查点先于本点，persist 过滤兜底双保险）。
 func (a *AgentLoop) injectCommands(ac *AgentContext, opts *RunOptions, msgs []core.Message) []core.Message {
 	kept := make([]core.Message, 0, len(msgs))
-	for _, m := range msgs {
+	for i, m := range msgs {
 		if !m.IsCommandMessage() {
 			kept = append(kept, m)
 			continue
+		}
+		// compact 的「同批是否有正文」必须在原始批次上算：命令之后的消息才是本批。
+		// 不能用 inputMark（Run 入口恒 0，历史正文会被误判成本批）。
+		// 「正文」只算 text/image 块（空块与引擎注入块不算，见 hasUserBody）。
+		if name, _ := parseCommand(m); name == "compact" {
+			ac.compactHasBody = hasUserBody(msgs[i+1:])
 		}
 		if injected, ok := a.executeCommand(ac, opts, m); ok {
 			kept = append(kept, injected)

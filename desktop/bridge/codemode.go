@@ -324,7 +324,7 @@ func registerCodemode(eng *tools.Engine, workspace, sid string, sbx sandbox.Sand
 	}
 	eng.RegisterTool(context.Background(), codemode.New(codemode.Options{
 		Engine: eng,
-		Tools:  func() []tools.Tool { return eng.Tools() },
+		Tools:  func() []tools.Tool { return eng.VisibleTools() },
 		// Mode/InlineBudget/ScriptTimeout 都接装配时读到的设置值：本工具实例随 loop
 		// 重建而重建（reload_settings → rebuildAll），故捕获值不会比设置旧。
 		Mode:          func() codemode.Mode { return cfg.Mode },

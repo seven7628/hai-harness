@@ -29,7 +29,9 @@ export interface ProviderCfg {
   // metrics 记账 / 用户价表 / billing 请求 / GOCODE_KEY_<NAME> 兜底全部按 id 索引 ——
   // 改 id 会让历史统计断成两个 provider。空/缺省 = 用内置名或 id。
   label?: string
-  api_key?: string // API key 明文（settings.json；bridge loadSettings 读取）
+  // 瞬态输入，不持久化到 settings（BR-08）：key 由主进程落 keys.json（safeStorage + 0600），
+  // settings.json 里**不再**出现 provider key；读侧也被主进程抹掉了。
+  api_key?: string
   models: Record<string, number> // model → context window（tokens；1M=1000000）
   max_tokens: Record<string, number> // model → 单次输出上限（tokens；DeepSeek v4-flash 官方 384k）
   // 每模型用户价表覆盖（USD/1M tokens；缺省/全 0 = 用内置注册表价表）。
@@ -187,7 +189,7 @@ export interface STTSettings {
   enabled?: boolean // 语音输入总开关（缺省 false）
   base_url?: string // 端点根（如 https://api.openai.com/v1）；请求发往 {base_url}/audio/transcriptions
   model?: string // 转写模型（如 whisper-1 / gpt-4o-transcribe）
-  api_key?: string // API key（明文存 settings.json；与 provider 同策略）
+  api_key?: string // API key（STT 历史：仍存 settings.json；provider key 已迁 keys.json，见 BR-08）
   vendor?: string // 当前语音服务商预设 id（openai/groq/…/custom）；仅 UI 回显（切换厂商恢复手改过的 URL/模型列表）
   base_urls?: Record<string, string> // 各服务商手改过的端点（按厂商 id 分组；UI 切回该厂商时回显，转写仍用上面的 base_url）
   custom_models?: Record<string, string[]> // 用户自定义模型名（按厂商 id 分组；下拉列表 = 预设模型 + 此处）
@@ -298,7 +300,9 @@ export interface ProviderSaveInput {
   // usage 口径：true/false = 显式标注，null = 清除标注回「自动判定」
   usage_input_includes_cache?: boolean | null
   cache_ttl_1h?: boolean | null // 缓存 TTL：true=1h / false=5m / null=清除回自动
-  api_key?: string
+  // 瞬态输入，不持久化到 settings：主进程把它写进 keys.json（safeStorage）。
+  // null = 显式删除该 provider 的 key；undefined/'' = 不修改。
+  api_key?: string | null
 }
 
 // ── Provider 余额 / 配额（provider_billing 命令响应；数据面见 provider/billing）──
@@ -487,7 +491,14 @@ export interface Transport {
   pickApp(): Promise<{ name: string; bundleId?: string } | null> // 系统「选择应用程序」（osascript choose application）；取消 → null
   providerSave(p: ProviderSaveInput): Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
   providerRemove(provider: string): Promise<{ ok: boolean; error?: string }> // 删除自定义 provider（含 key）
+  // 「已设置」布尔指示（key 住 keys.json；迁移未完成时主进程回退遗留明文）
   providerKeyStatus(provider: string): Promise<boolean>
+  // 明文 key，仅供 renderer 本地「测试连接」/改名复制用（不预填、不落 settings、不写日志）。
+  // 无 key / 解密失败 / 旧主进程 → 空串。
+  providerKey(provider: string): Promise<string>
+  // provider 改名：把 keys.json 条目从 from 复制到 to（新条目建好后、删旧条目之前调用）。
+  // 旧主进程没有该方法 → { ok:false, error:'unsupported' }。
+  providerCopyKey(from: string, to: string): Promise<{ ok: boolean; copied?: boolean; error?: string }>
   // OAuth 订阅登录（2026-08 P2）
   oauthLogin(provider: string): Promise<{ ok: boolean; error?: string }>
   oauthLogout(provider: string): Promise<{ ok: boolean; error?: string }>
@@ -555,6 +566,13 @@ export interface Transport {
   send(cmd: BridgeCommand): Promise<{ ok: boolean; error?: string }>
   onEvent(cb: (line: string) => void): () => void
   onExit(cb: (info: BridgeExitInfo) => void): () => void
+  /**
+   * hub:// 深链（P4-02）：主进程收到 open-url / second-instance argv 后转发。
+   * 返回取消订阅函数。浏览器 mock 是空实现（没有 OS 协议处理器）。
+   */
+  onHubDeepLink(cb: (url: string) => void): () => void
+  /** 取冷启动/刷新期间排队的深链；取完主进程转为直发（先订阅再 take 才不漏）。 */
+  takeHubDeepLinks(): Promise<string[]>
 }
 
 // ─── IM 集成（外部 IM Gateway，docs/IM_INTEGRATION.md）───
@@ -601,14 +619,25 @@ export interface IMGatewayCfg {
   type: string
   enabled: boolean
   config: Record<string, unknown>
-  // 渠道级：路由（Chat → workspace）与授权名单
+  // 渠道级：路由（Chat → workspace/agent/group）与授权名单
   routes?: IMRouteCfg[]
   allow_users?: string[]
 }
 
+// IMRouteCfg 路由：Chat → 投递目标，**三选一**（与 bridge im.RouteConfig 同构）。
+//
+//	workspace 非空          → workspace:<path>，驱动该项目的会话（原有语义）
+//	agent 非空（group 空）  → agent:<id>，驱动该智能体的 DM
+//	group + agent 非空      → group:<id>，驱动该群会话（agent 是该群的执行者）
+//
+// owner 一般留空（由目标派生）；显式填写时必须与目标一致（bridge Validate 校验）。
+// 前端**不得**把 agent/group 字段丢掉再写回——那会把消息静默改投到项目会话（B2）。
 export interface IMRouteCfg {
   chat: IMChat
-  workspace: string
+  workspace?: string
+  agent?: string
+  group?: string
+  owner?: string
 }
 
 export interface IMMirrorCfg {

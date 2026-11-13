@@ -45,7 +45,7 @@ func skillCapabilitiesFor(pc *providerConfig, prov, model string, eng *tools.Eng
 	input := modelInputs(pc, prov, model)
 	var toolNames []string
 	if eng != nil {
-		for _, t := range eng.Tools() {
+		for _, t := range eng.VisibleTools() {
 			toolNames = append(toolNames, t.Name())
 		}
 	}

@@ -59,6 +59,33 @@ var mobileAllowedCommands = map[Command]bool{
 	CmdAgentSend:     true,
 	CmdInterruptTask: true,
 	CmdMobileStatus:  true,
+	// —— Agent Hub（P4-03a）——
+	// 只开手机 UI 日常需要的读/发/安全写；智能体 CRUD、记忆/提示词/回滚、
+	// 群组 CRUD/成员增删仍只在桌面端（误操作代价高，且不是移动场景的日常动作）。
+	// 只读 / 打开 / 读历史
+	CmdHubAgentList:     true, // hub_agent_list
+	CmdHubAgentGet:      true, // hub_agent_get
+	CmdHubGroupList:     true, // hub_group_list
+	CmdHubGroupGet:      true, // hub_group_get
+	CmdHubOpen:          true, // hub_open
+	CmdHubHistory:       true, // hub_history
+	CmdHubGroupHistory:  true, // hub_group_history
+	CmdHubGroupActivity: true, // hub_group_activity
+	CmdHubTaskList:      true, // hub_task_list
+	CmdHubTaskGet:       true, // hub_task_get
+	CmdHubNeedList:      true, // hub_need_list
+	CmdHubMarkRead:      true, // hub_mark_read
+	CmdHubArtifactGet:   true, // hub_artifact_get
+	CmdHubSearch:        true, // hub_search（人类命令；手机端只读）
+	// 安全写：发消息 / 派任务 / 停止 / 取消 / 重试 / 解决 need / 清空 DM
+	CmdHubSend:             true, // hub_send
+	CmdHubGroupSend:        true, // hub_group_send
+	CmdHubGroupAssign:      true, // hub_group_assign
+	CmdHubConversationStop: true, // hub_conversation_stop
+	CmdHubTaskCancel:       true, // hub_task_cancel
+	CmdHubTaskRetry:        true, // hub_task_retry
+	CmdHubNeedResolve:      true, // hub_need_resolve
+	CmdHubClear:            true, // hub_clear
 }
 
 type mobileServer struct {
@@ -97,6 +124,23 @@ func newMobileServer(m *manager, dataDir string) *mobileServer {
 	return s
 }
 
+// attachEvents 把 hub_* 事件接到 bridge 输出总线（只挂一次，见 out.writeLine）。
+func (s *mobileServer) attachEvents() {
+	if s == nil || s.mgr == nil || s.mgr.out == nil {
+		return
+	}
+	s.mgr.out.setLineTap(s.onOutLine)
+}
+
+// onOutLine 输出总线钩子：只把 hub_* 行投给 hub 作用域订阅者。
+// 运行在 out 写锁内：只做非阻塞 channel 投递，不 dispatch/Ask/写 stdout。
+func (s *mobileServer) onOutLine(line []byte) {
+	if s == nil || s.hub == nil || !isHubEvent(line) {
+		return
+	}
+	s.hub.broadcastHub(line)
+}
+
 // start 绑定监听。优先复用上次的端口（手机端保存的 URL 才不会每次失效）。
 //
 // 监听范围由 ~/.go-code/mobile/config.json 的 lan 决定：
@@ -128,6 +172,9 @@ func (s *mobileServer) start(preferred string) error {
 	s.ln = ln
 	s.addr = ln.Addr().String()
 	s.saveAddr(s.addr)
+	// Hub 事件由各 hub_* 生产方走 m.out.writeLine（不是 bs.emit），
+	// 在输出总线上挂一次钩子即可覆盖全部事件类型；onOutLine 只转发 hub_*。
+	s.attachEvents()
 
 	s.http = &http.Server{Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -367,7 +414,8 @@ func (s *mobileServer) handleCmd(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleEvents 把该会话的事件行推给手机。订阅粒度 = workspace + session。
+// handleEvents 事件流。scope 空 = 会话流（按 workspace + session 过滤）；
+// scope=hub = Hub 应用级流（只收 hub_*，不绑定会话）。两类订阅严格隔离。
 // liveFrame 当前会话「正在流的那一段」（正文 + 思考）快照。
 // 手机 WS 重连、或弱网丢帧后据此直接替换 live 屏，不必整页重拉会话快照。
 // 返回 nil 表示会话不存在（此时调用方退回 resync）。
@@ -395,9 +443,21 @@ func (s *mobileServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = device
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != "hub" {
+		http.Error(w, "bad scope", http.StatusBadRequest)
+		return
+	}
 	ws := r.URL.Query().Get("workspace")
 	sid := r.URL.Query().Get("session_id")
-	sub := s.hub.subscribe(ws, sid)
+	var sub *mobileSub
+	if scope == "hub" {
+		// Hub 是应用级数据面：不绑定任何 workspace/session，只收 hub_*。
+		ws, sid = "", ""
+		sub = s.hub.subscribeHub()
+	} else {
+		sub = s.hub.subscribe(ws, sid)
+	}
 	defer s.hub.unsubscribe(sub)
 
 	// 页面由本进程托管（/m/），同源即可；token 是硬门槛，不额外放开跨站 Origin。
@@ -408,13 +468,18 @@ func (s *mobileServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer c.Close(websocket.StatusNormalClosure, "")
 
 	ctx := r.Context()
-	_ = c.Write(ctx, websocket.MessageText, mustMobileJSON(map[string]any{
-		"type": "hello", "workspace": ws, "session_id": sid,
-	}))
+	hello := map[string]any{"type": "hello", "workspace": ws, "session_id": sid}
+	if scope == "hub" {
+		hello["scope"] = "hub"
+	}
+	_ = c.Write(ctx, websocket.MessageText, mustMobileJSON(hello))
 	// 连上先把「正在流的那一段」补上：手机息屏/切后台期间断流，重连时不能空屏等下一个 token。
-	if f := s.liveFrame(ws, sid); f != nil {
-		if err := c.Write(ctx, websocket.MessageText, f); err != nil {
-			return
+	// Hub 订阅没有会话 live 快照，直接等 hub_* 事件（丢帧时主循环会发 resync）。
+	if scope != "hub" {
+		if f := s.liveFrame(ws, sid); f != nil {
+			if err := c.Write(ctx, websocket.MessageText, f); err != nil {
+				return
+			}
 		}
 	}
 
@@ -472,8 +537,8 @@ func (s *mobileServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
-				if isChunkEvent(line) {
-					continue // 当前帧同样已在快照里
+				if isDroppableEvent(line) {
+					continue // 当前帧同样已在快照里（会话 chunk / Hub delta）
 				}
 			}
 			frames := [][]byte{line}

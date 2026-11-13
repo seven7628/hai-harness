@@ -39,6 +39,12 @@ export function electronTransport(): Transport {
     providerSave: (p) => d.providerSave(p),
     providerRemove: (provider) => d.providerRemove(provider),
     providerKeyStatus: (provider) => d.providerKeyStatus(provider),
+    // 兼容「renderer 已更新、主进程还是旧版」：没有该方法时降级为空串（不预填、不炸主流程）。
+    providerKey: (provider) => (typeof d.providerKey === 'function' ? d.providerKey(provider) : Promise.resolve('')),
+    providerCopyKey: (from, to) =>
+      typeof d.providerCopyKey === 'function'
+        ? d.providerCopyKey({ from, to })
+        : Promise.resolve({ ok: false, error: 'unsupported' }),
     // OAuth 订阅登录（2026-08 P2）：经主进程 IPC 转发 bridge 命令
     oauthLogin: async (provider) => {
       const r = await d.oauthLogin({ provider })
@@ -96,5 +102,10 @@ export function electronTransport(): Transport {
         }
       }),
     onExit: (cb) => d.onExit(cb),
+    // 协议深链：旧主进程/preload 没有这个方法时退化成空订阅（不因能力缺失炸主流程）。
+    onHubDeepLink: (cb) =>
+      typeof d.onHubDeepLink === 'function' ? d.onHubDeepLink(cb) : () => undefined,
+    takeHubDeepLinks: () =>
+      typeof d.hubTakeDeepLinks === 'function' ? d.hubTakeDeepLinks() : Promise.resolve([]),
   }
 }

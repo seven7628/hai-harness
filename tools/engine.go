@@ -61,6 +61,23 @@ type Engine struct {
 	// 见 RegisterTool：同名同实例静默通过（hidden 档依赖），同名异实例上报。
 	onRegisterConflict func(RegisterConflict)
 
+	// hidden 被宿主按策略撤下的工具名（仍留在 tools 里：Tools() 还能列出，但模型
+	// 看不到、也调不到）。粘性：重注册同名工具不会自动恢复可见（MCP 重连/插件重注册
+	// 之后策略依然生效）。
+	//
+	// 为什么不「同名重注册成 hidden wrapper」：Go 只提升接口自身声明的方法，包装会
+	// 丢掉 ApprovalRequired / ToolTimeoutProvider / PerCallTimeout / ReadOnlyTool 等
+	// 可选接口 —— 审批、时限、只读判定全部静默失效（P1-01 复审判定的 blocking）。
+	hidden map[string]struct{}
+
+	// toolFilter 动态策略钩子（nil = 全放行）。与 hidden 的分工：
+	//   - hidden 是**装配时**按名字拍下的快照，粘、可诊断（Tools() 仍列出）；
+	//   - toolFilter 按**工具本身**判定，覆盖装配之后才注册的工具（MCP 断线重连、
+	//     插件热装）—— 那些名字此前不在快照里，只靠 hidden 会漏成「策略外工具」。
+	// 两者在 GetTool 与 ToolParams 上等价生效（都硬拦：模型看不到、调不到）。
+	// 必须是纯函数且快（在 RLock 内调用）；不允许回调里再取引擎锁（死锁）。
+	toolFilter func(Tool) bool
+
 	lock sync.RWMutex
 }
 
@@ -147,6 +164,7 @@ func WithMaxResultImages(n int) Option {
 func NewToolEngine(opts ...Option) *Engine {
 	e := &Engine{
 		tools:             make(map[string]Tool),
+		hidden:            make(map[string]struct{}),
 		maxParallel:       8,
 		maxResponse:       defaultMaxResponseSize,
 		maxScriptResponse: defaultMaxScriptResponseSize,
@@ -185,6 +203,54 @@ func (e *Engine) RegisterTool(ctx context.Context, tool Tool) {
 			Incoming: toolIdentity(tool),
 		})
 	}
+}
+
+// HideTool 按名字撤下工具（策略关闭）：模型不可见（不进 ToolParams）、也调不到
+// （GetTool 报错，直呼与脚本编排两条路径都拦）。工具实例与它的全部可选接口保持
+// 原样 —— 与「重注册成 hidden wrapper」相反，后者会让审批/时限/只读判定失效。
+//
+// 粘性：之后同名重注册（MCP 重连、插件热更新）不会把工具变回可见；要恢复必须显式
+// ShowTool。未注册的名字是 no-op（调用方可以按 Tools() 清单批量撤）。
+func (e *Engine) HideTool(name string) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	if _, ok := e.tools[name]; !ok {
+		return
+	}
+	e.hidden[name] = struct{}{}
+}
+
+// ShowTool 恢复被 HideTool 撤下的工具（同名的下一次注册不会自动恢复，见 HideTool）。
+// 只清 hidden 名表；toolFilter 是另一层策略（按工具本身判定），仍拒绝时工具照样不可见 ——
+// 要真正放开必须同时清除 filter（SetToolFilter(nil)）。
+func (e *Engine) ShowTool(name string) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	delete(e.hidden, name)
+}
+
+// ToolHidden 该名字当前是否被策略撤下。
+func (e *Engine) ToolHidden(name string) bool {
+	e.lock.RLock()
+	defer e.lock.RUnlock()
+	_, ok := e.hidden[name]
+	return ok
+}
+
+// SetToolFilter 安装动态策略钩子（nil = 清除）。见 Engine.toolFilter。
+// 调用方负责钩子的线程安全与幂等：它会在每次 GetTool / ToolParams 里被调用。
+func (e *Engine) SetToolFilter(fn func(Tool) bool) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	e.toolFilter = fn
+}
+
+// hiddenByPolicy 该工具当前是否被策略挡住（调用方必须持锁）。
+func (e *Engine) hiddenByPolicy(t Tool) bool {
+	if _, hidden := e.hidden[t.Name()]; hidden {
+		return true
+	}
+	return e.toolFilter != nil && !e.toolFilter(t)
 }
 
 // sameToolInstance 判断两次注册是否为同一实例（同名同实例静默通过 —— hidden 档依赖）。
@@ -237,7 +303,15 @@ func toolIdentity(t Tool) string {
 func (e *Engine) GetTool(_ context.Context, name string) (Tool, error) {
 	e.lock.RLock()
 	defer e.lock.RUnlock()
+	if _, hidden := e.hidden[name]; hidden {
+		// 明确说「被策略关闭」而不是「not registered」：模型据此改用别的路径，
+		// 也不会把名字当成拼写错误反复重试。
+		return nil, fmt.Errorf("tool %q is disabled by policy", name)
+	}
 	if t, ok := e.tools[name]; ok {
+		if e.hiddenByPolicy(t) {
+			return nil, fmt.Errorf("tool %q is disabled by policy", name)
+		}
 		return t, nil
 	}
 	// 未命中 → 外来命名兜底：
@@ -250,6 +324,9 @@ func (e *Engine) GetTool(_ context.Context, name string) (Tool, error) {
 	// 注意：本方法持 RLock，建议计算必须用下面的纯函数（再取锁即死锁）。
 	if alias, ok := toolAliases[name]; ok {
 		if t, ok := e.tools[alias]; ok {
+			if e.hiddenByPolicy(t) {
+				return nil, fmt.Errorf("tool %q is disabled by policy", name)
+			}
 			return t, nil
 		}
 	}
@@ -285,6 +362,30 @@ func (e *Engine) Tools() []Tool {
 	out := make([]Tool, 0, len(names))
 	for _, name := range names {
 		out = append(out, e.tools[name])
+	}
+	e.lock.RUnlock()
+	return out
+}
+
+// VisibleTools 已注册且**未被策略撤下**的工具（模型视角的注册表）。
+//
+// 与 Tools() 的差别只有一处：hidden 与 toolFilter 拒绝的工具不出现。给模型看的清单
+// （codemode 目录、技能能力清单）必须用它 —— 否则撤下的工具虽然调不到（GetTool 拦），
+// 却仍然出现在 codemode 描述里，等于告诉模型「有这个工具」，是误导（P1-01 复核）。
+func (e *Engine) VisibleTools() []Tool {
+	e.lock.RLock()
+	names := make([]string, 0, len(e.tools))
+	for name := range e.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]Tool, 0, len(names))
+	for _, name := range names {
+		t := e.tools[name]
+		if e.hiddenByPolicy(t) {
+			continue
+		}
+		out = append(out, t)
 	}
 	e.lock.RUnlock()
 	return out
@@ -522,6 +623,9 @@ func (e *Engine) ToolParams(ctx context.Context) ([]core.ToolSchema, error) {
 	providers := make([]string, 0, 1)
 	for _, name := range names {
 		t := e.tools[name]
+		if e.hiddenByPolicy(t) {
+			continue
+		}
 		if !DeclaredToModel(t) {
 			continue
 		}

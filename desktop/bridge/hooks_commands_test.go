@@ -412,7 +412,7 @@ func TestHooksTrustImmediateEffectAndHotApply(t *testing.T) {
 	}
 
 	// hooks_trust → 即刻生效（同一份 hooks 对象，查库发生在派发时）
-	m.dispatch(cmd(2, "hooks_trust", map[string]any{"commands": []any{cmdStr}, "scope": "project", "reason": "测试确认"}))
+	m.dispatch(cmd(2, "hooks_trust", map[string]any{"commands": []any{cmdStr}, "scope": "project", "reason": "测试确认", "workspace": ws}))
 	resp, _ := lastResp(t, buf)
 	if resp["ok"] != true {
 		t.Fatalf("hooks_trust 应通过: %v", resp)
@@ -427,7 +427,9 @@ func TestHooksTrustImmediateEffectAndHotApply(t *testing.T) {
 	}
 	// 信任状态在 hooks_list 里同步可见
 	data := hooksList(t, m, buf, 3, ws)
-	if got := hookTrustOf(data, cmdStr); got != "trusted" {
+	// 信任按来源 owner 存：项目卡读自己的 trust，顶层 trust 只代表「当前 owner」视图。
+	project := hooksProjectOf(t, data, ws)
+	if got := hookTrustOf(project, cmdStr); got != "trusted" {
 		t.Fatalf("信任后 hooks_list 应显示 trusted，实为 %s", got)
 	}
 	// 信任库落在 ~/.go-code/hooks-state.json（与 settings.json 分开，避免互相覆盖）
@@ -436,7 +438,7 @@ func TestHooksTrustImmediateEffectAndHotApply(t *testing.T) {
 	}
 
 	// 空命令跳过、空列表不报错（前端"信任此项目的钩子"在无钩子时是 no-op）
-	m.dispatch(cmd(4, "hooks_trust", map[string]any{"commands": []any{"  "}, "scope": "project"}))
+	m.dispatch(cmd(4, "hooks_trust", map[string]any{"commands": []any{"  "}, "scope": "project", "workspace": ws}))
 	if d, _ := lastResp(t, buf); d["ok"] != true || d["data"].(map[string]any)["trusted"] != float64(0) {
 		t.Fatalf("空命令应跳过且计数为 0: %v", d)
 	}

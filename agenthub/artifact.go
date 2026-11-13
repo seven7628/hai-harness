@@ -1,0 +1,182 @@
+package agenthub
+
+// artifact.go：产物版本化（P3a-07，§6.8）。
+//
+// 版本键是 (owner_agent_id, name)：同一智能体同名产物递增版本；不同智能体同名互不影响。
+// 预览按 artifact id 寻址（不是路径），避免路径穿越与「同名被后写覆盖」。
+// 索引扫描由调用方提供（FileStore.ListArtifacts）；本文件只做确定性版本计算与路径校验。
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+// MaxArtifactSnapshotBytes 是版本副本的大小上限；超过只登记元数据。
+const MaxArtifactSnapshotBytes = 16 << 20
+
+// artifactVersionMu 串行化「扫描现有版本 → 分配 → 落盘」；FileStore 的
+// SaveArtifact 本身不查重，调用方必须经 RegisterArtifact 才能拿到唯一版本。
+var artifactVersionMu sync.Mutex
+
+// RegisterArtifact 是产物登记的唯一入口：分配 id、按 (owner,name) 递增版本并落盘。
+// 并发调用在进程内串行；返回的 a 已带最终 ID/Version/时间。
+func RegisterArtifact(ctx context.Context, st Store, a *Artifact) error {
+	if st == nil || a == nil {
+		return fmt.Errorf("%w: artifact 参数为空", ErrInvalid)
+	}
+	lister, ok := st.(interface {
+		ListArtifacts(context.Context) ([]*Artifact, error)
+	})
+	if !ok {
+		return fmt.Errorf("%w: store 不支持产物列表", ErrInvalid)
+	}
+	artifactVersionMu.Lock()
+	defer artifactVersionMu.Unlock()
+	if id := strings.TrimSpace(string(a.ID)); id != "" {
+		// 调用方自带的 ID 必须先验，再进入复制步骤；否则 "../" 会在校验前落文件。
+		if !validID(id) || !strings.HasPrefix(id, PrefixArtifact+"_") {
+			return fmt.Errorf("%w: artifact id %q", ErrInvalid, id)
+		}
+	} else {
+		id, err := st.AllocateID(ctx, PrefixArtifact)
+		if err != nil {
+			return err
+		}
+		a.ID = ArtifactID(id)
+	}
+	existing, err := lister.ListArtifacts(ctx)
+	if err != nil {
+		return err
+	}
+	if err := NewArtifactVersion(existing, a); err != nil {
+		return err
+	}
+	// 版本号必须对应不可变内容：把源文件复制到 artifacts/<id>/v<N>，
+	// 预览读副本，后续覆盖源文件不会改写历史版本（P3a-07 复审 B1-b）。
+	if err := snapshotArtifactSource(st, a); err != nil {
+		return err
+	}
+	return st.SaveArtifact(ctx, a)
+}
+
+func snapshotArtifactSource(st Store, a *Artifact) error {
+	src := strings.TrimSpace(a.SourcePath)
+	if src == "" {
+		return nil
+	}
+	rooter, ok := st.(interface{ Root() string })
+	if !ok {
+		return nil // MemoryStore 不落文件副本
+	}
+	fi, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%w: 产物源不是普通文件", ErrInvalid)
+	}
+	if fi.Size() > MaxArtifactSnapshotBytes {
+		// 复制会让 bridge 在大文件上长时间持全局锁；超限只保留元数据，
+		// 预览仍走 2MB 截断，不阻塞结算。
+		return nil
+	}
+	destDir := filepath.Join(rooter.Root(), "artifacts", string(a.ID))
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return err
+	}
+	dest := filepath.Join(destDir, fmt.Sprintf("v%d%s", a.Version, filepath.Ext(src)))
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	a.SourcePath = dest
+	return nil
+}
+
+// NextArtifactVersion 计算 (owner,name) 的下一个版本号（现有最大 +1；无则 1）。
+func NextArtifactVersion(existing []*Artifact, owner AgentID, name string) int {
+	name = strings.TrimSpace(name)
+	max := 0
+	for _, a := range existing {
+		if a == nil || a.OwnerAgentID != owner || !strings.EqualFold(strings.TrimSpace(a.Name), name) {
+			continue
+		}
+		if a.Version > max {
+			max = a.Version
+		}
+	}
+	return max + 1
+}
+
+// ValidateArtifactPath 拒绝空/绝对/包含 .. 的路径（产物路径是相对群工作区/产物的）。
+func ValidateArtifactPath(p string) error {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return fmt.Errorf("%w: artifact.path 不能为空", ErrInvalid)
+	}
+	if filepath.IsAbs(p) {
+		return fmt.Errorf("%w: artifact.path 不能是绝对路径", ErrInvalid)
+	}
+	clean := filepath.Clean(p)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: artifact.path 不能越出根目录", ErrInvalid)
+	}
+	return nil
+}
+
+// NewArtifactVersion 用现有产物计算并填充版本字段（调用方负责落盘）。
+func NewArtifactVersion(existing []*Artifact, a *Artifact) error {
+	if a == nil {
+		return fmt.Errorf("%w: artifact is nil", ErrInvalid)
+	}
+	if err := ValidateArtifactPath(a.Path); err != nil {
+		return err
+	}
+	if strings.TrimSpace(a.Name) == "" {
+		a.Name = filepath.Base(strings.TrimSpace(a.Path))
+	}
+	a.Visibility = a.Visibility.EffectiveVisibility()
+	if err := a.Visibility.Validate(); err != nil {
+		return err
+	}
+	a.Version = NextArtifactVersion(existing, a.OwnerAgentID, a.Name)
+	now := time.Now().UTC()
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = now
+	}
+	a.UpdatedAt = now
+	return nil
+}
+
+// ArtifactVisibleTo 预览/读取鉴权：owner 仅人类与产物 owner 可见；group 所有成员可见。
+func ArtifactVisibleTo(a *Artifact, viewer AgentID, isHuman bool) bool {
+	if a == nil {
+		return false
+	}
+	if a.Visibility.EffectiveVisibility() == VisibilityGroup {
+		return true
+	}
+	return isHuman || viewer == a.OwnerAgentID
+}

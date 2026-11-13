@@ -34,7 +34,7 @@ func cronTestManager(t *testing.T) (*manager, *syncBuf) {
 func TestLoadCronSettingsDefaults(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cs := loadCronSettings()
-	if !cs.Enabled || !cs.AutoClean {
+	if !cs.enabledOn() || !cs.autoCleanOn() {
 		t.Fatalf("缺省应全开，得到 %+v", cs)
 	}
 	// 写设置：关闭定时任务
@@ -44,10 +44,10 @@ func TestLoadCronSettingsDefaults(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"cron":{"enabled":false,"auto_clean":true}}`), 0o644)
 	t.Setenv("HOME", home)
 	cs2 := loadCronSettings()
-	if cs2.Enabled {
+	if cs2.enabledOn() {
 		t.Fatal("enabled=false 应被读取")
 	}
-	if !cs2.AutoClean {
+	if !cs2.autoCleanOn() {
 		t.Fatal("auto_clean=true 应保留")
 	}
 }

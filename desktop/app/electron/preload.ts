@@ -128,10 +128,13 @@ contextBridge.exposeInMainWorld('desktop', {
   egoInstall: () => ipcRenderer.invoke('ego:install') as Promise<{ ok: boolean; error?: string }>,
   // 启动已安装的 ego lite（已装未运行时用；open -a，无需 TCC 授权）
   egoLaunch: () => ipcRenderer.invoke('ego:launch') as Promise<{ ok: boolean; error?: string }>,
-  providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) =>
+  providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string | null }) =>
     ipcRenderer.invoke('provider:save', p) as Promise<{ ok: boolean; hasKey?: boolean; error?: string }>,
   providerRemove: (provider: string) => ipcRenderer.invoke('provider:remove', provider) as Promise<{ ok: boolean; error?: string }>,
   providerKeyStatus: (provider: string) => ipcRenderer.invoke('provider:key-status', provider) as Promise<boolean>,
+  // BR-08：明文 key 只在需要时按 provider 单取（本地「测试连接」/改名复制），不出现在 settings 里
+  providerKey: (provider: string) => ipcRenderer.invoke('provider:key', provider) as Promise<string>,
+  providerCopyKey: (p: { from: string; to: string }) => ipcRenderer.invoke('provider:copy-key', p) as Promise<{ ok: boolean; copied?: boolean; error?: string }>,
   // OAuth 订阅登录（2026-08 P2）：登录/登出/状态经主进程转发 bridge 命令
   oauthLogin: (p: { provider: string }) => ipcRenderer.invoke('oauth:login', p) as Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>,
   oauthLogout: (p: { provider: string }) => ipcRenderer.invoke('oauth:logout', p) as Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>,
@@ -224,6 +227,17 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('embed-ai-action', listener)
     return () => ipcRenderer.removeListener('embed-ai-action', listener)
   },
+  // hub:// 深链（P4-02）：主进程把 open-url / second-instance argv 归一成字符串转发；
+  // 渲染层只拿到「hub://…」，不接触其他 argv（安全边界与 onEvent 一致）。
+  onHubDeepLink: (cb: (url: string) => void) => {
+    const listener = (_e: unknown, url: string) => {
+      if (typeof url === 'string' && url) cb(url)
+    }
+    ipcRenderer.on('hub:deep-link', listener)
+    return () => ipcRenderer.removeListener('hub:deep-link', listener)
+  },
+  // 冷启动/刷新期间排队的深链：renderer 先订阅 onHubDeepLink，再 take 一次。
+  hubTakeDeepLinks: (): Promise<string[]> => ipcRenderer.invoke('hub:take-deep-links'),
   // M6：多页面视图池（真开/切换/关闭真实 target）
   // srcPath = 预览的**源文件路径**（office 转换产物每次换临时 html_path，只有源文件认得出
   // 「同一个文件」）→ 命中已有标签时主进程刷新它而不是新建（见 embed.ts openEmbedTarget）。
@@ -279,8 +293,10 @@ declare global {
       officeKit: (req?: { refresh?: boolean }) => Promise<{ ok: boolean; kit?: OfficeKitStatus; error?: string }>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
       pickApp: () => Promise<{ name: string; bundleId?: string } | null>
-      providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
+      providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string | null }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
       providerKeyStatus: (provider: string) => Promise<boolean>
+      providerKey: (provider: string) => Promise<string>
+      providerCopyKey: (p: { from: string; to: string }) => Promise<{ ok: boolean; copied?: boolean; error?: string }>
       mcpSave: (servers: Record<string, MCPServerCfg>) => Promise<{ ok: boolean; error?: string }>
       fsList: (dir: string) => Promise<{ ok: boolean; path: string; entries: { name: string; path: string; isDir: boolean; size?: number }[]; error?: string }>
       fsReadRef: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; content?: string; error?: string }>
@@ -318,6 +334,9 @@ declare global {
       embedNavigateTarget: (id: string, url: string) => Promise<{ ok: boolean; error?: string }>
       onEvent: (cb: (payload: string | { lines: string[] }) => void) => () => void
       onExit: (cb: (info: BridgeExitInfo) => void) => () => void
+      // hub:// 深链（P4-02）：返回取消订阅。
+      onHubDeepLink: (cb: (url: string) => void) => () => void
+      hubTakeDeepLinks: () => Promise<string[]>
       // 内存压力信号（主进程轮询系统内存推来；见 electron/main.ts 的 startMemPressureWatch）
       onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void
     }

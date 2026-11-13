@@ -551,6 +551,10 @@ type AgentContext struct {
 	// forceCompact 强制压缩标志（命令框架：compact 命令置位，本轮结算段
 	// maybeCompact(forced=true) 直接压缩，跳过 ShouldCompact 预估）
 	forceCompact bool
+	// compactHasBody 本批 compact 命令之后是否还有用户正文（session_send 的
+	// command + text）。在 injectCommands 消费命令的那一刻按**原始批次**算，
+	// 不能用 inputMark（Run 入口恒 0，会把历史正文误当本批）。
+	compactHasBody bool
 
 	// forceClear 清空上下文标志（命令框架：clear 命令置位；循环顶部清空全部历史
 	// 仅保留 system，然后 Stop 结束本轮——上下文已空无需再跑 LLM，下轮从零开始）
@@ -728,6 +732,17 @@ func (a *AgentLoop) currentEffort() provider.ReasoningEffortLevel {
 	return a.effort
 }
 
+// SystemPromptText 下一次请求的完整系统提示词（宿主「提示词预览」自检用：
+// 预览拼出来的文本必须与这里逐字节相等，否则「用户看到的 = 模型看到的」不成立）。
+// 含 Base/产品层/Current Workspace/AGENTS.md/记忆/技能清单，按真实拼接顺序。
+func (a *AgentLoop) SystemPromptText() string { return a.composeSystemPrompt() }
+
+// Model 当前模型名（会话面板/重建后自检用；与 SetModel 同一把锁）。
+func (a *AgentLoop) Model() string { return a.currentModel() }
+
+// ReasoningEffort 当前推理档位（同上）。
+func (a *AgentLoop) ReasoningEffort() provider.ReasoningEffortLevel { return a.currentEffort() }
+
 // SetModel 会话期间切换模型：下一次 LLM 请求生效，不重建 loop/会话
 // （与 effort 同为运行边界配置；事件 Model 字段读 currentModel 保持同步）。
 func (a *AgentLoop) SetModel(m string) {
@@ -897,7 +912,7 @@ type RunOptions struct {
 
 	// PostToolUse 每个工具结果落定后回调（逐工具粒度）：注入串追加到该结果文本尾部。
 	PostToolUse events.PostToolUseHook
-	// Stop 回合自然结束的门控点：可要求"再跑一轮"（带上限，见 AgentContext.stopHookBlocks）。
+	// Stop 收尾门控点（截断判定之前）：可要求"再跑一轮"（带上限，见 AgentContext.stopHookBlocks）。
 	Stop events.StopHook
 	// SystemExtra 每 Run 追加到系统提示词（**在 Mode.SystemHint 之前**）的额外内容。
 	// 用途：hooks 的 SessionStart 注入——会话内保持稳定即不破坏 provider 前缀缓存；
@@ -1136,10 +1151,19 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 
 		forced := ac.forceCompact
 		ac.forceCompact = false
+		// 同批 compact + 用户正文（session_send 的 command + text）：压缩后必须继续
+		// 跑一轮，否则正文因 Stop 永远没有模型回答。
+		// 正文在压缩后还剩多少取决于压缩器（llm_compressor.Compact 的上游契约，
+		// 此处不改）：默认 LatestUserMaxTokens（8k 估算 token）以内由 latestUser
+		// 块逐字保留；超过上限则并入压缩输入，压缩后只剩摘要要点、原文不再保留。
+		// 两种情形都必须继续 —— 摘要 + 交接提醒足以接着回答，Stop 则连这一轮都没有。
+		// 纯 /compact（命令之后没有新用户内容）仍保持「独立操作」语义。
+		continueAfterCompact := forced && ac.compactHasBody
+		ac.compactHasBody = false
 		a.maybeCompact(ac, opts, forced)
-		// 手动压缩是独立操作：压缩完成后停在当前状态，等待用户下一条输入，
-		// 不应继续触发一次 LLM 对话。自动压缩则继续当前轮。
-		if forced {
+		// 手动压缩是独立操作：只有命令、没有正文时停在当前状态，等待用户下一条输入；
+		// 同批带正文则继续当前轮（见上）。
+		if forced && !continueAfterCompact {
 			ac.Stop()
 			continue
 		}
@@ -1236,12 +1260,14 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 			// 保留：Stop hook（外部显式声明「继续」，见下）与工具轮空回复续跑（模型侧空轮，
 			// 非引擎替模型判断）。子 loop 的在途孙任务门控（subagent.go，判据用
 			// InFlightDescendants 且按 running/interrupting 过滤）不动。
-			// Stop（hooks 能力扩展）：模型即将自然结束本轮前的**最后一个**门控点。
+			// Stop（hooks 能力扩展）：本轮收尾门控（在截断判定之前）。
 			// 外部 hook 可要求"再跑一轮"（社区里 Stop-hook loop 类工具的用法：让 agent
-			// 继续未完成的工作）。三重护栏缺一不可：① 只在自然结束路径生效（abort /
-			// ctx 取消 / 出错路径在上面已 break —— 那些属打断，不该再拖一轮）；
-			// ② 每 Run 次数上限 maxStopHookBlocks=8（对标 Claude Code 的连续 block 上限）；
-			// ③ hook panic → 视为"不继续"（坏 hook 不得卡住会话）。
+			// 继续未完成的工作）。三重护栏缺一不可：① 只在收尾门控生效（abort /
+			// ctx 取消 / 更早的出错路径在此前已 break —— 那些属打断，不该再拖一轮；
+			// 注意截断判定在本门控**之后**，所以截断轮也会先派发 Stop，
+			// LastAssistant 可能为空）；② 每 Run 次数上限 maxStopHookBlocks=8
+			// （对标 Claude Code 的连续 block 上限）；③ hook panic → 视为"不继续"
+			// （坏 hook 不得卡住会话）。
 			if opts != nil && opts.Stop != nil && !ac.IsAborted() && ac.ctx.Err() == nil &&
 				ac.stopHookBlocks < maxStopHookBlocks {
 				cont, panicked := callStop(opts.Stop, ac.ctx, events.StopContext{
@@ -1274,13 +1300,14 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 			// stop 收尾 → **零交付却报成功**：子 agent 状态 completed、结果为空串，主 agent
 			// 当成"已完成"继续往下走，用户看到任务莫名结束且全程无任何报错。
 			//
-			// 为什么判定放在这里（stop 检查点，且先于 Stop hooks 与静默结束事件）：
+			// 为什么判定放在这里（Stop 门控之后、静默结束事件之前）：
 			//   - 收尾轮无文本 + 无工具调用 ⇒ 本次 Run 没有任何可交付物，唯一诚实的终态是失败；
 			//   - 先于静默结束事件：截断是更强的判据（引擎已知上游为何切断），报错即可，
 			//     不必再叠加一条"静默结束"读数；
-			//   - 先于 Stop hooks：hooks 是"再跑一轮"的加码机制，而截断轮**没有可续跑的
-			//     依据**（模型没交出任何东西，多跑一轮只是再赌一次预算够不够），且引擎
-			//     不能替模型续跑（用户裁定）。
+			//   - 在 Stop 门控之后：若 Stop hook 要求继续，上面已 continue，本轮不会
+			//     走到截断报错；若 hook 不继续，截断仍如实报错。引擎自身不因截断自动
+			//     重试（重试装不下同一份答案），但外部 hook 可以显式要求继续（上限 8）
+			//     ——那是用户策略，不是引擎替模型重试。
 			//
 			// 不重试：截断是**配置与任务的匹配问题**（输出预算 < 该任务需要的答案量），
 			// 重试装不下同一份答案，只会再烧一轮 token。不判永久错误：调大 max_tokens /
@@ -2095,6 +2122,52 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 	}
 }
 
+// hasUserBody 命令之后（原始批次的切片）是否还有需要模型继续处理的内容。
+// 用于区分「纯 /compact」与「compact + 正文」：前者压缩完就停，后者要继续回答。
+//
+// 不是所有非 text 块都是正文，也不是所有非 text 块都不是正文：
+//   - 算正文：text（去空白非空）、image（有 URL/data URL —— image-only 也要继续本轮）、
+//     task_result（后台任务结果必须继续被处理：core/message.go 约定 provider 按文本
+//     送出、「模型看到 Markdown 结果续跑」，Stop 会把这次回推整个吞掉）；
+//   - 不算正文：空块、纯命令/技能/摘要块（command / skill / summary）、纯注入提示
+//     （hub_task / hub_group_wake / mesh_from）—— 这些是引擎替用户补的上下文，
+//     不是这一批要回答的东西。按「非 text 即正文」判会让「/compact + 群唤醒」
+//     压缩完白跑一轮模型（还可能凭空回答用户没说过的任务）。
+//
+// 与 session.collectUserContents 的口径不同：那个判「有没有用户输入」（标题/UI 用，
+// task_result 不算输入），这里判「有没有活要干」（task_result 有活要干）。
+// 用白名单而非黑名单：将来新增的块类型默认不算正文 —— 宁可少跑一轮
+// （用户再发一句即可），也不能替用户凭空开一轮模型调用。
+func hasUserBody(msgs []core.Message) bool {
+	for _, m := range msgs {
+		// 命令消息恒为 Role=System（core.NewCommandMessage），Role 判据已能挡住；
+		// 再查一次是纵深防御（防将来出现 user 角色的命令消息），且 IsCommandMessage
+		// 只查首块 —— 块级排除由下面的白名单负责，不在这里扩大语义。
+		if m.Role != core.User || m.IsCommandMessage() {
+			continue
+		}
+		for _, c := range m.Content {
+			switch c.Type {
+			case core.ContentTypeText:
+				if strings.TrimSpace(c.Content) != "" {
+					return true
+				}
+			case core.ContentTypeTaskResult:
+				// 不是用户说的话，但有活要干：任务结果必须继续被处理（见上）。
+				if strings.TrimSpace(c.Content) != "" {
+					return true
+				}
+			case core.ContentTypeImage:
+				// image-only（无 text 正文）也是用户输入：截图/图片提问必须继续本轮。
+				if strings.TrimSpace(c.Content) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // maybeCompact 每轮 LLM 调用前按预估 token 触发压缩（LLMStart 前检查点）。
 // 压缩结果替换上下文；压缩调用的用量计入运行结算（Usage/Cost），失败降级为不压缩。
 // forced = 强制压缩（命令框架：compact 命令），跳过 ShouldCompact 预估直接压缩；
@@ -2719,7 +2792,10 @@ func (ac *AgentContext) todoSnapshot() []events.TodoSnapshot {
 	}
 	items := ac.Todo.Items()
 	if len(items) == 0 {
-		return nil
+		// 空清单是事实（用户刚清空），不是「没有快照」：返回非 nil 空切片，
+		// 让宿主把 [] 原样写进事件，而不是回退读会话清单（子 agent 会因此显示
+		// 主会话的 TODO）。
+		return []events.TodoSnapshot{}
 	}
 	out := make([]events.TodoSnapshot, 0, len(items))
 	for _, it := range items {

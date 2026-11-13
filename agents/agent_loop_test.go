@@ -1878,3 +1878,243 @@ func TestToolImageOnlyMessageNotTreatedAsEmpty(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 }
+
+// keepAllCompressor 原样保留消息，模拟「压缩后 latestUser 仍在」的真实压缩器。
+type keepAllCompressor struct{}
+
+func (keepAllCompressor) ShouldCompact(context.Context, CompressStats) bool { return true }
+func (keepAllCompressor) Compact(_ context.Context, messages []core.Message) (CompressResult, error) {
+	return CompressResult{Messages: messages}, nil
+}
+
+// compactCallProvider 精确记录模型调用次数（含 0 次）。
+// mockProvider.calls 只在「脚本里还有下一轮」时自增（见其 Stream），单轮脚本下
+// 即使真调用了模型 calls 仍为 0 —— 用它断言「没有调用模型」是空断言。
+// compact 正文判定类用例一律用本类型，别再用 p.calls。
+type compactCallProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *compactCallProvider) Stream(_ context.Context, _ *provider.StreamRequest, handler func(provider.StreamEvent) error) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return handler(provider.LLMEndEvent{FinishReason: core.FinishReasonStop, Content: "已回答"})
+}
+
+// CallCount 已发生的模型调用次数（-race 下安全）。
+func (p *compactCallProvider) CallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// countCompressEnd 统计 CompressEnd 事件数。
+// 负向用例（0 次模型调用）必须同时断言压缩真的执行过（== 1）：否则将来
+// 「空批次提前 return、压根没进 maybeCompact」也会让 0 次断言变绿 ——
+// 两条断言成对，才等于「压缩完停在当前状态」。
+func countCompressEnd(list *[]events.Event) int {
+	n := 0
+	for _, e := range *list {
+		if _, ok := e.(*events.CompressEnd); ok {
+			n++
+		}
+	}
+	return n
+}
+
+// 同批 compact + 正文：压缩后必须继续跑一轮，正文不能被 Stop 吞掉。
+func TestForcedCompactWithUserTextContinuesRun(t *testing.T) {
+	p := &compactCallProvider{}
+	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+	handler, list := collectEvents()
+	ac := loop.Run(context.Background(), []core.Message{
+		core.NewCommandMessage("compact", ""),
+		core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: "请回答"}),
+	}, handler)
+	if ac.Err != nil {
+		t.Fatalf("run: %v", ac.Err)
+	}
+	if got := p.CallCount(); got != 1 {
+		t.Fatalf("compact + text 应继续调用一次模型，calls=%d", got)
+	}
+	var end *events.AgentEnd
+	compress := 0
+	for _, e := range *list {
+		switch ev := e.(type) {
+		case *events.CompressEnd:
+			compress++
+		case *events.AgentEnd:
+			end = ev
+		}
+	}
+	if compress != 1 {
+		t.Fatalf("CompressEnd = %d, want 1", compress)
+	}
+	if end == nil || end.Content != "已回答" {
+		t.Fatalf("AgentEnd = %+v, want 已回答", end)
+	}
+}
+
+// 纯 /compact（没有正文）仍应停在压缩完成，不触发模型调用。
+// 断言用 compactCallProvider（mockProvider 单轮脚本的 calls 恒 0，抓不住误调用）。
+func TestForcedCompactCommandOnlyStillStops(t *testing.T) {
+	p := &compactCallProvider{}
+	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+	handler, list := collectEvents()
+	ac := loop.Run(context.Background(), []core.Message{
+		core.NewCommandMessage("compact", ""),
+	}, handler)
+	if ac.Err != nil {
+		t.Fatalf("run: %v", ac.Err)
+	}
+	if got := p.CallCount(); got != 0 {
+		t.Fatalf("纯 compact 调用了模型 %d 次", got)
+	}
+	// 与 0 次成对：压缩必须真的执行（否则「没进 maybeCompact」也会让 0 次变绿）。
+	if got := countCompressEnd(list); got != 1 {
+		t.Fatalf("纯 compact 的 CompressEnd = %d, want 1", got)
+	}
+}
+
+// 纯 /compact 但历史里有旧正文：不能把历史正文误判成同批正文。
+// （Run 入口 inputMark 恒 0，必须按「命令之后」的原始批次判断。）
+func TestForcedCompactWithHistoryButNoNewTextStops(t *testing.T) {
+	p := &compactCallProvider{}
+	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+	handler, list := collectEvents()
+	ac := loop.Run(context.Background(), []core.Message{
+		core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: "旧问题：3+4 等于几？"}),
+		core.NewCommandMessage("compact", ""),
+	}, handler)
+	if ac.Err != nil {
+		t.Fatalf("run: %v", ac.Err)
+	}
+	if got := p.CallCount(); got != 0 {
+		t.Fatalf("纯 compact 重答了历史正文，calls=%d", got)
+	}
+	// 与 0 次成对：压缩必须真的执行（否则「没进 maybeCompact」也会让 0 次变绿）。
+	if got := countCompressEnd(list); got != 1 {
+		t.Fatalf("纯 compact 的 CompressEnd = %d, want 1", got)
+	}
+}
+
+// compact 之后的块不都是「正文」：空块、纯注入提示、纯命令/技能/摘要块都不算。
+// 按「非 text 即正文」判会让这些批次压缩完白跑一轮模型（群唤醒/跨会话来源提示
+// 尤其明显：用户这轮并没有提新问题）。判据见 hasUserBody。
+func TestForcedCompactNonBodyBlocksDoNotContinue(t *testing.T) {
+	cases := []struct {
+		name  string
+		after []core.Message // compact 命令之后的消息（原始批次切片）
+	}{
+		{"空 text 块", []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: ""}),
+		}},
+		{"纯空白 text 块", []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: " \n\t "}),
+		}},
+		{"空 image 块", []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeImage, Content: ""}),
+		}},
+		{"仅 hub_group_wake 注入块", []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeHubGroupWake, Content: `{"wake":true}`}),
+		}},
+		{"仅 hub_task 注入块", []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeHubTask, Content: `{"task_id":"task_31"}`}),
+		}},
+		{"仅 mesh_from 来源块", []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeMeshFrom, Content: "来自会话 sess_x"}),
+		}},
+		{"仅 skill 指令块", []core.Message{core.NewSkillMessage("技能指令正文")}},
+		{"仅 summary 块", []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeSummary, Content: "# 旧摘要"}),
+		}},
+		{"无内容块的 user 消息", []core.Message{{Role: core.User}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &compactCallProvider{}
+			loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+			handler, list := collectEvents()
+			msgs := append([]core.Message{core.NewCommandMessage("compact", "")}, tc.after...)
+			ac := loop.Run(context.Background(), msgs, handler)
+			if ac.Err != nil {
+				t.Fatalf("run: %v", ac.Err)
+			}
+			if got := p.CallCount(); got != 0 {
+				t.Fatalf("%s：compact 之后没有用户正文，却调用了模型 %d 次", tc.name, got)
+			}
+			// 与 0 次成对：压缩必须真的执行过（防「空批次早退」让断言失去耦合）。
+			if got := countCompressEnd(list); got != 1 {
+				t.Fatalf("%s：CompressEnd = %d, want 1", tc.name, got)
+			}
+		})
+	}
+}
+
+// compact + task_result-only：后台任务结果不是「用户输入」（不算标题/UI 正文），
+// 但有活要干 —— core/message.go 约定「模型看到结果续跑」，必须继续跑一轮，
+// 不能被 Stop 吞掉（失败/中断的结果同样要处理）。
+func TestForcedCompactTaskResultOnlyContinuesRun(t *testing.T) {
+	for _, status := range []string{"completed", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			p := &compactCallProvider{}
+			loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+			handler, list := collectEvents()
+			ac := loop.Run(context.Background(), []core.Message{
+				core.NewCommandMessage("compact", ""),
+				core.NewTaskResultMessageWithStatus("task_1", "job", "结果正文", status, nil),
+			}, handler)
+			if ac.Err != nil {
+				t.Fatalf("run: %v", ac.Err)
+			}
+			if got := p.CallCount(); got != 1 {
+				t.Fatalf("task_result-only 必须继续调用一次模型，calls=%d", got)
+			}
+			if got := countCompressEnd(list); got != 1 {
+				t.Fatalf("CompressEnd = %d, want 1", got)
+			}
+			var end *events.AgentEnd
+			for _, e := range *list {
+				if ev, ok := e.(*events.AgentEnd); ok {
+					end = ev
+				}
+			}
+			if end == nil || end.Content != "已回答" {
+				t.Fatalf("AgentEnd = %+v, want 已回答", end)
+			}
+		})
+	}
+}
+
+// compact + image-only（无 text 正文）：图片就是用户输入，必须继续跑一轮
+// （截图提问不能被 Stop 吞掉）。
+func TestForcedCompactImageOnlyContinuesRun(t *testing.T) {
+	p := &compactCallProvider{}
+	loop := NewAgentLoop(WithProvider(p), WithCompressor(keepAllCompressor{}))
+	handler, list := collectEvents()
+	ac := loop.Run(context.Background(), []core.Message{
+		core.NewCommandMessage("compact", ""),
+		core.NewUserMessage(core.Content{
+			Type:     core.ContentTypeImage,
+			Content:  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+			MimeType: "image/png",
+		}),
+	}, handler)
+	if ac.Err != nil {
+		t.Fatalf("run: %v", ac.Err)
+	}
+	if got := p.CallCount(); got != 1 {
+		t.Fatalf("image-only 必须继续调用一次模型，calls=%d", got)
+	}
+	var end *events.AgentEnd
+	for _, e := range *list {
+		if ev, ok := e.(*events.AgentEnd); ok {
+			end = ev
+		}
+	}
+	if end == nil || end.Content != "已回答" {
+		t.Fatalf("AgentEnd = %+v, want 已回答", end)
+	}
+}

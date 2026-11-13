@@ -968,6 +968,17 @@ function PluginTab() {
                 )}
               </div>
               <div className="mcp-s-cmd">{p.description}</div>
+              {/* 归属（owner）：IM 的启用/路由按归属隔离（连接共享）—— 面板必须显示
+                  「这个开关是给谁的」，否则 A 群启用看起来像 B 群也启用了。 */}
+              {p.owner !== undefined && (
+                <div className="mcp-s-cmd">
+                  {t('plugin.owner.scope')}：<span className="mono">{p.owner || '—'}</span>
+                  {p.ownerLabel ? ` · ${p.ownerLabel}` : ''}
+                  {typeof p.sharedConnected === 'number' && p.sharedConnected > 0
+                    ? ` · ${t('plugin.owner.shared').replace('{n}', String(p.sharedConnected))}`
+                    : ''}
+                </div>
+              )}
               {(p.error || (p.status === 'error' && p.reason)) && (
                 <div className="mcp-s-err mono">
                   {p.error ?? (p.reason === 'NODE_MISSING' ? t('plugin.nodeMissing') : p.reason)}

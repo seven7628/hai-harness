@@ -26,9 +26,19 @@ const (
 	EventUserPromptSubmit Event = "UserPromptSubmit"
 	EventPreToolUse       Event = "PreToolUse"
 	EventPostToolUse      Event = "PostToolUse"
-	EventStop             Event = "Stop"
-	EventPreCompact       Event = "PreCompact"    // 复用内核已有回调
-	EventPostToolBatch    Event = "PostToolBatch" // 复用内核已有回调
+	// EventStop 是 AgentEnd 的收尾门控锚点（Hub 也不例外，P4-04a）。
+	// 实际顺序（agents/agent_loop.go）：自然收尾门控 → 截断判定。
+	//   - 每轮自然收尾先派发 Stop；输出被截断（finish_reason=length 且零可见内容）
+	//     的轮次**也会先派发** Stop（LastAssistant 可能为空），之后才按截断报错。
+	//   - exit 2 / decision=block 表示"继续跑一轮"（内核侧 stopHookBlocks 上限 8 次），
+	//     不是终态；在截断轮上，hook 的"继续"会让本轮跳过截断报错、再跑一轮。
+	//     引擎自身不因截断自动重试，但外部 hook 可以显式要求（用户策略）。
+	//   - abort / ctx 取消 / 更早的出错路径在门控之前已退出，不派发 Stop；
+	//     hook panic → 视为不继续（坏 hook 不得卡住会话）。
+	//   - 因此不能假设每个 AgentEnd 之前都有 Stop（abort/error 收尾就没有）。
+	EventStop          Event = "Stop"
+	EventPreCompact    Event = "PreCompact"    // 复用内核已有回调
+	EventPostToolBatch Event = "PostToolBatch" // 复用内核已有回调
 )
 
 // MatcherField 说明该事件的 matcher 匹配什么（写进文档，避免"写了 matcher 不生效"的坑）。
@@ -84,6 +94,10 @@ type Payload struct {
 	TurnID         string          `json:"turn_id,omitempty"`
 	AgentID        string          `json:"agent_id,omitempty"`
 	AgentType      string          `json:"agent_type,omitempty"`
+	// Owner 本次派发的**信任归属**（workspace:<path> | agent:<id> | group:<id>）。
+	// json:"-"：归属是宿主内部概念，不进 hook 进程的 stdin 契约（那是 Claude 兼容面，
+	// 加字段等于扩协议）；hook 需要它时应由宿主经环境变量/参数显式给出。
+	Owner string `json:"-"`
 }
 
 // ToolResponse 工具结果的精简表示（够 hook 判断成败与拿到文件路径）。

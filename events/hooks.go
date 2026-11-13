@@ -72,7 +72,7 @@ type PostToolUseResult struct {
 // Graft 的 blast radius 就挂在这里：编辑类工具执行后立刻回注"谁依赖这个文件"。
 type PostToolUseHook func(ctx context.Context, pc PostToolUseContext) PostToolUseResult
 
-// StopContext Stop 回调入参（回合自然结束的门控点）。
+// StopContext Stop 回调入参（收尾门控点：截断判定之前；LastAssistant 可能为空）。
 type StopContext struct {
 	RunId         string
 	LastAssistant string // 本轮最终文本（可能为空）
@@ -85,7 +85,8 @@ type StopResult struct {
 	Reason   string // 作为提醒文本注入下一轮
 }
 
-// StopHook 回合结束回调（仅自然结束路径触发；abort/出错路径不触发）。
+// StopHook 收尾回调：自然收尾与截断轮都会触发（截断轮 LastAssistant 可能为空）；
+// abort / ctx 取消 / 更早的出错路径不触发。
 type StopHook func(ctx context.Context, sc StopContext) StopResult
 
 // SessionStartContext 会话开始回调入参。
