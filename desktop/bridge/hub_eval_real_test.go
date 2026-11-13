@@ -1,15 +1,19 @@
 package main
 
-// P5-10：真实 Provider 的 Hub 端到端评测（7 个场景）。
+// P5-10：真实 Provider 的 Hub 端到端评测（12 个场景：base 1–7 + round2 8–12）。
 //
 // 现有 hub_eval*_test.go 全部用确定性 fake provider（不碰网络），所以「单智能体 DM /
 // 工具调用 / 审批 / 群 @all / 群 @指定 / @A→@B handoff / 自主开项目会话」都**没有真实
 // Provider 的端到端证据**。本文件补这个缺口：默认 skip，只有显式设 HAI_EVAL_HUB_REAL=1
 // 才跑（会产生真实付费调用）。
 //
+// 场景表拆两段：hubRealBaseDefs（1–7，本文件）+ hubRealRound2Defs（8–12，
+// hub_eval_real_round2_test.go）；hubRealScenarioDefs 是两者的只读合并。8–12 没有
+// 跨场景依赖（各自建自己的智能体/群/工作区），5/6 仍复用 4 建的群。
+//
 // 门控与隔离：
 //   - HAI_EVAL_HUB_REAL=1 才跑，否则 t.Skip；
-//   - provider/model 默认 opencode / deepseek-v4.1-flash，可由 HAI_EVAL_HUB_PROVIDER /
+//   - provider/model 默认 opencode2 / deepseek-v4.1-flash，可由 HAI_EVAL_HUB_PROVIDER /
 //     HAI_EVAL_HUB_MODEL 覆盖；
 //   - 从**真实** ~/.go-code/settings.json 读出该 provider 的配置块（base_url/models/
 //     prices…，**不含 api_key**），复制到 testManager 建的临时 HOME 的 settings.json；
@@ -23,8 +27,8 @@ package main
 //
 // 运行：
 //
-//	HAI_EVAL_HUB_REAL=1 HAI_EVAL_HUB_PROVIDER=opencode HAI_EVAL_HUB_MODEL=deepseek-v4.1-flash \
-//	  go test ./desktop/bridge -run TestHubRealE2E -count=1 -v -timeout 20m
+//	HAI_EVAL_HUB_REAL=1 HAI_EVAL_HUB_PROVIDER=opencode2 HAI_EVAL_HUB_MODEL=deepseek-v4.1-flash \
+//	  go test ./desktop/bridge -run TestHubRealE2E -count=1 -v -timeout 45m
 //
 // 报告默认 /tmp/hub-real-e2e/report-<pid>-<时间戳>.json（绝对路径），原始事件写同目录
 // events.jsonl。失败也写报告（defer），且每个失败场景带最近 5 条消息 /
@@ -44,7 +48,9 @@ import (
 )
 
 // 真实评测的协议标识（报告里自证用；schema 变更时一起改）。
-const hubRealProtocol = "hub-real-e2e/v1"
+// v2：场景表扩到 8–12（round2 证据块 needs/bubbles/isolation/push/merge），
+// 默认 provider 改 opencode2。
+const hubRealProtocol = "hub-real-e2e/v2"
 
 // 等待真实模型/run 的上限：群 @all 要等两个成员各跑一轮，留足余量。
 // 7 个场景 × 120s = 840s < 文档里的 `-timeout 20m`；单场景内部可能有多段等待，
@@ -52,8 +58,10 @@ const hubRealProtocol = "hub-real-e2e/v1"
 const hubRealTimeout = 120 * time.Second
 
 // hubRealDefaultProvider / hubRealDefaultModel 是任务指定的真实 provider/model。
+// opencode2 与 opencode 同端点（provider 名带序号只是另一套配置块）；真实
+// settings.json 里必须存在同名配置块，否则 hubRealResolveProvider 报错并写 skip 报告。
 const (
-	hubRealDefaultProvider = "opencode"
+	hubRealDefaultProvider = "opencode2"
 	hubRealDefaultModel    = "deepseek-v4.1-flash"
 )
 
@@ -74,7 +82,10 @@ type hubRealScenarioDef struct {
 	run     func(*hubRealScenario)
 }
 
-var hubRealScenarioDefs = []hubRealScenarioDef{
+// hubRealBaseDefs 是场景 1–7（P5-10 原始表）；round2 的 8–12 在
+// hub_eval_real_round2_test.go（hubRealRound2Defs）。5/6 复用 4 建的同一个群与成员，
+// 所以依赖必须在场景表里显式声明（HAI_EVAL_HUB_ONLY 解析期就拒绝缺依赖的选择）。
+var hubRealBaseDefs = []hubRealScenarioDef{
 	{
 		name: "1_dm", aliases: []string{"1", "dm"},
 		prompt: "请只回复：HAI_DM_OK",
@@ -114,6 +125,15 @@ var hubRealScenarioDefs = []hubRealScenarioDef{
 	},
 }
 
+// hubRealScenarioDefs 是 base（1–7）+ round2（8–12）的合并视图：显式复制到新切片，
+// 不共享底层数组（append 到 hubRealBaseDefs 会改到 base 的表头，别名解析会漂）。
+var hubRealScenarioDefs = func() []hubRealScenarioDef {
+	defs := make([]hubRealScenarioDef, 0, len(hubRealBaseDefs)+len(hubRealRound2Defs))
+	defs = append(defs, hubRealBaseDefs...)
+	defs = append(defs, hubRealRound2Defs...)
+	return defs
+}()
+
 // hubRealParseOnly 解析 HAI_EVAL_HUB_ONLY（逗号分隔；空项忽略；序号/短名映射到合法名）。
 // 任何未知 token / 空选择 / 只选 5、6 而未选 4 都返回错误——调用方必须在创建
 // manager、发真实请求之前 t.Fatalf，不能静默跑 0 个场景还报 pass。
@@ -146,8 +166,11 @@ func hubRealParseOnly(raw string) (map[string]bool, error) {
 		only[name] = true
 	}
 	if len(bad) > 0 {
-		return nil, fmt.Errorf("HAI_EVAL_HUB_ONLY 含未知场景 %s；合法名：%s（也接受序号别名 1…7 及 dm/tool/approval/all/one/handoff/project）",
-			strings.Join(bad, ", "), strings.Join(legal, ", "))
+		// 短名/序号清单从场景表现算（新增场景不会漏改文案；TestHubRealOnlySelection
+		// 逐条比对这份清单）。
+		return nil, fmt.Errorf("HAI_EVAL_HUB_ONLY 含未知场景 %s；合法名：%s（也接受序号别名 %s 及短名 %s）",
+			strings.Join(bad, ", "), strings.Join(legal, ", "),
+			hubRealAliasRange(), strings.Join(hubRealShortAliases(), "/"))
 	}
 	if len(only) == 0 {
 		return nil, fmt.Errorf("HAI_EVAL_HUB_ONLY=%q 没有有效场景名；合法名：%s", raw, strings.Join(legal, ", "))
@@ -164,6 +187,41 @@ func hubRealParseOnly(raw string) (map[string]bool, error) {
 		}
 	}
 	return only, nil
+}
+
+// hubRealAliasRange 是序号别名的范围文案（"1…12"，按场景表长度算）。
+func hubRealAliasRange() string {
+	if len(hubRealScenarioDefs) == 0 {
+		return "1…0"
+	}
+	return fmt.Sprintf("1…%d", len(hubRealScenarioDefs))
+}
+
+// hubRealShortAliases 列出所有**非纯数字**别名（短名），按场景表顺序去重：
+// 错误文案与 TestHubRealOnlySelection 共用同一份事实源。
+func hubRealShortAliases() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, def := range hubRealScenarioDefs {
+		for _, a := range def.aliases {
+			if a == "" || seen[a] {
+				continue
+			}
+			numeric := true
+			for _, r := range a {
+				if r < '0' || r > '9' {
+					numeric = false
+					break
+				}
+			}
+			if numeric {
+				continue
+			}
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // hubRealValidateReportPath HAI_EVAL_HUB_REPORT 必须是绝对路径：相对路径会写进
@@ -223,9 +281,16 @@ type hubRealScenarioReport struct {
 	LLM          hubRealLLM        `json:"llm"`
 	LLMErrors    []string          `json:"llm_errors,omitempty"`
 	Project      *hubRealProject   `json:"project,omitempty"`
-	Errors       []string          `json:"errors,omitempty"`
-	Notes        []string          `json:"notes,omitempty"`
-	Diagnostics  []string          `json:"diagnostics,omitempty"`
+	// round2（8–12）证据：每块都由 sync() 从事件/消息/账本重建（不依赖场景内联记录），
+	// 失败报告里也能看出「哪条断言不成立」。
+	Needs       *hubRealNeeds     `json:"needs,omitempty"`
+	Bubbles     *hubRealBubbles   `json:"bubbles,omitempty"`
+	Isolation   *hubRealIsolation `json:"isolation,omitempty"`
+	Push        *hubRealPush      `json:"push,omitempty"`
+	Merge       *hubRealMerge     `json:"merge,omitempty"`
+	Errors      []string          `json:"errors,omitempty"`
+	Notes       []string          `json:"notes,omitempty"`
+	Diagnostics []string          `json:"diagnostics,omitempty"`
 }
 
 type hubRealLLM struct {
@@ -635,6 +700,9 @@ type hubRealScenario struct {
 	decisions map[string]string
 	// finalText 场景主回复（报告 FinalText）。
 	finalText string
+	// round2 是场景 8–12 的原始事实（会话 id / recorder / 账本 id / 事件起点）；
+	// sync() 据此从事件、消息、账本重建 needs/bubbles/isolation/push/merge 证据。
+	round2 *hubRealRound2State
 }
 
 func (sc *hubRealScenario) cmd(typ string, payload map[string]any) (bool, string, map[string]any) {
@@ -899,6 +967,8 @@ func (sc *hubRealScenario) sync() {
 		})
 	}
 	rep.Messages = msgs
+	// 8–12 的派生证据：从事件/消息/账本/recorder 重建（场景内联值只是原始 id）。
+	sc.syncRound2()
 }
 
 // redactKey 把凭证原文从诊断/日志里抹掉（真实模型可能把 key 回显进工具参数/正文）。
