@@ -4802,6 +4802,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         }
         break
       }
+      // 办公组件状态变化（R08d）：bridge 在「kit 的 bin 已经不存在」时主动推一份新状态
+      //（转换回落的那一刻就是事实变化的时刻）。更新同一份字段，横幅随之自己消失 ——
+      // 否则它要等用户去设置页点「重新探测」，等于说谎。
+      case 'office_kit_status': {
+        const d = raw.data as { kit?: OfficeKitStatus } | undefined
+        if (d?.kit) setState({ officeKit: d.kit, officeKitLoading: false })
+        break
+      }
       // ego lite 激活提示（引擎=ego + load_skill(ego-browser) 时 bridge 发；方案 1）：
       // 窗口已带到前台，提示用户切到 agent 的 Space 查看实时操作。
       case 'ego_activate_status': {

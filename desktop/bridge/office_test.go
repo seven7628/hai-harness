@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seven7628/hai-harness/desktop/bridge/conversion"
 	"github.com/seven7628/hai-harness/internal/officekit"
@@ -184,6 +185,58 @@ func TestPreviewConvertFallsBackWhenKitFails(t *testing.T) {
 	}
 	if fake.calls.Load() == 0 {
 		t.Fatal("没有落回近似路径")
+	}
+}
+
+// kit 卸载（bin 被删）后状态必须**自己**失效（R08d 复评 P1）：转换回落近似路径，
+// **并且** bridge 推一条 office_kit_status(state=missing) —— 前端横幅据此消失。
+//
+// 为什么这条必须有：Prober 的 Kit() 是进程级缓存，文件被删不会让它变 nil。修之前
+// 这里只打一行 stderr 就回落，横幅会一直写着「可用」，直到用户自己去点「重新探测」
+// —— 用户卸载后看到的应该是「已缺失 + 怎么装」。
+func TestOfficeKitUninstallInvalidatesStatusAndFallsBack(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "gone.docx"), []byte("fake docx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, buf := testManager(t)
+	m.runtime(ws)
+	opts := fakeOfficeKit(t, pdfScript)
+	installOfficeState(m, opts, officekit.RenderImages)
+	// 生产里 App 启动就会查一次状态（App.tsx 的 fetchOfficeKit）→ 缓存「可用」。
+	if st := m.officeKitStatus(false); !st.Available {
+		t.Fatalf("前置条件不成立：kit 应可用，得到 %+v", st)
+	}
+	fake := &stubConverter{html: "<html>approximate</html>"}
+	m.conv = convertSvc(t, fake)
+
+	// 卸载：kit 目录整块删掉（bin 跟着消失，KIT.json 也没了 → 重探结论是 missing 而不是 invalid）。
+	if err := os.RemoveAll(opts.KitRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	m.dispatch(cmd(7, "docx_preview", map[string]any{"workspace": ws, "path": "gone.docx"}))
+	resp := waitResponse(t, buf, 7)
+	if resp["ok"] != true {
+		t.Fatalf("kit 没了应回落成功（用户至少还能看近似版），得到 %+v", resp)
+	}
+	data, _ := resp["data"].(map[string]any)
+	if data["renderer"] != "approximate" {
+		t.Fatalf("renderer = %v，期望 approximate", data["renderer"])
+	}
+	if fake.calls.Load() == 0 {
+		t.Fatal("没有落回近似路径")
+	}
+
+	// 状态推送：事件本身，而不是「下次被问到时才重新算」。
+	ev := waitEvent(t, buf, "office_kit_status", 5*time.Second)
+	kit, _ := ev["data"].(map[string]any)["kit"].(map[string]any)
+	if kit["available"] != false || kit["state"] != string(officekit.StateMissing) {
+		t.Fatalf("推送的状态应是 missing/不可用，得到 %+v", kit)
+	}
+	// 缓存也真的作废了（事件之外，后续命令读到的必须是新结论）。
+	if st := m.officeKitStatus(false); st.Available || st.State != officekit.StateMissing {
+		t.Fatalf("探测缓存没失效：%+v", st)
 	}
 }
 
