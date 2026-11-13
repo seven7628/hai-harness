@@ -45,6 +45,14 @@ export interface PreviewProps {
    */
   html?: string
   /**
+   * bridge 的 1 MiB 闸是否截断了 content（file_preview 的 `truncated`）。
+   *
+   * 为什么放进契约：截断的后果取决于**渲染器**怎么用这份内容 —— text 少几行无所谓，
+   * html 少掉的往往是页面尾部（图表、结论），office 少掉的是后半本书。这类「少了一截」
+   * 必须由渲染器自己如实说，而不是等用户发现内容对不上。缺省（不传）= 没截断。
+   */
+  truncated?: boolean
+  /**
    * 「我接不了这个文件」的上报口（R08b）。
    *
    * 为什么必须是上报、不是自己画一块占位：`data-renderer` 只有一个写者（PreviewHost），
@@ -81,7 +89,8 @@ export interface PreviewRenderer {
   match: (f: FileRef) => number
   /**
    * 优先级，**越大越先**。数值口径（并发取只写在这里，避免各处各猜）：
-   *   100 专用格式（pdf/office，R08b）· 80 图片 · 60 表格(csv) · 10 文本兜底
+   *   100 专用格式（pdf/office，R08b）· 90 媒体 · 80 图片 · 70 页面（html/svg）
+   *   · 60 表格(csv) · 10 文本兜底
    * 同 weight 时**按注册顺序**取先注册的那个（见 registry.pickRenderer 的严格大于）。
    */
   weight: number

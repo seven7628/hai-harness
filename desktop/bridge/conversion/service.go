@@ -181,6 +181,13 @@ func New(opts Options) (*Service, error) {
 // CacheDir 缓存根目录。
 func (s *Service) CacheDir() string { return s.cache.Dir() }
 
+// Cache 转换服务自己的缓存实例。
+//
+// 为什么把它暴露出来（R08d）：PDF/PNG 产物也要落在同一套内容寻址目录里，共享 512 MiB
+// 预算与 LRU。**必须用这一个实例**（不是 NewCache 照路径再建一份）：Cache.mu 是实例级
+// 锁，两份同目录的 Cache = 两把锁 = Sweep 与 Put 之间那个已经在 R08a 修掉的窗口重新打开。
+func (s *Service) Cache() *Cache { return s.cache }
+
 // Sweep 启动时清扫（过期 + LRU）。不存在缓存目录不算错误。
 func (s *Service) Sweep() (Stats, error) {
 	// 计数器在清扫**之后**递增：调用方据此断言「清扫确实走的是这个实例」

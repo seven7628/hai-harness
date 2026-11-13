@@ -52,7 +52,7 @@ export function PreviewPanel({ path, tabId }: { path?: string; tabId?: string })
                 : ''}
             </div>
             {filePreview
-              ? <PreviewHost file={file} tabId={tabId} content={filePreview.content} />
+              ? <PreviewHost file={file} tabId={tabId} content={filePreview.content} truncated={filePreview.truncated} />
               : <div className="file-activity-empty">{t('rp.file.reading')}</div>}
           </div>
         )}

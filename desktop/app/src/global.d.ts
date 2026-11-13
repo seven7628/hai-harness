@@ -1,4 +1,4 @@
-import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply } from './transport/types'
+import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus } from './transport/types'
 
 export {}
 
@@ -20,6 +20,7 @@ declare global {
       inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => Promise<{ ok: boolean; error?: string }>
       sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => Promise<{ ok: boolean; text?: string; error?: string }>
       externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
+      officeKit: (req?: { refresh?: boolean }) => Promise<{ ok: boolean; kit?: OfficeKitStatus; error?: string }>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
       pickApp: () => Promise<{ name: string; bundleId?: string } | null>
       egoInstall: () => Promise<{ ok: boolean; error?: string }>
@@ -84,7 +85,7 @@ declare global {
       // （openpyxl）把工作簿转成自带样式的 HTML，返回产物路径 → 前端送内嵌浏览器 file://。
       // 主进程侧用负 id 直发 bridge 并等待响应（同 externalSkillsStatus 的通道形态；
       // 转换要跑 Python，可能秒级，首次还会先 bootstrap 运行时）。
-      watchXlsx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string }>
+      watchXlsx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
       // docx 文档 / pptx 演示文稿预览：与 watchXlsx 同一条通路（主进程直发 bridge + 产物路径
       // 给内嵌浏览器），仅 bridge 命令不同。pptx 那条的产物是**近似版式重建**（Python 侧
       // python-pptx 不能渲染），故文档/UI 措辞都要带「近似」，别在前端许诺保真。

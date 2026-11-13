@@ -1,4 +1,4 @@
-import type { Transport, ExternalSkillsStatus, ExternalSkillsImportResult, FsImageResult, OAuthStatus } from './types'
+import type { Transport, ExternalSkillsStatus, ExternalSkillsImportResult, FsImageResult, OAuthStatus, OfficeKitStatus } from './types'
 
 // Electron 真实 transport：走 preload 暴露的 IPC → 主进程 → Go bridge stdio
 export function electronTransport(): Transport {
@@ -30,6 +30,11 @@ export function electronTransport(): Transport {
       return result.status
     },
     importExternalSkills: async (): Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }> => d.importExternalSkills(),
+    officeKitStatus: async (refresh?: boolean): Promise<OfficeKitStatus> => {
+      const result = await d.officeKit({ refresh: refresh === true })
+      if (!result.ok || !result.kit) throw new Error(result.error ?? '读取办公组件状态失败')
+      return result.kit
+    },
     pickApp: () => d.pickApp(),
     providerSave: (p) => d.providerSave(p),
     providerRemove: (provider) => d.providerRemove(provider),

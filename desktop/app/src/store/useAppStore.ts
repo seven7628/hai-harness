@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import type { RightLayout } from '../lib/layout'
 import { afterDrag, collapse as layoutCollapse, expand as layoutExpand, normalizeLayout } from '../lib/layout'
-import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
+import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings, OfficeKitStatus } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 // 运行位收敛诊断（BR-15）：只做有界记录，状态改写仍在 store
 import { recordRunSettle, type RunSettleSource } from './events'
@@ -14,7 +14,7 @@ import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
 import { looksSubRun } from '../lib/sessionScope'
-import { visualKindOf, isVisualPath } from '../lib/visualFile'
+import { visualKindOf, isVisualPath, BROWSER_EXTS, extOf } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
 import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
@@ -3058,6 +3058,10 @@ export interface AppState {
   // 会话级：带 sessionId，渲染方须校验归属（切会话后旧响应不得当新会话展示）。
   ctxBreakdown?: CtxBreakdown
   externalSkillsStatus?: ExternalSkillsStatus
+  // 办公组件（LibreOffice kit，R08d）：面板横幅 + 设置页共用这一份状态。
+  // undefined = 还没查过（此时**不**出横幅：宁可晚一点，也不要先冤枉成「未安装」）。
+  officeKit?: OfficeKitStatus
+  officeKitLoading: boolean
   externalSkillsLoading: boolean
   externalSkillsImporting: boolean
   externalSkillsError?: string
@@ -3229,6 +3233,8 @@ export interface AppState {
   fetchSkills(): void // 技能清单（SkillsPage + /skill 命令补全数据源）
   fetchCtxBreakdown(): void // 上下文构成分区（Composer ctx 环 hover 面板）
   refreshExternalSkillsStatus(): Promise<void>
+  // 办公组件状态（refresh=true = 设置页点了「重新探测」：安装/卸载发生在本进程之外）
+  fetchOfficeKit(refresh?: boolean): Promise<void>
   importExternalSkills(): Promise<boolean>
   toggleSkill(name: string, enabled: boolean): void // 启用/禁用（真过滤：发现清单 + load_skill）
   getSkill(name: string): void // 技能详情预览（skill_get）
@@ -9275,6 +9281,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   titleOverrides: initTitles,
   skills: [],
   externalSkillsStatus: undefined,
+  officeKit: undefined,
+  officeKitLoading: false,
   // 记忆浏览初始态：未加载。memoryBrowseAvailable=false 表示"还没查到"，
   // 与"查到了但记忆关着"在 UI 上表现相同（都不列文件），故不额外区分。
   memoryBrowseAvailable: false,
@@ -10415,8 +10423,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   // store.filePreviews，缺了会停在「正在读取文件…」且没有任何东西会再来拉）。
   // 与 openFile 的关系：openFile 是「打开」的默认通道（可视类落内嵌浏览器 web 标签，D-I 口径
   // 不变）；本动作是**同一个文件的另一种看法** —— 两者身份不同（tabKeyOf 带 mode），可以并存。
+  //
+  // 例外（2026-11，用户报的回归）：「html 类文件默认用浏览器展示，能直接看到效果」。
+  // 此前这条入口对任何路径都建 preview 标签，而预览注册表里没有 html 渲染器（R08b 只落了
+  // pdf/office），text 兜底把页面渲染成**源码** —— 用户点「预览」看到的是一坨 `<h1>`。
+  // 判据与 openFile 的「可视类分流」同一个事实源（BROWSER_EXTS = html/htm/svg）：这类文件
+  // 的「预览」就是**在内嵌浏览器里看**，与「打开」落点一致（脚本/交互/字体都是效果的一部分，
+  // srcdoc 静态快照给不了）。preview 标签那条路仍然由 renderers/html.tsx 兜住（旧版本
+  // 持久化恢复出来、或调用方直接 openTab{mode:'preview'} 的），并留了「在内嵌浏览器打开」的出口。
   openPreviewTab: (path) => {
     if (!path) return
+    if (BROWSER_EXTS.has(extOf(path))) {
+      // 与 openFile 的可视类分支同序：先让文件面板的上下文与内容缓存就位（locateFile 只写
+      // fileFocus + 发一次 file_preview，不切标签、不抢视线），再落内嵌浏览器。
+      get().locateFile(path)
+      void get().openInBrowserTab(path, { activate: true })
+      return
+    }
     get().openTab({ kind: 'file', path, mode: 'preview' })
     get().setRightExpanded(true)
     // locateFile 只写 fileFocus + 发一次 file_preview（不改右栏标签、不抢视线），与 openFile
@@ -10511,6 +10534,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sid = get().activeSessionId
     if (!sid) return
     send({ type: 'context_breakdown', payload: { session_id: sid } })
+  },
+  fetchOfficeKit: async (refresh) => {
+    set({ officeKitLoading: true })
+    try {
+      const kit = await transport.officeKitStatus(refresh === true)
+      set({ officeKit: kit, officeKitLoading: false })
+    } catch {
+      // 查不到 = 不展示状态（横幅的缺省是「不出」）。这里刻意不 toast：设置页一打开就
+      // 弹错属于噪音，用户真正需要知道的是「有没有 kit」，而那个问题下一轮还会再问。
+      set({ officeKitLoading: false })
+    }
   },
   refreshExternalSkillsStatus: async () => {
     set({ externalSkillsLoading: true, externalSkillsError: undefined })

@@ -26,6 +26,14 @@ import type { SurfaceRenderContext } from '../surfaces/types'
 
 // embedRectOf 已提到 lib/embedRect.ts（R08b：pdf 预览面板也要驱动同一个原生视图）。
 // 那段注释解释了为什么「量不到」必须返回 undefined 而不是钳成 80×80 —— 看它，别在这里重写。
+// isOfficeSourcePath 这个标签预览的是不是办公文档（R08d 横幅的判据）。
+//
+// 只认 office 转换会带 srcPath 的那几类扩展名：pdf/图片/html 预览也带 srcPath，
+// 但它们与 kit 无关 —— 把横幅挂到它们身上等于谎报「这是近似渲染」。
+function isOfficeSourcePath(p?: string): boolean {
+  return !!p && /\.(docx|docm|doc|pptx|pptm|ppt|xlsx|xlsm|xls)$/i.test(p)
+}
+
 export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
   const t = useT()
   // —— R06c：原先由 RightPanel 传入的四样东西，各归其位（取值不变）——
@@ -270,6 +278,13 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
 
   // 预览 vs 真网页：预览（file:// / data:）用精简工具条（见下），真网页保留完整导航。
   const isPreviewUrl = /^(file|data):/.test(nav?.url ?? '')
+  // R08d：办公文件预览 + kit 不可用 → 面板顶部横幅（「当前是近似渲染」的如实说明 + 安装指引）。
+  // 判据是**当前标签的源文件**（office 转换产物才带 srcPath，见 openInBrowserTab 的 srcPath
+  // 说明）：kit 缺失时任何 office 预览都是近似，与具体哪个渲染器无关。
+  // officeKit 为 undefined（还没查过）时**不**出横幅 —— 宁可晚一点，也不要先冤枉成「未安装」。
+  const officeKit = useAppStore((s) => s.officeKit)
+  const [kitHelpOpen, setKitHelpOpen] = useState(false)
+  const kitMissing = officeKit?.available === false && isOfficeSourcePath(tab.srcPath)
   // —— M6：地址栏跟随激活视图 URL（store 层已全局订阅 embed-nav；用户输入中不打断）——
   const navUrl = nav?.url ?? ''
   useEffect(() => {
@@ -342,6 +357,29 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
             </div>
           )}
           {embeddedMode && aiActive && lastAction && <div className="btab-action mono">{lastAction}</div>}
+          {/* R08d：降级横幅。放在 .browser-shot **之上**：原生视图的矩形由 embedRectOf(shotRef)
+              量出，横幅占掉的高度会自动让视图下移（不会盖住横幅）。 */}
+          {kitMissing && isPreviewUrl && (
+            <div className="office-kit-banner" role="status">
+              <span className="okb-mark" aria-hidden="true">!</span>
+              <span className="okb-text">{t('office.kit.missing.banner')}</span>
+              <button className="okb-link" onClick={() => setKitHelpOpen((v) => !v)} aria-expanded={kitHelpOpen}>
+                {kitHelpOpen ? t('office.kit.howto.hide') : t('office.kit.howto')}
+              </button>
+              {kitHelpOpen && (
+                <div className="okb-help">
+                  <div>{t('office.kit.install.manual')}</div>
+                  <div className="mono okb-path" title={officeKit?.root ?? ''}>
+                    {officeKit?.root || '~/.go-code/office-kit'}
+                    {officeKit?.pinnedVersion ? ` · v${officeKit.pinnedVersion}` : ''}
+                  </div>
+                  <button className="okb-link" onClick={() => { setKitHelpOpen(false); useAppStore.getState().openSettings() }}>
+                    {t('office.kit.openSettings')}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {/* M5：建连失败可见化（此前静默回退截图，用户只看到“静态页”） */}
           {embedError && (
             <div className="btab-fallback">

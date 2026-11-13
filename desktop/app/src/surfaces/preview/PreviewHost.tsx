@@ -21,6 +21,8 @@ export interface PreviewHostProps {
   content?: string
   /** 现成的高亮 HTML（文件面板为「定位到读过的行」本来就算了一份，见 types.PreviewProps）。 */
   html?: string
+  /** bridge 的 1 MiB 闸是否截断（见 types.PreviewProps.truncated）。 */
+  truncated?: boolean
   /** 收窄候选渲染器（文件面板的「表格 / 纯文本」开关用）。 */
   only?: readonly string[]
 }
@@ -29,7 +31,7 @@ type Loaded = { id: string; C?: ComponentType<PreviewProps>; error?: string }
 /** 渲染器自己上报的「接不了」（R08b，见 types.PreviewProps.onUnavailable）。 */
 type Reported = { id: string; reason: string }
 
-export function PreviewHost({ file, tabId, content = '', html, only }: PreviewHostProps) {
+export function PreviewHost({ file, tabId, content = '', html, truncated, only }: PreviewHostProps) {
   const t = useT()
   // 每次渲染现算：候选表只有几条，且 pickRenderer 返回的是**注册表里的那个对象**
   // （身份稳定），所以下面 effect 的依赖用 id 就够，不必 memo 出什么。
@@ -78,7 +80,7 @@ export function PreviewHost({ file, tabId, content = '', html, only }: PreviewHo
   const C = loaded?.id === picked.id ? loaded.C : undefined
   return (
     <div className="preview-host" data-renderer={picked.id} data-state={C ? 'ready' : 'loading'}>
-      {C ? <C file={file} tabId={tabId} content={content} html={html} onUnavailable={onUnavailable} /> : null}
+      {C ? <C file={file} tabId={tabId} content={content} html={html} truncated={truncated} onUnavailable={onUnavailable} /> : null}
     </div>
   )
 }

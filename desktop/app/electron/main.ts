@@ -1206,14 +1206,16 @@ function sendCommand(cmd: unknown): { ok: boolean; error?: string } {
   return { ok: true }
 }
 
-function sendBridgeRequest(type: string, payload: Record<string, unknown> = {}): Promise<BridgeCommandResponse> {
+// timeoutMs 默认 30s（历史口径）。需要更长时间的调用（R08d：soffice→PDF 单次上限 60s，
+// 冷启 3–6s）必须显式放宽 —— 否则主进程先放弃、bridge 那边还在烧 CPU 转一份没人要的文件。
+function sendBridgeRequest(type: string, payload: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<BridgeCommandResponse> {
   if (!bridge || bridge.killed) return Promise.resolve({ ok: false, error: 'bridge 未运行' })
   const id = bridgeRequestSeq--
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingBridgeRequests.delete(id)
       resolve({ ok: false, error: 'bridge 请求超时' })
-    }, 30_000)
+    }, timeoutMs)
     pendingBridgeRequests.set(id, { resolve, timer })
     try {
       bridge!.stdin.write(JSON.stringify({ id, type, payload }) + '\n')
@@ -1546,6 +1548,16 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!response.ok) return { ok: false, error: response.error ?? '检测外部 Skills 失败' }
     return { ok: true, status: response.data?.status }
   })
+  // 办公组件状态（R08d）：设置页展示 + 「重新探测」。kit 缺失是正常结果（ok:true +
+  // available:false），由前端决定横幅/引导文案；只有 bridge 真的不可用才是 error。
+  ipcMain.handle('office-kit:status', async (_e, req: { refresh?: boolean } = {}) => {
+    const started = await ensureBridgeBin()
+    if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 不可用' }
+    if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
+    const response = await sendBridgeRequest('office_kit_status', { refresh: req?.refresh === true })
+    if (!response.ok) return { ok: false, error: response.error ?? '读取办公组件状态失败' }
+    return { ok: true, kit: response.data?.kit }
+  })
   ipcMain.handle('external-skills:import', async () => {
     const started = await ensureBridgeBin()
     if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 不可用' }
@@ -1571,14 +1583,18 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const path = String(req?.path ?? '')
     if (!path) return { ok: false, error: 'path 为空' }
+    // 90s：kit 路径单次上限 60s + 冷启余量（approximate 路径通常 <1s）。
     const response = await sendBridgeRequest('xlsx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
-    })
+    }, 90_000)
     if (!response.ok) return { ok: false, error: response.error ?? '工作簿转换失败' }
     const htmlPath = response.data?.html_path
     if (typeof htmlPath !== 'string' || !htmlPath) return { ok: false, error: 'bridge 未返回 HTML 路径' }
-    return { ok: true, html_path: htmlPath }
+    // renderer：libreoffice（kit → PDF）| approximate（既有近似 HTML）。前端据此出横幅
+    //（kit 缺失时如实说明「当前为近似渲染」）—— 缺省按 approximate，不谎称保真。
+    const renderer = response.data?.renderer === 'libreoffice' ? 'libreoffice' : 'approximate'
+    return { ok: true, html_path: htmlPath, renderer }
   })
   // docx 文档预览：renderer 点「文档预览」→ bridge 用受管 Python（mammoth）把文档
   // 转成 HTML → 返回产物路径 → renderer 送内嵌浏览器 file://（与 PDF 预览同一条通道）。
@@ -1598,14 +1614,18 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const path = String(req?.path ?? '')
     if (!path) return { ok: false, error: 'path 为空' }
+    // 90s：kit 路径单次上限 60s + 冷启余量（approximate 路径通常 <1s）。
     const response = await sendBridgeRequest('docx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
-    })
+    }, 90_000)
     if (!response.ok) return { ok: false, error: response.error ?? '文档转换失败' }
     const htmlPath = response.data?.html_path
     if (typeof htmlPath !== 'string' || !htmlPath) return { ok: false, error: 'bridge 未返回 HTML 路径' }
-    return { ok: true, html_path: htmlPath }
+    // renderer：libreoffice（kit → PDF）| approximate（既有近似 HTML）。前端据此出横幅
+    //（kit 缺失时如实说明「当前为近似渲染」）—— 缺省按 approximate，不谎称保真。
+    const renderer = response.data?.renderer === 'libreoffice' ? 'libreoffice' : 'approximate'
+    return { ok: true, html_path: htmlPath, renderer }
   })
   // pptx 演示文稿预览：与上面 docx 那条逐字同构（同样的直发理由与 30s 口径），
   // 唯一差别是转换器：Python 侧 python-pptx **不能渲染**，产物是按真实 OOXML 几何做的
@@ -1617,14 +1637,18 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
     const path = String(req?.path ?? '')
     if (!path) return { ok: false, error: 'path 为空' }
+    // 90s：kit 路径单次上限 60s + 冷启余量（approximate 路径通常 <1s）。
     const response = await sendBridgeRequest('pptx_preview', {
       path,
       ...(req?.workspace ? { workspace: String(req.workspace) } : {}),
-    })
+    }, 90_000)
     if (!response.ok) return { ok: false, error: response.error ?? '演示文稿转换失败' }
     const htmlPath = response.data?.html_path
     if (typeof htmlPath !== 'string' || !htmlPath) return { ok: false, error: 'bridge 未返回 HTML 路径' }
-    return { ok: true, html_path: htmlPath }
+    // renderer：libreoffice（kit → PDF）| approximate（既有近似 HTML）。前端据此出横幅
+    //（kit 缺失时如实说明「当前为近似渲染」）—— 缺省按 approximate，不谎称保真。
+    const renderer = response.data?.renderer === 'libreoffice' ? 'libreoffice' : 'approximate'
+    return { ok: true, html_path: htmlPath, renderer }
   })
   // —— 媒体预览（R08c）：URL 通道 + 探测 ——
   //

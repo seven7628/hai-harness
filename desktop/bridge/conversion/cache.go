@@ -152,6 +152,65 @@ func (c *Cache) Put(key string, r io.Reader, meta Meta) (string, error) {
 	return p, nil
 }
 
+// EntryDir 条目目录（诊断/测试用）。
+func (c *Cache) EntryDir(key string) string { return c.entryDir(key) }
+
+// FileAt 条目里的某个具名产物的绝对路径（存在且非空才算有）。
+//
+// 与 Lookup 的分工：Lookup 只认 index.html（HTML 预览的「条目可用」判据）；
+// PDF/PNG 这类**非 HTML 产物**用 FileAt 逐名查（R08d：office_convert 的 PDF、
+// office_render 的逐页 PNG 都写在同一套内容寻址目录里，共享 LRU 与限额）。
+func (c *Cache) FileAt(key, name string) (string, bool) {
+	if !validArtifactName(name) {
+		return "", false
+	}
+	p := filepath.Join(c.entryDir(key), name)
+	st, err := os.Stat(p)
+	if err != nil || !st.Mode().IsRegular() || st.Size() == 0 {
+		return "", false
+	}
+	// 命中也要刷 mtime：LRU 依据是目录 mtime，不刷会让热条目被当成最旧的。
+	now := c.now()
+	_ = os.Chtimes(c.entryDir(key), now, now)
+	return p, true
+}
+
+// PutFile 把 r 写成条目里的具名产物（<key>/<name>），返回绝对路径。
+//
+// 为什么需要「具名」（而不是复用 Put）：Put 固定写 index.html —— 对 HTML 预览是对的
+// （浏览器按扩展名决定渲染器），对 PDF 却是致命的：一份 PDF 字节被命名成 index.html，
+// Chromium 会**按 HTML 解析**，用户看到的是白屏或半页乱码。故产物名必须由调用方给定。
+func (c *Cache) PutFile(key, name string, r io.Reader, meta Meta) (string, error) {
+	if !validArtifactName(name) {
+		return "", fmt.Errorf("conversion: 非法的产物名 %q（只接受单层文件名）", name)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dir := c.entryDir(key)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	now := c.now()
+	_ = os.Chtimes(dir, now, now)
+	if b, err := json.Marshal(meta); err == nil {
+		_ = atomicfile.ReplaceReader(filepath.Join(dir, metaName), bytes.NewReader(b), cacheFileMode)
+	}
+	p := filepath.Join(dir, name)
+	if err := atomicfile.ReplaceReader(p, r, cacheFileMode); err != nil {
+		return "", err
+	}
+	_ = os.Chtimes(dir, c.now(), c.now())
+	return p, nil
+}
+
+// validArtifactName 产物名必须是单层文件名。
+//
+// 这不是洁癖：key 由内容哈希算出，而 name 来自参数/调用点；一旦允许 "a/b" 或 ".."，
+// 缓存写入就成了「按模型可算出的 key 往任意相对路径写文件」的通道。
+func validArtifactName(name string) bool {
+	return name != "" && name != "." && name != ".." && filepath.Base(name) == name
+}
+
 // Stats 一次清扫的结果（启动日志/测试断言用）。
 type Stats struct {
 	Entries int   // 清扫后现存条目数

@@ -6,10 +6,11 @@
 // 的坑在源头堵掉。
 //
 // R08a 注册 text/image/csv；R08b 补齐 pdf/docx/pptx/xlsx（weight 100 = 专用格式）；
-// R08c 补 media（音视频：原生 <video>/<audio> + hai-media:// 的 Range 通道）。
+// R08c 补 media（音视频：原生 <video>/<audio> + hai-media:// 的 Range 通道）；
+// 2026-11 补 html（html/htm/svg → srcDoc 静态快照，补的是 01-design §4.7 里本来就有的 id）。
 import { isCsvPath } from '../../../lib/csv'
 import { mediaKindOf } from '../../../lib/mediaFile'
-import { DOCX_EXTS, IMAGE_EXTS, PDF_EXTS, PPTX_EXTS, XLSX_EXTS } from '../../../lib/visualFile'
+import { BROWSER_EXTS, DOCX_EXTS, IMAGE_EXTS, PDF_EXTS, PPTX_EXTS, XLSX_EXTS } from '../../../lib/visualFile'
 import { detectPreviewDeps } from '../deps'
 import { registerRenderer } from '../registry'
 
@@ -91,6 +92,21 @@ registerRenderer({
   match: (f) => (mediaKindOf(f.path) ? 1 : 0),
   requires: ['media'],
   load: async () => (await import('./media')).default,
+})
+
+// —— 2026-11：html（01-design §4.7 的渲染器清单里本来就有这个 id，此前没接上）——
+// 缺失时的实际后果（用户报的回归）：.html 落 text(10) → 面板里是**源码**。
+// weight 70：只要压过 text 兜底即可；与 image(80)/csv(60) 的扩展名互斥，数值不参与彼此的
+// 判定（放 80 与 60 之间是为了让「专用格式 > 媒体 > 图片 > 页面 > 表格 > 兜底」这条阶梯
+// 一眼可读，见 types.PreviewRenderer.weight 的口径）。这条必须由数值保证：text 的 match
+// 是「非二进制就接」，靠 match 实现细节挡不住。
+// match 与「默认通道」共用同一个事实源 BROWSER_EXTS（html/htm/svg）—— 两处各写一份扩展名
+// 迟早漂移成「打开是浏览器、预览还是源码」这种半修状态。
+registerRenderer({
+  id: 'html',
+  weight: 70,
+  match: (f) => (BROWSER_EXTS.has(f.ext) ? 1 : 0),
+  load: async () => (await import('./html')).default,
 })
 
 // 依赖探测放在注册之后：本模块是「渲染器在册」的唯一副作用入口，凡是能选到渲染器的地方
