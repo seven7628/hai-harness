@@ -15,7 +15,7 @@ import { BarChart, FileIcon, Globe, ImageIcon } from '../../components/icons'
 import { WebTab } from '../../components/WebTab'
 import { fileUrlToPath } from '../../lib/filePaths'
 import { visualKindOf } from '../../lib/visualFile'
-import { useAppStore } from '../../store/useAppStore'
+import { activePageIdOf, useAppStore } from '../../store/useAppStore'
 import type { WebTabInstance } from '../../store/useAppStore'
 import { registerSurface } from '../registry'
 import type { SurfaceProvider } from '../types'
@@ -53,7 +53,8 @@ function tabIcon(url: string): ReactElement {
 //
 // 为什么在这里 getState() 而不是让 RP 把 embedNav 传进来：SurfaceProvider 的 title/icon 签名
 // 固定为 (tab, t) / (tab)（types.ts，C2 不动契约），而签名里没有 store。读 store 是**单向**依赖
-// （store 侧不 import 任何 surfaces，见 grep 证据），且 RP 自己就订阅了同一字段
+// （builtin → store；store 侧只 import registry，从不 import 任何 builtin，PR-11 后仍然成立 ——
+// 见 store 的 import 注释里那三行方向），且 RP 自己就订阅了同一字段
 // （useAppStore((s) => s.embedNav)）—— 值一变 RP 必重渲染，本函数随即读到新值，不存在「读到旧值
 // 却不重渲染」的窗口。
 function liveTarget(tab: WebTabInstance) {
@@ -77,10 +78,16 @@ export const webSurface: SurfaceProvider<WebTabInstance> = {
     const tp = liveTarget(tab)
     return tabLabel(tp?.url ?? tab.url ?? '', tp?.title ?? '') || t('rp.tab.web')
   },
-  icon: (tab) => tabIcon(liveTarget(tab)?.url ?? tab.url ?? ''),
-  // 打开时的默认实例：无池身份的 web 标签，形状与 store.makeTab('web') 在「认不出当前页」时
-  // 给的一致。契约字段，目前还没有运行时消费者（与 git/file 的同名字段一样）。
-  defaultSpec: () => ({ kind: 'web' }),
+  // 图标：PR-11 起 RightPanel 不再有本地 switch，这里是唯一真相。入参可省 —— ＋ 菜单与
+  // 空态能力面板只列「能开什么」，没有实例，给通用 Globe（与旧 RP 的兜底字面一致）。
+  icon: (tab) => (tab ? tabIcon(liveTarget(tab)?.url ?? tab.url ?? '') : <Globe size={12} />),
+  // 打开时的默认实例（PR-11 起这是 makeTab('web') 的**唯一**来源）：池里认得出「当前激活的
+  // 真实页面」就带上它的 viewId（新标签直接接在那一页上），认不出就是空 web 标签 ——
+  // 后者交给 syncWebTabs 的收养分支（见 store 里 activePageIdOf 的注释）。
+  defaultSpec: (s) => {
+    const viewId = activePageIdOf(s)
+    return { kind: 'web', ...(viewId ? { viewId } : {}) }
+  },
   // C3：渲染委派。只传 { tab, scope } —— 组件里不再有 RP 专属 props（immersive 变内部 state，
   // panelVisible/menuOpen 从 store 读）。**不要**在这里加 key 或按 tab.id 分支：切 web 标签时
   // RightPanel 的元素类型与位置都不变，React 复用同一个 WebTab 实例（DOM 容器不重挂载），

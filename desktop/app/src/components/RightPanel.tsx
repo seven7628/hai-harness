@@ -2,7 +2,7 @@ import { Fragment, useEffect, useReducer, useRef, useState, useCallback } from '
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, isPendingWebTab, rebuildWebTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
 import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
-import { Activity, GitBranch, FileIcon, CheckList, EyeIcon, Globe, PanelRight, ChevronDown, Plus } from './icons'
+import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
 import { ChangesTab } from './ChangesTab'
 import { WebTab } from './WebTab'
 import { ActivityTab } from './ActivityTab'
@@ -41,8 +41,10 @@ function secondaryTabs(t: (k: string) => string): { key: RightTab; label: string
 }
 
 // GitStatus 空值（工作区未探测/非仓库时的兜底展示）
-// 标签标题/类型图标本体已随 R06b 迁进 surfaces/builtin/webSurface.tsx（那里是 web 分支的
-// 唯一消费者；若将来第二种 kind 也要用，再提升到 lib —— 本轮不预先抽象）。
+// 标签标题与类型图标**都在 provider 里**：web 的随 R06b 迁进 surfaces/builtin/webSurface.tsx，
+// 其余三个随 PR-11 迁进各自的 provider（file 的 preview→眼睛也在那里）。RP 侧只剩
+// `kindIcon(kind, tab?)` 一个取值点，不再认识任何一个 kind 的字形。
+// 若将来要在 provider 之外复用「页面类型 → 图标」那套判定，提升到 lib —— 不要在这里再抄一份。
 
 // 标签条最多平铺几个（超出收进「+N」）：常量在 store（TABS_MAX_VISIBLE = 5，R4 起就已定义，
 // PR-09 之前没有消费者）。取 5：与原型一致，且 360px 宽的右栏里 5 个已是「还能读出文件名」的下限。
@@ -53,13 +55,22 @@ function secondaryTabs(t: (k: string) => string): { key: RightTab; label: string
 // 「+」菜单里**没有** file：文件标签需要路径，由点文件产生（阶段 2 起是**多实例**：
 // 一个文件一个标签，同一文件的 diff / source 各一个 —— 见 store.openTab 的幂等键）。
 const ADDABLE_KINDS: TabKind[] = ['activity', 'git', 'web']
-function kindIcon(kind: TabKind): ReactElement {
-  switch (kind) {
-    case 'git': return <GitBranch size={12} />
-    case 'file': return <FileIcon size={12} />
-    case 'web': return <Globe size={12} />
-    default: return <Activity size={12} />
-  }
+/**
+ * 标签 / 菜单 / 空态面板共用的**一个**图标取值点：provider 是唯一真相。
+ *
+ * PR-11 之前这里是 `switch (kind)`（git/file/web/activity 四个字形 + default），而 web 的
+ * 标签图标早已搬进 webSurface —— 同一种信息两处判，第二个 kind 细化（file 的 preview→眼睛）
+ * 就得改两个地方。现在四个内置 provider 各自给字形与尺寸，RP 不再认识任何一个 kind 的名字。
+ *
+ * tab 可省：＋ 菜单与空态能力面板列的是「现在能开什么」，那里没有标签实例（provider 的
+ * icon 签名已把入参改成可选，见 surfaces/types.ts —— 不要在这里造假 tab）。
+ *
+ * 兜底 `Activity` 只在 **provider 未注册**时可达（只 import RightPanel 的探针页；生产里
+ * main.tsx 的副作用 import 保证注册在先）：与 `.right-body` 的 panelFallback 同一口径 ——
+ * 给一个中性图标，而不是在 RP 里再抄一份 kind→图标表（那正是本轮删掉的东西）。
+ */
+function kindIcon(kind: SurfaceKind, tab?: TabInstance): ReactNode {
+  return getSurface(kind)?.icon?.(tab) ?? <Activity size={12} />
 }
 
 // 「现在能新建什么」= 静态清单减去**被禁用**的 kind（health 的禁用集）。
@@ -372,23 +383,15 @@ export default function RightPanel() {
 
   // 标签显示名：file → 文件名；web → 当前页标题（退化到主机名）；其余 → kind 的 i18n 文案。
   const kindLabel = (k: TabKind) => t(`rp.tab.${k}`)
-  // 图标：web 标签按页面 URL 判类型（pdf/图片/xlsx/网页…，与产出卡/文件栏共用 visualKindOf），
-  // 其余按 kind。未读时**用未读点替代**图标（R4 口径：未读时用户最需要知道的是「有新东西」）。
-  // 阶段 5：待重建的恢复标签不在视图池里（viewId 为空）→ 退化用它的 **url 快照**，
-  // 否则重启后这些标签会丢掉图标与名字（用户看到一排「网页」）。
-  // R06b 起 web 的「名字 / 类型图标」由 webSurface 提供（visualKindOf 那套判定随之搬走，
-  // 仍是单一份）；RP 只保留 webTabUrl —— 标签的 title 属性还要用它。fallback 只在
-  // provider 未注册时可达：main.tsx 的副作用 import 保证不会发生。
+  // 图标：所有 kind 都由 provider 的 icon 给（PR-11 起 RP 里没有 switch，见 kindIcon）。
+  // web 按页面 URL 判类型（pdf/图片/xlsx/网页…，与产出卡/文件栏共用 visualKindOf，仍在
+  // webSurface 里单一份）；待重建的恢复标签不在视图池里（viewId 为空）→ provider 退化用它的
+  // **url 快照**，否则重启后这些标签会丢图标与名字（用户看到一排「网页」）。
+  // 未读时**用未读点替代**图标（R4 口径：未读时用户最需要知道的是「有新东西」）—— 这一条
+  // 留在 RP：它是标签条的交互状态，不是 provider 的元数据。
+  // RP 只保留 webTabUrl：标签的 title 属性还要用它。
   const webTabUrl = (tab: TabInstance): string =>
     tab.kind === 'web' ? (embedNav?.targets?.find((x) => x.id === tab.viewId)?.url ?? tab.url ?? '') : ''
-  // 返回 ReactNode（而非 ReactElement）：provider 的 icon 签名是 ReactNode，见 types.ts。
-  const tabIconEl = (tab: TabInstance): ReactNode => {
-    if (tab.kind === 'web') return getSurface('web')?.icon?.(tab) ?? kindIcon('web')
-    // 预览标签用**眼睛**图标（R08b）：标签窄到只剩两个汉字时，标题里的「· 预览」会被
-    // shortName 截掉 —— 图标是那时唯一还看得见的区分（同一个文件的 source 标签仍是文件图标）。
-    if (tab.kind === 'file' && (tab as FileTabInstance).mode === 'preview') return <EyeIcon size={12} />
-    return kindIcon(tab.kind)
-  }
   const tabTitle = (tab: TabInstance): string => {
     if (tab.kind === 'file') {
       const base = (tab.path ?? '').split('/').filter(Boolean).pop()
@@ -531,7 +534,7 @@ export default function RightPanel() {
                 >
                   {tab.kind === 'web' && tab.viewId && unreadViews.includes(tab.viewId)
                     ? <span className="browser-page-dot" title={t('browser.tabUnread')} />
-                    : <span className="rtab-ico">{tabIconEl(tab)}</span>}
+                    : <span className="rtab-ico">{kindIcon(tab.kind, tab)}</span>}
                   <span className="rtab-t">{restoring ? t('browser.tabRestoring') : tabTitle(tab)}</span>
                   {/* 未保存圆点：位置在标题后、✕ 前（✕ 的命中区不受影响），title 给读屏与 hover 文案 */}
                   {dirtyTabs[tab.id] && <span className="rtab-dirty" title={t('editor.dirty')} aria-label={t('editor.dirty')} />}
@@ -585,7 +588,7 @@ export default function RightPanel() {
                       tabIndex={-1}
                       onClick={() => { activateTab(tab.id); setMenu(null) }}
                     >
-                      {tabIconEl(tab)} {tabTitle(tab)}
+                      {kindIcon(tab.kind, tab)} {tabTitle(tab)}
                     </button>
                   ))}
                 </div>

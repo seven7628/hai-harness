@@ -70,18 +70,40 @@ global.window = {
 }
 
 // 3) esbuild 打包真实 store 到临时 CJS 后 require（与 test-store-scoping.mjs 同策略）
+//
+// PR-11：入口从「store 本身」改成「先副作用 import surfaces/builtin，再 re-export store」——
+// 与生产的模块图同构（main.tsx 也是先注册 provider 再渲染）。为什么必须同构：PR-11 起
+// makeTab 的初值由 provider 的 defaultSpec 给（store 只发 id/kind），只 bundle store 等于
+// 「四个内置 provider 一个都没注册」，那时 makeTab 只能退回 { id, kind } —— L19-L27 那组
+// 「点 ＋ 开网页 → 认的是池里的真实页面」就不再走用户的路径了（断言会变成测兜底分支）。
 const dir = mkdtempSync(join(tmpdir(), 'right-tabs-'))
 const outfile = join(dir, 'store-bundle.cjs')
 await build({
-  entryPoints: [join(__dirname, '../src/store/useAppStore.ts')],
+  stdin: {
+    contents: "import './src/surfaces/builtin'\nexport * from './src/store/useAppStore'",
+    resolveDir: join(__dirname, '..'),
+    loader: 'ts',
+  },
   bundle: true,
   format: 'cjs',
   platform: 'node',
   outfile,
   logLevel: 'silent',
   // store 间接依赖 src/transport/mock.ts，它 import 了 README/brand 资源（`?raw`/`?no-inline`/
-  // `?url` 后缀）。node 侧没有 vite 的资源插件链 → 这里给 esbuild 补 loader，否则打包直接失败。
-  loader: { '.md': 'text', '.svg': 'text', '.png': 'dataurl' },
+  // `?url` 后缀）；builtin 又牵进四个面板组件（图标/预览渲染器）。node 侧没有 vite 的资源插件链
+  // → 这里给 esbuild 补 loader，否则打包直接失败（与 test:builtin-surfaces 同一组）。
+  loader: {
+    '.md': 'text',
+    '.svg': 'text',
+    '.png': 'dataurl',
+    '.css': 'text',
+    '.ttf': 'dataurl',
+    '.woff': 'dataurl',
+    '.woff2': 'dataurl',
+    '.jpg': 'dataurl',
+    '.jpeg': 'dataurl',
+    '.gif': 'dataurl',
+  },
 })
 const { useAppStore, putFilePreview } = require(outfile)
 
@@ -978,6 +1000,47 @@ async function main() {
     const scopes8 = JSON.parse(mem.get(LS_TABS)).scopes
     eq(Object.keys(scopes8).length, 40, 'N50 持久化的 scope 数封顶 40')
     assert('sess44' in scopes8, 'N51 最近用过的会话优先保留')
+  }
+
+  // —— Q. makeTab 的初值来自 provider 的 defaultSpec（PR-11）——
+  //
+  // 为什么必须单独钉这一块：e2e 探针里 file 标签几乎都走 `openTab(path)`，而那条路在 store
+  // 内部就把 focusSpec 合进 payload 了（openTab 自己的 `full`），**完全绕过 makeTab**。
+  // makeTab 的初值只在一条路上可见：这个 scope 还**没有标签集**、按 rightTab 建默认集
+  //（syncTabsToRightTab 分支①）—— 正是「e2e 直写 rightTab 复位后 sync」那条路径，
+  // R11b 之前必须一直是好的。没有这组断言，PR-11 把 defaultSpec 写丢时 220 条全绿。
+  console.log('\n—— Q. 默认集的初值来自 provider 的 defaultSpec（makeTab 不再有 switch）——')
+  {
+    const tab0 = () => useAppStore.getState().tabsByScope[S1]?.tabs[0]
+    // Q1/Q2：file —— payload = fileFocus（有 toolId → diff，带 startLine；openSeq=1）
+    reset({ activeSessionId: S1, rightTab: 'file', fileFocus: { path: 'src/a.ts', toolId: 'tool-1', seq: 7, startLine: 12 } })
+    st().syncTabsToRightTab()
+    eq(tab0()?.kind, 'file', 'Q1 默认集按 rightTab 建出 file 标签')
+    // 用 join 比较：本脚本的 eq 是严格相等（数组永远不等），而这里要的是「逐字段」
+    eq(
+      [tab0()?.path, tab0()?.mode, tab0()?.toolId, tab0()?.startLine, tab0()?.openSeq].join('|'),
+      'src/a.ts|diff|tool-1|12|1',
+      'Q2 file 标签的 payload 逐字段来自 fileFocus（path/mode/toolId/startLine/openSeq）',
+    )
+    // Q3：无 toolId → source（「有 toolId 才 diff」这条判据只有一份，在 store 的 focusSpec 里）
+    reset({ activeSessionId: S1, rightTab: 'file', fileFocus: { path: 'src/b.ts', seq: 8 } })
+    st().syncTabsToRightTab()
+    eq(tab0()?.mode, 'source', 'Q3 无 toolId → source 模式')
+    // Q4/Q5：web —— 池里有真实页面才认 viewId（about:blank 是常驻自举载体，不认）
+    reset({
+      activeSessionId: S1,
+      rightTab: 'web',
+      embedNav: { activeId: 't9', targets: [{ id: 't9', url: 'https://q.example/' }] },
+    })
+    st().syncTabsToRightTab()
+    eq([tab0()?.kind, tab0()?.viewId].join('|'), 'web|t9', 'Q4 web 标签认池里当前激活的真实页面')
+    reset({
+      activeSessionId: S1,
+      rightTab: 'web',
+      embedNav: { activeId: 't1', targets: [{ id: 't1', url: 'about:blank' }] },
+    })
+    st().syncTabsToRightTab()
+    eq([tab0()?.kind, tab0()?.viewId].join('|'), 'web|', 'Q5 about:blank 不算真实页面 → 空 web 标签')
   }
 
   console.log(`\n全部通过：${pass} 项断言\n`)

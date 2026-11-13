@@ -1330,6 +1330,48 @@ settings.features = { surfaceRegistry: true, editor: true, multiTab: true }
 | e2e | ~10 脚本 | 布局三态、多标签、编辑器、插件装载/卸载、越权、崩溃隔离 |
 | 人工 | 1 张矩阵 | 3 档宽度 × 3 种 bias × 明暗主题 |
 
+### 5.4 PR-11 之后：RightPanel 里剩下的 `kind === '` 逐条
+
+R11 结束时 `grep -c "kind === '" desktop/app/src/components/RightPanel.tsx` = **16 行 / 17 处**
+（开工时 18 行；本轮删掉的是 `tabIconEl` 里 web/preview 那两条 —— 它们搬进了 provider 的 `icon`）。
+
+**这个数就是本轮的口径**：`02-pr-plan.md` 原来写的「= 0」不成立，也不该为它硬搬 ——
+下面 17 处里只有 3 处是**真正的 legacy 判别**，其余是「标签形状的固有语义」或**探针契约**。
+新增一条 `kind === '` 之前必须先回答：**provider 能不能给？** 能就进 provider（本轮 A/B/C 三件
+就是这么消掉的）；不能，写清楚它为什么是标签形状的一部分。
+
+| # | 位置（R11 收口时） | 代码 | 性质 | 为什么留 / 什么时候才会掉 |
+|---|---|---|---|---|
+| 1 | 285 | `ctxTab?.kind === 'web'` | web embed 语义 | 右键「复制路径」：web 标签没有文件路径，要用池里的页面 url |
+| 2 | 287 | `ctxTab?.kind === 'file' && ctxTab.path` | file path | 同上，file 侧用 path（相对路径按 workspace 补全） |
+| 3 | 294 | `ctxTab?.kind === 'web'` | web embed 语义 | 右键「刷新」= `embedReloadTarget(viewId)`，只有原生视图能刷新 |
+| 4 | 348 | `activeTab?.kind === 'web'` | 原生宿主判定 | `nativeHost`：web 标签是原生视图宿主 → 决定 `embedHide` |
+| 5 | 348 | `activeTab?.kind === 'file' && previewEmbedActive` | 原生宿主判定 | 同一判定的另一半：`file{mode:'preview'}` 里的 embed 也是宿主 |
+| 6 | 394 | `tab.kind === 'web'` | web embed 语义 | 标签 `title` 属性要「当前页 url」（webTabUrl） |
+| 7 | 396 | `tab.kind === 'file'` | **legacy 判别** | 标签名 = `basename(path)`。web 已走 `provider.title`，file 没有 —— 因为 fileSurface 的 `title` 现在返回的是 i18n **面板名**（「文件」），不是文件名。改它要先给 provider 的 title 定口径（文件名 vs 面板名），属 R11b+ |
+| 8 | 410 | `tab.kind === 'web'` | provider 兜底 | `getSurface('web')?.title(...) ?? kindLabel('web')`：只 import RightPanel 的探针页里 provider 没注册（与 `panelFallback` 同一口径），**不是** KIND 判别 |
+| 9 | 448 | `x.kind === 'web' && !!x.viewId` | web embed 语义 | +N 的未读计数：未读是**视图池**的概念（`unreadViews` 存的是 viewId） |
+| 10 | 490 | `tab.kind === 'web'` | web embed 语义 | 待重建判定要先查池目标（`embedNav.targets` 只有 web 有） |
+| 11 | 504 | `tab.kind === 'file'` | **探针契约** | `data-mode`：2 个 e2e 靠它选 preview/diff/source 标签（`verify_preview_renderers` 的 `.rtab[data-kind="file"][data-mode="preview"]` 选眼睛图标、`verify_tabbar_interactions` 的 A1 断言）。**不许搬走** |
+| 12 | 505 | `tab.kind === 'web'` | **探针契约** | `data-view`：3 个 e2e 用它（`verify_session_tabs_persist` 断言「接回原标签 / 待重建」、`verify_auto_open_visual`、`verify_tabbar_interactions`）。**不许搬走** |
+| 13 | 516 | `tab.kind === 'file'` | file path | `title` 文本的退化顺序：web url → file path → kind 文案（file 标签没有 url） |
+| 14 | 535 | `tab.kind === 'web' && tab.viewId` | web embed 语义 | 未读时用未读点**替代**图标（R4 口径）—— 交互状态，不属于 provider 元数据 |
+| 15 | 643 | `ctxTab.kind === 'web'` | web embed 语义 | 右键菜单的「刷新」项只在 web 标签上出现 |
+| 16 | 689 | `activeTab?.kind === 'file'` | file mode | `.right-body.file-mode` 的布局分支（文件面板的滚动/贴边规则不同） |
+| 17 | 746 | `activeTab?.kind === 'file'` | file mode | 文件工具栏（编辑/预览切换）只在 file 标签渲 |
+
+**汇总**：web embed 语义 7 / file 的 mode 与 path 5 / 探针契约 `data-*` 2 / 原生宿主判定 2（1 行）/
+provider 兜底 1。**真正的 legacy 判别只有 3 处**（#7 标签名、#8 provider 兜底、#4/#5 宿主判定
+应改成能力位），其余 14 处是「标签形状」或「探针契约」。
+
+**守则（写进评审口径）**：
+1. 这个数**只许降不许升**；升了必须在 PR 里回答「provider 能不能给」。
+2. `data-mode` / `data-view` 两条**不是** legacy，是 e2e 契约 —— 要动先改 8 个探针的选取器，
+   那是一个独立 PR（与 R11b 的 `rightTab` 迁移同一批）。
+3. 插件 kind 进来（PR-12/14）后，这张表里的 web 分支会被 `plugin:` 复用 —— 届时判断条件从
+   `kind === 'web'` 变成「有没有池身份」，那时再收（不要提前抽象成 `hasPoolIdentity(tab)`，
+   现在只有 web 一个实现，抽象只会多一层要维护的假接口）。
+
 ---
 
 ## 6. 工作量与分工

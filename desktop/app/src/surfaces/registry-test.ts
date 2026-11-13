@@ -2,7 +2,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  BUILTIN_KINDS,
   getSurface,
+  isBuiltinKind,
   listSurfaces,
   registerSurface,
   resetSurfacesForTest,
@@ -58,6 +60,34 @@ test('内置 provider 可以声明 write（编辑器需要）', () => {
 test('未知内置 kind 被拒', () => {
   // 刻意绕类型：验证运行期拒绝未在 BuiltinKind 里的 kind
   assert.throws(() => registerSurface(make({ kind: 'office' as unknown as SurfaceKind })), /未知的内置 kind/)
+})
+
+// —— PR-11：持久化恢复的 kind 过滤 ——
+//
+// 为什么这三条断言在注册表侧：BUILTIN_KINDS 原本是模块私有常量（只给 assertProvider 校验用），
+// PR-11 把它提升为 store 的 loadPersistedTabs 也读的**唯一白名单**（替换掉 store 自己那份
+// TAB_KINDS）。它一旦被改宽（例如把 plugin: 放进来），症状是「重启后一个没有 provider 的
+// 幽灵标签复活」，而 store 侧看不见这个常量 —— 所以口径钉在它定义的地方。
+test('四个内置 kind 全部通过（与 BuiltinKind 联合逐项对齐）', () => {
+  assert.deepEqual([...BUILTIN_KINDS].sort(), ['activity', 'file', 'git', 'web'])
+  for (const k of ['activity', 'git', 'file', 'web'] as const) {
+    assert.equal(isBuiltinKind(k), true, `${k} 必须被认作内置 kind`)
+  }
+})
+
+test('plugin: 被拒（插件标签要等 R11b/PR-14 再放开）', () => {
+  // 今天的口径：持久化里出现 plugin: 一律丢弃。插件 provider 还没有 loader（PR-12/PR-14），
+  // 认了它只会恢复出一个没有 manifest、没人做过入参校验的幽灵标签。
+  // 放开时改的是这一条 + loadPersistedTabs 的注释，而不是悄悄放宽白名单。
+  assert.equal(isBuiltinKind('plugin:x'), false)
+  assert.equal(BUILTIN_KINDS.has('plugin:x'), false)
+})
+
+test('未知 kind 被拒（历史枚举、空串、非字符串）', () => {
+  assert.equal(isBuiltinKind('office'), false) // 03 §5.1 里迁移掉的历史 kind
+  assert.equal(isBuiltinKind(''), false)
+  assert.equal(isBuiltinKind(undefined), false)
+  assert.equal(isBuiltinKind(42), false)
 })
 
 test('排序：group → order（缺省 100）→ kind', () => {

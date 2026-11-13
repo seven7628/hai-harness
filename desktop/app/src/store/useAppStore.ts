@@ -42,6 +42,12 @@ import { isPendingWebTab, samePreviewTarget, webTabKey, webUrlSnapshot } from '.
 // 媒体元素池的回收入口（R08c）：关标签时按标签里的 path 释放解码器/缓冲。
 // 只 import 函数、不 import 任何在模块顶层碰 document 的东西（node 单测会 import 本文件）。
 import { disposeMediaElementsForPath } from '../lib/mediaStage'
+// PR-11：从注册表读两样东西 —— ① 内置 kind 的白名单（isBuiltinKind），store 不再自持 TAB_KINDS；
+// ② makeTab 的初值（provider 的 defaultSpec），store 不再按 kind 写 switch。
+// 依赖方向 = store → registry 是**单向**的（registry 只 import types/health，从不 import store），
+// 反向的 builtin provider → store 更早就存在（webSurface 读 embedNav），两者不构成环：
+//   builtin → {store, registry}，store → registry，registry 谁都不 import。
+import { getSurface, isBuiltinKind } from '../surfaces/registry'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
@@ -1440,7 +1446,10 @@ let tabSeq = 0
 // 阶段 2 起 fileFocus **不再是内容源**（内容按归一化路径索引，见 filePreviews），它只剩
 // 两个用途：① 无路径打开 file 标签时的初值（本函数 —— 用户点 rail 的「文件」按钮 /
 // setRightTab('file') / e2e 直接写 rightTab 后 sync）；② 左栏文件树的选中行。
-function focusSpec(s: { fileFocus?: FileFocus }): TabSpec {
+//
+// PR-11 导出：openTab 与 file provider 的 defaultSpec 两个调用点都读它 —— **实现只有这一份**
+//（在 provider 里照抄一遍条件，迟早与这里分叉：mode 的 toolId 口径、startLine 的可选性）。
+export function focusSpec(s: { fileFocus?: FileFocus }): TabSpec {
   const f = s.fileFocus
   if (!f?.path) return { kind: 'file' }
   return {
@@ -1474,25 +1483,29 @@ function tabKeyOf(t: TabInstance | TabSpec, ws: string | undefined): string | un
 //   上一个标签（2026-09-21 用户报障「右侧侧边栏点击加号、选择网页无效」，真机 trace 实测）。
 // 认不出真实页面时**不认 id**：交给「空 web 标签」形态 —— 它被 syncWebTabs 的收养分支接住，
 // 池里出现第一个真实页面时复用它的标签实例（不闪、不多一个标签）。
-function activePageIdOf(s: { embedNav?: EmbedNavState }): string | undefined {
+//
+// PR-11 导出：web provider 的 defaultSpec 读它（makeTab 的 web 分支搬过去了）。
+// 判据必须只有一份 —— 两套判据分叉时最先坏的是「点 ＋ 开网页」这条链路。
+export function activePageIdOf(s: { embedNav?: EmbedNavState }): string | undefined {
   const nav = s.embedNav
   if (!nav?.activeId) return undefined
   const tp = nav.targets?.find((x) => x.id === nav.activeId)
   return tp?.url && tp.url !== 'about:blank' ? nav.activeId : undefined
 }
 
-// makeTab 造一个标签实例。file / web 的 payload 从**当前上下文**取初值：
-//   file → fileFocus（见 focusSpec）
-//   web  → 池里当前激活的**真实页面**（见 activePageIdOf；认不出就是空标签）
+// makeTab 造一个标签实例：store 只发 id 与 kind，**payload 由 provider 的 defaultSpec 给**
+//（file → fileFocus，见 focusSpec；web → 池里当前激活的真实页面，见 activePageIdOf）。
+//
+// PR-11 之前这里是 `if (kind === 'file') … if (kind === 'web') …` 的 switch：每加一个内置
+// provider 就要回来改一次 store，而 provider 侧早就留好了 defaultSpec 这个口子（types.ts，PR-00）。
+//
+// `{ id, kind }` 兜底只在**provider 没注册**时可达（只 import RightPanel 的探针页；
+// 生产里 main.tsx 的副作用 import 保证注册先于首次 makeTab，node 侧的 store 测试也照这个
+// 顺序 bundle —— 见 scripts/test-right-panel-tabs.mjs 的 stdin 入口）。
 const newTabId = (): string => `tab${++tabSeq}`
 function makeTab(kind: TabKind, s: AppState): TabInstance {
-  const id = newTabId()
-  if (kind === 'file') return { ...focusSpec(s), id, openSeq: 1 } as TabInstance
-  if (kind === 'web') {
-    const viewId = activePageIdOf(s)
-    return { id, kind, ...(viewId ? { viewId } : {}) }
-  }
-  return { id, kind }
+  const spec = getSurface(kind)?.defaultSpec?.(s)
+  return { id: newTabId(), kind, ...spec } as TabInstance
 }
 
 // —— 阶段 5：标签集持久化（docs/RIGHT_PANEL_TABS_PLAN.md §6 阶段 5 / §7 未决 4）——
@@ -1574,15 +1587,16 @@ function fromPersistedTab(p: PersistedTab, id: string): TabInstance {
   }
 }
 
-const TAB_KINDS: TabKind[] = ['activity', 'git', 'file', 'web']
-
 // sanitizePersistedTab：逐字段校验一条存储记录。**坏数据不炸**（规格 §2 要求 4）——
 // 结构不对/类型不对的字段一律丢弃（能救的字段救回来，救不了的整条丢），绝不抛错。
 function sanitizePersistedTab(raw: unknown): PersistedTab | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const r = raw as Record<string, unknown>
-  const kind = typeof r.kind === 'string' && (TAB_KINDS as string[]).includes(r.kind) ? r.kind as TabKind : undefined
-  if (!kind) return undefined // 非法 kind（含旧版本枚举）→ 丢弃这一条
+  // kind 白名单**不在本文件**（PR-11）：注册表的 BUILTIN_KINDS 是唯一真相，这里只是读它。
+  // 今天 plugin:* 与任意未知 kind 都为 false —— 插件标签要等 R11b/PR-14 再放开
+  //（届时放开的是注册表那一份清单，恢复路径自动跟上，不会再出现「两处枚举分叉」）。
+  const kind = isBuiltinKind(r.kind) ? r.kind : undefined
+  if (!kind) return undefined // 非法 kind（含旧版本枚举 / plugin:*）→ 丢弃这一条
   const id = typeof r.id === 'string' && r.id ? r.id : newTabId()
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
   const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
