@@ -126,4 +126,30 @@ const eq = (got, want, m) => {
   eq(two.more, 0, '2 人群头没有 +N')
 }
 
+// 4b) 投递账本文案（P6-01）：每个 target 的状态 + 一轮摘要。
+{
+  const conv = await load('conversation.ts')
+  const names = { agt_a: 'A', agt_b: 'B', agt_c: 'C' }
+  eq(conv.deliveryLabel({ target: 'agt_b', status: 'queued', reason: 'target_busy' }, names),
+    'B 排队中（目标忙，排队中）', 'queued 文案带原因')
+  eq(conv.deliveryLabel({ target: 'agt_c', status: 'running' }, names), 'C 进行中', 'running 文案')
+  eq(conv.deliveryLabel({ target: 'agt_c', status: 'done' }, names), 'C 已回复', 'done 文案')
+  eq(conv.deliveryLabel({ target: 'agt_a', status: 'skipped', reason: 'pair_limit' }, names),
+    'A 已跳过：互踢到上限，已跳过', 'skipped 文案带原因')
+  eq(conv.deliveryLabel({ target: 'agt_a', status: 'failed', reason: 'boom' }, names),
+    'A 失败：boom', '未知原因码原样显示')
+  eq(conv.deliveryReasonText(''), '', '空原因 → 空文案')
+  const cid = 'conv_1'
+  const sum = conv.deliverySummary({ deliveries: [
+    { target: 'agt_a', status: 'running', turn: 1, conversation_id: cid },
+    { target: 'agt_b', status: 'running', turn: 1, conversation_id: cid },
+    { target: 'agt_c', status: 'queued', reason: 'target_busy', turn: 1, conversation_id: cid },
+    { target: 'agt_d', status: 'skipped', reason: 'pair_limit', turn: 1, conversation_id: cid },
+    { target: 'agt_e', status: 'done', turn: 1, conversation_id: cid },
+  ] })
+  eq(sum, '2 进行中 · 1 排队 · 1 已回复 · 1 跳过', '一轮 @ 的投递摘要')
+  eq(conv.deliverySummary(null), '', '没有账本 → 空摘要')
+  eq(conv.deliverySummary({ deliveries: [] }), '', '空账本 → 空摘要')
+}
+
 console.log(`\nHUB_CONV_TEST_PASS (${pass})`)

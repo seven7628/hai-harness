@@ -2315,6 +2315,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 		if hubSpec.Scope.Kind == agenthub.ScopeGroup {
 			gid, aid := hubSpec.Scope.GroupID, hubSpec.Agent.ID
 			bs.hubOnRunEnd = func() {
+				// 先收口投递账本（running → done），再推进泵：泵看到的是
+				// 「这一轮已结束」的账本，不会把同一条 wake 当成还在跑。
+				m.finishHubGroupDelivery(gid, aid)
 				m.scheduleAgentTaskPump(gid, aid)
 				m.scheduleHubConversationPump(gid)
 			}

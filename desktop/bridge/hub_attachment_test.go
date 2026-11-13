@@ -387,8 +387,9 @@ func TestHubGroupBusyImageDeliveredOnNextWake(t *testing.T) {
 	if !ok {
 		t.Fatalf("忙目标也要先落消息: %s", errMsg)
 	}
-	if errs, _ := data["wake_errors"].([]any); len(errs) == 0 {
-		t.Fatal("忙目标应报告 wake_errors")
+	// P6-01：忙不再是「唤醒失败」，而是账本里一条 queued（target_busy）—— 不丢。
+	if d := mustDelivery(t, data, b.ID); d.Status != "queued" || d.Reason != "target_busy" {
+		t.Fatalf("忙目标应记为 queued/target_busy，实际 %+v", d)
 	}
 	if fake.callCount() != 0 {
 		t.Fatalf("忙目标不该跑模型，实际调用 %d 次", fake.callCount())

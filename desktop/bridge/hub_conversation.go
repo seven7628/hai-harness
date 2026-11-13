@@ -226,7 +226,10 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 	}
 	if err := m.dispatchConversationWake(gid, wake); err != nil {
 		if errors.Is(err, errHubGroupTargetBusy) {
-			return // 留队：下一次群 run 结束再试，不告警（这是闸门，不是故障）
+			// 目标忙：账本已退回 queued，wake 留队；下一次群 run 结束再试。
+			// 这是闸门，不是故障 —— 不告警，但要让 UI 看到「还在排队」。
+			m.emitHubConversation(gid, ctrl.View(gid))
+			return
 		}
 		m.hubAlertf("group_conversation_wake_failed", "群 %s 自动对话唤醒 %s 失败：%v", gid, wake.Target, err)
 		if errors.Is(err, agenthub.ErrNotFound) {
@@ -236,22 +239,8 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 		return
 	}
 	hubConvDispatchBarrier("delivered", gid)
-	begun, ok := ctrl.BeginTurn(gid, time.Time{})
-	if !ok {
-		if v := ctrl.View(gid); v.Status == agenthub.ConversationStopped {
-			// 停止在投递窗口里落地：这一轮随停止作废（finishHubRound 会抑制 final，
-			// 停止系统消息由 stop 自己写）。不算异常，不告警。
-			return
-		}
-		// 投递已经发生（目标会话真会跑一轮），却记不上账：不能再静默当成良性竞态，
-		// 否则这一轮完全绕过预算/深度护栏。留告警 + 终态视图，由人类重开对话。
-		m.hubAlertf("group_conversation_turn_lost", "群 %s 唤醒 %s 已投递但对话状态已变化，本轮未记账", gid, wake.Target)
-		m.notifyHubConversation(gid, ctrl.View(gid))
-		return
-	}
-	if wake.ConversationID != "" && begun.ConversationID != wake.ConversationID {
-		m.hubAlertf("group_conversation_wake_raced", "群 %s 唤醒 %s 的对话在投递窗口内被替换，已停止本轮接龙", gid, wake.Target)
-	}
+	// 记账（TurnsUsed/Depth/冷却起点）已经在 wakeGroupAgent 的 BeginDelivery 里完成：
+	// 那条路径是幂等的唯一入口，这里不能再记一次（会把轮次算成两轮）。
 	m.emitHubConversation(gid, ctrl.View(gid))
 	// 串行：刚放行的那一条之外还有会话在跑（并行首轮的另一条），下一条必须等它们
 	// 全部结束。排一个延迟泵兜底；真正放行时闸门会再判一次。
@@ -274,7 +263,21 @@ func (m *manager) dispatchConversationWake(gid agenthub.GroupID, wake agenthub.W
 	if g == nil || g.Deleted {
 		return fmt.Errorf("%w: 群组 %s 不存在", agenthub.ErrNotFound, gid)
 	}
-	return m.wakeGroupAgent(ctx, st, g, wake)
+	_, err = m.wakeGroupAgent(ctx, st, g, wake)
+	return err
+}
+
+// finishHubGroupDelivery 群 run 收尾时把该目标**正在跑**的投递记录推进到 done。
+// 每目标同时最多一条 running（群会话忙闩保证），所以不需要 wake id。
+// 也负责把「还没投出去」的排队记录留给下一次泵（它们仍是 queued，不在这里动）。
+func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.AgentID) {
+	if m == nil || gid == "" || agentID == "" {
+		return
+	}
+	ctrl := m.hubConversation()
+	if n := ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}); n > 0 {
+		m.emitHubConversation(gid, ctrl.View(gid))
+	}
 }
 
 // scheduleHubConversationTimer 在冷却窗口结束后重试一次泵。同一群只保留一个定时器，
@@ -582,6 +585,9 @@ func (m *manager) hubConversationStop(c command) {
 	// final 会被抑制；而闸门保证「正在投递的 wake」先落地/记账，不会被中途撕开。
 	view := ctrl.Stop(g.ID, "人类停止了自动对话，等你继续", time.Time{})
 	m.bumpHubConversationGen(g.ID) // 冷却定时器作废：停止之后不许再自己接龙
+	// P6-01：账本跟着停止走 —— 排队的记 skipped(stopped)，在跑的记 interrupted
+	//（它们的 run 马上被中断，不会再正常收尾成 done）。
+	ctrl.SkipQueuedDeliveries(g.ID, agenthub.DeliveryReasonStopped, time.Time{})
 	unlock := m.hubConvDispatch.lock(g.ID)
 	interrupted := 0
 	for _, bs := range m.groupActiveSessions(g) {
@@ -593,6 +599,10 @@ func (m *manager) hubConversationStop(c command) {
 		interrupted++
 	}
 	unlock()
+	if interrupted > 0 {
+		ctrl.InterruptRunningDeliveries(g.ID, agenthub.DeliveryReasonInterrupted, time.Time{})
+	}
+	view = ctrl.View(g.ID)
 	// 系统消息在放闸门之后写：任何已经在收尾的 final 要么排在它前面（闸门先到，
 	// 状态还是 running），要么已经被抑制 —— 不会出现「停止」之后又冒一条 final。
 	m.notifyHubConversation(g.ID, view)

@@ -1,4 +1,4 @@
-import type { HubConversation, HubGroupProgress } from './types'
+import type { HubConversation, HubDelivery, HubGroupProgress } from './types'
 
 // 群内自动对话的状态文案（P3b-07，方案 §7.5.4 / §8.3.5）。
 // 纯函数：ConversationBar 与左栏都从这里取同一套口径，Node 直测。
@@ -146,4 +146,67 @@ export function formatClockTime(iso?: string | null): string {
   const hh = d.getHours() < 10 ? `0${d.getHours()}` : String(d.getHours())
   const mm = d.getMinutes() < 10 ? `0${d.getMinutes()}` : String(d.getMinutes())
   return `${hh}:${mm}`
+}
+
+// ── 投递账本（P6-01）──────────────────────────────────────────────────────────
+// 一条 @ 会变成 N 条投递：谁在跑、谁排队、谁被护栏跳过。状态条与 @all 摘要都从
+// 这里取同一套口径（Go 的 agenthub.Delivery 是权威，这里只做文案映射）。
+
+/** 投递原因码 → 人话。未知码原样返回（后端新增原因时前端不会显示空白）。 */
+export function deliveryReasonText(reason?: string | null): string {
+  switch (reason) {
+    case 'target_busy': return '目标忙，排队中'
+    case 'rate_limit': return '上游限流，退避重试'
+    case 'pair_limit': return '互踢到上限，已跳过'
+    case 'depth_limit': return '链路太深，已跳过'
+    case 'budget': return '预算不足，未启动'
+    case 'stopped': return '已停止'
+    case 'stale_conversation': return '上一轮对话已作废'
+    case 'duplicate': return '重复投递已忽略'
+    case 'interrupted': return '运行被中断'
+    case 'shutdown': return 'Hub 正在关停'
+    case 'invalid': return '群或成员已不可用'
+    default: return (reason ?? '').trim()
+  }
+}
+
+/** 单条投递的一句话：`B 排队中（目标忙）` / `C 失败：…`。 */
+export function deliveryLabel(d?: HubDelivery | null, names?: Record<string, string>): string {
+  if (!d) return ''
+  const who = names?.[d.target ?? ''] ?? d.target ?? ''
+  const why = deliveryReasonText(d.reason)
+  switch (d.status) {
+    case 'queued': return why ? `${who} 排队中（${why}）` : `${who} 排队中`
+    case 'running': return `${who} 进行中`
+    case 'done': return `${who} 已回复`
+    case 'skipped': return why ? `${who} 已跳过：${why}` : `${who} 已跳过`
+    case 'failed': return why ? `${who} 失败：${why}` : `${who} 失败`
+    default: return who
+  }
+}
+
+/**
+ * 一轮 @ 的投递摘要：`9 进行中 · 2 排队 · 1 跳过`。
+ * 只统计最近一批（同一 conversation_id + 同一 turn 的最后连续一段），
+ * 否则历史记录会把当前这轮淹没。
+ */
+export function deliverySummary(conv?: HubConversation | null): string {
+  const list = conv?.deliveries ?? []
+  if (list.length === 0) return ''
+  const last = list[list.length - 1]
+  const batch = list.filter((d) => (d.turn ?? 0) === (last.turn ?? 0) &&
+    (d.conversation_id ?? '') === (last.conversation_id ?? ''))
+  const count = (s: string): number => batch.filter((d) => d.status === s).length
+  const parts: string[] = []
+  const running = count('running')
+  const queued = count('queued')
+  const done = count('done')
+  const skipped = count('skipped')
+  const failed = count('failed')
+  if (running > 0) parts.push(`${running} 进行中`)
+  if (queued > 0) parts.push(`${queued} 排队`)
+  if (done > 0) parts.push(`${done} 已回复`)
+  if (skipped > 0) parts.push(`${skipped} 跳过`)
+  if (failed > 0) parts.push(`${failed} 失败`)
+  return parts.join(' · ')
 }

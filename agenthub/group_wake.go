@@ -23,6 +23,10 @@ type GroupWakeHeader struct {
 	RoundID    string  `json:"round_id"`
 	TriggerSeq int64   `json:"trigger_seq"`
 	MessageID  string  `json:"message_id,omitempty"`
+	// WakeID 是这条唤醒在投递账本里的幂等键（P6-01）：run 收尾时用它把
+	// queued/running 推进到 done，排障时也能从转录直接对上 /hub/conversation 的
+	// deliveries。omitempty：P6-01 之前落盘的旧块没有该字段，解码为 ""。
+	WakeID string `json:"wake_id,omitempty"`
 	// Depth/Turn 是对话控制器（P3b-04）的记账字段：本唤醒是第几跳 @（人类=0，首轮
 	// 智能体=1）、本轮对话的第几轮。omitempty + 缺省 0：P3b-04 之前落在 transcript
 	// 里的旧块必须继续能解析（「没有字段」= 深度/轮次未知，按 0 处理）。

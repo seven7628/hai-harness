@@ -123,6 +123,9 @@ func (l ConversationLimits) withDefaults() ConversationLimits {
 // Turn 在出队（BeginTurn）时才最终确定；NextDue/Peek 给出的是「如果现在跑，会是第几轮」。
 type Wake struct {
 	GroupID GroupID `json:"group_id"`
+	// ID 是投递幂等键（P6-01）：Offer 时分配一次，之后重试/重泵都复用它。
+	// 空串 = 未登记（直接构造的 wake，投递时按「首次」处理并补登记）。
+	ID string `json:"id,omitempty"`
 	// ConversationID 是入队时所处对话的 id：投递方（bridge）在真正投递前用它
 	// 确认「这条 wake 还属于当前对话」，停止/人类插话开新对话后旧 wake 立即失效。
 	ConversationID string  `json:"conversation_id,omitempty"`
@@ -179,7 +182,16 @@ type ConversationView struct {
 	StopReason string         `json:"stop_reason,omitempty"`
 	StartedAt  *time.Time     `json:"started_at,omitempty"`
 	UpdatedAt  *time.Time     `json:"updated_at,omitempty"`
+	// Deliveries 是最近一轮的投递账本（P6-01）：每个 target 的
+	// queued/running/done/skipped/failed + 原因。有界（见 ConversationViewDeliveries），
+	// 只给 UI/命令回执看，不参与任何判定。
+	Deliveries []Delivery `json:"deliveries,omitempty"`
 }
+
+// ConversationViewDeliveries 是 ConversationView 里携带的投递记录条数上限：
+// hub_conversation 事件是高频事件，整本账（64 条）塞进去会把事件行撑到十几 KB。
+// 进行中的记录一条不丢，终态的只保留最近的几条。
+const ConversationViewDeliveries = 20
 
 // Terminal 终态（stopped/exhausted）；idle/running 都不算。
 func (v ConversationView) Terminal() bool { return v.Status.Terminal() }
@@ -211,6 +223,10 @@ type conversation struct {
 	lastWake  time.Time
 	startedAt time.Time
 	updatedAt time.Time
+	// deliveries 是投递账本（P6-01）：每 target 一条，跨 generation 保留（有界）。
+	deliveries *deliveryLedger
+	// wakeSeq 是 wake id 的单调序号（同毫秒内不撞车）。
+	wakeSeq uint64
 }
 
 // ConversationController 每群一份对话状态。并发安全：所有方法持同一把锁，
@@ -261,12 +277,13 @@ func (c *ConversationController) ensureLocked(group GroupID, now time.Time) *con
 	conv := c.convs[group]
 	if conv == nil {
 		conv = &conversation{
-			group:     group,
-			status:    ConversationIdle,
-			pairs:     map[agentPair]int{},
-			prints:    map[agentPair]map[string]bool{},
-			startedAt: now,
-			updatedAt: now,
+			group:      group,
+			status:     ConversationIdle,
+			pairs:      map[agentPair]int{},
+			prints:     map[agentPair]map[string]bool{},
+			startedAt:  now,
+			updatedAt:  now,
+			deliveries: newDeliveryLedger(),
 		}
 		c.convs[group] = conv
 	}
@@ -276,6 +293,13 @@ func (c *ConversationController) ensureLocked(group GroupID, now time.Time) *con
 func (c *ConversationController) nextIDLocked(now time.Time) string {
 	c.seq++
 	return fmt.Sprintf("conv_%d_%d", now.UnixMilli(), c.seq)
+}
+
+// nextWakeIDLocked 分配投递幂等键（P6-01）。同毫秒内靠 wakeSeq 递增不撞车；
+// 带群 id 便于日志/UI 直接看出归属。
+func (c *ConversationController) nextWakeIDLocked(conv *conversation, now time.Time) string {
+	conv.wakeSeq++
+	return fmt.Sprintf("wake_%s_%d_%d", conv.group, now.UnixMilli(), conv.wakeSeq)
 }
 
 // BeginHuman 人类消息开启新对话：TurnsUsed=0、Depth=0、队列清空、踢皮球计数与
@@ -300,6 +324,9 @@ func (c *ConversationController) BeginHuman(group GroupID, humanSeq int64, at ti
 	conv.lastWake = time.Time{}
 	conv.startedAt = now
 	conv.updatedAt = now
+	// 人类开新对话：旧 generation 还在排队的 wake 全部作废（D5）。账本里只丢
+	// 这些 queued 记录；running/终态保留，在飞 run 收尾时还能正常落到 done。
+	conv.deliveries.dropQueued()
 	return conv.view(c.limits)
 }
 
@@ -421,11 +448,19 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	}
 	wakes := make([]Wake, 0, len(plans))
 	for _, p := range plans {
-		wakes = append(wakes, Wake{
+		w := Wake{
 			GroupID: group, ConversationID: conv.id, Sender: req.Sender, Human: req.Human, Target: p.target,
 			Text: text, Depth: depth, TriggerSeq: req.TriggerSeq, RoundID: req.RoundID,
 			Fingerprint: fp, EnqueuedAt: now,
+		}
+		// P6-01：入队即登记一条 queued 投递记录（幂等键 wake id 在这里分配一次）。
+		w.ID = c.nextWakeIDLocked(conv, now)
+		conv.deliveries.put(&Delivery{
+			WakeID: w.ID, ConversationID: conv.id, GroupID: group, Target: w.Target,
+			Sender: w.Sender, Human: w.Human, Depth: w.Depth, TriggerSeq: w.TriggerSeq,
+			RoundID: w.RoundID, Status: DeliveryQueued, EnqueuedAt: now, UpdatedAt: now,
 		})
+		wakes = append(wakes, w)
 		if req.Human {
 			continue // 人类发送不计入踢皮球/循环统计（§6.5.6 规则 1/4）
 		}
@@ -439,6 +474,7 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	}
 	conv.queue = append(conv.queue, wakes...)
 	conv.updatedAt = now
+	conv.deliveries.prune()
 	return wakes, nil
 }
 
@@ -492,35 +528,29 @@ func (c *ConversationController) Peek(group GroupID) (Wake, bool) {
 
 // BeginTurn 出队并记账：TurnsUsed++、Depth=该 wake 的跳数、记下「上一次唤醒时间」
 // （下一次的冷却从此刻算起）。投递成功后调用；投递失败**不要**调用（wake 留队）。
+//
+// 队首版本：P6-01 起内部走 BeginDelivery（账本 + 幂等），保留给只需要「下一跳」的
+// 调用方与旧测试；并行调度器用 BeginDelivery 直接指定 wake id。
 func (c *ConversationController) BeginTurn(group GroupID, at time.Time) (Wake, bool) {
 	if c == nil {
 		return Wake{}, false
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	conv := c.convs[group]
 	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+		c.mu.Unlock()
 		return Wake{}, false
 	}
 	if c.limits.TurnBudget > 0 && conv.turns >= c.limits.TurnBudget {
 		c.exhaustLocked(conv, now,
 			fmt.Sprintf("本轮自动对话已达上限 %d 轮，等待人类继续", c.limits.TurnBudget))
+		c.mu.Unlock()
 		return Wake{}, false
 	}
-	w := conv.queue[0]
-	if ready := c.readyAtLocked(conv, w); now.Before(ready) {
-		return Wake{}, false
-	}
-	conv.queue = conv.queue[1:]
-	conv.turns++
-	conv.depth = w.Depth
-	conv.lastWake = now
-	conv.updatedAt = now
-	w.ConversationID = conv.id
-	w.Turn = conv.turns
-	w.ReadyAt = now
-	return w, true
+	head := conv.queue[0]
+	c.mu.Unlock()
+	return c.BeginDelivery(head, at)
 }
 
 // Stop 停止自动对话：清队列、Status=stopped、记下原因。幂等：已是终态则原样返回
@@ -652,6 +682,9 @@ func (conv *conversation) view(l ConversationLimits) ConversationView {
 	if !conv.updatedAt.IsZero() {
 		t := conv.updatedAt
 		v.UpdatedAt = &t
+	}
+	if conv.deliveries != nil {
+		v.Deliveries = conv.deliveries.listRecent(ConversationViewDeliveries)
 	}
 	return v
 }

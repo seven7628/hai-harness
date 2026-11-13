@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import { hubCommand } from './api'
 import type {
-  HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDMInfo, HubGroup, HubGroupPolicy,
+  HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDelivery, HubDMInfo, HubGroup, HubGroupPolicy,
   HubHistoryPage,
   HubMessage, HubGroupActivity, HubGroupProgress, HubNeed, HubPage, HubPromptLayer, HubPromptPreviewData,
   HubRound, HubRunEntry, HubSearchCursor, HubSearchHit, HubSearchPage, HubSearchScope, HubTask,
@@ -1485,7 +1485,7 @@ export const useHubStore = create<HubState>((set, get) => ({
     // 两者取并集 —— 前端删改正文不会留下「幽灵唤醒」。
     if (mentions && mentions.length > 0) payload.mentions = mentions
     if (mentionAll) payload.mention_all = true
-    const r = await hubCommand<{ seq?: number; round?: HubRound }>('hub_group_send', payload)
+    const r = await hubCommand<{ seq?: number; round?: HubRound; deliveries?: HubDelivery[] }>('hub_group_send', payload)
     // 切群/下一轮发送已发生：旧响应只负责自己的乐观气泡，不得复位新一轮的 groupSending。
     if (groupSendGen !== gen || get().activeGroupId !== activeGroupId) return false
     if (!r.ok) {

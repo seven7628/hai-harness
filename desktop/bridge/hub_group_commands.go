@@ -675,20 +675,18 @@ func (m *manager) hubGroupSend(c command) {
 	// 「先停一下」这类插话必须能打断自动接龙（§6.5.6 规则 1/5）。
 	_, turn := m.beginHubConversationWithinGate(g, seq, len(round.Targets))
 	// 无 @ 只写日志（N-1）：不产生 hub_round，否则前端会误报「无人被唤醒」。
-	var wakeErrors []string
+	var deliveries []agenthub.Delivery
 	if routed != nil {
 		m.out.writeLine(map[string]any{"event_type": "hub_round", "group_id": string(g.ID), "round": round})
 		// 首轮目标仍然**并行**唤醒：人叫醒几个人不该排队（§6.5.6 规则 2）。
 		// 先落日志/回执，再唤醒；唤醒失败不能把已写入的群消息回滚（人已经看到了）。
-		wakeErrors = m.wakeGroupRound(g, round, msg, 1, turn)
-		for _, we := range wakeErrors {
-			m.hubAlertf("group_wake_failed", "群 %s 唤醒失败：%s", g.ID, we)
-		}
+		// P6-01：返回每个 target 的投递记录 —— 忙的留队（queued），不是「唤醒失败」。
+		deliveries = m.wakeGroupRound(g, round, msg, 1, turn)
 	}
 	unlockConv()
 	respData := map[string]any{"seq": seq, "message_id": msg.ID, "round": round, "targets": round.Targets}
-	if len(wakeErrors) > 0 {
-		respData["wake_errors"] = wakeErrors
+	if len(deliveries) > 0 {
+		respData["deliveries"] = deliveries
 	}
 	m.resp(c, true, "", respData)
 }

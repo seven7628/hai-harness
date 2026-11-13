@@ -391,4 +391,31 @@ export interface HubConversation {
   stop_reason?: string
   started_at?: string
   updated_at?: string
+  /** 最近一轮的投递账本（P6-01）：每个 target 一条，见 HubDelivery。 */
+  deliveries?: HubDelivery[]
+}
+
+/**
+ * 投递账本的单目标状态（P6-01，Go 的 agenthub.Delivery）。
+ * queued：排队等目标空闲；running：已交给目标会话；done：这一轮收尾；
+ * skipped：护栏/停止/换代有意不跑（带 reason）；failed：投递出错（带 reason）。
+ */
+export interface HubDelivery {
+  wake_id?: string
+  conversation_id?: string
+  group_id?: string
+  target?: string
+  sender?: string
+  human?: boolean
+  depth?: number
+  turn?: number
+  trigger_seq?: number
+  round_id?: string
+  status?: 'queued' | 'running' | 'done' | 'skipped' | 'failed' | string
+  /** 人话原因码：target_busy / rate_limit / pair_limit / depth_limit / budget / stopped / ... */
+  reason?: string
+  attempts?: number
+  ready_at?: string
+  enqueued_at?: string
+  updated_at?: string
 }
