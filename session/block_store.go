@@ -294,14 +294,14 @@ func (r blockRef) unchanged(payload []byte) bool {
 //
 // 现在三件事：
 //
-//   · **引用计数（pin）** —— 正在用的实例不可淘汰。
-//     这不只是为了淘汰，也是**正确性**：后台 compact 会在释放 record 锁之后
-//     继续用 bs（compact_scheduler.go 的 rewriteCompact 阶段），
-//     没有 pin 时它可能被另一个 goroutine 关掉 ⇒ use-after-close。
-//   · **LRU + 预算** —— 超预算时按「最近最少使用」淘汰**未 pin** 的实例。
-//     淘汰动作在**后台**做：Close 会 fsync 整个 sidecar，提交路径延迟敏感。
-//   · **预算按索引内存算**，不按实例数 —— 大小会话的索引差三个数量级
-//     （40,232 块 vs 20 块）。
+//	· **引用计数（pin）** —— 正在用的实例不可淘汰。
+//	  这不只是为了淘汰，也是**正确性**：后台 compact 会在释放 record 锁之后
+//	  继续用 bs（compact_scheduler.go 的 rewriteCompact 阶段），
+//	  没有 pin 时它可能被另一个 goroutine 关掉 ⇒ use-after-close。
+//	· **LRU + 预算** —— 超预算时按「最近最少使用」淘汰**未 pin** 的实例。
+//	  淘汰动作在**后台**做：Close 会 fsync 整个 sidecar，提交路径延迟敏感。
+//	· **预算按索引内存算**，不按实例数 —— 大小会话的索引差三个数量级
+//	  （40,232 块 vs 20 块）。
 //
 // 并发：FileStorage.mu 已串行化提交，这里再加一层锁保护 Reader/Writer 路径。
 type blockStoreEntry struct {
@@ -1321,7 +1321,7 @@ func refBlocks(bs *blockStore, view []byte) ([]byte, int, error) {
 // 安全性完全依赖调用方保证 spans 与 view 一致（同一次 Marshal 产出）；
 // 数量对不上就回退全量路径。
 func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, int, error) {
-	return refBlocksFromSpansDirty(bs, view, spans, nil, nil, nil)
+	return refBlocksFromSpansDirty(bs, view, spans, nil, nil, nil, nil)
 }
 
 // refBlocksFromSpansDirty 是 refBlocksFromSpans 的脏块快路径版本。
@@ -1334,7 +1334,29 @@ func refBlocksFromSpans(bs *blockStore, view []byte, spans [][]byte) ([]byte, in
 // 窗口恢复时 spans 只覆盖「窗口 + 卡片块」，allIDs 仍是全集 —— 引用必须按全集写，
 // 否则 pruneTo 会把窗口外的历史从 sidecar 里删掉（不可逆的数据丢失）。
 // allIDs 为 nil 时按 spans 自身构造（旧行为）。
-func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty map[uint64]struct{}, spanIDs []uint64, allIDs []uint64) ([]byte, int, error) {
+// RefPhaseTiming 是「逐块比对 + 追加 + 集合摘要」这一阶段的**分解计时**。
+//
+// 为什么要拆：实测慢提交的 sidecar 阶段里 sc-ref 占 7.6s（23.4s 那次），
+// 但这一段里至少有五件事（逐块比对 / 写入 / 回收 / 摘要 / 文档构造）——
+// 不拆开就只能猜，而"猜"过一次就猜错过（当时以为 40,232 块的 sha256 摘要
+// 要 10ms，实际差了三个数量级 ⇒ 真凶不是它）。
+//
+// 字段全为 0 时表示没量（tm 为 nil）。
+type RefPhaseTiming struct {
+	Compare time.Duration // 逐块比对（脏块快路径下只是 O(1) 存在性检查）
+	Put     time.Duration // 真正写入 sidecar 的块（含压缩）
+	Prune   time.Duration // 回收不在引用集里的旧块（O(索引大小)）
+	SetSum  time.Duration // 块集合摘要（顺序无关：对全部块算一次 sha256）
+	Doc     time.Duration // 引用文档构造（排序 + 稠密区间 + 序列化）
+	Replace time.Duration // 把引用写回 view（等长替换）
+	Total   time.Duration
+}
+
+func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty map[uint64]struct{}, spanIDs []uint64, allIDs []uint64, tm *RefPhaseTiming) ([]byte, int, error) {
+	if tm != nil {
+		tm.Total = 0
+		defer func() { tm.Total = tm.Compare + tm.Put + tm.Prune + tm.SetSum + tm.Doc + tm.Replace }()
+	}
 	if len(spans) == 0 {
 		// 空 blocks：仍要写引用，避免下次被当作旧格式。
 		// 同时把索引里残留的块清掉 —— 否则 ref.Count=0 与 store.Len()>0 对不上，
@@ -1354,6 +1376,8 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 
 	useIDs := len(spanIDs) == len(spans)
 	wrote := 0
+	// 分解计时：比对（跳过未变块）与写入（真写 sidecar）分开算。
+	var cmpDur, putDur time.Duration
 	for i, elem := range spans {
 		var id string
 		if useIDs {
@@ -1367,9 +1391,11 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 		}
 		if isLiveBlock(elem) {
 			// running 块每个事件都可能变，一律重写（不哈希）。
+			putStart := time.Now()
 			if err := bs.put(id, elem); err != nil {
 				return nil, 0, err
 			}
+			putDur += time.Since(putStart)
 			wrote++
 			continue
 		}
@@ -1382,23 +1408,38 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 			// 旧版本（「卡片永不更新」那个 bug）。因此调用方要周期性传 nil
 			// 走全量校验（见 bridge 的 verifyEvery）。
 			if num, err := parseUintID(id); err == nil {
-				if _, known := dirty[num]; !known && bs.has(id) {
+				cmpStart := time.Now()
+				_, known := dirty[num]
+				present := bs.has(id)
+				cmpDur += time.Since(cmpStart)
+				if !known && present {
 					continue
 				}
 			}
+			putStart := time.Now()
 			if err := bs.put(id, elem); err != nil {
 				return nil, 0, err
 			}
+			putDur += time.Since(putStart)
 			wrote++
 			continue
 		}
-		if bs.holdsSame(id, elem) {
+		cmpStart := time.Now()
+		same := bs.holdsSame(id, elem)
+		cmpDur += time.Since(cmpStart)
+		if same {
 			continue
 		}
+		putStart := time.Now()
 		if err := bs.put(id, elem); err != nil {
 			return nil, 0, err
 		}
+		putDur += time.Since(putStart)
 		wrote++
+	}
+	if tm != nil {
+		tm.Compare = cmpDur
+		tm.Put = putDur
 	}
 	// 引用集合：窗口恢复下以 allIDs 为准（全集），否则按 spans 自身。
 	refIDs2 := make([]string, 0, len(spans))
@@ -1425,13 +1466,18 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 			}
 		}
 	}
+	pruneStart := time.Now()
 	if err := bs.pruneTo(keep2); err != nil {
 		return nil, 0, err
 	}
+	pruneDur := time.Since(pruneStart)
+	sumStart := time.Now()
 	setSum2, serr2 := blocksSetSum(bs, refIDs2)
 	if serr2 != nil {
 		return nil, 0, serr2
 	}
+	sumDur := time.Since(sumStart)
+	docStart := time.Now()
 	ids2, ierr2 := sortedIDNums(refIDs2)
 	if ierr2 != nil {
 		return nil, 0, ierr2
@@ -1442,9 +1488,19 @@ func refBlocksFromSpansDirty(bs *blockStore, view []byte, spans [][]byte, dirty 
 	if err != nil {
 		return nil, 0, err
 	}
+	docDur := time.Since(docStart)
+	if tm != nil {
+		tm.Prune = pruneDur
+		tm.SetSum = sumDur
+		tm.Doc = docDur
+	}
 	// 用 spans 的已知总长度直接算出数组结尾，省掉 matchJSONEnd 的 86MB 扫描
 	//（实测 110ms，占提交 20%）。
+	replaceStart := time.Now()
 	out, err := replaceBlocksWithKnownSpans(view, spans, refJSON)
+	if tm != nil {
+		tm.Replace = time.Since(replaceStart)
+	}
 	if err != nil {
 		// 长度对不上（调用方 spans 与 view 不一致）→ 回退扫描式定位。
 		fallback, ferr := replaceJSONField(view, "blocks", refJSON)

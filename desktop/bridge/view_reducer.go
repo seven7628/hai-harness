@@ -922,12 +922,31 @@ func cloneBlocksForEncode(in []Block) []Block {
 	out := make([]Block, len(in))
 	for i := range in {
 		out[i] = in[i] // 切片字段共享（编码期间只读）
-		// normalizeSnapshotBlocks 会写 Items[j].Active/Aborted → 只复制这一类。
-		if in[i].Kind == blockKindAgent && len(in[i].Items) > 0 {
+		// normalizeSnapshotBlocks 唯一会写穿的是 agent 块的
+		// Items[j].Active/Aborted —— **且只对「正在压缩中」的那一项写**。
+		//
+		// 旧实现复制**每张** agent 卡的全部 items：真实会话 40,232 块里有
+		// ~1,600 张 agent 卡（每张 50 条 item）⇒ 每次提交白分配 ~20MB ⇒
+		// 在 3GB 堆上触发 GC ⇒ 实测 marshal 5.9s。
+		// 真正需要复制的只有「此刻正在压缩」的那几张。
+		if in[i].Kind == blockKindAgent && hasActiveCompressionItem(in[i].Items) {
 			out[i].Items = append([]AgentItem(nil), in[i].Items...)
 		}
 	}
 	return out
+}
+
+// hasActiveCompressionItem 报告这份 items 里有没有「正在压缩中」的项。
+//
+// 这正是 normalizeSnapshotBlocks 唯一会写的字段 ⇒ 只有它为真时才需要复制
+// items 切片（否则归一化会写穿到 reducer 的本体上）。
+func hasActiveCompressionItem(items []AgentItem) bool {
+	for j := range items {
+		if items[j].Kind == agentItemCompression && items[j].Active {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *ViewReducer) snapshotLocked() *Checkpoint {
