@@ -1034,7 +1034,12 @@ body.is-electron .left-brand {
 }
 /* 项目/会话列表：占满剩余空间，内容超高时自身滚动，不把底部 nav（Skills/定时任务/设置）挤出可视区 */
 .proj-list {
-  flex: 1 1 auto;
+  /* basis 必须是 0，不能是 auto：basis:auto 取内容高度，Project 展开出长会话列表后
+     basis 变成几千 px，负空间按 basis 分摊 → 本项触到 min-height 后剩余负空间全压给
+     .hub-side（flex:0 1 auto; min-height:0），Hub 段被压到连 tabs 都放不下（1280×900
+     实测 .hub-side 235→78、.hub-side-list 115→6）。basis:0 让本项从 0 长起，
+     超长时**列表滚动发生在这里**（overflow-y:auto），Hub 段保持自身高度。 */
+  flex: 1 1 0;
   /* 工作区树是左栏的根内容：Hub section 再高也必须给这里留下可见的
      「工作区行 + 至少一个会话行」空间（980×620 回归；120px 会把 Hub 列表挤到 21px）。 */
   min-height: 96px;
