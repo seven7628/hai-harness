@@ -16,7 +16,7 @@
 | D5 | 人类插话不停止在飞 run | 在飞 run 继续；人类消息排到对应 agent 的“下一个输入”；旧链未启动的 wake 丢弃；旧 run 的 @ 不得进入新链。 |
 | D6 | 对话状态必须持久化 | 队列/状态/深度/pair 计数落盘；重启可恢复；已投递未完成的 run 标 interrupted，不自动重放副作用。 |
 | D7 | observer 删除 | 身份只剩：人 / owner 智能体 / member 智能体；旧数据 `observer → member`。 |
-| D8 | 全局 Settings 位置 | `settings.json` 顶层 `hub.conversation`：`max_depth`、`pair_limit`、`cooldown_ms`（默认 0）、`run_timeout_ms`、`max_pending_wakes`。 |
+| D8 | 全局 Settings 位置 | `settings.json` 顶层 `hub.conversation`：`max_depth`、`pair_limit`、`pair_window_ms`（默认 10 分钟）、`idle_reset_ms`（默认 30 分钟）、`cooldown_ms`（默认 0）、`run_timeout_ms`、`max_pending_wakes`。 |
 
 ## 1. 设计契约
 
@@ -29,11 +29,16 @@
   - 只跳过该 target，记录 `skipped: pair_limit`；
   - 其他 target 继续投递；
   - 全部 target 都 skipped → `waiting_human`，写一条系统说明，不设 `exhausted`。
-- 重置：
-  - 人类新输入（新 generation）清零所有 pair；
-  - `A→B, B→A, A→C` 中 `A↔C` 是新键，从 0 开始；`A↔B` **不因 A 去跟 C 说话而清零**（否则换目标就能洗白循环）；
-  - 旧 generation 的在飞 run 保留旧计数，但不能向新 generation 路由。
-- UI：显示 `A ↔ B 10/10`，不是 `A → B`。
+- 计数是**滚动窗口**：只统计最近 `pair_window_ms`（默认 10 分钟）内的成功投递；更早的计数惰性过期。
+- 重置/清零时机（必须明确）：
+  1. **人类新输入**：消息被接受时立即开新 generation，清零所有 pair 计数、depth、指纹；这是主重置。
+  2. **pair 窗口自动过期**：A↔B 的 10 次只在最近 10 分钟内有效；窗口滑过后该 pair 自动恢复，不需要人类操作，避免永久卡死。惰性判断，不靠定时器。
+  3. **空闲重置**：群连续 `idle_reset_ms`（默认 30 分钟）没有 run/wake，状态回 `idle`，计数清零。
+  4. **手动重置**：状态条提供“重置本群限制”按钮（`hub_conversation_reset`），立即清零计数并解除 waiting_human，不自动唤醒任何人；用户下一次 @ 立即生效。
+  5. **重启加载**：持久化的 pair 计数带时间戳；加载时先按窗口过期，再恢复。
+- `A→B, B→A, A→C` 中 `A↔C` 是新键，从 0 开始；`A↔B` **不因 A 去跟 C 说话而清零**（否则换目标就能洗白循环）。
+- 旧 generation 的在飞 run 保留旧计数，但不能向新 generation 路由。
+- UI：显示 `A ↔ B 10/10`，并显示“约 N 分钟后自动恢复”；不是 `A → B`。
 - handoff 的 10 分钟/2 次是另一套，保留；文档/UI 要区分“对话 pair”和“交接 pair”。
 
 ### 1.2 Depth（每条链独立）
@@ -41,7 +46,7 @@
 - `wake.depth = parent.depth + 1`；人类输入首跳 = 1。
 - 同一 generation 内，并行分支互不影响；浅分支跑完不会把深分支的 depth 重置。
 - 到 `max_depth`：只拒绝该链继续 @，不把整个群判死；写系统说明。
-- 重置：人类新输入开新 generation；旧 run 保留旧 depth，且不能路由进新 generation。
+- 重置/清零时机：人类新输入开新 generation；群空闲 `idle_reset_ms` 后回 idle 并清零；手动“重置本群限制”立即清零。旧 run 保留旧 depth，且不能路由进新 generation。
 - 兜底（不是替代）：
   - PairLimit 10；
   - 同内容指纹；
@@ -82,7 +87,7 @@
 - 每群 `conversations/<group>.json`（FileStore 原子写）：
   - generation id / human seq / status / stop reason / turns；
   - queue（target、trigger_seq、round_id、depth、enqueued_at、delivery status）；
-  - 无序 pair counts；
+  - 无序 pair counts（带最近一次成功投递时间戳，供滚动窗口过期）；
   - 指纹集合（每 pair 有上限，避免无限增长）。
 - 写时机：enqueue/dequeue/deliver/complete/stop/pair 变更；不按 token 写。
 - 重启：
@@ -107,13 +112,13 @@
 | P6-01 | 投递账本：每 target `queued/running/done/skipped/failed` | — | `agenthub/conversation.go`、`desktop/bridge/hub_conversation.go`、`hub_group_session.go`、`hub_group_commands.go` | 忙目标排队重试；不丢；命令返回 deliveries；UI 类型 |
 | P6-02 | 统一调度器：并发=目标数，删除 MaxParallelRuns | P6-01 | 调度器/pump、`agenthub/group.go`、UI/mock | 12 人群 @all 11 并发；agent @all 也并行；字段删除 |
 | P6-03 | 预跑预算 + provider 信号量 + 429 退避 | P6-02 | `hub_conversation.go`、预算/guard、provider 调用层 | 预算不足不启动；429 排队；不标 failed |
-| P6-04 | 全局对话设置 + PairLimit 算法 | P6-01 | `settings`、`agenthub/conversation.go`、bridge loader、UI | 无序/10/成功投递计数/逐目标 skip/不整批熔断 |
-| P6-05 | 每链 Depth + 全局 1000 + 重置 | P6-04 | `agenthub/conversation.go`、wake header、UI | 并行分支互不影响；深/浅不串；人类重置 |
+| P6-04 | 全局对话设置 + PairLimit 算法 | P6-01 | `settings`、`agenthub/conversation.go`、bridge loader、UI | 无序/10/成功投递计数/逐目标 skip/不整批熔断；10 分钟滚动窗口；人类/空闲/手动/重启四类清零时机 |
+| P6-05 | 每链 Depth + 全局 1000 + 重置 | P6-04 | `agenthub/conversation.go`、wake header、UI | 并行分支互不影响；深/浅不串；人类/空闲/手动清零 |
 | P6-06 | Mode 真接线（auto/ask/readonly） | — | 工具包装、群策略、Needs/审批、UI | readonly 拒绝副作用；ask 弹审批；auto 直跑 |
 | P6-07 | 人类插话下一输入 + generation 隔离 | P6-01/02/04/05 | `hub_group_commands.go`、`hub_conversation.go`、`hub_group_session.go` | 旧 run 继续；旧 wake 丢弃；旧 @ 不路由；目标排队 |
 | P6-08 | 按 agent 停止 + run 超时 | P6-01/02 | stop 命令、scheduler | 只停一个 agent；超时中断并继续队列 |
 | P6-09 | 对话状态持久化 + 重启恢复 | P6-01/04/05/07 | `agenthub/store*.go`、conversation、bridge startup | 队列/状态/pair 恢复；interrupted 不重放 |
-| P6-10 | @all 状态/沉默语义 + UI | P6-01/02 | bridge 事件、`useHubStore`、`ConversationBar` | 已入队/已回复/未回复/失败可见；不再只显示最热 pair |
+| P6-10 | @all 状态/沉默语义 + UI | P6-01/02 | bridge 事件、`useHubStore`、`ConversationBar` | 已入队/已回复/未回复/失败可见；不再只显示最热 pair；pair 恢复倒计时 + 手动重置按钮 |
 | P6-11 | agent 来源标记 + 工具策略审计 | P6-06 | wake header、prompt、审计/测试 | 来源可追溯；ask/readonly 对 agent-origin 同样生效 |
 | P6-12 | observer 删除与迁移 | — | `agenthub/group.go`、bridge tools、前端 mentions/UI/mock | 旧 observer→member；角色只剩两种；无 observer 特判 |
 | P6-13 | 死旋钮清理 | P6-02/06 | `agenthub/group.go`、settings、UI/docs | 删除 MaxParallelRuns/MaxTurnsPerHuman；Mode 已生效；每个旋钮有效果测试 |

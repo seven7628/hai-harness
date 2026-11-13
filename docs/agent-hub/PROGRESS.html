@@ -2237,7 +2237,7 @@ const BASE = {
         "desktop/app/src/settings",
         "desktop/app/src/hub/conversation.ts"
       ],
-      "acceptance": "settings.json hub.conversation.max_depth/pair_limit；A↔B 无序；成功投递才计数；到限只 skip 该 target；A→C 不重置 A↔B；人类新 generation 清零。",
+      "acceptance": "无序/10/成功投递计数/逐目标 skip/不整批熔断；10 分钟滚动窗口；人类新输入、窗口过期、空闲 30 分钟、手动重置、重启加载五类清零/恢复时机明确。",
       "tests": "go test ./agenthub -run TestConversationPair；settings 单测；node scripts/test-hub-conv.mjs",
       "commit": "feat(hub-p6-04): 全局对话设置与无序 PairLimit",
       "status": "in_progress"
@@ -2255,7 +2255,7 @@ const BASE = {
         "desktop/bridge/hub_conversation.go",
         "desktop/app/src/hub/conversation.ts"
       ],
-      "acceptance": "depth=parent+1；并行分支互不影响；深浅不串；max_depth 默认 1000；人类新输入归零；旧 run 不消耗新链额度。",
+      "acceptance": "depth=parent+1；并行分支互不影响；深浅不串；max_depth 默认 1000；人类新输入/空闲 30 分钟/手动重置清零；旧 run 不消耗新链额度。",
       "tests": "go test ./agenthub -run TestConversationDepth；go test ./desktop/bridge -run TestHubGroupDepth；浏览器状态条",
       "commit": "feat(hub-p6-05): 每链深度与全局 max_depth",
       "status": "in_progress"
@@ -2347,7 +2347,7 @@ const BASE = {
         "desktop/app/src/hub/ConversationBar.tsx",
         "desktop/app/src/hub/conversation.ts"
       ],
-      "acceptance": "每 target 已入队/已回复/未回复/失败可见；@all 成功=已入队；状态条显示本轮/本链/队列/pair/失败。",
+      "acceptance": "每 target 已入队/已回复/未回复/失败可见；@all 成功=已入队；状态条显示本轮/本链/队列/pair/失败；pair 恢复倒计时 + 手动重置按钮。",
       "tests": "node scripts/test-hub-conv.mjs；浏览器群聊状态条",
       "commit": "feat(hub-p6-10): @all 投递状态与群状态条"
     },
