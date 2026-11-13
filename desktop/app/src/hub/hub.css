@@ -2757,16 +2757,38 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .hub-msg-highlight { animation: demo-highlight 1.4s ease; }
 @keyframes demo-highlight { 0%, 100% { background: transparent; } 20% { background: color-mix(in srgb, var(--accent) 12%, transparent); } }
 
-.hub-demo .hub-conv-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; padding: 0 2px; color: var(--muted-2); font-size: 11px; min-height: 24px; border: 0; background: none; }
-.hub-demo .hub-conv-status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
-.hub-demo .hub-conv-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
-.hub-demo .hub-conv-bar.running .hub-conv-dot { background: var(--success); animation: demo-live 1.6s ease infinite; }
+/* 自动对话状态条（P6-10）：header 与 messages 之间的独立一档。
+   骨架/配色走上面 .hub-conv-bar 的 app 令牌基础规则；这里只补 demo 会话区的内边距
+   （与 .messages / .composer-wrap 同一组 28 / 14 / 12）与各档的状态色。
+   信息密度：本轮 · 本链 · 队列 · pair · 投递 · 终态 —— 一条，不另起第二套。 */
+.hub-demo.main > .hub-conv-bar { flex: 0 0 auto; padding: 5px 28px; }
+.hub-demo .hub-conv-facts { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 4px; min-width: 0; flex: 1 1 auto; font-variant-numeric: tabular-nums; }
+.hub-demo .hub-conv-seg { white-space: nowrap; }
+.hub-demo .hub-conv-seg.warn { color: var(--ochre); }
+.hub-demo .hub-conv-seg.danger { color: var(--crimson); }
+.hub-demo .hub-conv-sep { color: var(--ink-line-2); margin: 0 4px 0 2px; }
+.hub-demo .hub-conv-actions { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; flex: none; }
+.hub-demo .hub-conv-reset { color: var(--text-2); font-size: 11px; white-space: nowrap; }
+.hub-demo .hub-conv-reset:hover { color: var(--accent); }
+.hub-demo .hub-conv-reset:disabled { opacity: .5; cursor: default; }
+.hub-demo .hub-conv-stop { margin-left: 0; color: var(--text-2); font-size: 11px; white-space: nowrap; }
+.hub-demo .hub-conv-stop:hover { color: var(--crimson); }
+/* 状态色用 app 的语义令牌：运行中 = --indigo（不是主色，红点会被读成出错），
+   等你继续/护栏命中 = --ochre，已停止 = 弱字色。 */
+.hub-demo.main > .hub-conv-bar.running .hub-conv-dot { background: var(--indigo); animation: demo-live 1.6s ease infinite; }
+.hub-demo.main > .hub-conv-bar.waiting .hub-conv-dot,
+.hub-demo.main > .hub-conv-bar.exhausted .hub-conv-dot { background: var(--ochre); }
+.hub-demo.main > .hub-conv-bar.stopped .hub-conv-dot { background: var(--ink-3); }
 @keyframes demo-live { 50% { opacity: .35; } }
-.hub-demo .hub-conv-turns,
-.hub-demo .hub-conv-pair,
-.hub-demo .hub-conv-terminal { color: var(--muted-2); }
-.hub-demo .hub-conv-stop { margin-left: auto; color: var(--muted); font-size: 11px; }
-.hub-demo .hub-conv-stop:hover { color: var(--danger); }
+@media (max-width: 900px) {
+  .hub-demo.main > .hub-conv-bar { padding: 5px 14px; }
+}
+@media (max-width: 640px) {
+  /* 640：facts 自然折行、操作收到下一行右侧；不横向溢出（验收判据）。 */
+  .hub-demo.main > .hub-conv-bar { padding: 5px 12px; gap: 4px 8px; }
+  .hub-demo .hub-conv-facts { gap: 0 2px; }
+  .hub-demo .hub-conv-actions { gap: 10px; }
+}
 
 .hub-demo .event-spacer { width: 30px; flex: 0 0 30px; }
 .hub-demo .event-card--task { --event-color: var(--success); max-width: 560px; }
