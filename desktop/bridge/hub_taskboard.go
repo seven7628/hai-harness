@@ -405,6 +405,9 @@ func hubNeedAnswers(v any) ([]events.QuestionAnswer, error) {
 
 // recordHubNeed 在审批/提问事件到达时落一条 need（幂等：同一 anchor 只建一次）。
 // 只对 Hub 智能体或正在执行 hub_task 的会话生效，不改普通工作区会话的行为。
+// 归属（场景2）：Hub 会话记会话自身；Project 会话从绑定的 hub_task 反推 origin
+// （哪个 Hub 智能体/群派来的）与 target（本 Project workspace/session），
+// 供 Hub 单聊/群内联展示；RunID/Depth 取事件自带值。
 func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 	if m == nil || bs == nil || bs.runtime == nil {
 		return
@@ -415,13 +418,16 @@ func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 		return
 	}
 	var kind, anchor, title, body string
+	runID, depth := "", 0
 	switch ev := e.(type) {
 	case *events.ToolApprovalRequested:
 		kind, anchor = "approval", ev.Id
+		runID, depth = ev.RunId, ev.Depth
 		title = "工具审批：" + ev.Name
 		body = truncateRunes(ev.Arguments, 2000)
 	case *events.AskUserQuestion:
 		kind, anchor = "question", ev.Id
+		runID = ev.RunId // 提问事件没有 Depth（不是嵌套调用）
 		title = "需要你回答问题"
 		if raw, err := json.Marshal(ev.Questions); err == nil {
 			body = truncateRunes(string(raw), 4000)
@@ -442,18 +448,54 @@ func (m *manager) recordHubNeed(bs *bridgeSession, e events.Event) {
 	if existing, err := st.LoadNeed(ctx, id); err == nil && existing != nil {
 		return // 事件重放/重复渲染：已经在列表里（含已处理）
 	}
+	taskID := firstHubTaskID(bs)
+	// 任务快照缺失（被清理/脏绑定）只让归属留空：need 仍要落库、仍要能 resolve。
+	var task *agenthub.Task
+	if taskID != "" {
+		task, _ = st.LoadTask(ctx, taskID)
+	}
 	n := &agenthub.Need{
 		ID: id, Kind: kind, Status: "pending",
-		AgentID:   agenthub.AgentID(bs.runtime.agentID),
-		GroupID:   agenthub.GroupID(hubGroupIDFromSID(bs.id)),
-		TaskID:    firstHubTaskID(bs),
+		TaskID:    taskID,
 		SessionID: bs.id, Workspace: bs.workspace, Anchor: anchor,
+		RunID: runID, Depth: depth,
 		Title: title, Body: body, CreatedAt: time.Now().UTC(),
+	}
+	if isHub {
+		// Hub 会话保持原语义：等的人就是会话自己的智能体；群从 sid 推出（DM 为空）。
+		n.AgentID = agenthub.AgentID(bs.runtime.agentID)
+		n.GroupID = agenthub.GroupID(hubGroupIDFromSID(bs.id))
+	} else if task != nil {
+		// Project 会话：AgentID/GroupID 记 origin（hub_need_list 按它们能查到），
+		// SessionID/Workspace 仍是**被阻塞的** Project 会话（resolve 按它找会话）。
+		n.AgentID = task.Origin.AgentID
+		n.GroupID = task.Origin.GroupID
+		n.OriginAgentID = task.Origin.AgentID
+		n.OriginAgentName = task.Origin.AgentName
+		n.OriginKind = task.Origin.Kind
+	}
+	if hubNeedTaskOwnsSession(task, bs) {
+		n.TargetKind = task.Target.Kind
+		n.TargetWorkspace = task.Target.Workspace
+		n.TargetSessionID = task.Target.SessionID
 	}
 	if err := st.SaveNeed(ctx, n); err != nil {
 		return
 	}
 	m.emitHubNeed(n)
+}
+
+// hubNeedTaskOwnsSession 判断 task 的目标是不是本会话：钉了 session_id 就比 id
+// （Hub 智能体可能拿到绑在不同会话上的任务）；只钉了 workspace（还没建会话就
+// 派发）时按 workspace 相同算本会话。
+func hubNeedTaskOwnsSession(task *agenthub.Task, bs *bridgeSession) bool {
+	if task == nil || bs == nil {
+		return false
+	}
+	if task.Target.SessionID != "" {
+		return task.Target.SessionID == bs.id
+	}
+	return task.Target.Workspace != "" && task.Target.Workspace == bs.workspace
 }
 
 func firstHubTaskID(bs *bridgeSession) agenthub.TaskID {

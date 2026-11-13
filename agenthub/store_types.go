@@ -39,14 +39,33 @@ const DefaultNeedTTL = 30 * time.Minute
 
 // Need 是 Needs you 的一条待处理项：审批/提问/交接/失败/预算。
 type Need struct {
-	ID        NeedID  `json:"id"`
-	Kind      string  `json:"kind"`   // approval | question | handoff | failure | budget
-	Status    string  `json:"status"` // pending | resolved | expired
+	ID     NeedID `json:"id"`
+	Kind   string `json:"kind"`   // approval | question | handoff | failure | budget
+	Status string `json:"status"` // pending | resolved | expired
+	// AgentID 是「谁在等」：Hub 会话即该智能体；Project 会话取绑定 hub_task 的
+	// origin.agent_id（场景2），这样 hub_need_list{agent_id} 也能查到项目侧审批。
 	AgentID   AgentID `json:"agent_id,omitempty"`
 	GroupID   GroupID `json:"group_id,omitempty"`
 	TaskID    TaskID  `json:"task_id,omitempty"`
 	SessionID string  `json:"session_id,omitempty"`
 	Workspace string  `json:"workspace,omitempty"`
+	// 归属（场景2）：这条审批/提问是从哪个 Hub 智能体/群发起的、落在哪个目标
+	// 会话上、属于哪个 run。Project 会话本身没有 Hub 身份，由 recordHubNeed 从
+	// 绑定的 hub_task 反推；Hub 单聊/群内联按这些字段展示。全部 omitempty，
+	// 旧 JSON 缺键 → 零值，展示层按空处理。
+	OriginAgentID   AgentID `json:"origin_agent_id,omitempty"`
+	OriginAgentName string  `json:"origin_agent_name,omitempty"` // 冗余显示名（TaskOrigin.AgentName）
+	OriginKind      string  `json:"origin_kind,omitempty"`       // dm | group | human
+	TargetKind      string  `json:"target_kind,omitempty"`       // workspace | agent
+	TargetWorkspace string  `json:"target_workspace,omitempty"`
+	TargetSessionID string  `json:"target_session_id,omitempty"`
+	// RunID 是触发这条 need 的 run（审批/提问事件自带 RunId）。
+	RunID string `json:"run_id,omitempty"`
+	// RunName 预留给子智能体归属：子智能体与主会话共用 approvalWaiter/QuestionWaiter，
+	// 事件里只有 RunId 没有名字，暂不填（后续按 run 注册表接）。
+	RunName string `json:"run_name,omitempty"`
+	// Depth 是审批事件的嵌套深度（codemode 子调用；不是子智能体深度）。提问恒 0。
+	Depth int `json:"depth,omitempty"`
 	// Anchor 是决策锚：approval 的调用 id / question 的批次 id（hub_need_resolve 用）。
 	Anchor     string     `json:"anchor,omitempty"`
 	Title      string     `json:"title"`
