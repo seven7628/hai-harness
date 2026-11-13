@@ -184,14 +184,14 @@
 | P6-04 | done | group-core | aef52b4 + 18c1ace | 主 Session 复验并合并（d4aec2c + c570975）；Go/TS/浏览器全绿 |
 | P6-05 | done | group-core | 81d9a6d + 8294a78 | 主 Session 复验并合并（d4aec2c + c570975）；Go/TS/浏览器全绿 |
 | P6-06 | done | group-surface | 9e5ca58 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
-| P6-07 | in_progress | group-lifecycle | — | — |
-| P6-08 | in_progress | group-lifecycle | — | — |
-| P6-09 | in_progress | group-lifecycle | — | — |
-| P6-10 | review | group-ui | bc205cc + db0eb4e | 主 Session 复验通过（Go/TS/Node/浏览器）；待 P6-15 |
+| P6-07 | done | group-lifecycle | 37207ce | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
+| P6-08 | done | group-lifecycle | 7d3754b | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
+| P6-09 | done | group-lifecycle | 38b8350 | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
+| P6-10 | done | group-ui | bc205cc + db0eb4e | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
 | P6-11 | done | group-surface | 4727831 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-12 | done | group-surface | 715a28c | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
-| P6-13 | review | group-ui | 15e4d34 | 主 Session 复验通过（Go/TS/Node/浏览器）；待 P6-15 |
-| P6-14 | review | group-ui | f62aa98 | 主 Session 复验通过（Go/TS/Node/浏览器）；待 P6-15 |
+| P6-13 | done | group-ui | 15e4d34 | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
+| P6-14 | done | group-ui | f62aa98 | 主 Session 复验并合并（3521fe2 + 0fa50b4）；Go/TS/浏览器全绿 |
 | P6-15 | todo | main | — | — |
 | P6-16 | done | group-surface | 3bd3439 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |
 | P6-17 | done | group-surface | 1744204 | 主 Session 复验并合并（4ec7313）；Go/TS/Node/浏览器全绿 |

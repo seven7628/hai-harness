@@ -2306,8 +2306,10 @@ const BASE = {
       ],
       "acceptance": "在飞 run 不中断；旧 generation 未投递 wake 丢弃；人类消息按 target 排队；旧 run @ 不路由；新链 depth/pair 清零。",
       "tests": "go test ./desktop/bridge -run TestHumanInterject；浏览器群聊插话",
-      "commit": "feat(hub-p6-07): 人类插话下一输入与代际隔离",
-      "status": "in_progress"
+      "commit": "37207ce",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-08",
@@ -2324,8 +2326,10 @@ const BASE = {
       ],
       "acceptance": "stop 可带 agent_id 只停一个；群级 stop 保留；run_timeout_ms 超时中断；队列继续。",
       "tests": "go test ./desktop/bridge -run TestHubConversationStop；浏览器停止按钮",
-      "commit": "feat(hub-p6-08): 按 agent 停止与 run 超时",
-      "status": "in_progress"
+      "commit": "7d3754b",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-09",
@@ -2345,8 +2349,10 @@ const BASE = {
       ],
       "acceptance": "每群 conversation 文件；queue/status/pair/depth 落盘；重启恢复未投递；已投递未完成标 interrupted 不重放；坏文件不覆盖。",
       "tests": "go test ./agenthub -run TestConversationStore；go test ./desktop/bridge -run TestConversationRestart",
-      "commit": "feat(hub-p6-09): 对话状态持久化与重启恢复",
-      "status": "in_progress"
+      "commit": "38b8350",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-10",
@@ -2365,9 +2371,9 @@ const BASE = {
       "acceptance": "每 target 已入队/已回复/未回复/失败可见；@all 成功=已入队；状态条显示本轮/本链/队列/pair/失败；pair 恢复倒计时 + 手动重置按钮。",
       "tests": "node scripts/test-hub-conv.mjs；浏览器群聊状态条",
       "commit": "bc205cc + db0eb4e",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub 全绿；tsc/css/test:hub-conv 132 全绿；浏览器 conversation-bar/theme-palette/menu-layer/columns 全绿。merge 3521fe2；待 P6-15 最终回归。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-11",
@@ -2427,9 +2433,9 @@ const BASE = {
       "acceptance": "删除 MaxParallelRuns/MaxTurnsPerHuman 字段与默认值；Mode 已生效；每个保留 policy 字段有生效性测试。",
       "tests": "go test ./agenthub -run GroupPolicy；npm run test:p4",
       "commit": "15e4d34",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub 全绿；tsc/css/test:hub-conv 132 全绿；浏览器 conversation-bar/theme-palette/menu-layer/columns 全绿。merge 3521fe2；待 P6-15 最终回归。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-14",
@@ -2448,9 +2454,9 @@ const BASE = {
       "acceptance": "ink/paper/system 三主题中心与右栏同色；header/composer 同步；状态条显示本轮/本链/队列/pair/失败；1280/640 无溢出。",
       "tests": "npm run test:css；浏览器截图三主题；check-p4-p2-details",
       "commit": "f62aa98",
-      "status": "review",
-      "review": "pending",
-      "reviewNote": "主 Session 合并后复验：agenthub 全绿；tsc/css/test:hub-conv 132 全绿；浏览器 conversation-bar/theme-palette/menu-layer/columns 全绿。merge 3521fe2；待 P6-15 最终回归。"
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 合并后复验：agenthub + desktop/bridge 整包全绿；tsc/css/test:hub-conv 139 全绿；浏览器 conversation-bar/theme-palette/menu-layer/group-edit/group-stream 全绿。merge 3521fe2 + 0fa50b4。"
     },
     {
       "id": "P6-15",
