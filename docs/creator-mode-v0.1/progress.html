@@ -205,7 +205,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 15:05",
+    "updated": "2026-11-13 12:20",
     "current": "R14"
   },
   "rounds": [
@@ -983,8 +983,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "R12"
       ],
       "status": "done",
-      "commit": "7ee29a9+059f8e1",
-      "review": "测试先行（7ee29a9 全红：surfaceStore/newSurfaceStore 未定义，build failed）→ 实现（11c43a0）。19 条 TestSurface 全绿 + 5 条变异（deny-approval / bak / sha256 / trash / staging 各一条）",
+      "commit": "06e7a41",
+      "review": "主会话复核：go vet（干净检出）/ TestSurface 21 条 / TestUI 16 条 / tsc 0 / ui 探针 31 项全绿；读码确认 ①校验在建目录之前 ②暂存-rename 后 index 才写、写失败回滚目录 ③entry 三道闸（绝对路径/../EvalSymlinks 前缀）④软链一律拒 ⑤.bak 逐字节复制旧文件 ⑥写 index 持 flock 走 ReplaceReaderLocked",
       "perf": [
         "P14"
       ],
@@ -999,7 +999,10 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "audit.jsonl 每动作一行（install/remove，JSON 合法）；audit 路径不可写时 install 仍成功",
         "CodeMode 真跑：await tools.surface_install 拿到对象（isObj/isString 双断言）；校验失败 status=rejected 且不抛异常",
         "审批：install/remove RequiresApproval=true、list=false；引擎审批路径拒绝 → 工具未被调用、index 不存在；批准 → 真的装上",
-        "装/卸成功后推 surfaces_changed（PR-12 通道，形状未改）；本轮不加载 panel.js"
+        "装/卸成功后推 surfaces_changed（PR-12 通道，形状未改）；本轮不加载 panel.js",
+        "裁决：source 存源目录绝对路径（index 0600 本地），PR-14 在插件页只显示 basename",
+        "裁决：升级只看 hash（内容是真相，version 是作者自述）",
+        "裁决：卸载不关标签、index 不留墓碑 —— 墓碑持久化必须在 R14 决定（01 §5.4 要求重启后仍在）"
       ],
       "rollback": "关 surfaces.plugin.enabled（本轮三个工具无条件注册，settings.features.surfaceTools 开关留给 PR-14）"
     },
@@ -1024,6 +1027,27 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "token 增量 ≤ 900"
       ],
       "rollback": "关 settings.features.surfaceTools"
+    },
+    {
+      "id": "R14b",
+      "pr": "PR-14b",
+      "title": "PluginsPage：列表 / 禁用 / 卸载 / 权限与 audit 对照（UI 半边）",
+      "type": "新增",
+      "est": 1.0,
+      "deps": [
+        "R14"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [],
+      "acc": [
+        "插件页展示已装列表（source 只显示 basename，不暴露用户目录）",
+        "禁用/卸载走 surface_disable/surface_remove，失败有可读原因",
+        "manifest 声明的 commands 与 audit.jsonl 实际调用逐条对照",
+        "卸载后标签变墓碑；重启后仍可见（若 R14 决定持久墓碑）"
+      ],
+      "rollback": "整页可移除，不影响已装插件的运行（loader 与工具独立）"
     },
     {
       "id": "R15",
