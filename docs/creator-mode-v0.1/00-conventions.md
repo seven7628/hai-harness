@@ -291,6 +291,7 @@ catch (e) { assert(/rejected|timed out/.test(String(e.message))) }
 > **工作树纪律（用户 2026-11-13 明确）**：**一轮 = 一个独立 worktree**。
 > - 每轮开工：`git worktree add .go-code/worktrees/<轮次> -b feat/<轮次> main`（**从最新的 main 拉**，不叠在上一轮的 worktree 上）；
 > - **只能从 main 拉，绝不能从一条还没合并的分支拉**：2026-11-13 我从 `feat/creator-mode-v0.1`（未合并、含待修的 R08d）拉了 `html-preview-fix`，合并时把 R08d 一起带进了 main，main 当场红了（officekit 那条 P0 测试）。后来靠 cherry-pick 修回来。
+> - **`docs/` 在 `.gitignore` 第 18 行**（整个目录被忽略，只有历史文件是已跟踪的）：新写的文档必须 `git add -f` 才进得了版本库，否则**只存在于主工作区** —— 从 main 拉的 worktree 里看不到，子智能体会读不到规范。2026-11-13 PR-09 开工时踩到：worktree 里没有 `docs/creator-mode-v0.1/`。
 > - 该轮所有 commit 落在这条分支上；
 > - 轮次结束：评审 PASS → `git merge --no-ff feat/<轮次>` 进 main → **删除该 worktree**；
 > - 下一轮重新从 main 拉新 worktree。
@@ -490,6 +491,7 @@ catch (e) { assert(/rejected|timed out/.test(String(e.message))) }
 
 | 版本 | 日期 | 变更 | 触发 |
 |---|---|---|---|
+| v0.12 | 2026-11-13 | §3 再补：`docs/` 是忽略目录，新文档必须 `git add -f`，否则 worktree 里没有 | 实际踩到：PR-09 开工时 worktree 无规范文档 |
 | v0.11 | 2026-11-13 | §3 工作树纪律补一条：只能从 main 拉（从待修分支拉会把半成品一起合进 main） | 实际踩到：main 红了约 6 分钟 |
 | v0.10 | 2026-11-13 | §3 增「工作树纪律」：一轮一个独立 worktree，从 main 拉、合回 main 即删 | 用户明确要求；此前长期复用同一 worktree 导致 395 文件合并 |
 | v0.9 | 2026-11-13 | §3 增「commit message 纪律」：声明必须能在 diff 里指到行 | F59（声称删 FIFO 但没删，且零覆盖） |
