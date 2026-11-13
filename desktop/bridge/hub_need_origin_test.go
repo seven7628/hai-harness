@@ -99,7 +99,8 @@ func assertProjectNeedAttribution(t *testing.T, n *agenthub.Need, site *projectN
 	if n.RunID != wantRunID || n.Depth != wantDepth {
 		t.Fatalf("run_id = %q depth = %d, want %q/%d", n.RunID, n.Depth, wantRunID, wantDepth)
 	}
-	// RunName 预留给子智能体归属（事件里只有 RunId），本轮刻意留空。
+	// 这些 fixture 不 emit AgentStart，run 名未知，故 RunName 必须为空；根 run 负例见
+	// TestHubNeedRunNameRootRunNotFilled。
 	if n.RunName != "" {
 		t.Fatalf("run_name = %q, want 空（子智能体归属尚未接）", n.RunName)
 	}
@@ -377,5 +378,29 @@ func TestHubNeedRunNameFromSubagentStart(t *testing.T) {
 	_ = json.Unmarshal(raw, &out)
 	if len(out.Needs) != 1 || out.Needs[0].RunName != "子研究员" {
 		t.Fatalf("hub_need_list run_name = %s", raw)
+	}
+}
+
+// 根 run 不得冒充子智能体：AgentStart 带 Name 但没有 ParentRunId/Depth 时，
+// Need.run_name 必须为空（前端据此不画「子智能体」）。
+func TestHubNeedRunNameRootRunNotFilled(t *testing.T) {
+	site := newProjectNeedSite(t, agenthub.TaskOrigin{
+		Kind: agenthub.OriginGroup, GroupID: "grp_need", AgentID: "ag_need", AgentName: "派单员",
+	})
+	site.bs.emit(&events.AgentStart{
+		RunId: "run-root-need", Name: "主智能体",
+		Timestamp: time.Now(), EventType: events.AgentStartType,
+	})
+	if _, err := site.bs.s.RequestApproval(context.Background(),
+		core.ToolCall{Id: "call-root-need", Name: "bash"}); err != nil {
+		t.Fatalf("register approval: %v", err)
+	}
+	site.bs.emit(&events.ToolApprovalRequested{
+		RunId: "run-root-need", Id: "call-root-need", Name: "bash",
+		Arguments: `{"command":"ls"}`, Timestamp: time.Now(), EventType: events.ToolApprovalType,
+	})
+	n := singlePendingNeed(t, site.st)
+	if n.RunName != "" {
+		t.Fatalf("root run leaked run_name = %q", n.RunName)
 	}
 }
