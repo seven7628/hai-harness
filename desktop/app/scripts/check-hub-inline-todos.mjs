@@ -249,6 +249,12 @@ try {
 
   // 6) 只读：消息条数不变 + 一条 send 都没发
   check(await msgRows() === rowsBefore, `内联卡不写 hub 消息（.msg-row ${rowsBefore} → ${await msgRows()}）`)
+  // 骨架里的 .msg-row 是静态行，不能证明 store 没被写；直接查 store 的 DM/群消息。
+  const hubMsgCounts = await page.evaluate(() => {
+    const s = window.__hubStore.getState()
+    return { dm: s.messages.length, grp: s.groupMessages.length }
+  })
+  check(hubMsgCounts.dm === 0 && hubMsgCounts.grp === 0, `内联卡不写 hub 消息（messages=${hubMsgCounts.dm} groupMessages=${hubMsgCounts.grp}）`)
   const sentA = await sent()
   check(!sentA.includes('hub_send'), `没有发 hub_send（got=${JSON.stringify(sentA)}）`)
   check(!sentA.includes('hub_group_send'), `没有发 hub_group_send（got=${JSON.stringify(sentA)}）`)
