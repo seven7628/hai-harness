@@ -933,6 +933,79 @@ func TestHubGroupStreamGroupSayDedup(t *testing.T) {
 	}
 }
 
+// 场景2b（多段回归）：**两段正文** + group_say 同文 → 最后一段仍要去重。
+//
+// 去重基线一旦在落账循环里被写回成「上一段」，2 段以上时最后一段永远在和铺垫段
+// 比较，group_say 已发过的正文被 final 又写一遍（群日志里 report 出现两次）。
+// 铺垫段照常落账（它确实没有发过），但不路由、不带 mentions。
+func TestHubGroupStreamGroupSayDedupMultiSegment(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "MultiSayA")
+	b := createHubAgent(t, m, buf, 2, "MultiSayB")
+	g := groupWithMembers(t, m, buf, 3, "多段去重群", memberRef{a.ID, "owner"}, memberRef{b.ID, "member"})
+	bs, err := m.hubGroupSession(string(b.ID), string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs.hubDelta.interval = time.Hour
+	const preamble = "铺垫段：我先看一眼群日志，然后汇报。"
+	const report = "这是完整的汇报正文，模型会先 group_say 发一次。"
+	setGroupStreamLoop(t, m, bs, g, string(b.ID), newSegmentProvider(
+		segmentRound{
+			chunks:  []string{"铺垫段：我先看一眼群日志，", "然后汇报。"},
+			content: preamble,
+			tool: &core.ToolCall{
+				Id: "call_say_multi", Index: 0, Name: "group_say",
+				Arguments: fmt.Sprintf(`{"group_id":%q,"text":%q}`, string(g.ID), report),
+			},
+		},
+		segmentRound{chunks: []string{"这是完整的汇报正文，", "模型会先 group_say 发一次。"}, content: report},
+	), 2)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 4, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": "@MultiSayB 汇报一下",
+	}); !ok {
+		t.Fatalf("group send: %s", errMsg)
+	}
+	// 等两段都落账（group_say 在 run 中写，铺垫段在 AgentEnd 收尾时写）。
+	waitGroupMessages(t, m, g.ID, func(msgs []agenthub.Message) bool {
+		return len(agentTextMessages(msgs, b.ID)) >= 2
+	})
+	p404aWaitGroupIdle(t, bs)
+	msgs, err := mustHubStore(t, m).ReadMessages(context.Background(), g.ID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bMsgs := agentTextMessages(msgs, b.ID)
+	if len(bMsgs) != 2 {
+		t.Fatalf("B 的 text 消息 = %d，want 2（铺垫段 + group_say；最后一段同文不再写第三条）: %+v", len(bMsgs), bMsgs)
+	}
+	// 顺序 = seq：group_say 在 run 中落账（round_id 空），铺垫段在 AgentEnd 收尾时落账。
+	if bMsgs[0].Text != report || bMsgs[0].RoundID != "" {
+		t.Fatalf("第一条 = %+v，want group_say 的完整正文且 round_id 空", bMsgs[0])
+	}
+	if bMsgs[1].Text != preamble {
+		t.Fatalf("第二条 = %q，want 铺垫段（它确实没发过，必须照常落账）", bMsgs[1].Text)
+	}
+	// report 在整条群日志里只出现 1 次（group_say 那条）；final 的最后一段被去重。
+	n := 0
+	for _, msg := range msgs {
+		if strings.TrimSpace(msg.Text) == report {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("report 在群日志里出现 %d 次，want 1（group_say 已发过，final 不能再写）", n)
+	}
+	// 铺垫段是中间段：SkipRoute —— 不解析 @、不填 mentions、不产生 round。
+	if len(bMsgs[1].Mentions) != 0 || bMsgs[1].MentionAll {
+		t.Fatalf("铺垫段带了路由结果（mentions=%v all=%v），want 空（中间段不路由）", bMsgs[1].Mentions, bMsgs[1].MentionAll)
+	}
+	// 只有人类那条 @MultiSayB 产生 hub_round：回复两段都不该唤醒任何人。
+	if rounds := gwGroupRounds(buf, g.ID); rounds != 1 {
+		t.Fatalf("hub_round = %d 条，want 1（只有人的 @；agent 回复的段不得路由）", rounds)
+	}
+}
+
 // 场景2b：LLMError{WillRetry} 后自动重试 → 该轮只 1 条气泡，文本 = 重试成功的 Content。
 func TestHubGroupStreamRetryKeepsOneBubble(t *testing.T) {
 	m, buf := testManager(t)

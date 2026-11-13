@@ -607,16 +607,20 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 		turnCtx = agenthub.BuildTurnContext(spec.Agent.ID, msgs, cur.AgentContextSeq, wake.TriggerSeq)
 	}
 	// 去重只看最后一段：中间段是铺垫，重复与否不影响「本轮回复是否已由 group_say 说过」。
-	lastText := ""
-	if last := lastAgentReplyInRound(msgs, spec.Agent.ID, wake.TriggerSeq); last != nil {
-		lastText = last.Text
+	//
+	// dedupBase 是**只读**基线：本轮 group_say 已经落账的正文。绝不能拿循环里刚写完的
+	// 段落去更新它 —— 那样 2 段以上时最后一段永远在和「上一段」比，group_say 同文失明，
+	// final 又写一条（Review 探针：铺垫段 + group_say(report) → report 出现两次）。
+	dedupBase := ""
+	if lastAgent := lastAgentReplyInRound(msgs, spec.Agent.ID, wake.TriggerSeq); lastAgent != nil {
+		dedupBase = lastAgent.Text
 	}
 	var lastMsg *agenthub.Message
 	var lastRouted *agenthub.Round
 	var lastRouteErr error
 	for i, seg := range texts {
 		last := i == len(texts)-1
-		if last && sameGroupReply(lastText, seg.text) {
+		if last && sameGroupReply(dedupBase, seg.text) {
 			// 模型先 group_say 做了完整汇报，AgentEnd 的最后一段是同一段收尾，
 			// 不能再写一条重复气泡；本轮已处理，推进游标。
 			break
@@ -634,7 +638,6 @@ func (m *manager) finishHubRound(spec *hubSessionSpec, wake *agenthub.GroupWakeH
 			m.hubAlertf("group_reply_failed", "群回复落账失败：%v", err)
 			return
 		}
-		lastText = seg.text
 		if last {
 			lastMsg, lastRouted, lastRouteErr = msg, routed, routeErr
 		}
