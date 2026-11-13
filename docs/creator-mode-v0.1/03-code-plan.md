@@ -809,6 +809,21 @@ func (k *Kit) RenderImages(ctx context.Context, pdfPath string, pages []int, dpi
 > 5. 渲染层的 `ui` 分流点在 `store/useAppStore.ts` 的事件解析入口（本项目没有
 >    `transport/stdio.ts`），落点是 `lib/uiBus.ts`；快照在 `lib/uiSnapshot.ts`。
 
+> **落地偏差（R13，安装器）** —— §3.5 的代码片段是设计稿，实际按这六条落地：
+>
+> 1. 文件是 `desktop/bridge/surfaces.go`（store）+ `surfaces_tools.go`（三个工具），
+>    不是 §3.5 尾部的 `surfaces_registry.go`，也不是 `tools/builtin/surface_tools.go`：
+>    store 与 manager 都在 `package main`（工具要拿 `PushSurfacesChanged`）。
+> 2. **index 的原子写只走 `internal/atomicfile`**（`LockPath` + `ReplaceReaderLocked`，
+>    权限 0600），没有另写一份 temp+rename；读-改-写全程持 flock，跨进程串行化。
+> 3. 安装是「拷到 `surfaces/.install-<rand>/` → 复算 sha256 → rename 成 `<id>`」三步，
+>    **不是**直接写 `<id>`：半装状态比装不上更糟（失败用例断言「根目录不多出任何条目」）。
+> 4. 校验失败返回 `status:"rejected"` + `reason`（**不**返回 Go error，见 02-pr-plan 的落地表）；
+>    审批拒绝仍由引擎 Block 表达（结果串含 `rejected`），措辞未改。
+> 5. 卸载是 `os.Rename` 进 `.trash/<id>-<ts>`，**不是** `RemoveAll`；升级同款（旧版本也进 trash）。
+> 6. `audit.jsonl` 只在 install / remove 各写一行 `{id, action, ts, ok, reason?}`，
+>    写失败只记日志；`ctx.host.command` 的 host 侧审计是 PR-14。
+
 ### 3.1 协议：`ui` 信封（**不动 28 个 agent 事件**）
 
 Go：

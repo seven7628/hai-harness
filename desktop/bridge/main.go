@@ -1572,6 +1572,10 @@ type manager struct {
 	// ui 渲染层最近一次自述的快照（PR-12，见 ui_state.go）。
 	// 零值可用（内嵌结构体，自带 mutex）：不进事件流、不落盘，只服务 ui_inspect。
 	ui uiState
+	// surfaces ~/.go-code/surfaces/ 持久层（PR-13，见 surfaces.go）。
+	// 零值可用（root 为空时按 appDataDir() 解析）：同上一条纪律 —— manager 由多处
+	// 字面量构造，要求显式初始化必然会漏一处，而那处会装到别的目录去。
+	surfaces surfaceStore
 }
 
 // previewService 取（或懒创建）转换服务单例（R08a）。
@@ -6002,6 +6006,9 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 	// UI 快照查询工具（PR-12）：**无条件**注册 —— 渲染层没连上时它回答
 	// {ok:false, reason:"no_snapshot"}，那是状态而不是失败（见 ui_tools.go）。
 	m.registerUITools(eng)
+	// Surface 插件安装器（PR-13）：同样**无条件**注册 —— 装不上是回执里的
+	// status=rejected，不是「工具不存在」（后者会让模型以为产品没有这个能力）。
+	m.registerSurfaceTools(eng)
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()

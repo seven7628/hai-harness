@@ -370,6 +370,21 @@
 
 **CodeMode 验收（必过）**：脚本内 `tools.surface_install({target})` 未批准时 reject，`catch` 到 `rejected`；审批超时 reject 到 `timed out`（两者措辞不同）；两个 install 并发（`Promise.all`）按帧号保序，不出现 index 写乱。
 
+**落地（R13）** —— 与上面几处口径差，逐条记在这里（下一轮别按老写法改回去）：
+
+| 项 | 计划里的写法 | 落地 | 为什么 |
+|---|---|---|---|
+| 文件 | 一个 `surfaces.go` 装 store + 三个工具 | `surfaces.go`（store）+ `surfaces_tools.go`（工具） | 一个文件 700 行、两种关注点；ui 侧也是 `ui_state.go` / `ui_tools.go` 分开 |
+| 校验失败的返回 | `reject`（Go error，脚本 `catch`） | `status:"rejected"` + `reason`（**正常返回**） | 模型/脚本据此**改参数**，比吃掉一轮重试便宜；只有「参数不是合法 JSON」才走 Go error |
+| 审批拒绝 | 同上一行 | 仍是引擎 Block（结果串含 `rejected`），措辞未改 | 审批是引擎的事，工具不重复实现一遍 |
+| 卸载不存在的 id | `not_found` | `cleaned`（幂等） | 本轮的封闭状态集是 `applied\|already_installed\|cleaned\|rejected\|error`；「已经干净」不是错误 |
+| 升级 | 「同 id 视为升级」 | 旧目录先进 `.trash/<id>-<ts>` 再换新版本（不删） | 与卸载同一条纪律：磁盘上任何旧版本都可回收 |
+| hash | `sha256(panel.js)` | `sha256(manifest.entry)`，缺省即 `panel.js` | entry 可改名（`dist/panel.js`），认死文件名会让合法 manifest 装不上 |
+| `installedAt` | 首次安装时刻 | **这一版**落盘时刻（升级会刷新） | 它描述的是「当前这版何时落盘」，不是「id 首次出现」 |
+
+**证据**：`desktop/bridge/surfaces_test.go`（19 条：不变式 + 七连拒绝 + 并发 + 损坏恢复 + audit）、
+`surfaces_tools_test.go`（真引擎 `run_code` 拿到对象 / rejected 不抛异常 / 审批拒绝不写盘）。
+
 ---
 
 ### PR-15 收口

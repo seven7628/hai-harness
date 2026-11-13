@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 11:40",
-    "current": "R13"
+    "updated": "2026-11-13 15:05",
+    "current": "R14"
   },
   "rounds": [
     {
@@ -982,18 +982,26 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R12"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "7ee29a9+059f8e1",
+      "review": "测试先行（7ee29a9 全红：surfaceStore/newSurfaceStore 未定义，build failed）→ 实现（11c43a0）。19 条 TestSurface 全绿 + 5 条变异（deny-approval / bak / sha256 / trash / staging 各一条）",
       "perf": [
         "P14"
       ],
       "acc": [
-        "红灯先行",
-        "sha256 不符拒装",
-        "同 sha 重复安装返回同 id"
+        "安装：index 有序 {id,version,hash,source,enabled,installedAt}，hash = sha256(manifest.entry)，目录 0700 / 文件 0600，panel.js 真的拷过去",
+        "先拷到 surfaces/.install-<rand>/ → 复算 sha256 → 才 rename 成 <id>；任何一步失败 index 一个字节不变、根目录不多出条目（含「死在拷贝步」的软链用例）",
+        "同 id 同 hash = already_installed（index 逐字节不变）；换版本 = 原位升级，旧目录进 .trash",
+        "卸载：目录挪进 .trash/<id>-<ts>（不删），记录在而目录没了 = cleaned",
+        "index 损坏 → 按空列表启动 + 原文件改名 index.json.corrupt-<ts> 原样备份 + 下一次 install 写出合法 index",
+        "index.json.bak = 变更前内容（逐字节，不是变更后）",
+        "并发两个 install 都成功、index 两条且 JSON 合法、无 .install-* 残留",
+        "audit.jsonl 每动作一行（install/remove，JSON 合法）；audit 路径不可写时 install 仍成功",
+        "CodeMode 真跑：await tools.surface_install 拿到对象（isObj/isString 双断言）；校验失败 status=rejected 且不抛异常",
+        "审批：install/remove RequiresApproval=true、list=false；引擎审批路径拒绝 → 工具未被调用、index 不存在；批准 → 真的装上",
+        "装/卸成功后推 surfaces_changed（PR-12 通道，形状未改）；本轮不加载 panel.js"
       ],
-      "rollback": "关 surfaces.plugin.enabled"
+      "rollback": "关 surfaces.plugin.enabled（本轮三个工具无条件注册，settings.features.surfaceTools 开关留给 PR-14）"
     },
     {
       "id": "R14",
@@ -1164,7 +1172,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "name": "插件加载 / 卸载",
       "budget": "加载 ≤ 150ms；卸载后 0 常驻",
       "how": "loader 打点 + 注册表前后数量",
-      "last": null,
+      "last": "R13 只做完磁盘一半：install 5.4ms / remove 8.0ms（TestSurfaceInstallWritesIndexHashAndPerms / TestSurfaceRemoveMovesToTrash，预算 150ms）。渲染层 loader 与「卸载后 0 常驻」的注册表计数在 PR-14 量",
       "target": "R13"
     },
     {
