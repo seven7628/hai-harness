@@ -71,7 +71,7 @@ useAppStore.setState({ workspace: '/mock/workspace' })
 }
 ;(window as unknown as { __surfaces: unknown }).__surfaces = {
   file: !!getSurface('file'),
-  // 仪器自检用：七个渲染器是否真的注册（缺 renderers 副作用 import 时这里是 []）
+  // 仪器自检用：八个渲染器是否真的注册（缺 renderers 副作用 import 时这里是 []）
   renderers: previewRegistry.listRenderers().map((r) => r.id),
 }
 void useAppStore.getState().start('/mock/workspace')
@@ -184,14 +184,16 @@ async function main() {
   console.log('\n[0] 仪器自检：探针页自己走的是注册表那条路')
   const boot = await page.evaluate(() => window.__surfaces)
   assert(boot?.file === true, `builtin file provider 已注册（否则验的是 ?? 兜底；实得 ${JSON.stringify(boot)}）`)
-  assert(JSON.stringify(boot?.renderers) === JSON.stringify(['csv', 'image', 'text', 'pdf', 'docx', 'pptx', 'xlsx']),
-    `七个渲染器在册（实得 ${JSON.stringify(boot?.renderers)}）`)
+  // R08c 起是八个：media 是新增的那个（音视频走 hai-media://，浏览器里没有这条通道）。
+  assert(JSON.stringify(boot?.renderers) === JSON.stringify(['csv', 'image', 'text', 'pdf', 'docx', 'pptx', 'xlsx', 'media']),
+    `八个渲染器在册（实得 ${JSON.stringify(boot?.renderers)}）`)
   const deps0 = await page.evaluate(() => ({
     conversion: window.__preview.registry.dependencyStatus('conversion'),
     embed: window.__preview.registry.dependencyStatus('embed'),
+    media: window.__preview.registry.dependencyStatus('media'),
   }))
-  assert(deps0.conversion?.ok === false && deps0.embed?.ok === false,
-    `本环境（浏览器 mock）两条依赖都不可用且已探测（conversion=${JSON.stringify(deps0.conversion)}）`)
+  assert(deps0.conversion?.ok === false && deps0.embed?.ok === false && deps0.media?.ok === false,
+    `本环境（浏览器 mock）三条依赖都不可用且已探测（conversion=${JSON.stringify(deps0.conversion)} media=${JSON.stringify(deps0.media)}）`)
   ok('依赖探测真的跑过（不是注册表里的默认值）')
 
   // —— [1] text ——
@@ -375,7 +377,7 @@ async function main() {
       n: R.listRenderers().length,
     }
   })
-  assert(restored.pick === 'pdf' && restored.n === 7, `还原成功（pdf=${restored.pick} 在册=${restored.n}）`)
+  assert(restored.pick === 'pdf' && restored.n === 8, `还原成功（pdf=${restored.pick} 在册=${restored.n}）`)
 
   // —— [7] 变异 B：把「挂载前拦截」删掉 → 渲染器真挂上，但仍必须落在 unavailable ——
   console.log('\n[7] 变异 B（unavailable 分支）：依赖假装可用 → 渲染器真挂上了、真拿不到通道')

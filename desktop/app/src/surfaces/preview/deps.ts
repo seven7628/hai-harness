@@ -20,6 +20,10 @@ interface DesktopLike {
   watchXlsx?: unknown
   embedOpenTarget?: unknown
   embedShow?: unknown
+  // media（R08c）：URL 通道 + ffprobe 元信息。两个都在才算可用 —— 只有 probe 没有 URL
+  // 等于「知道时长但放不了」，只有 URL 没有 probe 是「能放但不知道是什么」，都该如实说。
+  mediaUrl?: unknown
+  mediaProbe?: unknown
 }
 
 const isFn = (v: unknown): boolean => typeof v === 'function'
@@ -46,8 +50,11 @@ export function detectPreviewDeps(
 ): void {
   const conversion = !!desktop && isFn(desktop.watchDocx) && isFn(desktop.watchPptx) && isFn(desktop.watchXlsx)
   const embed = !!desktop && isFn(desktop.embedOpenTarget) && isFn(desktop.embedShow)
+  // media 的两条 IPC 都在 preload 里才放行（老版本桌面端缺 media:url 也能落到占位）
+  const media = !!desktop && isFn(desktop.mediaUrl) && isFn(desktop.mediaProbe)
   setDependencyStatus('conversion', conversion ? { ok: true } : { ok: false, reason: REASONS.conversion })
   setDependencyStatus('embed', embed ? { ok: true } : { ok: false, reason: REASONS.embed })
+  setDependencyStatus('media', media ? { ok: true } : { ok: false, reason: REASONS.media })
 }
 
 /** 依赖缺失时的理由文案（探针与测试要用同一份，不另抄一遍）。 */
