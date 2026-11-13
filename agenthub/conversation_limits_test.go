@@ -9,6 +9,7 @@ package agenthub
 //   - A→C 不清 A↔B；人类发送不计 pair。
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -292,5 +293,145 @@ func TestConversationMaxPendingWakes(t *testing.T) {
 	}
 	if v := c.View("group_1"); v.QueueLen != 2 || v.MaxPendingWakes != 2 {
 		t.Fatalf("视图 = %+v, want queue=2/max=2", v)
+	}
+}
+
+// TestConversationWaitingHumanStillSchedules：B1 回归 —— pair 到限把对话推到
+// waiting_human 之后，下一批 @（另一条在飞 run 回来 @D / 人类插话）必须**既能入队
+// 也能被调度器取到**，否则队列永久泵不动（Offer 成功、DueWakes 却返回空）。
+func TestConversationWaitingHumanStillSchedules(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 1, PairWindow: 10 * time.Minute, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	// 用满 a↔b（1 次成功投递）。
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin")
+	}
+	// b→a 命中 pair 限 → 全部 skipped → waiting_human。
+	if wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_b", Targets: convIDs("agent_a"), Text: "两句", Depth: 2,
+	}); err != nil || len(wakes) != 0 {
+		t.Fatalf("到限必须跳过: %v %+v", err, wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationWaitingHuman || v.QueueLen != 0 {
+		t.Fatalf("到限后 = %+v, want waiting_human/queue=0", v)
+	}
+	// 软状态不是终态：waiting_human + 空队列时调度器什么都不给（不会自己复活）。
+	if wakes := c.DueWakes("group_1", clk.Now()); len(wakes) != 0 {
+		t.Fatalf("空队列不该有可投 wake: %+v", wakes)
+	}
+	if _, ok := c.NextReadyAt("group_1"); ok {
+		t.Fatal("空队列不该有 NextReadyAt")
+	}
+	// 另一条在飞 run 回来 @D（不同 pair，不命中限）：必须入队 + 立刻可调度。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_c", Targets: convIDs("agent_d"), Text: "换个对手", Depth: 2,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("waiting_human 之后必须仍能入队: %v %+v", err, wakes)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("入队后 = %+v, want running/queue=1（waiting_human 必须被拉回）", v)
+	}
+	if v.StopReason != "" {
+		t.Fatalf("拉回 running 后不该残留等待原因: %q", v.StopReason)
+	}
+	if due := c.DueWakes("group_1", clk.Now()); len(due) != 1 || due[0].Target != "agent_d" {
+		t.Fatalf("DueWakes = %+v, want [agent_d]（B1：队列必须泵得动）", due)
+	}
+	if _, ok := c.NextReadyAt("group_1"); !ok {
+		t.Fatal("B1：waiting_human 拉回后 NextReadyAt 必须给得出")
+	}
+	if _, ok := c.Peek("group_1"); !ok {
+		t.Fatal("B1：Peek 必须看得到队首")
+	}
+	if w, ok := c.BeginTurn("group_1", clk.Now()); !ok || w.Target != "agent_d" {
+		t.Fatalf("BeginTurn = %+v/%v, want agent_d", w, ok)
+	}
+}
+
+// TestConversationWaitingHumanKeepsWhenAllSkipped：B1 回归 —— 全部 skipped 时
+// **仍然**保持 waiting_human（不能因为放宽调度判据就翻回 running）。
+func TestConversationWaitingHumanKeepsWhenAllSkipped(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 1, PairWindow: 10 * time.Minute, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin")
+	}
+	// 连续两次全部跳过：状态必须稳定停在 waiting_human，队列/调度一律为空。
+	for i := 0; i < 2; i++ {
+		if wakes, err := c.Offer(ConversationOffer{
+			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "再一句", Depth: 2,
+		}); err != nil || len(wakes) != 0 {
+			t.Fatalf("第 %d 次到限必须跳过: %v %+v", i+1, err, wakes)
+		}
+		v := c.View("group_1")
+		if v.Status != ConversationWaitingHuman || v.QueueLen != 0 || v.StopReason == "" {
+			t.Fatalf("第 %d 次全跳过之后 = %+v, want waiting_human/queue=0/有原因", i+1, v)
+		}
+		if wakes := c.DueWakes("group_1", clk.Now()); len(wakes) != 0 {
+			t.Fatalf("全跳过之后不该有可投 wake: %+v", wakes)
+		}
+	}
+}
+
+// TestConversationTerminalNeverSchedules：B1 放宽调度判据之后，stopped/exhausted
+// 仍然一条都不放（队列里有东西也不能投）。
+func TestConversationTerminalNeverSchedules(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"), Text: "一句", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.Stop("group_1", "人类停止", clk.Now())
+	if wakes := c.DueWakes("group_1", clk.Now()); len(wakes) != 0 {
+		t.Fatalf("stopped 之后不该有可投 wake: %+v", wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationStopped {
+		t.Fatalf("stopped 之后状态 = %q", v.Status)
+	}
+	// exhausted：同一对重复同一段内容 → 整批熔断（保留原有语义）。
+	c2, clk2 := newTestController(t, ConversationLimits{
+		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+	})
+	c2.BeginHuman("group_2", 1, clk2.Now())
+	if _, err := c2.Offer(ConversationOffer{
+		GroupID: "group_2", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句话", Depth: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c2.BeginTurn("group_2", clk2.Now()); !ok {
+		t.Fatal("begin")
+	}
+	if _, err := c2.Offer(ConversationOffer{
+		GroupID: "group_2", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "同一句话", Depth: 2,
+	}); !errors.Is(err, ErrConversationExhausted) {
+		t.Fatalf("同内容应 exhausted: %v", err)
+	}
+	if wakes := c2.DueWakes("group_2", clk2.Now()); len(wakes) != 0 {
+		t.Fatalf("exhausted 之后不该有可投 wake: %+v", wakes)
+	}
+	if v := c2.View("group_2"); v.Status != ConversationExhausted {
+		t.Fatalf("exhausted 之后状态 = %q", v.Status)
 	}
 }

@@ -226,7 +226,11 @@ func (m *manager) pumpHubConversation(gid agenthub.GroupID) {
 		m.notifyHubConversation(gid, view)
 		return
 	}
-	if view.Status != agenthub.ConversationRunning {
+	// B1：waiting_human 且队列非空时**也要泵** —— 与控制器 schedulableLocked 同一
+	// 判据（View.Schedulable）。只认 running 会让「到限 → waiting_human → 另一条
+	// 在飞 run 回来 @D」的 D 永久留在队里（Offer 成功、DueWakes 却返回空）。
+	// stopped/exhausted 仍不放。
+	if !view.Schedulable() {
 		return
 	}
 	// 串行 fallback（保留）：hubConvSerialPump 打开时一次只放一条。生产恒关；

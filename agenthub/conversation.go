@@ -247,6 +247,17 @@ const ConversationViewDeliveries = 20
 // Terminal 终态（stopped/exhausted）；idle/running 都不算。
 func (v ConversationView) Terminal() bool { return v.Status.Terminal() }
 
+// Schedulable 调度器现在该不该为这个群取队（B1）：running / waiting_human **且**
+// 队列非空。waiting_human 只是「上一批目标全被护栏跳过」的软状态 —— 队列里重新
+// 有东西（人类插话、另一条在飞 run 回来 @）就必须继续投，否则永久泵不动。
+// stopped/exhausted 一律不可调度。
+func (v ConversationView) Schedulable() bool {
+	if v.QueueLen <= 0 {
+		return false
+	}
+	return v.Status == ConversationRunning || v.Status == ConversationWaitingHuman
+}
+
 // ConversationPairKey 是 PairCount 的键：**无序**（D2/§1.1）—— A↔B 与 B↔A 是同一个
 // 键，否则「A 先 @B 十次」和「B 先 @A 十次」会被当成两对，踢皮球照样洗白。
 // 用 ↔ 而不是 → 是刻意的：UI 与日志里一眼能看出这是对称关系。
@@ -714,6 +725,14 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	}
 	conv.queue = append(conv.queue, wakes...)
 	conv.updatedAt = now
+	// B1：waiting_human 是**软状态**，不是终态。这一批真的入队了（len(wakes)>0）
+	// 就把对话拉回 running —— 否则「pair 到限 → waiting_human → 另一条在飞 run
+	// 回来 @D」会让 D 永远不唤醒：状态停在 waiting_human，而调度器只认 running。
+	// stopped/exhausted 的语义不变（上面已提前返回）。
+	if len(wakes) > 0 && conv.status == ConversationWaitingHuman {
+		conv.status = ConversationRunning
+		conv.stop = ""
+	}
 	// 全部目标都被护栏跳过 → waiting_human（不是 exhausted）：写一条系统说明，
 	// 人类一句话就能继续（§1.1）。
 	if skipped > 0 && len(wakes) == 0 {
@@ -737,9 +756,28 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	return wakes, nil
 }
 
+// schedulableLocked 这个群的队列现在**允许调度器取队**吗（B1 的第二道保险）。
+//
+// running 是常态；waiting_human 只是「上一批目标全被护栏跳过」的软状态 —— 它既
+// 不是终态，也不代表队列里没有东西：人类插话、或者另一条在飞 run 回来 @，都会让
+// 队列重新非空。只认 running 会让这类 wake 永久泵不动（Offer 成功、DueWakes 空）。
+//
+// stopped/exhausted 是**真终态**：一条都不放（人类消息会开新对话/重置才恢复）。
+// 调用方必须持锁。
+func (c *ConversationController) schedulableLocked(conv *conversation) bool {
+	if conv == nil || len(conv.queue) == 0 {
+		return false
+	}
+	switch conv.status {
+	case ConversationRunning, ConversationWaitingHuman:
+		return true
+	}
+	return false
+}
+
 // NextDue 返回「现在可以跑」的那一个 wake（不改变队列/计数）。
-// 返回 false：没有对话 / 不是 running / 队列空 / 还没到 ReadyAt（冷却中）/
-// 预算耗尽（这一种会把状态推进到 exhausted 并清队列）。
+// 返回 false：没有对话 / 不可调度（不是 running/waiting_human）/ 队列空 /
+// 还没到 ReadyAt（冷却中）/ 预算耗尽（这一种会把状态推进到 exhausted 并清队列）。
 // 投递失败时调用方**不要**出队：下次（群 run 结束）再取一次即可。
 //
 // 并行调度器用 DueWakes（一次取全批）；这个「队首一条」的版本留给只要一条的
@@ -761,7 +799,7 @@ func (c *ConversationController) DueWakes(group GroupID, at time.Time) []Wake {
 	c.mu.Lock()
 	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
-	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+	if !c.schedulableLocked(conv) {
 		return nil
 	}
 	if c.limits.TurnBudget > 0 && conv.turns >= c.limits.TurnBudget {
@@ -807,7 +845,7 @@ func (c *ConversationController) NextReadyAt(group GroupID) (time.Time, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conv := c.convs[group]
-	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+	if !c.schedulableLocked(conv) {
 		return time.Time{}, false
 	}
 	var best time.Time
@@ -836,7 +874,7 @@ func (c *ConversationController) NextDue(group GroupID, at time.Time) (Wake, boo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conv := c.convs[group]
-	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+	if !c.schedulableLocked(conv) {
 		return Wake{}, false
 	}
 	if c.limits.TurnBudget > 0 && conv.turns >= c.limits.TurnBudget {
@@ -862,7 +900,7 @@ func (c *ConversationController) Peek(group GroupID) (Wake, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	conv := c.convs[group]
-	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+	if !c.schedulableLocked(conv) {
 		return Wake{}, false
 	}
 	w := conv.queue[0]
@@ -884,7 +922,7 @@ func (c *ConversationController) BeginTurn(group GroupID, at time.Time) (Wake, b
 	now := c.clockAt(at)
 	c.mu.Lock()
 	conv := c.convs[group]
-	if conv == nil || conv.status != ConversationRunning || len(conv.queue) == 0 {
+	if !c.schedulableLocked(conv) {
 		c.mu.Unlock()
 		return Wake{}, false
 	}
