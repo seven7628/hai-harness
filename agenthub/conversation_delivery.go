@@ -26,7 +26,7 @@ func (c *ConversationController) BeginDelivery(w Wake, at time.Time) (Wake, bool
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(w.GroupID) }()
 	conv := c.ensureLocked(w.GroupID, now)
 	if conv.deliveries == nil {
 		conv.deliveries = newDeliveryLedger()
@@ -91,7 +91,7 @@ func (c *ConversationController) CommitDelivery(w Wake, at time.Time) Wake {
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(w.GroupID) }()
 	conv := c.convs[w.GroupID]
 	if conv == nil || conv.deliveries == nil {
 		return w
@@ -143,7 +143,7 @@ func (c *ConversationController) RequeueDelivery(w Wake, reason string, readyAt 
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(w.GroupID) }()
 	conv := c.convs[w.GroupID]
 	if conv == nil || conv.deliveries == nil {
 		return false
@@ -174,7 +174,7 @@ func (c *ConversationController) FinishDelivery(group GroupID, wakeID string, st
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return false
@@ -199,7 +199,7 @@ func (c *ConversationController) FinishAgentDeliveries(group GroupID, agent Agen
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return 0
@@ -228,7 +228,7 @@ func (c *ConversationController) SkipQueuedDeliveries(group GroupID, reason stri
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return 0
@@ -257,7 +257,7 @@ func (c *ConversationController) InterruptRunningDeliveries(group GroupID, reaso
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return 0
@@ -287,7 +287,7 @@ func (c *ConversationController) SkipAgentQueuedDeliveries(group GroupID, agent 
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil {
 		return 0
@@ -333,7 +333,7 @@ func (c *ConversationController) SkipWake(group GroupID, wakeID string, reason s
 	}
 	now := c.clockAt(at)
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() { c.mu.Unlock(); c.saveState(group) }()
 	conv := c.convs[group]
 	if conv == nil || conv.deliveries == nil {
 		return false

@@ -42,6 +42,12 @@ func (m *manager) hubConversation() *agenthub.ConversationController {
 		if m.hubConvLimits != nil {
 			opts.Limits = *m.hubConvLimits
 		}
+		// P6-09：对话状态落盘（conversations/<gid>.json）。落盘失败只告警：
+		// 磁盘问题不能让群聊停下。
+		opts.Persister = hubConversationPersister{m: m}
+		opts.OnPersistError = func(gid agenthub.GroupID, err error) {
+			m.hubAlertf("hub_conversation_persist_failed", "群 %s 对话状态写入失败：%v", gid, err)
+		}
 		m.hubConv = agenthub.NewConversationController(opts)
 	}
 	return m.hubConv
@@ -493,17 +499,27 @@ func (m *manager) dispatchConversationWake(gid agenthub.GroupID, wake agenthub.W
 	return err
 }
 
-// finishHubGroupDelivery 群 run 收尾时把该目标**正在跑**的投递记录推进到 done。
-// 每目标同时最多一条 running（群会话忙闩保证），所以不需要 wake id。
-// 也负责把「还没投出去」的排队记录留给下一次泵（它们仍是 queued，不在这里动）。
-func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.AgentID) {
+// finishHubGroupDelivery 群 run 收尾时把**这一轮**的投递记录推进到 done。
+//
+// 必须按 wake id 收口，不能「把这个目标所有 running 都标 done」：忙闩在
+// finishHubReply 的 defer 里就放开了，而收尾在 emit 末尾 —— 中间这一小段里泵可能
+// 已经把下一条 wake 投给同一目标（BeginDelivery 记成 running）。按目标收口会把
+// 新那一轮误标 done，它的 CommitDelivery 之后就只能 no-op（轮次不涨、pair 不记）。
+// wakeID 为空（任务结果回推等无 wake 的 run）才退回按目标收口。
+func (m *manager) finishHubGroupDelivery(gid agenthub.GroupID, agentID agenthub.AgentID, wakeID string) {
 	if m == nil || gid == "" || agentID == "" {
 		return
 	}
 	// P6-08：这一轮已经收尾，超时定时器必须撤掉（迟到的定时器会误杀下一轮）。
 	m.clearHubRunTimeout(gid, agentID)
 	ctrl := m.hubConversation()
-	if n := ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}); n > 0 {
+	finished := false
+	if wakeID != "" {
+		finished = ctrl.FinishDelivery(gid, wakeID, agenthub.DeliveryDone, "", time.Time{})
+	} else {
+		finished = ctrl.FinishAgentDeliveries(gid, agentID, agenthub.DeliveryDone, "", time.Time{}) > 0
+	}
+	if finished {
 		// 终态视图由 notifyHubConversation 统一去重上报（否则「run 收尾 + 耗尽」
 		// 会各发一个 exhausted 事件）。
 		if v := ctrl.View(gid); !v.Terminal() {

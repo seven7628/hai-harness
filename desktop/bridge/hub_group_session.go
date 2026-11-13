@@ -536,6 +536,12 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, ae *ev
 	}
 	wake := bs.hubGroupWake
 	bs.setHubGroupWake(nil)
+	// P6-09：记下这一轮的 wake id，hubOnRunEnd 按它收口账本（忙闩已经放开，
+	// 泵可能已经投了下一轮 —— 按目标收口会误标下一条）。
+	bs.hubGroupRunWakeID = ""
+	if wake != nil {
+		bs.hubGroupRunWakeID = wake.WakeID
+	}
 	// 一次性标记：无论这一轮怎么收尾都要取走，不能留给下一个 run。
 	taskResult := bs.takeHubTaskResultTask()
 	runSeq := bs.hubGroupRunSeq.Load()
