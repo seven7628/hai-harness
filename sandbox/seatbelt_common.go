@@ -37,6 +37,14 @@ var defaultOpenSubpaths = []string{
 	// **标准文件工具**读写记忆，没有记忆专用工具（技术方案 §1）；不放行则 bash 侧
 	// 写不了记忆，与文件工具侧行为不一致。该子树下只有记忆文件（0600），无密钥。
 	".go-code/memory",
+	// .go-code/previews：预览产物缓存（R08a，conversion 服务的内容寻址目录）。
+	// 放行的**唯一理由**是前端要读回：office 预览的面板渲染走 file_preview 读
+	// html_path（bridge 的 resolveWorkspacePath 复用 denyHarnessConfigPath，不放行就
+	// 「转换成功但读不回」）。子树里只有「由用户自己打开过的文档」转出的 HTML ——
+	// 没有密钥、没有会话历史，与 memory 同性质的派生物。不放在 .go-code/runtime 下
+	// 是因为那份子树属于受管 Python 运行时，升级/重装会整目录替换（缓存会被连带清掉，
+	// 且语义上把「用户文件的派生物」塞进「解释器目录」会让排查时看不出谁写的）。
+	".go-code/previews",
 }
 
 // deviceReadPaths / deviceWritePaths 常规 shell 运行必需设备白名单（2026-08-28 误伤修复）。

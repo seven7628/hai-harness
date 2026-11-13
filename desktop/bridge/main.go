@@ -56,6 +56,7 @@ import (
 	"github.com/seven7628/hai-harness/computer"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/cron"
+	"github.com/seven7628/hai-harness/desktop/bridge/conversion"
 	"github.com/seven7628/hai-harness/desktop/bridge/jsonwire"
 	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/hooks"
@@ -806,15 +807,16 @@ type manager struct {
 	// 不做 I/O，建 venv 是首次调用时 Ensure 的职责）。全局单例：运行时根在 home
 	// （~/.go-code/runtime/python），与工作区无关；Ensure 自身按 Root 串行 + flock 去重。
 	pyRT *goruntime.Runtime
-	// xlsxPV 工作簿预览转换器（xlsx_preview 命令；与 run_python 共用 pyRT）。
-	// 全局单例（同 pyRT 的理由：运行时不按工作区隔离），懒创建 —— 新建只是构造一个
-	// 结构体（无 I/O），真正的重活在首次 Convert 时才发生（Ensure + 跑 openpyxl）。
+	// xlsxPV docxPV pptxPV 三个预览转换器（进程级单例，懒创建；单例理由同 pyRT：
+	// 运行时不按工作区隔离，新建只是构造结构体，重活在首次 Convert 的 Ensure 里）。
+	// R08a 起命令分支不再直接调它们 —— 统一经 conv 排队/缓存/限额，见 previewService。
 	xlsxPV *builtin.XlsxPreviewer
-	// docxPV / pptxPV 文档与演示文稿预览转换器（docx_preview / pptx_preview 命令）。
-	// 单例与懒创建的理由同上；三条通路共用同一个 pyRT 与同一套沙箱工厂，只是跑不同的
-	// 固定脚本（mammoth / python-pptx）。
 	docxPV *builtin.DocxPreviewer
 	pptxPV *builtin.PptxPreviewer
+	// conv 转换服务（R08a）：并发 2 / 单次 60s / 内容寻址缓存 / 启动清扫。
+	// **必须是进程级单例**：并发闸门和缓存条目的 LRU 都建立在「同一份状态」上，
+	// 每次命令新建一个等于没有限额。懒建（见 previewService）。
+	conv *conversion.Service
 	// hookTrust 进程内共享的 hooks 信任库（~/.go-code/hooks-state.json；懒读一次，
 	// 见 hookTrustStore）。**必须共享同一实例**：信任判定发生在每次派发时，面板的
 	// hooks_trust 写的就是它 —— 否则新信任要重建会话才生效（契约 §5.5 要求即刻生效）。
@@ -826,12 +828,39 @@ type manager struct {
 	fileEd   *fileEditor
 }
 
-// xlsxPreviewer 取（或懒创建）工作簿预览转换器单例。
-// pyRT 为空（SDK 层未装配运行时）时仍可构造 —— Convert 会给出「运行时不可用」的明确
-// 错误（bridge 侧在调用前已判定并回错误，这里只是兜底，不 panic）。
-func (m *manager) xlsxPreviewer(pyRT *goruntime.Runtime) *builtin.XlsxPreviewer {
+// previewService 取（或懒创建）转换服务单例（R08a）。
+//
+// 为什么三个 previewer 在这里一次建好：conversion.Service 的 Converters 是构造期固定的
+// 映射；previewer 构造零 I/O（Ensure 在 Convert 内），一次建三个没有启动成本。
+// pyRT 为空时照样构造 —— 每个 previewer.Convert 会回「运行时未装配」的明确错误（不 panic）。
+// 调用方须持 m.mu（三个 *Locked 取用函数的前提）。
+func (m *manager) previewServiceLocked(pyRT *goruntime.Runtime) (*conversion.Service, error) {
+	if m.conv == nil {
+		svc, err := conversion.New(conversion.Options{
+			Converters: conversion.PreviewerConverters(
+				m.xlsxPreviewerLocked(pyRT), m.docxPreviewerLocked(pyRT), m.pptxPreviewerLocked(pyRT)),
+			// 产物落 appdata（~/.go-code/previews），**不落工作区**：预览产物不是用户资产。
+			CacheDir: conversion.DefaultCacheDir(appDataDir()),
+		})
+		if err != nil {
+			return nil, err
+		}
+		m.conv = svc
+	}
+	return m.conv, nil
+}
+
+// previewService 加锁取服务（命令分支用）。
+func (m *manager) previewService(pyRT *goruntime.Runtime) (*conversion.Service, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.previewServiceLocked(pyRT)
+}
+
+// xlsxPreviewerLocked 取（或懒创建）工作簿预览转换器单例（调用方须持 m.mu）。
+// pyRT 为空（SDK 层未装配运行时）时仍可构造 —— Convert 会给出「运行时不可用」的明确
+// 错误（bridge 侧在调用前已判定并回错误，这里只是兜底，不 panic）。
+func (m *manager) xlsxPreviewerLocked(pyRT *goruntime.Runtime) *builtin.XlsxPreviewer {
 	if m.xlsxPV == nil {
 		var py builtin.PythonRuntime
 		if pyRT != nil {
@@ -843,10 +872,8 @@ func (m *manager) xlsxPreviewer(pyRT *goruntime.Runtime) *builtin.XlsxPreviewer 
 	return m.xlsxPV
 }
 
-// docxPreviewer 取（或懒创建）文档预览转换器单例（理由同 xlsxPreviewer）。
-func (m *manager) docxPreviewer(pyRT *goruntime.Runtime) *builtin.DocxPreviewer {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// docxPreviewerLocked 取（或懒创建）文档预览转换器单例（理由同 xlsxPreviewerLocked）。
+func (m *manager) docxPreviewerLocked(pyRT *goruntime.Runtime) *builtin.DocxPreviewer {
 	if m.docxPV == nil {
 		var py builtin.PythonRuntime
 		if pyRT != nil {
@@ -857,10 +884,8 @@ func (m *manager) docxPreviewer(pyRT *goruntime.Runtime) *builtin.DocxPreviewer 
 	return m.docxPV
 }
 
-// pptxPreviewer 取（或懒创建）演示文稿预览转换器单例（理由同 xlsxPreviewer）。
-func (m *manager) pptxPreviewer(pyRT *goruntime.Runtime) *builtin.PptxPreviewer {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// pptxPreviewerLocked 取（或懒创建）演示文稿预览转换器单例（理由同 xlsxPreviewerLocked）。
+func (m *manager) pptxPreviewerLocked(pyRT *goruntime.Runtime) *builtin.PptxPreviewer {
 	if m.pptxPV == nil {
 		var py builtin.PythonRuntime
 		if pyRT != nil {
@@ -2910,76 +2935,22 @@ func (m *manager) dispatch(c command) {
 		// 沙箱内（见 xlsxPreviewSandbox）。前端只拿产物路径 → 复用内嵌浏览器的 file:// 通道
 		// （与 PDF 预览同一条，实测可渲染）。
 		//
-		// 产物是临时文件（受管运行时 tmp 子目录，见 builtin.writeTempFile），不是用户资产：
-		// 不落工作区、不进产出卡片、不写 metrics。生命周期由转换器自己管（下一次转换时清上一条）。
-		path := str(c.Payload, "path")
-		abs, ok := m.previewInputPath(c, ws, path, "xlsx")
-		if !ok {
-			return
-		}
-		pyRT := m.pythonRuntime()
-		if pyRT == nil { // 理论上不会（pythonRuntime 恒返回非 nil），留作装配变化的兜底
-			m.resp(c, false, "受管 Python 运行时未装配，无法预览 xlsx", nil)
-			return
-		}
-		// 转换（openpyxl 解析 + 渲染）：秒级，但**首次调用可能先 bootstrap 运行时**
-		// （建 venv + pip 装约 42MB），故放 goroutine —— 与 oauth_login 同理，不能阻塞
-		// dispatch 主循环（那会让整个桌面端在此期间无响应）。响应经 m.resp 回写（线程安全）。
-		go func() {
-			res, cerr := m.xlsxPreviewer(pyRT).Convert(context.Background(), abs, ws)
-			if cerr != nil {
-				m.resp(c, false, cerr.Error(), nil)
-				return
-			}
-			m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath})
-		}()
+		// 产物在 appdata 的预览缓存（~/.go-code/previews/<内容键>/index.html，R08a），
+		// 不是用户资产：不落工作区、不进产出卡片、不写 metrics。同一份内容二次打开直接命中。
+		m.handlePreviewConvert(c, ws, "xlsx")
 
 	case CmdDocxPreview: // .docx 文档 → HTML（受管运行时跑固定 mammoth 脚本）→ 内嵌浏览器 file://
-		// 与 xlsx_preview 逐字同构：为什么在 bridge 做、为什么产物落临时目录、路径口径，
+		// 与 xlsx_preview 逐字同构：为什么在 bridge 做、为什么产物落缓存目录、路径口径，
 		// 全部同 CmdXlsxPreview 的长注释（三条预览通路是一条通路，不该各自演化）。
 		//
 		// 与 xlsx 的唯一差别是转换器：Word 文档要的是**语义结构**（标题层级/列表/表格/
 		// 内嵌图片），mammoth 正是这个定位（builtin.DocxPreviewer 有详细取舍）。
-		path := str(c.Payload, "path")
-		abs, ok := m.previewInputPath(c, ws, path, "docx")
-		if !ok {
-			return
-		}
-		pyRT := m.pythonRuntime()
-		if pyRT == nil {
-			m.resp(c, false, "受管 Python 运行时未装配，无法预览 docx", nil)
-			return
-		}
-		go func() {
-			res, cerr := m.docxPreviewer(pyRT).Convert(context.Background(), abs, ws)
-			if cerr != nil {
-				m.resp(c, false, cerr.Error(), nil)
-				return
-			}
-			m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath})
-		}()
+		m.handlePreviewConvert(c, ws, "docx")
 
 	case CmdPptxPreview: // .pptx 演示文稿 → HTML（受管运行时跑固定 python-pptx 脚本）→ 内嵌浏览器 file://
 		// 同上。注意这条通路的产物是**近似版式重建**而不是渲染（本机没有 LibreOffice，
 		// python-pptx 不能渲染）—— 做不到的几件事印在页面顶部，见 builtin.PptxPreviewer。
-		path := str(c.Payload, "path")
-		abs, ok := m.previewInputPath(c, ws, path, "pptx")
-		if !ok {
-			return
-		}
-		pyRT := m.pythonRuntime()
-		if pyRT == nil {
-			m.resp(c, false, "受管 Python 运行时未装配，无法预览 pptx", nil)
-			return
-		}
-		go func() {
-			res, cerr := m.pptxPreviewer(pyRT).Convert(context.Background(), abs, ws)
-			if cerr != nil {
-				m.resp(c, false, cerr.Error(), nil)
-				return
-			}
-			m.resp(c, true, "", map[string]any{"path": path, "html_path": res.HTMLPath})
-		}()
+		m.handlePreviewConvert(c, ws, "pptx")
 
 	case CmdContextBreakdown: // 上下文构成面板（Composer ctx 环 hover 数据源）
 		// 静态分区（系统提示词/技能/工具/MCP/其他）按请求组装字节固定展示，消息分区
@@ -6004,6 +5975,7 @@ func serve() error {
 	if loadCheckpointSettings().sweepJournals() {
 		go sweepSessionFilesInBackground()
 	}
+	go sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU），见 sweepPreviewCache
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
 	startupLog("A2.5.browserEngine("+string(m.getBrowserEngine())+")", serveStart)
@@ -6353,6 +6325,31 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 // 实测全量 447 个会话的 record + .bak 共 4.0GB，其中 1.22GB 是 SDK 上下文的
 // 冗余副本、2.59GB 是内嵌块（formal/.bak 各一份）—— 搬进 sidecar 后只存一份。
 // 实测单个工作区 710MB → 75.5MB（省 89%）。
+// sweepPreviewCache R08a：启动时清扫预览缓存（过期 24h + 总量 LRU 到 512 MiB）。
+//
+// 为什么放在启动（而不是每次转换顺手扫）：清扫要遍历缓存目录、删几十个目录，
+// 属于后台维护；挂在转换路径上会让「点一下预览」偶发变慢，且并发路径下要额外加锁。
+// 为什么放 goroutine：不该拖延 bridge_ready（前端自举以它为准）。
+// 失败只打一行 stderr：缓存是**派生物**，清扫不成功最多是磁盘多占一点，不该报错给用户。
+func sweepPreviewCache() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintln(os.Stderr, "preview cache sweep: panic:", r)
+		}
+	}()
+	c := conversion.NewCache(conversion.DefaultCacheDir(appDataDir()),
+		conversion.DefaultMaxCacheBytes, conversion.DefaultMaxCacheAge)
+	st, err := c.Sweep()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "preview cache sweep: %v\n", err)
+		return
+	}
+	if st.Removed > 0 {
+		fmt.Fprintf(os.Stderr, "preview cache sweep: 删 %d 条（释放 %s），现存 %d 条 / %s\n",
+			st.Removed, humanBytes(int(st.Freed)), st.Entries, humanBytes(int(st.Bytes)))
+	}
+}
+
 func sweepSessionFilesInBackground() {
 	root := filepath.Join(appDataDir(), "sessions")
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {

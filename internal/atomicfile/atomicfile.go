@@ -12,8 +12,10 @@ package atomicfile
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -51,14 +53,26 @@ func LockPath(p string) (*os.File, error) {
 // ReplaceLocked 在调用方已持锁（或文件尚不存在、lock == nil）时执行原子替换。
 // 父目录缺失会被创建 —— 写入类工具的语义承诺。
 func ReplaceLocked(lock *os.File, p, content string) error {
+	return ReplaceReaderLocked(lock, p, strings.NewReader(content))
+}
+
+// ReplaceReaderLocked 同 ReplaceLocked，但内容来自 io.Reader（流式写入，不整读进内存）。
+// R08a：预览产物（office 转出的 HTML，可达数 MB）必须落盘却不必整段驻留堆 ——
+// 走 io.Copy 与「大文件不整读进内存」的既有约束一致（00-conventions §4.5）。
+//
+// 为什么 ReplaceLocked 改为委托这里（而不是并存两份）：两条写路径的**安全性**完全一样
+// （同目录 temp + fsync + rename + 调用方持锁），各写一份迟早漂移（比如只给其中一份加
+// fsync 或 O_EXCL）。父目录错误的措辞也保持原样 —— 那是模型可见的文案。
+func ReplaceReaderLocked(lock *os.File, p string, r io.Reader) error {
 	// 父目录缺失时 CreateTemp 会失败并报出内部临时文件名（".atomic-<n>"），
 	// 模型无法从中看出真正原因是「父目录不存在」（实测 16 次/周，历史最高）。
-	if dir := filepath.Dir(p); dir != "" {
+	dir := filepath.Dir(p)
+	if dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("cannot create parent directory %s for %s: %w", dir, p, err)
 		}
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".atomic-*")
+	tmp, err := os.CreateTemp(dir, ".atomic-*")
 	if err != nil {
 		return err
 	}
@@ -70,7 +84,7 @@ func ReplaceLocked(lock *os.File, p, content string) error {
 	if err := tmp.Chmod(0o644); err != nil {
 		return err
 	}
-	if _, err := tmp.WriteString(content); err != nil {
+	if _, err := io.Copy(tmp, r); err != nil {
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
@@ -89,6 +103,18 @@ func Replace(p, content string) error {
 		defer lock.Close()
 	}
 	return ReplaceLocked(lock, p, content)
+}
+
+// ReplaceReader 是完整的流式原子写：加锁 + temp + io.Copy + rename。
+func ReplaceReader(p string, r io.Reader) error {
+	lock, err := LockPath(p)
+	if err != nil {
+		return err
+	}
+	if lock != nil {
+		defer lock.Close()
+	}
+	return ReplaceReaderLocked(lock, p, r)
 }
 
 // Append 追加写入：flock 串行化 + O_APPEND（单次写原子，跨实例顺序化）。

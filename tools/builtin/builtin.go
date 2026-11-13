@@ -264,6 +264,9 @@ func denyHarnessConfigPath(abs string) error {
 		// read_file / write_file / edit_file** 读写记忆目录"，没有记忆专用工具
 		// （技术方案 §1）。不放行它 = 模型既读不到注入的索引指向的 topic，也写不进
 		// 新记忆，auto memory 整个不成立。该子树下只有记忆文件（0600），不含密钥。
+		// previews（R08a 预览产物缓存 ~/.go-code/previews）：前端要把转换产物读回来
+		// （file_preview 读 html_path，与文件工具同一条路径校验）—— 不放行就是
+		// 「转换成功但读不回」。里面只有用户自己打开过的文档转出的 HTML，无密钥。
 		// .go-code 其余（settings.json 明文密钥 / sessions / events）仍保护。
 		for _, sub := range allowedConfigSubtrees {
 			dir := filepath.Join(cfgDir, sub)
@@ -337,7 +340,7 @@ func isHardlinkToProtected(abs, cfgDir string) bool {
 // 与 sandbox.defaultOpenSubpaths 是**同一份语义的两次列举**（沙箱放行 shell 侧、
 // 本名单放行文件工具侧）。两处不同步就会出现"沙箱能跑而文件工具读写不了"或反向。
 // 由 TestAllowedSubtreesMatchSandboxOpenSubpaths 钉住同步。
-var allowedConfigSubtrees = []string{"plugins", "runtime", "memory"}
+var allowedConfigSubtrees = []string{"plugins", "runtime", "memory", "previews"}
 
 // resolveRealTarget 解析路径的**真实目标**：对最深的已存在祖先做 EvalSymlinks，
 // 再把剩余（可能尚不存在）的部分原样接回去。
