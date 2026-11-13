@@ -13265,3 +13265,94 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .pvp-bill-empty { font-size: 11.5px; color: var(--text-3); }
 .pvp-bill-err { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--warning); }
 .pvp-bill-src { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); opacity: 0.8; }
+
+/* —— 办公组件（LibreOffice kit，R08d）——
+   两处消费：
+   · .office-kit-banner —— 预览面板顶部横幅（kit 缺失 → 近似渲染的如实说明）；
+   · .okb-*             —— 设置页的状态/体积/许可/平台矩阵。
+   颜色只用既有 token（--text-3/--border/--error 等），亮暗主题自动跟随。 */
+.office-kit-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 7px 10px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--warning, #d08a2a) 12%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+.okb-mark {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--bg);
+  background: var(--warning, #d08a2a);
+}
+.okb-text { flex: 1 1 220px; min-width: 0; }
+.okb-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--accent, var(--text-2));
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.okb-help {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.okb-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.okb-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  vertical-align: middle;
+}
+.okb-badge.ok { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, transparent); }
+.okb-badge.bad { color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, transparent); }
+.okb-meta {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 2px 10px;
+  margin-top: 6px;
+  font-size: 11.5px;
+}
+.okb-meta > div { display: contents; }
+.okb-k { color: var(--text-3); }
+.okb-v { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.okb-errors { word-break: break-all; }
+.okb-platforms { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.okb-platform {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.okb-p-name { color: var(--text-2); min-width: 150px; }
+.okb-p-supply { min-width: 84px; }
+.okb-p-size { min-width: 56px; }
+.okb-p-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

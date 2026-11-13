@@ -330,6 +330,9 @@ function GeneralTab() {
           {externalSkillsImported > 0 ? t('settings.skillsImport.done').replace('{n}', String(externalSkillsImported)) : t('settings.skillsImport.none')}
         </div>
       )}
+      {/* 办公组件（LibreOffice kit，R08d）：版本/体积/许可/路径/状态 + 重新探测。
+          只展示与说明，**不自动下载** —— 分发是 PR-13。 */}
+      <OfficeKitSection />
       {/* 语音输入（STT）：整段折进可折叠卡片（默认收起）——OpenAI 兼容 /audio/transcriptions 端点 */}
       <STTSection />
     </>
@@ -1410,6 +1413,92 @@ function MemoryTab() {
           </tbody>
         </table>
       )}
+    </>
+  )
+}
+
+// —— 办公组件（LibreOffice kit，R08d）——
+//
+// 这一块是「用户能不能看懂自己有没有、为什么没有」的唯一落点：状态 + 版本 + 体积 +
+// 许可 + 路径 + 一个「重新探测」。安装动作**不在这里**（不自动下载，分发是 PR-13），
+// 只给手动的说明与目标目录 —— 让用户能把 kit 放对地方，而不是看着「未安装」没辙。
+const OFFICE_PLATFORM_LABEL: Record<string, string> = {
+  'darwin-arm64': 'macOS · Apple Silicon',
+  'darwin-x64': 'macOS · Intel',
+  'windows-x64': 'Windows · x64',
+  'linux-x64': 'Linux · x64',
+}
+
+function fmtKitSize(n: number): string {
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`
+  if (n >= 1 << 20) return `${Math.round(n / (1 << 20))} MB`
+  return `${n} B`
+}
+
+function OfficeKitSection() {
+  const t = useT()
+  const kit = useAppStore((s) => s.officeKit)
+  const loading = useAppStore((s) => s.officeKitLoading)
+  const fetchOfficeKit = useAppStore((s) => s.fetchOfficeKit)
+  const [open, setOpen] = useState(false)
+  // 打开设置页时如果还没查过就查一次（App 启动已经查过；这里覆盖「启动时 bridge 还没起」）。
+  useEffect(() => {
+    if (!kit && !loading) void fetchOfficeKit()
+  }, [kit, loading, fetchOfficeKit])
+  const stateLabel = !kit
+    ? '—'
+    : kit.available
+      ? t('office.kit.state.ok')
+      : kit.state === 'invalid'
+        ? t('office.kit.state.invalid')
+        : t('office.kit.state.missing')
+  const sourceLabel = kit?.source === 'system' ? t('office.kit.source.system') : kit?.source === 'kit' ? t('office.kit.source.kit') : ''
+  return (
+    <>
+      <div className="settings-sec-title">
+        {t('office.kit.title')}
+        <span className={`okb-badge ${kit?.available ? 'ok' : kit ? 'bad' : ''}`} data-office-kit-state={kit?.state ?? 'unknown'}>{stateLabel}</span>
+      </div>
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('office.kit.subtitle')}</div>
+          <div className="set-desc">{t('office.kit.desc')}</div>
+          {kit && (
+            <div className="okb-meta">
+              <div><span className="okb-k">{t('office.kit.version')}</span><span className="okb-v mono">{kit.version || '—'}{sourceLabel ? `（${sourceLabel}）` : ''}</span></div>
+              <div><span className="okb-k">{t('office.kit.size')}</span><span className="okb-v mono">{kit.sizeBytes > 0 ? fmtKitSize(kit.sizeBytes) : '—'}</span></div>
+              <div><span className="okb-k">{t('office.kit.license')}</span><span className="okb-v">{kit.license || '—'}</span></div>
+              <div><span className="okb-k">{t('office.kit.path')}</span><span className="okb-v mono okb-path" title={kit.bin || kit.root || ''}>{kit.bin || kit.root || '—'}</span></div>
+            </div>
+          )}
+        </div>
+        <button className="btn" disabled={loading} onClick={() => void fetchOfficeKit(true)}>
+          {loading ? t('office.kit.probing') : t('office.kit.reprobe')}
+        </button>
+      </div>
+      {kit?.reason && <div className="external-skills-feedback error">{kit.reason}</div>}
+      {kit?.errors && kit.errors.length > 0 && <div className="external-skills-feedback error okb-errors mono">{kit.errors.join(' · ')}</div>}
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('office.kit.howto')}</div>
+          <div className="set-desc">{t('office.kit.install.manual')}</div>
+          {open && kit && (
+            <div className="okb-platforms">
+              {kit.platforms.map((p) => (
+                <div className="okb-platform" key={p.id}>
+                  <span className="okb-p-name">{OFFICE_PLATFORM_LABEL[p.id] ?? p.id}</span>
+                  <span className="okb-p-supply">{p.supply === 'system' ? t('office.kit.supply.system') : t('office.kit.supply.kit')}</span>
+                  <span className="okb-p-size mono">{p.sizeBytes > 0 ? fmtKitSize(p.sizeBytes) : '—'}</span>
+                  <span className="okb-p-note">{p.note ?? ''}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <button className="btn link" onClick={() => setOpen((v) => !v)}>
+          {open ? t('office.kit.howto.hide') : t('office.kit.howto.show')}
+        </button>
+      </div>
     </>
   )
 }

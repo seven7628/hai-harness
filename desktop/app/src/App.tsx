@@ -58,6 +58,12 @@ export default function App() {
   useEffect(() => {
     if (window.desktop) void window.desktop.startupMark('app-mounted')
   }, [])
+  // 办公组件状态（R08d）：预览面板横幅与设置页共用这一份；启动查一次，之后只在用户
+  // 点「重新探测」时刷新（安装/卸载发生在 app 之外，自动轮询没有意义）。
+  const fetchOfficeKit = useAppStore((s) => s.fetchOfficeKit)
+  useEffect(() => {
+    void fetchOfficeKit()
+  }, [fetchOfficeKit])
   // 外观偏好（代码主题 / 字体大小 / 亮色底色）在这里订阅：改设置即时落 <html> +
   // 通知 Electron 缩放；顺带覆盖「切换主题」这一路径 —— 底色覆盖只能在 paper 下挂，
   // 切到 ink 必须由同一次 effect 清掉（inline 变量优先级高于 [data-theme] 规则）。

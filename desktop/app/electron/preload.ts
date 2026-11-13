@@ -59,6 +59,24 @@ export interface ExternalSkillsStatus {
   enabled: boolean
   sources: ExternalSkillSource[]
 }
+// 与 src/transport/types.ts 的 OfficeKitStatus 同构（两处都得写：preload 不能 import renderer 代码）。
+export interface OfficeKitStatus {
+  available: boolean
+  state: 'ok' | 'missing' | 'invalid'
+  source?: 'system' | 'kit'
+  bin?: string
+  root?: string
+  version?: string
+  platform: string
+  sizeBytes: number
+  license?: string
+  licenseUrl?: string
+  sourceUrl?: string
+  reason?: string
+  errors?: string[]
+  platforms: { id: string; os: string; arch: string; supply: 'kit' | 'system'; sizeBytes: number; license: string; note?: string }[]
+  pinnedVersion: string
+}
 export interface ExternalSkillsStatusResult {
   ok: boolean
   status?: ExternalSkillsStatus
@@ -102,6 +120,9 @@ contextBridge.exposeInMainWorld('desktop', {
   inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => ipcRenderer.invoke('input-history:forget', p) as Promise<{ ok: boolean; error?: string }>,
   sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => ipcRenderer.invoke('stt:transcribe', p) as Promise<{ ok: boolean; text?: string; error?: string }>,
   externalSkillsStatus: () => ipcRenderer.invoke('external-skills:status') as Promise<ExternalSkillsStatusResult>,
+  // 办公组件（LibreOffice kit，R08d）：状态查询 + 重新探测。kit 缺失时 available=false 是
+  // **正常结果**（前端据此出横幅），不是 IPC 错误。
+  officeKit: (req?: { refresh?: boolean }) => ipcRenderer.invoke('office-kit:status', req ?? {}) as Promise<{ ok: boolean; kit?: OfficeKitStatus; error?: string }>,
   importExternalSkills: () => ipcRenderer.invoke('external-skills:import') as Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>,
   pickApp: () => ipcRenderer.invoke('app:pick') as Promise<{ name: string; bundleId?: string } | null>,
   egoInstall: () => ipcRenderer.invoke('ego:install') as Promise<{ ok: boolean; error?: string }>,
@@ -178,11 +199,13 @@ contextBridge.exposeInMainWorld('desktop', {
   openPath: (p: string) => ipcRenderer.invoke('shell:open-path', p) as Promise<{ ok: boolean; error?: string }>,
   showItemInFolder: (p: string) => ipcRenderer.invoke('shell:show-item', p) as Promise<{ ok: boolean; error?: string }>,
   // xlsx 工作簿预览：bridge 侧转 HTML（受管 Python + openpyxl），返回产物路径。
-  watchXlsx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('xlsx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string }>,
+  // renderer：libreoffice = 走了 kit 的 soffice→PDF；approximate = 既有近似渲染（kit 缺失
+  // 或这份文件转不动）。前端据此在面板顶部出横幅（R08d）。
+  watchXlsx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('xlsx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
   // docx 文档 / pptx 演示文稿预览：与 watchXlsx 是同一条通路（同样的 invoke 形态与返回），
   // 只是主进程侧换 bridge 命令（mammoth / python-pptx）。调用方见 store 的 previewOfficeFile。
-  watchDocx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('docx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string }>,
-  watchPptx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('pptx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string }>,
+  watchDocx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('docx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
+  watchPptx: (req: { path: string; workspace: string }) => ipcRenderer.invoke('pptx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
   // 音视频（R08c）：`<video src>` 用 `hai-media://`（主进程按 Range 回 206，不把文件读进内存）。
   // mediaUrl 只对工作区内的媒体扩展名给 URL；mediaProbe 是 ffprobe 元信息（缺 ffprobe 时
   // 仍是 ok:true + available:false —— 降级不算错误）；mediaStats 是协议计数器（e2e 判据）。
@@ -253,6 +276,7 @@ declare global {
       inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => Promise<{ ok: boolean; error?: string }>
       sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => Promise<{ ok: boolean; text?: string; error?: string }>
       externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
+      officeKit: (req?: { refresh?: boolean }) => Promise<{ ok: boolean; kit?: OfficeKitStatus; error?: string }>
       importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
       pickApp: () => Promise<{ name: string; bundleId?: string } | null>
       providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
@@ -266,7 +290,7 @@ declare global {
       pickFsDir: () => Promise<string | null>
       // 拖拽/选择得到的 File → 磁盘路径（JS 构造的 File 返回空串）
       getPathForFile: (file: File) => string
-      watchXlsx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string }>
+      watchXlsx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
       applyTheme: (theme: string) => Promise<{ ok: boolean }>
       embedShow: (p: { url?: string; rect?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
       embedResize: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>

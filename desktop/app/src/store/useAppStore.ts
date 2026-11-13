@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { getTransport } from '../transport'
 import type { RightLayout } from '../lib/layout'
 import { afterDrag, collapse as layoutCollapse, expand as layoutExpand, normalizeLayout } from '../lib/layout'
-import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings } from '../transport/types'
+import type { BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, ProviderPreset, BillingSnapshot, MCPServerCfg, CronJob, CronRun, CronRunDetail, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, IMConfig, IMGatewaySchema, IMChat, IMBindRequest, IMChatInfo, STTSettings, MeshSettings, MeshStatusInfo, ModelPrices, AgentSettings, CodemodeSettings, OfficeKitStatus } from '../transport/types'
 import type { AnyEvent, BridgeCommand } from './events'
 import type { CheckpointView, CheckpointNestedCall, CheckpointHostOps } from './checkpoint'
 import { TRACE_SPAN_TYPES } from './trace'
@@ -3012,6 +3012,10 @@ export interface AppState {
   // 会话级：带 sessionId，渲染方须校验归属（切会话后旧响应不得当新会话展示）。
   ctxBreakdown?: CtxBreakdown
   externalSkillsStatus?: ExternalSkillsStatus
+  // 办公组件（LibreOffice kit，R08d）：面板横幅 + 设置页共用这一份状态。
+  // undefined = 还没查过（此时**不**出横幅：宁可晚一点，也不要先冤枉成「未安装」）。
+  officeKit?: OfficeKitStatus
+  officeKitLoading: boolean
   externalSkillsLoading: boolean
   externalSkillsImporting: boolean
   externalSkillsError?: string
@@ -3181,6 +3185,8 @@ export interface AppState {
   fetchSkills(): void // 技能清单（SkillsPage + /skill 命令补全数据源）
   fetchCtxBreakdown(): void // 上下文构成分区（Composer ctx 环 hover 面板）
   refreshExternalSkillsStatus(): Promise<void>
+  // 办公组件状态（refresh=true = 设置页点了「重新探测」：安装/卸载发生在本进程之外）
+  fetchOfficeKit(refresh?: boolean): Promise<void>
   importExternalSkills(): Promise<boolean>
   toggleSkill(name: string, enabled: boolean): void // 启用/禁用（真过滤：发现清单 + load_skill）
   getSkill(name: string): void // 技能详情预览（skill_get）
@@ -8717,6 +8723,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   titleOverrides: initTitles,
   skills: [],
   externalSkillsStatus: undefined,
+  officeKit: undefined,
+  officeKitLoading: false,
   // 记忆浏览初始态：未加载。memoryBrowseAvailable=false 表示"还没查到"，
   // 与"查到了但记忆关着"在 UI 上表现相同（都不列文件），故不额外区分。
   memoryBrowseAvailable: false,
@@ -9952,6 +9960,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sid = get().activeSessionId
     if (!sid) return
     send({ type: 'context_breakdown', payload: { session_id: sid } })
+  },
+  fetchOfficeKit: async (refresh) => {
+    set({ officeKitLoading: true })
+    try {
+      const kit = await transport.officeKitStatus(refresh === true)
+      set({ officeKit: kit, officeKitLoading: false })
+    } catch {
+      // 查不到 = 不展示状态（横幅的缺省是「不出」）。这里刻意不 toast：设置页一打开就
+      // 弹错属于噪音，用户真正需要知道的是「有没有 kit」，而那个问题下一轮还会再问。
+      set({ officeKitLoading: false })
+    }
   },
   refreshExternalSkillsStatus: async () => {
     set({ externalSkillsLoading: true, externalSkillsError: undefined })

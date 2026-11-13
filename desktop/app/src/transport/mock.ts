@@ -1,4 +1,4 @@
-import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply } from './types'
+import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, OfficeKitStatus } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
 import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
@@ -1024,6 +1024,19 @@ class MockTransport implements Transport {
       return { ok: true }
     } catch (e) {
       return { ok: false, error: (e as Error).message }
+    }
+  }
+
+  async officeKitStatus(): Promise<OfficeKitStatus> {
+    // 浏览器 mock：当作「系统装了 LibreOffice」（available），让设置页有内容可演示。
+    return {
+      available: true, state: 'ok', source: 'system', bin: '/mock/soffice', version: 'system',
+      platform: 'darwin-arm64', sizeBytes: 0, license: 'MPL-2.0 / LGPL-3.0（混合）',
+      platforms: [
+        { id: 'darwin-arm64', os: 'darwin', arch: 'arm64', supply: 'kit', sizeBytes: 412 << 20, license: 'MPL-2.0 / LGPL-3.0（混合）' },
+        { id: 'linux-x64', os: 'linux', arch: 'amd64', supply: 'system', sizeBytes: 0, license: 'MPL-2.0 / LGPL-3.0（混合）' },
+      ],
+      pinnedVersion: '24.8.7-1',
     }
   }
 

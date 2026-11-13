@@ -367,6 +367,37 @@ export interface ExternalSkillsStatus {
   sources: ExternalSkillSource[]
 }
 
+// —— 办公组件（LibreOffice kit，R08d）——
+// 与 bridge 的 office_kit_status 响应同构（desktop/bridge/office.go 的 officekit.Status）。
+// state：ok=可用 / missing=没装 / invalid=装了但校验不过（sha256/版本/平台）。
+export interface OfficeKitPlatform {
+  id: string
+  os: string
+  arch: string
+  supply: 'kit' | 'system' // system = 复用系统 soffice（Linux），不随 app 分发
+  sizeBytes: number
+  license: string
+  note?: string
+}
+
+export interface OfficeKitStatus {
+  available: boolean
+  state: 'ok' | 'missing' | 'invalid'
+  source?: 'system' | 'kit'
+  bin?: string
+  root?: string
+  version?: string
+  platform: string
+  sizeBytes: number
+  license?: string
+  licenseUrl?: string
+  sourceUrl?: string
+  reason?: string
+  errors?: string[]
+  platforms: OfficeKitPlatform[]
+  pinnedVersion: string
+}
+
 export interface ExternalSkillsStatusResult {
   ok: boolean
   status?: ExternalSkillsStatus
@@ -450,6 +481,8 @@ export interface Transport {
   inputHistorySet(scope: string, items: InputHistoryItem[]): Promise<InputHistoryReply>
   inputHistoryForget(prefix: string, subtree?: boolean): Promise<{ ok: boolean; error?: string }>
   externalSkillsStatus(): Promise<ExternalSkillsStatus>
+  // 办公组件状态（R08d）。refresh=true = 用户点了「重新探测」（安装/卸载发生在本进程之外）。
+  officeKitStatus(refresh?: boolean): Promise<OfficeKitStatus>
   importExternalSkills(): Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
   pickApp(): Promise<{ name: string; bundleId?: string } | null> // 系统「选择应用程序」（osascript choose application）；取消 → null
   providerSave(p: ProviderSaveInput): Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
