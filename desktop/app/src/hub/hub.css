@@ -2738,8 +2738,8 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
    ============================================================ */
 @media (max-width: 900px) {
   /* composer：@ 提及（28→32）、发送（31→32）。 */
-  .hub-demo .composer .icon-btn { width: 32px; height: 32px; }
-  .hub-demo .send-btn { width: 32px; height: 32px; }
+  .hub-demo .composer .icon-btn { width: 32px; height: 32px; margin-bottom: 1px; }
+  .hub-demo .composer .send-btn { width: 32px; height: 32px; margin-bottom: 1px; }
 
   /* 会话头：上下文（只读）/ 更多（30→32）。仍在 64px 头部里，不换行。 */
   .hub-demo .header-actions .icon-btn { width: 32px; height: 32px; }

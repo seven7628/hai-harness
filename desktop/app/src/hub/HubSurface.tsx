@@ -15,6 +15,7 @@ import { agentSigilLabel } from './avatarLabels'
 import { useAgentState } from './useAgentState'
 import { isImeComposing, type MentionAgent } from './mentions'
 import { useScrollbarWidth } from './useScrollbarWidth'
+import { useComposerAutoGrow } from './useComposerAutoGrow'
 import { canAutoFollow, highlightClass, scrollToSeq, seqDataAttr, seqJumpPlan } from './seqJump'
 import type { HubMessage, HubRunEntry } from './types'
 import { useClearSentAttachments, useHubAttachments } from './useHubAttachments'
@@ -73,6 +74,9 @@ export default function HubSurface() {
     setRightExpanded(true)
   }
   const draft = activeId ? (drafts[activeId] ?? '') : ''
+  // composer 单行垂直居中 + 最多 4 行自动增高（高度由内容量真值决定）。
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  useComposerAutoGrow(composerRef, draft)
   const view = useHubStore((s) => s.view)
   const setView = useHubStore((s) => s.setView)
   const runLog = useHubStore((s) => s.runLog)
@@ -415,6 +419,7 @@ export default function HubSurface() {
                       <ImageIcon size={15} />
                     </button>
                     <textarea
+                      ref={composerRef}
                       value={draft}
                       placeholder={t('hub.sendTo').replace('{name}', activeAgent.name)}
                       onChange={(e) => activeId && setDraft(activeId, e.target.value)}

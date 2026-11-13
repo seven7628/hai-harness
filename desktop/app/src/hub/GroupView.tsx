@@ -25,6 +25,7 @@ import { canAutoFollow, scrollToSeq, seqJumpPlan } from './seqJump'
 import { groupTimelineMarkdown } from './exportMarkdown'
 import { hubPerfMemoEnabled } from './perfFlags'
 import { useScrollbarWidth } from './useScrollbarWidth'
+import { useComposerAutoGrow } from './useComposerAutoGrow'
 import { downloadText, safeFilename, timestampSlug } from './download'
 import {
   ALL_MENTION_ID,
@@ -104,6 +105,8 @@ export default function GroupView({ group }: { group: HubGroup }) {
   }
   // @ 选择器：焦点始终在 textarea，选择器只做 listbox/aria-activedescendant。
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // composer 单行垂直居中 + 最多 4 行自动增高（DM/群同一套）。
+  useComposerAutoGrow(textareaRef, draft)
   // 群 composer 的附件（图片 + 文件引用）：与 DM 同一套 hook；换群时清空。
   const attach = useHubAttachments()
   const attachScope = useRef<string | null>(null)
