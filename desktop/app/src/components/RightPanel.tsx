@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, useCallback } from 'react'
+import { Fragment, useEffect, useReducer, useRef, useState, useCallback } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { useAppStore, isPendingWebTab, rebuildWebTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
 import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
@@ -9,7 +9,11 @@ import { ActivityTab } from './ActivityTab'
 import { FilePreviewTab } from './FilePreview'
 import { EditorConfirm } from './EditorConfirm'
 import { fileUrlToPath } from '../lib/filePaths'
-import { getSurface } from '../surfaces/registry'
+import { getSurface, listSurfaces, subscribeSurfaces } from '../surfaces/registry'
+import { SurfaceBoundary, SurfaceTombstone } from '../surfaces/SurfaceBoundary'
+import type { UnavailableReason } from '../surfaces/SurfaceBoundary'
+import { getSurfaceHealth, isSurfaceDisabled } from '../surfaces/health'
+import type { SurfaceKind } from '../surfaces/types'
 import type {} from '../lib/fileStatus'
 import { shortName } from '../lib/shortPath'
 import { copyText } from '../lib/clipboard'
@@ -58,6 +62,54 @@ function kindIcon(kind: TabKind): ReactElement {
   }
 }
 
+// 「现在能新建什么」= 静态清单 × 注册表的**可用**列表。
+// 为什么不能只用 ADDABLE_KINDS：它是静态数组，而「被禁用」只有注册表知道（listSurfaces
+// 已按 health 的禁用集剔除）。两处（＋ 菜单 / 空态能力面板）都读这一份，否则会出现
+// 「菜单里还能点开一个已经禁用的面板」。取交集而不是只问 isSurfaceDisabled：provider
+// 都没注册的 kind 本来就没有东西可开（PR-11 删掉静态清单后，这里只剩 listSurfaces）。
+function addableKinds(): TabKind[] {
+  const usable = new Set(listSurfaces().map((p) => p.kind))
+  return ADDABLE_KINDS.filter((k) => usable.has(k))
+}
+
+/**
+ * 标签的「不可用」判定（PR-10 墓碑）：
+ *   · 被禁用（连续 3 次崩溃自动禁用 / 手动禁用）→ 'disabled'
+ *   · 插件 provider 没注册（插件缺失/卸载）→ 'missing'
+ * 内置 kind 的 provider 缺失**不算**墓碑：若干探针页只 import RightPanel，注册表是空的，
+ * 那里靠 panelFallback 渲染（04 F45 的兜底）—— 把那种情况改成墓碑会把老探针整片打红，
+ * 而生产里内置 provider 由 main.tsx 的副作用 import 保证一定在。
+ */
+/**
+ * provider 的渲染宿主 —— 必须是**一个组件**，不能写成
+ * `{getSurface(kind)?.render({ tab, scope })}` 这样在 RightPanel 自己的 render 里直接调用。
+ *
+ * 为什么（PR-10 最容易漏的一条，实测踩过）：`provider.render` 是普通函数，直接在 RP 的
+ * render 期间调用 = 它的异常发生在 **RP 自己的渲染栈**里，SurfaceBoundary 根本接不到 ——
+ * React 看到的是「RightPanel 抛了」，于是整棵树被卸载（探针表现为「整页空白」，而
+ * CrashCard 一条都不出现）。放进独立组件后，异常落在边界**子树**里，才归 boundary 管。
+ * 返回值是 Fragment：这一层不产生 DOM 节点，`.right-body > .file-activity-panel` 之类的
+ * 直接子元素关系不变。
+ */
+function SurfaceHost({ kind, tab, scope, fallback }: {
+  kind: SurfaceKind
+  tab: TabInstance
+  scope: string
+  /** provider 未注册时的本地兜底（file 用 FilePreviewTab，其余见 panelFallback） */
+  fallback?: ReactNode
+}) {
+  const p = getSurface(kind)
+  if (p) return <>{p.render({ tab, scope })}</>
+  return <>{fallback ?? panelFallback(tab, scope)}</>
+}
+
+function unavailableReason(tab: TabInstance): UnavailableReason | null {
+  const kind: SurfaceKind = tab.kind
+  if (isSurfaceDisabled(kind)) return 'disabled'
+  if (kind.startsWith('plugin:') && !getSurface(kind)) return 'missing'
+  return null
+}
+
 /**
  * `.right-body` 的**本地兜底**：provider 未注册时用它渲染非 file 面板。
  *
@@ -101,6 +153,9 @@ export default function RightPanel() {
   const activateTab = useAppStore((s) => s.activateTab)
   const closeTab = useAppStore((s) => s.closeTab)
   const closeTabs = useAppStore((s) => s.closeTabs)
+  // 墓碑的「移除标签」走 closeTabNow（**跳过 dirty 守卫**）：墓碑不是编辑器，没有未保存内容，
+  // 弹一个「保存/丢弃/取消」只会让用户以为这里还藏着东西。
+  const closeTabNow = useAppStore((s) => s.closeTabNow)
   const reopenTab = useAppStore((s) => s.reopenTab)
   const syncTabs = useAppStore((s) => s.syncTabsToRightTab)
   const embedNav = useAppStore((s) => s.embedNav)
@@ -111,6 +166,9 @@ export default function RightPanel() {
   const tabs = tabSet?.tabs ?? []
   const closedTabs = tabSet?.closed ?? []
   const activeTab = tabs.find((x) => x.id === tabSet?.activeId) ?? null
+  // PR-10：内容区要不要渲染 provider（墓碑判定，见 unavailableReason）。非 null = 渲染占位卡，
+  // **不渲染 provider** —— 被禁用的面板连挂载都不该发生（否则又是一次崩溃/白屏）。
+  const activeUnavailable = activeTab ? unavailableReason(activeTab) : null
   // —— PR-09：+N 溢出（让 TABS_MAX_VISIBLE 真正生效）——
   // 可见窗口 = 数组前 TABS_MAX_VISIBLE 个；**激活标签必须始终可见**：它落在窗口外时占据
   // 最后一槽（只换渲染，不动 tabs 数组 —— 数组顺序既是用户打开的顺序，也是 ⌃⇥ 的遍历顺序）。
@@ -285,6 +343,12 @@ export default function RightPanel() {
   // e2e 直接 setState 复位），在渲染层收敛一处覆盖全部；已一致时 store 侧不 set（防自激）。
   useEffect(() => { syncTabs() }, [syncTabs, rightTab, scope])
 
+  // PR-10：注册表 / 禁用集变了要推动重渲染 —— 墓碑替换崩溃卡、标签条灰态、＋ 菜单剔除
+  // 被禁用的 kind，全都靠这一次重渲染。订阅复用 registry.subscribeSurfaces（health 的每次
+  // 改动也走那一条广播），不另造第二套订阅。
+  const [, bumpSurfaces] = useReducer((x: number) => x + 1, 0)
+  useEffect(() => subscribeSurfaces(bumpSurfaces), [])
+
   // 阶段 5：**视图按需重建** —— 重启恢复出来的 web 标签没有视图（恢复刻意不 eager 建，
   // 见 store 的 loadPersistedTabs / rebuildWebTab），只有它真的成了「当前正在显示的内容」
   // 才在主进程里建出来。判据三条缺一不可：面板展开 + 当前显示 web + 激活标签就是待重建的那个。
@@ -342,6 +406,10 @@ export default function RightPanel() {
       return mode === 'preview' ? `${name} · ${t('rp.tab.previewTag')}` : name
     }
     if (tab.kind === 'web') return getSurface('web')?.title(tab, t) ?? kindLabel('web')
+    // 插件 kind（PR-12 起进 store）没有 i18n 文案：面板名从 provider.title 取，
+    // 与墓碑/CrashCard 的标题保持同一来源；provider 缺失时再退到 kind 本身。
+    const prov = getSurface(tab.kind)
+    if (prov) return prov.title(tab, t)
     return kindLabel(tab.kind)
   }
 
@@ -421,20 +489,29 @@ export default function RightPanel() {
               const pending = isPendingWebTab(tab)
               const sleeping = !!tp?.sleeping || pending
               const restoring = !!tp?.restoring
+              // PR-10：这个标签的面板现在不可用（被禁用 / 插件缺失）。标签**仍然在**（身份不丢，
+              // 点它能看到原因与「重新启用」）—— 视觉复用休眠那套灰态（CSS 里 .rtab.unavailable
+              // 与 .rtab.sleeping 同一组规则），但不写 data-sleeping：休眠是视图池 LRU 的语义，
+              // 两个状态混用一个属性，以后就分不出「为什么会灰」。
+              const un = unavailableReason(tab)
               return (
                 <div
                   key={tab.id}
-                  className={`rtab ${on ? 'on' : ''} ${sleeping ? 'sleeping' : ''}`}
+                  className={`rtab ${on ? 'on' : ''} ${sleeping ? 'sleeping' : ''} ${un ? 'unavailable' : ''}`}
                   data-kind={tab.kind}
                   data-mode={tab.kind === 'file' ? ((tab as FileTabInstance).mode ?? 'source') : undefined}
                   data-view={tab.kind === 'web' ? (tab.viewId ?? (tab.pageId != null ? `p${tab.pageId}` : '')) : ''}
                   data-sleeping={sleeping ? '1' : undefined}
                   data-pending={pending ? '1' : undefined}
                   data-restoring={restoring ? '1' : undefined}
+                  data-unavailable={un ? '1' : undefined}
+                  data-unavailable-reason={un ?? undefined}
                   role="tab"
                   aria-selected={on}
                   tabIndex={on ? 0 : -1}
-                  title={restoring ? t('browser.tabRestoring') : sleeping ? t('browser.tabSleeping') : (webTabUrl(tab) || (tab.kind === 'file' ? (tab.path || tabTitle(tab)) : tabTitle(tab)))}
+                  title={un
+                    ? t(un === 'disabled' ? 'rp.surface.tabDisabled' : 'rp.surface.tabMissing')
+                    : restoring ? t('browser.tabRestoring') : sleeping ? t('browser.tabSleeping') : (webTabUrl(tab) || (tab.kind === 'file' ? (tab.path || tabTitle(tab)) : tabTitle(tab)))}
                   onClick={() => activateTab(tab.id)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTab(tab.id) }
@@ -528,10 +605,11 @@ export default function RightPanel() {
               <Plus size={13} />
             </button>
             {menu === 'add' && <div className="rtabs-menu rtabs-menu-right" role="menu">
-              {ADDABLE_KINDS.map((k) => (
+              {addableKinds().map((k) => (
                 <button
                   key={k}
                   className="rtabs-mi"
+                  data-kind={k}
                   role="menuitem"
                   onClick={() => { openTab({ kind: k } as TabSpec); setMenu(null) }}
                 >
@@ -611,11 +689,12 @@ export default function RightPanel() {
             <div className="empty rtabs-empty">
               <div className="big">{t('rp.tabs.empty')}</div>
               {t('rp.tabs.emptyHint')}
-              {/* PR-09：空态不是终点 —— 把「能开什么」直接列出来（与 ＋ 菜单同一份 ADDABLE_KINDS，
-                  图标/文案同源），点一下就能开工，用户不必先猜 ＋ 里有什么。 */}
+              {/* PR-09：空态不是终点 —— 把「能开什么」直接列出来（与 ＋ 菜单同一份 addableKinds()，
+                  图标/文案同源），点一下就能开工，用户不必先猜 ＋ 里有什么。
+                  PR-10：这份清单已经按注册表的可用性过滤（被禁用的 kind 不再出现）。 */}
               {tabs.length === 0 && (
                 <div className="rtabs-empty-adds" role="group" aria-label={t('rp.tabs.add')}>
-                  {ADDABLE_KINDS.map((k) => (
+                  {addableKinds().map((k) => (
                     <button key={k} className="rtabs-empty-add" data-kind={k} onClick={() => openTab({ kind: k } as TabSpec)}>
                       {kindIcon(k)}
                       <span>{kindLabel(k)}</span>
@@ -632,12 +711,30 @@ export default function RightPanel() {
               顺序也重要：provider 先、兜底后。provider 是**副作用注册**（只有 main.tsx 导入
               builtin 时才存在），而若干探针页只 import RightPanel —— 没有兜底时它们渲染空白面板，
               且空白不会让任何断言变红（04-review F45/F46）。
-              **不要**给这个元素加 key：切 web 标签时组件实例必须原地复用（DOM 容器不重挂载，
-              原生视图与页面状态才保得住）—— 加 key = 每次切标签销毁重建 WebContentsView（R06c）。
-              file 不走这条：它要一条「按标签 id 重挂载」的 key，与「不许加 key」相冲突，
-              重挂载语义的收口留给 PR-11。 */}
+
+              PR-10：被禁用/插件缺失时不渲染 provider，换成墓碑（原因 + 重新启用 + 移除标签）。
+              正常路径外面多了一层 **key=标签 id 的 SurfaceBoundary** —— 错误边界只包内容区
+              （标签条/收起钮/＋ 菜单都在它外面：崩一个面板不能让人没法切走）。key 是隔离的
+              唯一手段：没有它，A 标签崩了再切到 B，React 复用同一个 boundary 实例，把 A 的
+              错误页继续画给 B 看。
+              代价（如实记录）：boundary 换 key ⇒ children 跟着重挂，R06c 那条「切 web 标签时
+              内容原地复用」在这里不再成立。WebTab 的挂载只做 embedShow（视图在主进程池里，
+              重挂不重建 WebContentsView），但 DOM 层确实重建了一次。PR-11 若要拿回原地复用，
+              得把「按标签重置错误态」从 key 换成 boundary 内部一条显式 reset。 */}
           {activeTab && activeTab.kind !== 'file' && (
-            getSurface(activeTab.kind)?.render({ tab: activeTab, scope }) ?? panelFallback(activeTab, scope)
+            activeUnavailable ? (
+              <SurfaceTombstone
+                kind={activeTab.kind}
+                title={tabTitle(activeTab)}
+                reason={activeUnavailable}
+                auto={getSurfaceHealth(activeTab.kind)?.auto === true}
+                onRemove={() => closeTabNow(activeTab.id)}
+              />
+            ) : (
+              <SurfaceBoundary key={activeTab.id} kind={activeTab.kind} title={tabTitle(activeTab)}>
+                <SurfaceHost kind={activeTab.kind} tab={activeTab} scope={scope} />
+              </SurfaceBoundary>
+            )
           )}
           {/* key={activeTab.id}：**每个 file 标签一份组件实例**（阶段 2 的隔离手段）。
               为什么不共用一个实例再按 props 复位：file 标签之间切换时元素类型/位置不变，
@@ -648,7 +745,19 @@ export default function RightPanel() {
           {activeTab?.kind === 'file' && (
             // key 挂在 Fragment 上：切换文件标签要整体重挂（原实现直接在组件上写 key）
             <Fragment key={activeTab.id}>
-              {getSurface('file')?.render({ tab: activeTab, scope }) ?? <FilePreviewTab tab={activeTab} />}
+              {activeUnavailable ? (
+                <SurfaceTombstone
+                  kind="file"
+                  title={tabTitle(activeTab)}
+                  reason={activeUnavailable}
+                  auto={getSurfaceHealth('file')?.auto === true}
+                  onRemove={() => closeTabNow(activeTab.id)}
+                />
+              ) : (
+                <SurfaceBoundary kind="file" title={tabTitle(activeTab)}>
+                  <SurfaceHost kind="file" tab={activeTab} scope={scope} fallback={<FilePreviewTab tab={activeTab} />} />
+                </SurfaceBoundary>
+              )}
             </Fragment>
           )}
         </div>

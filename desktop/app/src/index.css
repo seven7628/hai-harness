@@ -5516,8 +5516,11 @@ body.is-electron .left.collapsed .rail .rbtn {
 }
 /* 阶段 3：休眠标签（视图池 LRU 释放了它的渲染进程，条目与 id 仍在）。
    灰态 + 虚线边 = 「还在，但内容没在内存里」，点一下即恢复（见 RightPanel 的 data-sleeping）。
-   用 CSS 标记而不是往标签里加文字：标签可见文案要保持与页面标题一致（e2e 按标题定位标签）。 */
-.rtab.sleeping {
+   用 CSS 标记而不是往标签里加文字：标签可见文案要保持与页面标题一致（e2e 按标题定位标签）。
+   PR-10：**墓碑标签**（面板被禁用/插件缺失）复用同一套灰态 —— 「有标签、没内容」是同一种
+   形态；语义靠 data-unavailable / data-sleeping 两个属性区分（标签上另给了 title 文案）。 */
+.rtab.sleeping,
+.rtab.unavailable {
   color: var(--text-4, var(--text-3));
   background: transparent;
   border-style: dashed;
@@ -5526,7 +5529,8 @@ body.is-electron .left.collapsed .rail .rbtn {
 .rtab.sleeping .rtab-t {
   font-style: italic;
 }
-.rtab.sleeping::before {
+.rtab.sleeping::before,
+.rtab.unavailable::before {
   content: '';
   flex: 0 0 auto;
   width: 6px;
@@ -5714,6 +5718,87 @@ body.is-electron .left.collapsed .rail .rbtn {
   flex: 1;
   min-height: 0;
 }
+/* ===== PR-10：面板崩溃卡 / 墓碑 =====
+   两者都是**内容区**里的占位（标签条、收起钮、＋ 菜单在边界外面 —— 崩一个面板不能让人没法切走）。
+   视觉上要一眼看出「这不是正常工作区」，但不抢眼：中性底色 + 边框 + 一枚小徽标/虚线边。
+   文案全部走 i18n（rp.surface.*），这里只管排版。 */
+.surface-crash,
+.surface-tombstone {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 2px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.surface-crash { border-color: color-mix(in srgb, var(--error) 38%, var(--border)); }
+.surface-tombstone { border-style: dashed; }
+.surface-crash-head { display: flex; align-items: center; gap: 8px; }
+.surface-crash-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+  font-size: 11px;
+}
+.surface-crash-title,
+.surface-tombstone-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.surface-crash-msg {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+}
+.surface-tombstone-why { color: var(--text-3); }
+.surface-crash-details > summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--text-3);
+}
+.surface-crash-details > summary:hover { color: var(--text-2); }
+.surface-crash-stack {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.surface-crash-actions,
+.surface-tombstone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.surface-crash-actions > button,
+.surface-tombstone-actions > button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+.surface-crash-actions > button:hover,
+.surface-tombstone-actions > button:hover {
+  color: var(--text);
+  border-color: var(--accent-strong);
+}
+.surface-crash-disable { color: var(--error); }
 @keyframes slideRight {
   from {
     opacity: 0;
