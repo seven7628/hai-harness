@@ -97,9 +97,15 @@ export function HubImageLightbox({
     document.addEventListener('keydown', onKey, true)
     return () => {
       document.removeEventListener('keydown', onKey, true)
-      // 关闭后焦点回到触发元素（缩略图 / +N / 删除后回到 composer 原位置）。
+      // 关闭后焦点回到触发元素（缩略图 / +N）。触发元素可能已经不在文档里：灯箱里
+      // 「删除」掉最后一张待发图时，缩略图跟着图片一起消失。这时兜底回 composer
+      // 输入框，否则 activeElement 掉到 <body>，键盘用户下一次 Tab 从页面顶部重来。
       const back = restoreTo.current
-      if (back instanceof HTMLElement && document.contains(back)) back.focus()
+      if (back instanceof HTMLElement && document.contains(back)) {
+        back.focus()
+        return
+      }
+      document.querySelector<HTMLElement>('.hub-demo .composer textarea')?.focus()
     }
   }, [])
 

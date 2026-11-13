@@ -227,6 +227,18 @@ async function sendWithImage(testid, text) {
   await page.locator('.hub-attach-lb-btn.danger').click()
   await page.locator('.hub-attach-lb').waitFor({ state: 'detached', timeout: 4000 })
   check(await page.locator('.hub-attach-chip--img').count() === 0, '灯箱里删除后条带清空')
+  // 删除最后一张后，触发缩略图随图片一起消失：cleanup 里的 restoreTo 已不在文档中，
+  // 必须兜底回 composer 输入框，否则 activeElement 掉到 <body>，键盘用户下一次 Tab
+  // 从页面顶部重来。
+  const afterDelete = await page.evaluate(() => {
+    const el = document.activeElement
+    return {
+      tag: el ? el.tagName : null,
+      inComposer: !!(el && el.closest('.hub-demo .composer')),
+    }
+  })
+  check(afterDelete.tag === 'TEXTAREA' && afterDelete.inComposer,
+    `删除最后一张后焦点回到 composer 输入框（不是 body）：activeElement=${afterDelete.tag}`)
 
   const bubble = await sendWithImage('hub-image-input', '看这张图')
   await bubble.waitFor({ timeout: 10000 })
