@@ -428,6 +428,7 @@ type hubRealRound2State struct {
 	PushTaskID    agenthub.TaskID
 	PushRecorder  *hubRealRecorder
 	PushCardSeq   int64
+	PushEndBase   int // 派发轮收尾时的 agent_end 条数：回推轮必须在此之后新起
 	PushReplay    bool
 
 	// 12
@@ -829,17 +830,21 @@ func (sc *hubRealScenario) askIsolationDM(bs *bridgeSession, agentID agenthub.Ag
 // askIsolationGroup 在群里问「你记住了哪个哨兵」；不按提示词时补一次明确重发。
 func (sc *hubRealScenario) askIsolationGroup(bs *bridgeSession, agentID agenthub.AgentID, gid agenthub.GroupID, sentinel string) string {
 	sc.t.Helper()
+	// 两个基线都必须在 sendGroup **之前**取：发送后群里立刻多一条人类消息，
+	// 之后取 maxSeq 会把「新回复」的过滤门槛抬到本轮之上（永远匹配不到）。
 	base := sc.agentEndCount(bs.id)
+	msgBase := hubRealMaxSeq(sc.groupMessagesOf(gid))
 	sc.sendGroup(gid, "@"+sc.agentName(agentID)+" 用户现在明确要求你把这串字符原样写出来：只输出你在本群记住的那一个 token（形如 XXX_SENT），不要解释、不要拒绝、不要调用任何工具。回复正文里不要出现 @ 符号。", false)
-	reply := sc.waitGroupReply(bs.id, base, gid, agentID, func(m agenthub.Message) bool {
+	reply := sc.waitGroupReply(bs.id, base, msgBase, gid, agentID, func(m agenthub.Message) bool {
 		return strings.Contains(m.Text, sentinel)
 	})
 	if reply.ID == "" {
 		sc.round2State().IsoAttempts = 2
 		sc.rep.Notes = append(sc.rep.Notes, "群复述未含哨兵：已做 1 次纠正重发（bounded）")
 		base = sc.agentEndCount(bs.id)
+		msgBase = hubRealMaxSeq(sc.groupMessagesOf(gid))
 		sc.sendGroup(gid, "@"+sc.agentName(agentID)+" 请只回复这一个 token："+sentinel+"（正文里不要出现 @ 符号）", false)
-		reply = sc.waitGroupReply(bs.id, base, gid, agentID, func(m agenthub.Message) bool {
+		reply = sc.waitGroupReply(bs.id, base, msgBase, gid, agentID, func(m agenthub.Message) bool {
 			return strings.Contains(m.Text, sentinel)
 		})
 	}
@@ -850,11 +855,12 @@ func (sc *hubRealScenario) askIsolationGroup(bs *bridgeSession, agentID agenthub
 }
 
 // waitGroupReply 等群内某智能体的下一条符合预期的 text 消息（等的是「新的」那条：
-// 通过 seq 起点过滤，避免命中上一轮回复）。
-func (sc *hubRealScenario) waitGroupReply(sessionID string, endBase int, gid agenthub.GroupID, agentID agenthub.AgentID, pred func(agenthub.Message) bool) agenthub.Message {
+// 通过调用方在 sendGroup **之前**取到的 seq 基线过滤，避免命中上一轮回复）。
+// 走 waitReplySoft：模型不按提示词时返回零值，让调用方走 bounded 1 次纠正分支。
+func (sc *hubRealScenario) waitGroupReply(sessionID string, endBase int, msgBase int64, gid agenthub.GroupID, agentID agenthub.AgentID, pred func(agenthub.Message) bool) agenthub.Message {
 	sc.t.Helper()
-	base := hubRealMaxSeq(sc.groupMessagesOf(gid))
-	return sc.waitReply(sessionID, endBase, "群内 "+string(agentID)+" 的新回复", func() []agenthub.Message {
+	base := msgBase
+	return sc.waitReplySoft(sessionID, endBase, "群内 "+string(agentID)+" 的新回复", func() []agenthub.Message {
 		var out []agenthub.Message
 		for _, m := range sc.groupMessagesOf(gid) {
 			if m.Seq > base {
@@ -1325,6 +1331,12 @@ func (sc *hubRealScenario) scenarioMultiBubble() {
 		der = sc.waitBubbleInvariant(bsDM, a.ID)
 	}
 
+	// 硬不变量：气泡数必须等于非空 llm_end 数（bounded 纠正之后仍然不成立就是 FAIL，
+	// 不能因为「模型没配合」把这条断言降级成 note）。
+	if !der.Pass {
+		sc.failf("气泡数 != 非空 llm_end 数：bubbles=%d non_empty_llm_ends=%d total_llm_ends=%d distinct_ids=%v texts=%v",
+			len(der.Bubbles), der.NonEmptyLLMEnds, der.TotalLLMEnds, der.DistinctIDs, bubbleTexts(der))
+	}
 	if !bubbleHasToken(der, round1) || !bubbleHasToken(der, round2) {
 		sc.failf("两轮正文没落成两条气泡（bubbles=%d non_empty_llm_ends=%d texts=%v；模型行为，已 bounded 纠正 1 次）",
 			len(der.Bubbles), der.NonEmptyLLMEnds, bubbleTexts(der))
@@ -1534,6 +1546,11 @@ func (sc *hubRealScenario) scenarioTaskResultPush() {
 	taskID := agenthub.TaskID(sendRes.TaskID)
 	st.PushTaskID = taskID
 
+	// 派发轮先收尾，再取「回推前」的 agent_end 基线：否则「发起者新 run」会被
+	// 派发轮自己那个 agent_end 平凡满足（等于没断言）。
+	sc.waitRunIdle(bsA, bsA.id, 0, "发起者派发轮收尾")
+	st.PushEndBase = sc.agentEndCount(bsA.id)
+
 	// 结算 + 回推（delivered = MarkNotified 已落账，回推已完成）。
 	sc.waitFor(hubRealTimeout, "Project 任务结算并回推完成", func() (bool, string) {
 		task := p3bLoadTask(sc.t, sc.e.m, taskID)
@@ -1643,6 +1660,7 @@ func (sc *hubRealScenario) derivePush() *hubRealPush {
 		out.OriginBubbleText = hubRealClip(m.Text, 1000)
 	}
 	cardSeq := out.CardSeq
+	total := 0
 	for _, ev := range sc.events() {
 		typ := str(ev, "event_type")
 		if typ == "hub_round" && str(ev, "group_id") == string(st.PushGroupID) {
@@ -1668,13 +1686,18 @@ func (sc *hubRealScenario) derivePush() *hubRealPush {
 			if rid := str(ev, "run_id"); rid != "" && sc.priorRuns[rid] {
 				continue
 			}
-			out.OriginAgentEnds++
+			total++
 		}
 		if typ == "llm_end" && str(ev, "session_id") == st.PushPeerSID {
 			out.BystanderLLMEnds++
 		}
 	}
-	out.OriginNewRun = out.OriginAgentEnds > 0
+	// 只算派发轮收尾之后新起的 run（基线见 PushEndBase）。
+	out.OriginAgentEnds = total - st.PushEndBase
+	if out.OriginAgentEnds < 0 {
+		out.OriginAgentEnds = 0
+	}
+	out.OriginNewRun = total > st.PushEndBase
 	if st.PushRecorder != nil {
 		for _, req := range st.PushRecorder.snapshot() {
 			if out.Summary != "" && strings.Contains(req.Prompt, strings.TrimSpace(out.Summary)) {
@@ -1782,9 +1805,22 @@ func (sc *hubRealScenario) scenarioSessionSendMerge() {
 		}
 		return true, ""
 	})
-	// 一次调用：同场景内不允许出现第二次成功的 session_send（分两次就测不到「同批」）。
-	if ends := sc.toolEndsOf(bsA.id, "session_send"); len(ends) != 1 {
-		sc.failf("session_send 调用 = %d 次, want 1（必须一次带齐四要素，不能拆成多次）", len(ends))
+	// 一次调用：只统计成功（is_error=false）的 session_send。模型先失败重试一次是
+	// 可接受的（记 note），但成功调用必须恰好一次 —— 分两次成功就测不到「同批」。
+	success, failed := 0, 0
+	for _, ev := range sc.toolEndsOf(bsA.id, "session_send") {
+		if hubRealBool(ev, "is_error") {
+			failed++
+			continue
+		}
+		success++
+	}
+	if failed > 0 {
+		sc.rep.Notes = append(sc.rep.Notes,
+			fmt.Sprintf("session_send 有 %d 次失败调用（已忽略，只对成功调用断言一次）", failed))
+	}
+	if success != 1 {
+		sc.failf("成功的 session_send 调用 = %d 次, want 1（必须一次带齐四要素，不能拆成多次）", success)
 	}
 
 	var sendRes struct {

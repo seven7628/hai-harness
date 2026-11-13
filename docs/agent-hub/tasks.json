@@ -1770,21 +1770,22 @@
     {
       "id": "P5-10",
       "phase": "P5",
-      "title": "真实 Provider Hub 端到端评测：opencode/deepseek-v4.1-flash，7 场景（DM/工具/审批/@all/@指定/handoff/项目会话）",
+      "title": "真实 Provider Hub 端到端评测：opencode2/deepseek-v4.1-flash，12 场景（DM/工具/审批/@all/@指定/handoff/项目会话 + round2：DM 群隔离/内联 need 与 todo/多气泡/结果回推/同批合并）",
       "deps": [
         "P5-08",
         "P5-09"
       ],
       "files": [
         "desktop/bridge/hub_eval_real_test.go",
-        "docs/agent-hub/REAL-E2E.md"
+        "docs/agent-hub/REAL-E2E.md",
+        "desktop/bridge/hub_eval_real_round2_test.go"
       ],
-      "acceptance": "新增默认 skip、HAI_EVAL_HUB_REAL=1 才跑的真实 Provider Hub E2E；用 opencode/deepseek-v4.1-flash 覆盖单 DM、bash 工具、hitl 审批、群 @all、群 @指定、@A→@B handoff、@指定智能体自主 workspace_create/session_create/session_send 且项目会话真实跑出 llm_end/agent_end 与 completed 任务；报告记录每场景耗时/LLM usage/tool/approval/handoff/project 证据，原始 events 落盘；真实 settings 只读、临时 HOME 隔离、key 不入报告/事件/commit。独立 Review PASS（含真实复跑与失败路径）。",
-      "tests": "go test ./desktop/bridge -run TestHubRealE2E -count=1（默认 skip）&& HAI_EVAL_HUB_REAL=1 HAI_EVAL_HUB_PROVIDER=opencode HAI_EVAL_HUB_MODEL=deepseek-v4.1-flash HAI_EVAL_HUB_REPORT=/tmp/hub-real-e2e/report.json go test ./desktop/bridge -run TestHubRealE2E -count=1 -v -timeout 20m",
-      "commit": "66228ce + ba23b49",
+      "acceptance": "新增默认 skip、HAI_EVAL_HUB_REAL=1 才跑的真实 Provider Hub E2E（protocol hub-real-e2e/v2，默认 opencode2/deepseek-v4.1-flash）；base 1–7 覆盖单 DM、bash 工具、hitl 审批、群 @all、群 @指定、@A→@B handoff、@指定智能体自主 workspace_create/session_create/session_send；round2 8–12 覆盖 DM/群上下文与真实 StreamRequest 互不串（含 prompt preview 作用域）、Project 会话审批/Ask/ToDo 只经 need 与 tool_run_end（resolve 后跑到终态）、DM 多气泡（气泡数==非空 llm_end 数、message_id 互异、final 晚于 delta）、任务结果回推（账本 delivered/summary、恰好一张 task_result 卡、发起者新 run+一条总结气泡、旁人零唤醒零路由、重放不写第二张卡）、一次 session_send 同批 command=compact+text+files+images（参数四要素/回执/账本附件/项目侧事件序 agent_start→compress_start→compress_end(error 空,before>0)→llm_end→agent_end 且仅一个 agent_start）；报告记录每场景耗时/LLM usage/tool/approval/handoff/project 与 needs/bubbles/isolation/push/merge 证据，原始 events 落盘；真实 settings 只读、临时 HOME 隔离、key 不入报告/事件/commit。",
+      "tests": "go test ./desktop/bridge -run 'TestHubRealOnlySelection|TestHubRealReportPathValidation|TestHubRealE2E' -count=1（默认 skip）&& HAI_EVAL_HUB_REAL=1 HAI_EVAL_HUB_PROVIDER=opencode2 HAI_EVAL_HUB_MODEL=deepseek-v4.1-flash HAI_EVAL_HUB_REPORT=/tmp/hub-real-e2e-r2/report.json go test ./desktop/bridge -run TestHubRealE2E -count=1 -v -timeout 45m（单场景用 HAI_EVAL_HUB_ONLY=8/9/10/11/12）",
+      "commit": "66228ce + ba23b49 + 79ddeba + b7d9559",
       "status": "done",
       "review": "passed",
-      "note": "真实 Provider 端到端（不是 fake loop）。首轮全量运行 6/7（6_handoff 模型未按提示调用 handoff，报告 fail，非静默 skip）；稳定化后 7/7。独立 Review task-xrs5np2c 亲自复跑 7/7（87.5s，22 LLM calls），并验证门控 skip、provider 缺失 skip、bogus model 失败路径 status=fail、真实 settings 哈希不变、临时目录清理、key/base_url 零泄漏。初版测试文件在 merge e518801 中被并行任务误收，66228ce 是最终提交。 隐式状态修复：ba23b49（B1/B2 + N1-N6/N9-N12）。",
+      "note": "真实 Provider 端到端（不是 fake loop）。首轮全量运行 6/7（6_handoff 模型未按提示调用 handoff，报告 fail，非静默 skip）；稳定化后 7/7。独立 Review task-xrs5np2c 亲自复跑 7/7（87.5s，22 LLM calls），并验证门控 skip、provider 缺失 skip、bogus model 失败路径 status=fail、真实 settings 哈希不变、临时目录清理、key/base_url 零泄漏。初版测试文件在 merge e518801 中被并行任务误收，66228ce 是最终提交。 隐式状态修复：ba23b49（B1/B2 + N1-N6/N9-N12）。 round2（2026-11，79ddeba 场景表拆分 + b7d9559 场景 8–12）：真实复跑 8/9/10/11/12 全 PASS（114.9s，22 calls；8=34.5s 隔离 2 请求/2 请求哨兵不串、9=31.2s approval+question resolved 且 todos/answer 哨兵命中、10=8.0s 2 非空 llm_end==2 气泡、11=14.0s delivered+1 卡+1 总结气泡+旁观者 0 唤醒+重放仍 1 卡、12=26.8s 事件序 5 条且仅 1 agent_start）；同时回归 base 1/2 PASS。Review 后硬化（fix(hub): harden real e2e invariants）：10 的「气泡数==非空 llm_end 数」升级为硬断言、11 的发起者新 run 改用派发轮收尾基线、8 群侧 seq 基线前移并走 soft wait 使 bounded 纠正可达、12 只对成功 session_send 计数（失败重试记 note）。",
       "reviewNote": "task-xrs5np2c PASS（66228ce；HEAD 后续只有 P5-09 B1 合入与看板 docs，测试 blob 未变）：DM 强断言 human+agent 两条；tool/approval 按 run/tool id 归属；@all 双成员 + 单 round + 禁 @ 接龙；@指定 A 零新消息/B +1；handoff 四阶段（事件 pending_ack→LoadHandoff→handoff_ack→accepted→B 回复）；场景 7 五工具逐个断言参数 + 目录存在且在工作区根内 + m.get/listSessions 可查 + 按 sid 过滤 llm_end/agent_end + 账本 completed/delivered + Result.Summary=HAI_PROJECT_SESSION_OK。报告 calls=19 与 19 条 llm_end 对齐；成本 0 已注明上游未上报、不等于免费。非阻塞：① 门控内 skip 会覆盖默认真报告，建议仅在显式 HAI_EVAL_HUB_REPORT 时写或写 report.skip.json；② HAI_EVAL_HUB_ONLY 全不匹配会 pass+0 场景，建议置 fail；③ handoff 缺「B 回复 seq > accepted message_seq」时序断言；④ 审批走 bs.s.Approve，未覆盖 UI approve 命令；⑤ 迟到 llm_end/tool_run_end 未按 session/run 过滤；⑥ 180s×7 与 -timeout 20m 余量偏紧；⑦ 细节：setActive 失败写 SkipReason、totals 无成本口径注记、场景 panic 可能被记 pass、SIGKILL 时临时 settings 残留 key、commit message 有字面 \\n。 2026-11 隐式状态审计 task-dpjs4b83 升级 B1/B2 为 blocking（ONLY 未知场景假绿、handoff 被人类 prompt 喂答案）；ba23b49 修复后独立复审 task-gpcyfzdv PASS：真实复跑 7/7（83.5s，21 calls），未知 ONLY/只选 5/6/0 场景均 FAIL，promptB 不含 token、ack 后新 run、reply seq 18 > accepted seq 14，临时 settings 快照无 api_key、skip 不覆盖真报告、相对路径 FAIL、场景 7 无 handoff 串入。非阻塞剩余：B2 注释「token 唯一来源」过强、N7 未覆盖 UI approve、默认报告路径同秒边界、场景 6 root agent_end 未过滤 parent_run_id。"
     },
     {
