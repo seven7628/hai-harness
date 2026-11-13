@@ -21,6 +21,7 @@ import type { HubMessage, HubRunEntry } from './types'
 import { useClearSentAttachments, useHubAttachments } from './useHubAttachments'
 import { withFileRefs } from './attachments'
 import AttachmentStrip from './AttachmentStrip'
+import HubInlineNeeds from './HubInlineNeeds'
 import HubAttachments from './HubAttachments'
 import { useResolvedTheme } from '../lib/useTheme'
 import './hub.css'
@@ -378,6 +379,7 @@ export default function HubSurface() {
 
               {view === 'chat' ? (
                 <div className="composer-wrap"><div className="composer-inner">
+                  <HubInlineNeeds scope={{ kind: 'dm', agentId: activeId }} />
                   <AttachmentStrip
                     images={attach.images}
                     files={attach.files}

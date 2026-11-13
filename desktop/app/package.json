@@ -153,6 +153,7 @@
     "check:hub-artifacts": "node scripts/check-hub-artifacts.mjs",
     "check:hub-attach": "node scripts/check-hub-attach.mjs",
     "check:hub-composer": "node scripts/check-hub-composer.mjs",
+    "check:hub-inline-needs": "node scripts/check-hub-inline-needs.mjs",
     "test:hub-attach": "node scripts/test-hub-attach.mjs",
     "test:hub-stream": "node scripts/test-hub-stream.mjs",
     "test:hub-alerts": "node scripts/test-hub-alerts.mjs",

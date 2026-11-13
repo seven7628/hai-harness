@@ -255,9 +255,19 @@ export interface HubNeed {
   kind?: string
   status?: string
   agent_id?: string
+  group_id?: string
   task_id?: string
   session_id?: string
   workspace?: string
+  origin_agent_id?: string
+  origin_agent_name?: string
+  origin_kind?: string
+  target_kind?: string
+  target_workspace?: string
+  target_session_id?: string
+  run_id?: string
+  run_name?: string
+  depth?: number
   anchor?: string
   title?: string
   body?: string

@@ -3139,3 +3139,101 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-demo .hub-msg-file { max-width: 100%; }
   .hub-demo .hub-msg-file-name { max-width: 120px; }
 }
+
+/* —— Hub 单聊/群内联「任务等待你」卡（P4-UI-15） ——
+   只读展示 Project 主/子会话的审批、提问；不写 hub 消息、不进智能体上下文。
+   与 Needs you 抽屉共用同一份 need 和 resolve 路由。 */
+.hub-inline-needs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+.hub-inline-need {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--warning) 8%);
+  padding: 7px 10px 8px;
+  font-size: 12px;
+}
+.hub-inline-need header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.hub-inline-need header strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-inline-need-attr {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hub-inline-need-body {
+  margin: 5px 0 0;
+  max-height: 80px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.hub-inline-need-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.hub-inline-need-questions label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+.hub-inline-need-questions input {
+  width: 100%;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0 8px;
+  font: inherit;
+  outline: none;
+}
+.hub-inline-need-questions input:focus { border-color: var(--focus); }
+.hub-inline-need-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.hub-inline-need-options button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 1px 6px;
+  font-size: 10.5px;
+}
+.hub-inline-need-options button.on {
+  border-color: var(--focus);
+  color: var(--text);
+}
+.hub-inline-need footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}

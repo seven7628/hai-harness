@@ -718,15 +718,21 @@ class MockTransport implements Transport {
       const at = (ms: number): string => new Date(now - ms).toISOString()
       this.hubFixtureNeedList = [
         {
-          id: 'need_mock_approval', kind: 'approval', status: 'pending', agent_id: 'ag_mockwri2',
-          task_id: 'task_mock1', session_id: 'hub.ag_mockwri2.g.grp_mock1', anchor: 'call_mock_write_1',
+          id: 'need_mock_approval', kind: 'approval', status: 'pending', agent_id: 'ag_mockres1',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: '/mock/workspace',
+          target_session_id: 's_mock_project', run_name: 'Researcher-sub', depth: 1,
+          task_id: 'task_mock1', session_id: 's_mock_project', anchor: 'call_mock_write_1',
           title: '写文件前确认：把价格表落到 reports/pricing.md',
           body: '工具 write_file 需要一次审批：\nreports/pricing.md（新建，约 1.2KB）',
           created_at: at(90_000),
         },
         {
           id: 'need_mock_question', kind: 'question', status: 'pending', agent_id: 'ag_mockres1',
-          session_id: 'hub.ag_mockres1.g.grp_mock1', anchor: 'ask_mock_1',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: '/mock/workspace',
+          target_session_id: 's_mock_project', run_name: 'Researcher-sub', depth: 1,
+          session_id: 's_mock_project', anchor: 'ask_mock_1',
           title: '整理简报前有两个问题',
           body: JSON.stringify([
             { id: 'q1', question: 'C 家没有公开单价，要不要写「未公开」而不是估算价？' },
@@ -736,6 +742,8 @@ class MockTransport implements Transport {
         },
         {
           id: 'need_mock_failure', kind: 'failure', status: 'pending', agent_id: 'ag_mockres1',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockres1', origin_agent_name: 'Researcher',
+          origin_kind: 'group', target_kind: 'workspace', target_workspace: '/mock/workspace',
           task_id: 'task_mock_failed',
           title: '抓取 C 家定价页失败',
           body: 'HTTP 403（robot 校验）：https://c-pricing.example.com 需要人工确认是否继续重试。',
@@ -743,6 +751,8 @@ class MockTransport implements Transport {
         },
         {
           id: 'need_mock_handoff', kind: 'handoff', status: 'pending', agent_id: 'ag_mockwri2',
+          group_id: 'grp_mock1', origin_agent_id: 'ag_mockwri2', origin_agent_name: 'Writer',
+          origin_kind: 'group', target_kind: 'agent', target_workspace: '/mock/workspace',
           session_id: 'hub.ag_mockwri2.g.grp_mock1',
           title: '对比表交接给我润色',
           body: 'Researcher 已给出三家单价与功能列；请确认接收后由 Writer 出两页简报。',

@@ -44,6 +44,7 @@ import type { HubGroup, HubMessage } from './types'
 import { useClearSentAttachments, useHubAttachments } from './useHubAttachments'
 import { withFileRefs } from './attachments'
 import AttachmentStrip from './AttachmentStrip'
+import HubInlineNeeds from './HubInlineNeeds'
 
 // 群组视图（P3a-08 → P3b-07）：群头（成员叠图）/ 自动对话状态条 / 时间线 /
 // 路由动作 / Chat|Run / 发言（@ 选择器）与派任务表单。
@@ -555,6 +556,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
 
       <div className="composer-wrap">
         <div className="composer-inner">
+        <HubInlineNeeds scope={{ kind: 'group', groupId: group.id }} />
         <AttachmentStrip
           images={attach.images}
           files={attach.files}
