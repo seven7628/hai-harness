@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 10:15",
-    "current": "R11"
+    "updated": "2026-11-13 10:49",
+    "current": "R11b"
   },
   "rounds": [
     {
@@ -891,21 +891,43 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     {
       "id": "R11",
       "pr": "PR-11",
-      "title": "删除 legacy：TAB_KINDS / makeTab switch / rightTab",
+      "title": "删除 legacy：TAB_KINDS / makeTab switch / kindIcon switch（rightTab → R11b）",
       "type": "清理",
       "est": 0.5,
       "deps": [
         "R10"
+      ],
+      "status": "done",
+      "commit": "a1596ba",
+      "review": "主会话复核：两条前置判据开工即否（kind === ' 实得 18 而非 0；rightTab 在 e2e 有 55 处/15 文件、src 47 行/4 文件）→ rightTab 拆 R11b。A/B/C 三件行为保持：14 项门禁逐项同数（无一条丢失），新增断言 registry+3 / builtin+2 / persist+3 / tabbar+1 / right-tabs+5；4 条变异全部真红（file defaultSpec→Q2、web defaultSpec→L27、icon→tabbar A1+眼睛图标、BUILTIN_KINDS 含 plugin:→注册表单测+P8）",
+      "perf": [],
+      "acc": [
+        "无 TAB_KINDS 代码引用（白名单搬进注册表 BUILTIN_KINDS + isBuiltinKind；3 处注释说明历史）",
+        "makeTab 无 kind switch（初值来自 provider.defaultSpec）",
+        "RightPanel 无 kind→图标 switch（图标来自 provider.icon）",
+        "kind === ' = 16 行/17 处，逐条有理由（03 §5.4），只许降不许升"
+      ],
+      "rollback": "四个 commit 各自独立：A/B/C 任一可单独 revert（defaultSpec/icon 都有内联兜底）"
+    },
+    {
+      "id": "R11b",
+      "pr": "PR-11b",
+      "title": "删 rightTab 字段（先迁 e2e 55 处引用）",
+      "type": "清理",
+      "est": 0.5,
+      "deps": [
+        "R11"
       ],
       "status": "todo",
       "commit": "",
       "review": "",
       "perf": [],
       "acc": [
-        "全仓无 TAB_KINDS 引用",
-        "e2e 全绿"
+        "e2e 里 55 处 rightTab 引用迁到 tabsByScope/activeId（15 个探针文件）",
+        "desktop/app/src 里 rightTab 只剩兼容注释",
+        "删字段后 tabPatch/viewFields 的写穿一并去掉"
       ],
-      "rollback": "同 PR 内保留旧字段到最后一个 commit"
+      "rollback": "字段删除与探针迁移同一个 PR；不迁移完不删字段（本轮的前提条件）"
     },
     {
       "id": "R12",

@@ -312,6 +312,24 @@
     （会重挂 children、破坏 R06c 的原地复用），改成 boundary 内 `tabId` 变化时复位错误态；
     ② 墓碑的「移除标签」不用 `closeTabNow`（会静默丢未保存内容），改 `closeTabs([id])`。
 - **11**：删 `TAB_KINDS`、`makeTab` 的 kind switch、`kindIcon/kindLabel` 的 switch、`rightTab` 字段本身（如果 e2e 已全部迁移）。**判据：`grep -c "kind === '" RightPanel.tsx` = 0，`grep -rn "rightTab" desktop/app/src` 只剩兼容注释。**
+  - **落地偏差（R11，F67/F68）——三件做了、一件推迟，判据换了口径**：
+    开工前核实两条前置：`grep -c "kind === '" RightPanel.tsx` 实得 **18**（不是 0）；`rightTab` 在
+    `desktop/app/e2e/*.mjs` 有 **55 处 / 15 个文件**。按本条自己的措辞「**如果** e2e 已全部迁移」，
+    `rightTab` 字段这一轮**不删** → 拆出 **R11b**。字段今天仍被两头用着，两条都得先迁：
+    e2e **55 处 / 15 个文件**（`window.__store` 直写 `rightTab` 复位标签条）；
+    `desktop/app/src` **47 行 / 4 个文件** —— 真代码是 RightPanel 的 rail 高亮
+    （`rightTab === tab.key`）与 sync effect 的依赖，加 store 里 `tabPatch`/`rightTabPatch`/
+    `viewFields` 的写穿，其余是注释里的口径说明。原判据「`grep -rn rightTab desktop/app/src`
+    只剩兼容注释」今天**也不成立**（41 行在 store），一并记在这里，免得 R11b 再踩一次。
+    其余三件已落地，且都是行为保持：`TAB_KINDS` → 注册表 `BUILTIN_KINDS`（+ `isBuiltinKind` 谓词）；
+    `makeTab` 的 kind switch → provider 的 `defaultSpec`（file/web 各一份实现，`focusSpec`/`activePageIdOf`
+    仍只有一份、在 store）；`kindIcon` 的 switch → provider 的 `icon`（`icon` 入参改为**可选** ——
+    ＋ 菜单与空态能力面板没有标签实例）。
+  - **判据改口径**：「`kind === '` 归零」这一轮**不成立，也不该为它硬搬**。剩下的 **16 行 / 17 处**逐条
+    分了三类 —— web 的 embed 语义（7）、file 的 mode 与 path（5）、探针契约 `data-mode`/`data-view`（2）、
+    原生宿主判定（2 处 1 行）、provider 兜底（1）。每条为什么留、什么时候才会掉，见 `03-code-plan.md` §5.4。
+    **可守的数：RightPanel 的 `grep -c "kind === '"` = 16，且只许降不许升**（新增一条 `kind === '`
+    必须先回答「provider 能不能给」—— 能，就进 provider；不能，是标签形状的固有语义）。
 
 ---
 
