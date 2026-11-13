@@ -294,8 +294,16 @@ func TestSameContentDifferentPathSharesCacheKey(t *testing.T) {
 	if got := fake.calls.Load(); got != 1 {
 		t.Fatalf("同内容不同路径调用了 %d 次，期望 1（内容寻址失效）", got)
 	}
-	if ra.Key != rb.Key || ra.HTMLPath != rb.HTMLPath {
-		t.Fatalf("缓存键/产物不一致：%q/%q vs %q/%q", ra.Key, ra.HTMLPath, rb.Key, rb.HTMLPath)
+	// 断言的是**可观察结果**，不是自己算出来的键：键由同一份实现产出，比两个键相等
+	// 等于自证。真正的问题是「第二次有没有重新转换、产物在不在」。
+	if !rb.Cached {
+		t.Fatal("同内容不同路径的第二次不是缓存命中")
+	}
+	if ra.HTMLPath != rb.HTMLPath {
+		t.Fatalf("两次拿到了不同的产物路径：%q vs %q", ra.HTMLPath, rb.HTMLPath)
+	}
+	if _, err := os.Stat(rb.HTMLPath); err != nil {
+		t.Fatalf("产物不存在: %v", err)
 	}
 	// 反向：同内容**换文件名**必须是另一个键 —— 产物里写着文件名（<title>/<h1>），
 	// 混用会让「另存为」后的预览标题停在旧名字上。
