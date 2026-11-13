@@ -2733,7 +2733,10 @@ func (ac *AgentContext) todoSnapshot() []events.TodoSnapshot {
 	}
 	items := ac.Todo.Items()
 	if len(items) == 0 {
-		return nil
+		// 空清单是事实（用户刚清空），不是「没有快照」：返回非 nil 空切片，
+		// 让宿主把 [] 原样写进事件，而不是回退读会话清单（子 agent 会因此显示
+		// 主会话的 TODO）。
+		return []events.TodoSnapshot{}
 	}
 	out := make([]events.TodoSnapshot, 0, len(items))
 	for _, it := range items {
