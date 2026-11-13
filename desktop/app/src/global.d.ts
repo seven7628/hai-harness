@@ -1,4 +1,4 @@
-import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus } from './transport/types'
+import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus, SurfaceIndex, SurfaceCommandReply } from './transport/types'
 
 export {}
 
@@ -11,6 +11,9 @@ declare global {
       createWorkspaceFolder: (parent: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
       startBridge: () => Promise<{ ok: boolean; error?: string }>
       command: (cmd: unknown) => Promise<{ ok: boolean; error?: string }>
+      // Surface 插件（PR-14）：索引（只读元数据）+ 宿主只读命令的唯一入口。
+      surfaceIndex: () => Promise<SurfaceIndex>
+      surfaceCommand: (p: { id: string; name: string; args?: Record<string, unknown>; workspace?: string }) => Promise<SurfaceCommandReply>
       stopBridge: () => Promise<{ ok: boolean }>
       settingsGet: () => Promise<AppSettings>
       settingsSet: (patch: Partial<AppSettings>) => Promise<{ ok: boolean; error?: string; settings?: AppSettings }>

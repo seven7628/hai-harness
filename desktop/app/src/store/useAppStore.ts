@@ -51,6 +51,9 @@ import { getSurface, isBuiltinKind } from '../surfaces/registry'
 // PR-12 `ui` 通道：渲染层 → 桥的 UI 快照（lib/uiSnapshot）+ 桥 → 渲染层的 ui 信封（lib/uiBus）。
 // 两者都不进事件流：`ui` 不是 28 类 agent 事件（不落盘、不重放、不进 transcript）。
 import { startUISnapshot } from '../lib/uiSnapshot'
+// PR-14 插件加载器：index 是「装过的」，注册表是「活着的」，它在两者之间做同步。
+// 依赖方向是 store → loader（loader 不 import store，见其文件头注释）。
+import { startPluginLoader, surfaceBaseUrl } from '../surfaces/plugin/loader'
 import { emitUI } from '../lib/uiBus'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
 
@@ -9219,6 +9222,8 @@ let wired = false
 // （每次 start() 多一份 window resize 监听），而**重发**是必要的：桥侧缓存随进程
 // 一起没了，新桥在用户动界面之前会一直回答 no_snapshot。
 let uiSnapStop: (() => void) | undefined
+// 插件加载器的停止函数（PR-14）。只停监听、不卸载已加载插件 —— 见 startPluginLoader 注释。
+let pluginLoaderStop: (() => void) | undefined
 function wire(): void {
   if (wired) return
   wired = true
@@ -9516,6 +9521,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
       t: i18nT,
       scopeKeyOf: (s) => scopeKeyOf(s),
+    })
+    // 插件加载器（PR-14）：启动同步一次 + 每次 surfaces_changed 再同步一次。
+    // 排在 startUISnapshot 之后是刻意的：快照要能立刻看到「装了什么」，而插件的
+    // surface_status 上报走同一条 transport.send（桥必须已经在跑）。
+    pluginLoaderStop?.()
+    pluginLoaderStop = startPluginLoader({
+      readIndex: async () =>
+        (window.desktop?.surfaceIndex ? await window.desktop.surfaceIndex() : { version: 1, items: [] }),
+      baseUrl: surfaceBaseUrl,
+      send: (op, data) => {
+        void transport.send({ id: ++cmdSeq, type: 'ui', payload: { op, data } })
+      },
+      openTab: (spec) => useAppStore.getState().openTab(spec as unknown as TabSpec),
+      toast: (msg) => useAppStore.getState().showToast(msg),
+      getWorkspace: () => useAppStore.getState().workspace,
     })
     // 工作区清单上移（手机端要看到与桌面相同的列表）：localStorage 只是缓存，
     // bridge 的 ~/.go-code/workspaces.json 才是真相源。只增不减，见 workspace_registry.go。

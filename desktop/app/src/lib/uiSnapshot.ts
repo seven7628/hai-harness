@@ -15,6 +15,7 @@
 import type { AppState, TabInstance } from '../store/useAppStore'
 import { getSurface, listSurfaces, subscribeSurfaces } from '../surfaces/registry'
 import { listDisabled } from '../surfaces/health'
+import { listSurfaceLoadErrors } from '../surfaces/plugin/status'
 import { shortName } from './shortPath'
 
 /** debounce 窗口（与 02-pr-plan 的 500ms 口径一致；改它要同步改 e2e 的等待窗口）。 */
@@ -27,6 +28,15 @@ export interface UISurfaceEntry {
   group: string
   order: number
   disabled: boolean
+  /**
+   * 插件**加载失败**的原因（PR-14 C）。字段口径：
+   *   · 只有「provider 根本没进注册表」的插件才有它（import 失败 / kind 不符 / apply 抛错）；
+   *   · `disabled:true` 与之同时出现，因为对快照的消费者（模型）来说「这个 kind 现在不能开」
+   *     是同一件事 —— 但**恢复动作不同**：disabled 走 `enableSurface`（health 的禁用集），
+   *     带 error 的没有 provider 可启用，只能重装/修插件。
+   * 字段名与 `surface_status` 的 `error` 同字（ui_state.go 的 uiSurfaceStatus.Error）。
+   */
+  error?: string
 }
 
 export interface UITabEntry {
@@ -101,6 +111,18 @@ function surfaceEntries(): UISurfaceEntry[] {
   for (const kind of [...off].sort()) {
     const p = getSurface(kind)
     out.push({ kind, group: p?.group ?? 'plugin', order: p?.order ?? 100, disabled: true })
+  }
+  // 插件加载失败（PR-14）：这些 kind **没有 provider**（没进注册表），所以上面的三个来源
+  // 都看不到它们。不补这一段，「插件坏了」与「没装过这个插件」在 ui_inspect 里长得一样 ——
+  // 而模型正是靠这份快照判断「要不要让用户重装」。
+  for (const err of listSurfaceLoadErrors()) {
+    const hit = out.find((e) => e.kind === err.kind)
+    if (hit) {
+      hit.error = err.error
+      hit.disabled = true
+      continue
+    }
+    out.push({ kind: err.kind, group: 'plugin', order: 100, disabled: true, error: err.error })
   }
   return out
 }

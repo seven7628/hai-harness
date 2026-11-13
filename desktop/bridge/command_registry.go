@@ -255,6 +255,10 @@ const (
 	// payload = {op, data}，op ∈ {snapshot, surface_status}；未知 op 静默忽略。
 	// 见 desktop/bridge/ui_state.go 与 03-code-plan §3.1。
 	CmdUI Command = "ui"
+	// CmdSurfaceCommand 插件调用宿主只读命令（PR-14 D）。
+	// payload = {id, name, args?}；白名单与审计在 Go（surfaces_command.go），
+	// 渲染层的预检只是省一次 IPC，不是边界。
+	CmdSurfaceCommand Command = "surface_command"
 )
 
 // String 命令名字符串（dispatch switch 用）。
