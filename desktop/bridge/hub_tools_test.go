@@ -428,3 +428,42 @@ func TestHubEngineVisibleToolsExcludeHidden(t *testing.T) {
 		t.Fatal("VisibleTools() dropped a tool that is not hidden")
 	}
 }
+
+// 场景1（会话隔离回归）：群工具只在群作用域会话注册。
+//
+// 这些工具都以「某个群」为参数。注册进 DM 引擎后，模型在单聊里就能读群历史、
+// 甚至 group_say 往群里发言 —— 单聊与群会话的隔离直接破掉（审计发现的真串话面）。
+// 群会话必须照旧全有（别修成两边都没有）。
+func TestHubDMHasNoGroupTools(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "ToolScopeA")
+	g := groupWithMembers(t, m, buf, 2, "工具作用域群", memberRef{a.ID, "owner"})
+
+	groupTools := []string{
+		"group_history", "group_members", "agent_status", // 读：群历史/名册/成员状态
+		"group_say", "handoff", "handoff_ack", // 写：往群里发言 / 发起交接 / 接受交接
+	}
+
+	dm, err := m.hubDMSession(string(a.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grp, err := m.hubGroupSession(string(a.ID), string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range groupTools {
+		if _, err := dm.hubEngine.GetTool(context.Background(), name); err == nil {
+			t.Errorf("DM 会话注册了群工具 %q：单聊能读群历史/往群里发言", name)
+		}
+		if _, err := grp.hubEngine.GetTool(context.Background(), name); err != nil {
+			t.Errorf("群会话缺群工具 %q: %v", name, err)
+		}
+	}
+	// 反向对照：撤群工具不能把 DM 的通用工具面一起关空。
+	for _, name := range []string{"bash", "read_file", "session_send"} {
+		if _, err := dm.hubEngine.GetTool(context.Background(), name); err != nil {
+			t.Errorf("DM 会话缺通用工具 %q: %v", name, err)
+		}
+	}
+}

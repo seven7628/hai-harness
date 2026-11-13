@@ -42,11 +42,19 @@ func p3bGroup(t *testing.T, m *manager, buf *syncBuf, cmdID int, name string, po
 }
 
 // p3bGroupSay 以某智能体的群工具调用 group_say（与生产一致：参数走 JSON）。
+//
+// 群工具只在群作用域会话里注册（场景1 隔离：DM 会话不注册 group_say），
+// 所以拿工具的会话必须是 group_id 对应的群会话，不能是 DM 会话。
 func p3bGroupSay(t *testing.T, m *manager, agentID string, args map[string]any) (map[string]any, error) {
 	t.Helper()
-	bs, err := m.hubDMSession(agentID)
+	gid, _ := args["group_id"].(string)
+	if strings.TrimSpace(gid) == "" {
+		t.Fatal("p3bGroupSay 需要 group_id 才能取到群会话里的 group_say")
+	}
+	bs, err := m.hubGroupSession(agentID, gid)
 	if err != nil {
-		t.Fatal(err)
+		// 非成员/已删除的群拿不到群会话 —— 与原实现（GetTool 报错）同口径，交给调用方断言失败。
+		return nil, err
 	}
 	tool, err := bs.hubEngine.GetTool(context.Background(), "group_say")
 	if err != nil {

@@ -570,3 +570,128 @@ func TestHubHomeCommandDoesNotCreateProjectRuntime(t *testing.T) {
 		t.Fatal("blocks_page must not assemble a hub runtime either")
 	}
 }
+
+// 场景 1-2：DM 与群的消息内容不互串 ——
+//  1. DM 里发的正文/附件不进群日志，也不进群唤醒快照（模型在群里读不到）；
+//  2. 反向群消息不进 DM 索引，也不进 DM 会话的模型上下文。
+//
+// 两组都是「正对照 + 负对照」：先证明各自那条消息确实进了自己的上下文，
+// 否则「对方没出现」也可能只是「什么都没读到」。
+func TestHubDMAndGroupContentStaysInItsOwnSession(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "LeakA")
+	g := groupWithMembers(t, m, buf, 2, "不串话群", memberRef{a.ID, "owner"})
+	agentID := string(a.ID)
+
+	const dmOnly = "DM-ONLY-私聊专属正文-x9"
+	const groupOnly = "GROUP-ONLY-群专属正文-y7"
+	imgURL := testImageDataURL("dm-only-image")
+
+	// —— DM 发一条「独特正文 + 独特图片附件」 ——
+	dm, err := m.hubDMSession(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dmProv := &evalProvider{reply: "DM 第一条回执"}
+	setDMFakeLoop(t, m, dm, agentID, dmProv)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 3, "hub_send", map[string]any{
+		"target": map[string]any{"kind": "dm", "agent_id": agentID},
+		"text":   dmOnly,
+		"attachments": []any{map[string]any{
+			"kind": "image", "name": "dm-only.png", "mime_type": "image/png",
+			"bytes": float64(9), "data_url": imgURL,
+		}},
+	}); !ok {
+		t.Fatalf("dm send: %s", errMsg)
+	}
+	waitHubIndex(t, m, a.ID, 2)
+	// 正对照：DM 自己的模型上下文里确实有这条正文与附件。
+	if prompt := isolationPrompt(dmProv.lastRequest()); !strings.Contains(prompt, dmOnly) || !strings.Contains(prompt, imgURL) {
+		t.Fatalf("DM 会话没拿到自己的正文/附件（正对照失败）:\n%s", prompt)
+	}
+
+	// —— 群里 @ 同一智能体 ——
+	grp, err := m.hubGroupSession(agentID, string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpProv := &evalProvider{reply: "群回执"}
+	setGroupFakeLoop(t, m, grp, g, agentID, grpProv)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 4, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": groupOnly, "mentions": []string{agentID},
+	}); !ok {
+		t.Fatalf("group send: %s", errMsg)
+	}
+	waitGroupMessages(t, m, g.ID, func(msgs []agenthub.Message) bool {
+		for _, msg := range msgs {
+			if msg.Sender.Kind == agenthub.SenderAgent && strings.Contains(msg.Text, "群回执") {
+				return true
+			}
+		}
+		return false
+	})
+	grpPrompt := isolationPrompt(grpProv.lastRequest())
+	if !strings.Contains(grpPrompt, groupOnly) {
+		t.Fatalf("群会话没拿到本轮触发消息（正对照失败）:\n%s", grpPrompt)
+	}
+	// 负对照：DM 的正文/附件一个字节都不该出现在群的模型上下文里（含 hidden 快照块）。
+	if strings.Contains(grpPrompt, dmOnly) {
+		t.Fatalf("DM 正文漏进了群会话上下文:\n%s", grpPrompt)
+	}
+	if strings.Contains(grpPrompt, imgURL) || strings.Contains(grpPrompt, "dm-only.png") {
+		t.Fatalf("DM 附件漏进了群会话上下文:\n%s", grpPrompt)
+	}
+
+	// 群快照本身（wake 的 hidden 块来源）也只能由群日志构造。
+	fst, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpMsgs, err := fst.ReadMessages(context.Background(), g.ID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range grpMsgs {
+		if strings.Contains(msg.Text, dmOnly) {
+			t.Fatalf("DM 正文落进了群日志: %+v", msg)
+		}
+	}
+	snap := agenthub.BuildGroupSnapshot(g, a.ID, grpMsgs, 0,
+		agenthub.Round{GroupID: g.ID, ID: "rnd_isolation"}, agenthub.SnapshotOptions{})
+	if !strings.Contains(snap.Text, groupOnly) {
+		t.Fatalf("群快照缺本轮群消息（正对照失败）:\n%s", snap.Text)
+	}
+	if strings.Contains(snap.Text, dmOnly) {
+		t.Fatalf("DM 正文出现在群快照里:\n%s", snap.Text)
+	}
+
+	// —— 反向：群消息不进 DM 索引 / DM 上下文 ——
+	dmProv2 := &evalProvider{reply: "DM 第二条回执"}
+	setDMFakeLoop(t, m, dm, agentID, dmProv2)
+	if ok, errMsg, _ := hubCmd(t, m, buf, 5, "hub_send", map[string]any{
+		"target": map[string]any{"kind": "dm", "agent_id": agentID},
+		"text":   "DM-ONLY-第二次提问",
+	}); !ok {
+		t.Fatalf("dm send #2: %s", errMsg)
+	}
+	waitHubIndex(t, m, a.ID, 4)
+	dmPrompt := isolationPrompt(dmProv2.lastRequest())
+	if !strings.Contains(dmPrompt, "DM-ONLY-第二次提问") {
+		t.Fatalf("DM 第二轮没拿到自己的新消息（正对照失败）:\n%s", dmPrompt)
+	}
+	if strings.Contains(dmPrompt, groupOnly) {
+		t.Fatalf("群正文漏进了 DM 会话上下文:\n%s", dmPrompt)
+	}
+	dmMsgs, err := fst.ReadDirectMessages(context.Background(), a.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dmMsgs) != 4 {
+		t.Fatalf("DM 索引条数 = %d, want 4（人/回执 × 2）", len(dmMsgs))
+	}
+	for _, msg := range dmMsgs {
+		if strings.Contains(msg.Text, groupOnly) {
+			t.Fatalf("群正文出现在 DM 索引（agenthub DM 索引串话）: %+v", msg)
+		}
+	}
+}

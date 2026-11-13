@@ -36,9 +36,11 @@ func handoffGroupFixture(t *testing.T, roles []handoffMember) (*manager, *syncBu
 	return m, buf, agents, groupFromData(t, data)
 }
 
-func callHubToolForAgent(t *testing.T, m *manager, agentID agenthub.AgentID, name, args string) (string, error) {
+// callHubToolForAgent 在**群作用域会话**里调群工具。场景1 隔离后 handoff/handoff_ack
+// 只在群会话注册（DM 里注册等于让私聊往群里发起交接），所以会话必须按 groupID 取群会话。
+func callHubToolForAgent(t *testing.T, m *manager, agentID agenthub.AgentID, groupID, name, args string) (string, error) {
 	t.Helper()
-	bs, err := m.hubDMSession(string(agentID))
+	bs, err := m.hubGroupSession(string(agentID), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +62,7 @@ func TestHubHandoffCardAckAndNeed(t *testing.T) {
 	}
 	ctx := context.Background()
 	args := `{"group_id":"` + string(g.ID) + `","to_agent_id":"` + string(b.ID) + `","instruction":"把定价表写成两页简报"}`
-	out, err := callHubToolForAgent(t, m, a.ID, "handoff", args)
+	out, err := callHubToolForAgent(t, m, a.ID, string(g.ID), "handoff", args)
 	if err != nil {
 		t.Fatalf("handoff: %v", err)
 	}
@@ -108,14 +110,14 @@ func TestHubHandoffCardAckAndNeed(t *testing.T) {
 		t.Fatalf("mark read changed handoff: %+v, %v", got, err)
 	}
 	// observer 不能发起；非接收方不能 ack。
-	if _, err := callHubToolForAgent(t, m, c.ID, "handoff", `{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x"}`); err == nil {
+	if _, err := callHubToolForAgent(t, m, c.ID, string(g.ID), "handoff", `{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x"}`); err == nil {
 		t.Fatal("observer handoff must fail")
 	}
-	if _, err := callHubToolForAgent(t, m, c.ID, "handoff_ack", `{"handoff_id":"`+h.ID+`","accept":true}`); err == nil {
+	if _, err := callHubToolForAgent(t, m, c.ID, string(g.ID), "handoff_ack", `{"handoff_id":"`+h.ID+`","accept":true}`); err == nil {
 		t.Fatal("non-recipient ack must fail")
 	}
 	// 接收方接受，卡片状态更新，Need resolved。
-	out, err = callHubToolForAgent(t, m, b.ID, "handoff_ack", `{"handoff_id":"`+h.ID+`","accept":true}`)
+	out, err = callHubToolForAgent(t, m, b.ID, string(g.ID), "handoff_ack", `{"handoff_id":"`+h.ID+`","accept":true}`)
 	if err != nil || !strings.Contains(out, string(agenthub.HandoffAccepted)) {
 		t.Fatalf("ack = %s, %v", out, err)
 	}
@@ -135,7 +137,7 @@ func TestHubHandoffCardAckAndNeed(t *testing.T) {
 		t.Fatalf("ack card status = %+v", msgs[1].Refs)
 	}
 	// 幂等：重复 ack 不追加卡片。
-	if _, err := callHubToolForAgent(t, m, b.ID, "handoff_ack", `{"handoff_id":"`+h.ID+`","accept":true}`); err != nil {
+	if _, err := callHubToolForAgent(t, m, b.ID, string(g.ID), "handoff_ack", `{"handoff_id":"`+h.ID+`","accept":true}`); err != nil {
 		t.Fatalf("repeat ack: %v", err)
 	}
 	if msgs, _ = st.ReadMessages(ctx, g.ID, 0, 20); len(msgs) != 2 {
@@ -152,7 +154,7 @@ func TestHubHandoffGuardsDepthRateAndDeletedTarget(t *testing.T) {
 	st, _ := m.hubStore()
 	ctx := context.Background()
 	handoff := func(from, to agenthub.AgentID) (agenthub.Handoff, error) {
-		out, err := callHubToolForAgent(t, m, from, "handoff",
+		out, err := callHubToolForAgent(t, m, from, string(g.ID), "handoff",
 			`{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(to)+`","instruction":"chain"}`)
 		var r struct {
 			Handoff agenthub.Handoff `json:"handoff"`
@@ -161,7 +163,7 @@ func TestHubHandoffGuardsDepthRateAndDeletedTarget(t *testing.T) {
 		return r.Handoff, err
 	}
 	// 不存在的 artifact_id 不能进交接卡。
-	if _, err := callHubToolForAgent(t, m, a.ID, "handoff",
+	if _, err := callHubToolForAgent(t, m, a.ID, string(g.ID), "handoff",
 		`{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x","artifact_ids":["art_missing"]}`); err == nil {
 		t.Fatal("unknown artifact id must be rejected")
 	}
@@ -199,11 +201,11 @@ func TestHubHandoffAckRejectsDeletedRecipient(t *testing.T) {
 	a, b := agents[0], agents[1]
 	st, _ := m.hubStore()
 	ctx := context.Background()
-	bsB, err := m.hubDMSession(string(b.ID))
+	bsB, err := m.hubGroupSession(string(b.ID), string(g.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := callHubToolForAgent(t, m, a.ID, "handoff",
+	out, err := callHubToolForAgent(t, m, a.ID, string(g.ID), "handoff",
 		`{"group_id":"`+string(g.ID)+`","to_agent_id":"`+string(b.ID)+`","instruction":"x"}`)
 	if err != nil {
 		t.Fatal(err)

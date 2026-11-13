@@ -2,8 +2,10 @@ package main
 
 // hub_group_tools.go：Hub 智能体的群工具（P3a-05）。
 //
-// group_history / group_members / group_say 都显式带 group_id（P3a 还没有群会话，
-// 模型从系统提示词/人给的任务里知道群 id）。权限：
+// group_history / group_members / group_say 都带 group_id。**群作用域会话把群钉死**：
+// 装配时绑定 spec.Scope.GroupID，参数缺省用绑定群、给了别的群直接拒绝 —— 与
+// assign_task/task_ack 同口径。否则同一智能体在多个群时，A 群会话能借参数读写 B 群
+// （跨群越权）。权限：
 //   - 必须是群成员（非成员一律拒绝，不泄漏群存在性以外的信息）；
 //   - group_history 走 Redacted(false)：owner-only 消息只显示占位；
 //   - observer 可以读，不能 group_say；
@@ -24,32 +26,57 @@ type hubGroupToolBase struct {
 	tools.BaseTool
 	m       *manager
 	agentID agenthub.AgentID
+	// groupID 是装配时绑定的群（群作用域会话 = spec.Scope.GroupID）。
+	// 空 = 未绑定（直造工具的老路径/测试），此时沿用「按参数」的旧行为。
+	groupID agenthub.GroupID
 }
 
-func registerHubGroupTools(eng *tools.Engine, m *manager, agentID agenthub.AgentID) {
+func registerHubGroupTools(eng *tools.Engine, m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) {
 	if eng == nil || m == nil || agentID == "" {
 		return
 	}
 	for _, tl := range []tools.Tool{
-		newHubGroupHistoryTool(m, agentID),
-		newHubGroupMembersTool(m, agentID),
-		newHubAgentStatusTool(m, agentID),
-		newHubGroupSayTool(m, agentID),
+		newHubGroupHistoryTool(m, agentID, groupID),
+		newHubGroupMembersTool(m, agentID, groupID),
+		newHubAgentStatusTool(m, agentID, groupID),
+		newHubGroupSayTool(m, agentID, groupID),
 	} {
 		eng.RegisterTool(context.Background(), tl)
 	}
-	registerHubHandoffTools(eng, m, agentID)
+	registerHubHandoffTools(eng, m, agentID, groupID)
 }
 
-// groupAccess 读群 + 校验成员；返回成员角色。
+// pinnedGroupID 解析工具参数里的 group_id，并把群作用域钉在装配时绑定的群上：
+//   - 已绑定（群作用域会话）：缺省用绑定群，给了别的群直接拒绝；
+//   - 未绑定（测试/老装配路径）：沿用按参数的行为（空参数仍报错）。
+func (t *hubGroupToolBase) pinnedGroupID(argsGroupID string) (agenthub.GroupID, error) {
+	bound := agenthub.GroupID(strings.TrimSpace(string(t.groupID)))
+	gid := agenthub.GroupID(strings.TrimSpace(argsGroupID))
+	if bound == "" {
+		if gid == "" {
+			return "", fmt.Errorf("%w: group_id 不能为空", agenthub.ErrInvalid)
+		}
+		return gid, nil
+	}
+	if gid == "" {
+		return bound, nil
+	}
+	if gid != bound {
+		// 不回显别的群的任何信息（只报本群与参数），越权探测没有额外收益。
+		return "", fmt.Errorf("%w: 群作用域会话只能操作本群（本群 %s，参数 %s）", agenthub.ErrInvalid, bound, gid)
+	}
+	return bound, nil
+}
+
+// groupAccess 先钉死群作用域、再读群 + 校验成员；返回成员角色。
 func (t *hubGroupToolBase) groupAccess(ctx context.Context, groupID string) (*agenthub.FileStore, *agenthub.Group, agenthub.MemberRole, error) {
-	st, err := t.m.hubStore()
+	gid, err := t.pinnedGroupID(groupID)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	gid := agenthub.GroupID(strings.TrimSpace(groupID))
-	if gid == "" {
-		return nil, nil, "", fmt.Errorf("%w: group_id 不能为空", agenthub.ErrInvalid)
+	st, err := t.m.hubStore()
+	if err != nil {
+		return nil, nil, "", err
 	}
 	g, err := st.LoadGroup(ctx, gid)
 	if err != nil {
@@ -70,7 +97,7 @@ func (t *hubGroupToolBase) groupAccess(ctx context.Context, groupID string) (*ag
 
 type hubGroupHistoryTool struct{ hubGroupToolBase }
 
-func newHubGroupHistoryTool(m *manager, agentID agenthub.AgentID) *hubGroupHistoryTool {
+func newHubGroupHistoryTool(m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) *hubGroupHistoryTool {
 	return &hubGroupHistoryTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "group_history",
 		Description_: "Read a Hub group's message history (paginated, newest first). " +
@@ -83,7 +110,7 @@ func newHubGroupHistoryTool(m *manager, agentID agenthub.AgentID) *hubGroupHisto
 			"limit":      tools.Int("Page size 1-100 (default 30)"),
 		}, "group_id"),
 		CanParallel_: true, ReadOnly_: true,
-	}, m: m, agentID: agentID}}
+	}, m: m, agentID: agentID, groupID: groupID}}
 }
 
 type hubGroupHistoryArgs struct {
@@ -98,7 +125,8 @@ func (t *hubGroupHistoryTool) Call(ctx context.Context, _, arguments string) (st
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	st, _, _, err := t.groupAccess(ctx, a.GroupID)
+	// 读用 groupAccess 解析后的群：参数缺省时 a.GroupID 是空串，不能直接拿去读。
+	st, g, _, err := t.groupAccess(ctx, a.GroupID)
 	if err != nil {
 		return "", err
 	}
@@ -108,9 +136,9 @@ func (t *hubGroupHistoryTool) Call(ctx context.Context, _, arguments string) (st
 	}
 	var msgs []agenthub.Message
 	if strings.TrimSpace(a.Query) != "" {
-		msgs, err = st.SearchMessages(ctx, agenthub.GroupID(a.GroupID), a.Query, a.BeforeSeq, limit)
+		msgs, err = st.SearchMessages(ctx, g.ID, a.Query, a.BeforeSeq, limit)
 	} else {
-		msgs, err = agenthub.ReadGroupLog(ctx, st, agenthub.GroupID(a.GroupID), a.BeforeSeq, limit)
+		msgs, err = agenthub.ReadGroupLog(ctx, st, g.ID, a.BeforeSeq, limit)
 	}
 	if err != nil {
 		return "", err
@@ -187,7 +215,7 @@ func groupMemberOf(g *agenthub.Group, id agenthub.AgentID) (agenthub.Member, boo
 
 type hubGroupMembersTool struct{ hubGroupToolBase }
 
-func newHubGroupMembersTool(m *manager, agentID agenthub.AgentID) *hubGroupMembersTool {
+func newHubGroupMembersTool(m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) *hubGroupMembersTool {
 	return &hubGroupMembersTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "group_members",
 		Description_: "List a Hub group's members: role (owner/member/observer) and live status " +
@@ -196,7 +224,7 @@ func newHubGroupMembersTool(m *manager, agentID agenthub.AgentID) *hubGroupMembe
 			"Only members can read.",
 		Params_:      tools.Obj(map[string]any{"group_id": tools.Str("Group id")}, "group_id"),
 		CanParallel_: true, ReadOnly_: true,
-	}, m: m, agentID: agentID}}
+	}, m: m, agentID: agentID, groupID: groupID}}
 }
 
 func (t *hubGroupMembersTool) Call(ctx context.Context, _, arguments string) (string, error) {
@@ -229,7 +257,7 @@ func (t *hubGroupMembersTool) Call(ctx context.Context, _, arguments string) (st
 
 type hubAgentStatusTool struct{ hubGroupToolBase }
 
-func newHubAgentStatusTool(m *manager, agentID agenthub.AgentID) *hubAgentStatusTool {
+func newHubAgentStatusTool(m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) *hubAgentStatusTool {
 	return &hubAgentStatusTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "agent_status",
 		Description_: "Live status (idle/running) for you or a colleague. Pass agent_id to ask about " +
@@ -241,7 +269,7 @@ func newHubAgentStatusTool(m *manager, agentID agenthub.AgentID) *hubAgentStatus
 			"agent_id": tools.Str("Target agent id (default: you)"),
 		}),
 		CanParallel_: true, ReadOnly_: true,
-	}, m: m, agentID: agentID}}
+	}, m: m, agentID: agentID, groupID: groupID}}
 }
 
 type hubAgentStatusArgs struct {
@@ -335,7 +363,7 @@ func (t *hubAgentStatusTool) ValidParams(_ context.Context, _, arguments string)
 
 type hubGroupSayTool struct{ hubGroupToolBase }
 
-func newHubGroupSayTool(m *manager, agentID agenthub.AgentID) *hubGroupSayTool {
+func newHubGroupSayTool(m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) *hubGroupSayTool {
 	return &hubGroupSayTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "group_say",
 		Description_: "Say something in a Hub group (appends to the group log and routes @mentions). " +
@@ -348,7 +376,7 @@ func newHubGroupSayTool(m *manager, agentID agenthub.AgentID) *hubGroupSayTool {
 			"mention_all": tools.Bool("Wake every group member (owner agents only; a rejected mention_all fails the call)"),
 		}, "group_id", "text"),
 		CanParallel_: false, ReadOnly_: false,
-	}, m: m, agentID: agentID}}
+	}, m: m, agentID: agentID, groupID: groupID}}
 }
 
 func (t *hubGroupSayTool) Call(ctx context.Context, _, arguments string) (string, error) {

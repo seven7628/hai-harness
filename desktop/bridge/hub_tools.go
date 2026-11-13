@@ -145,7 +145,15 @@ func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSess
 			Message: "Hub 队列初始化失败，session_send 降级为直接派发: " + err.Error(),
 		})
 	}
-	registerHubGroupTools(eng, m, p.ID)
+	// group_history / group_members / agent_status / group_say / handoff(_ack) 只在
+	// 群作用域会话注册：这些工具都以「某个群」为参数，DM 会话没有群上下文 —— 注册了
+	// 模型就能在私聊里读群历史、甚至 group_say 往群里发言，单聊与群会话的隔离就破了。
+	// 与下面的 assign_task/task_ack 同口径（群 id 来自装配时的 scope）。
+	if spec.Scope.Kind == agenthub.ScopeGroup && spec.Scope.GroupID != "" {
+		// 群 id 一并绑定：工具参数的 group_id 缺省用它、给了别的群直接拒绝，
+		// 与下面 assign_task/task_ack 同口径（群 A 的会话读写不了群 B）。
+		registerHubGroupTools(eng, m, p.ID, spec.Scope.GroupID)
+	}
 	registerHubArtifactTools(eng, m, p.ID)
 	registerHubTaskTools(eng, m, p.ID)
 	// assign_task / task_ack 只存在于群作用域会话：群 id 来自装配时的 scope，模型

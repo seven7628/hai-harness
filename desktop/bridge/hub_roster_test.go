@@ -193,7 +193,17 @@ func TestHubAgentStatusToolMembership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bsD, err := m.hubDMSession(string(d.ID))
+	// 群工具只在群作用域会话注册（场景1）；给 D 一个自己的群，成员校验才是真的在判。
+	okCreate, errMsg, data := hubCmd(t, m, buf, 5, "hub_group_create", map[string]any{
+		"name": "旁群", "members": []map[string]any{
+			{"agent_id": string(d.ID), "role": "owner"},
+		},
+	})
+	if !okCreate {
+		t.Fatalf("create side group: %s", errMsg)
+	}
+	sideGroup := groupFromData(t, data)
+	bsD, err := m.hubGroupSession(string(d.ID), string(sideGroup.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,9 +257,9 @@ func TestHubAgentStatusToolMembership(t *testing.T) {
 	if _, err := callSessionTool(t, bsB, "agent_status", `{"group_id":"`+string(g.ID)+`","agent_id":"`+string(d.ID)+`"}`); err == nil {
 		t.Fatal("agent_status must reject a target outside the group")
 	}
-	// 自己永远可以查自己（哪怕还没进任何群）。
+	// 自己永远可以查自己（不带 group_id，也不需要共享群）。
 	if _, err := callSessionTool(t, bsD, "agent_status", `{"agent_id":"`+string(d.ID)+`"}`); err != nil {
-		t.Fatalf("self status outside groups: %v", err)
+		t.Fatalf("self status without group_id: %v", err)
 	}
 }
 
@@ -439,7 +449,7 @@ func TestHubGroupRosterRebuildDoesNotAssembleSessions(t *testing.T) {
 	if ws := m.hubRuntimeIfExists(string(b.ID)); ws != nil {
 		t.Fatal("fixture: B runtime should not exist yet")
 	}
-	bs, err := m.hubDMSession(string(a.ID))
+	bs, err := m.hubGroupSession(string(a.ID), string(g.ID))
 	if err != nil {
 		t.Fatal(err)
 	}

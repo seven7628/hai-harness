@@ -23,13 +23,13 @@ import (
 	"github.com/seven7628/hai-harness/tools"
 )
 
-func registerHubHandoffTools(eng *tools.Engine, m *manager, agentID agenthub.AgentID) {
+func registerHubHandoffTools(eng *tools.Engine, m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) {
 	if eng == nil || m == nil || agentID == "" {
 		return
 	}
 	for _, tl := range []tools.Tool{
-		newHubHandoffTool(m, agentID),
-		newHubHandoffAckTool(m, agentID),
+		newHubHandoffTool(m, agentID, groupID),
+		newHubHandoffAckTool(m, agentID, groupID),
 	} {
 		eng.RegisterTool(context.Background(), tl)
 	}
@@ -39,7 +39,7 @@ func registerHubHandoffTools(eng *tools.Engine, m *manager, agentID agenthub.Age
 
 type hubHandoffTool struct{ hubGroupToolBase }
 
-func newHubHandoffTool(m *manager, agentID agenthub.AgentID) *hubHandoffTool {
+func newHubHandoffTool(m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) *hubHandoffTool {
 	return &hubHandoffTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "handoff",
 		Description_: "Transfer ownership of work to another group member (not the same as @mention). " +
@@ -52,7 +52,7 @@ func newHubHandoffTool(m *manager, agentID agenthub.AgentID) *hubHandoffTool {
 			"artifact_ids": tools.ArrayStr("Optional artifact id"),
 		}, "group_id", "to_agent_id", "instruction"),
 		CanParallel_: false, ReadOnly_: false,
-	}, m: m, agentID: agentID}}
+	}, m: m, agentID: agentID, groupID: groupID}}
 }
 
 func (t *hubHandoffTool) Call(ctx context.Context, _, arguments string) (string, error) {
@@ -175,7 +175,7 @@ func (t *hubHandoffTool) Call(ctx context.Context, _, arguments string) (string,
 
 type hubHandoffAckTool struct{ hubGroupToolBase }
 
-func newHubHandoffAckTool(m *manager, agentID agenthub.AgentID) *hubHandoffAckTool {
+func newHubHandoffAckTool(m *manager, agentID agenthub.AgentID, groupID agenthub.GroupID) *hubHandoffAckTool {
 	return &hubHandoffAckTool{hubGroupToolBase{BaseTool: tools.BaseTool{
 		Name_: "handoff_ack",
 		Description_: "Accept or decline a handoff addressed to you. " +
@@ -186,7 +186,7 @@ func newHubHandoffAckTool(m *manager, agentID agenthub.AgentID) *hubHandoffAckTo
 			"reason":     tools.Str("Optional reason when declining"),
 		}, "handoff_id", "accept"),
 		CanParallel_: false, ReadOnly_: false,
-	}, m: m, agentID: agentID}}
+	}, m: m, agentID: agentID, groupID: groupID}}
 }
 
 func (t *hubHandoffAckTool) Call(ctx context.Context, _, arguments string) (string, error) {
@@ -198,7 +198,24 @@ func (t *hubHandoffAckTool) Call(ctx context.Context, _, arguments string) (stri
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
 		return "", err
 	}
-	h, err := t.m.ackHubHandoff(ctx, strings.TrimSpace(args.HandoffID), args.Accept, args.Reason, t.agentID, false)
+	handoffID := strings.TrimSpace(args.HandoffID)
+	// handoff_ack 没有 group_id 参数：归属只能从交接记录本身读。群作用域会话只许处理
+	// 本群的交接 —— 否则 A 群会话能把 B 群的交接卡 ack 掉（跨群写）。
+	if bound := strings.TrimSpace(string(t.groupID)); bound != "" {
+		st, err := t.m.hubStore()
+		if err != nil {
+			return "", err
+		}
+		h, err := st.LoadHandoff(ctx, handoffID)
+		if err != nil {
+			return "", err
+		}
+		if string(h.GroupID) != bound {
+			return "", fmt.Errorf("%w: 交接 %s 属于群 %s，不能在群 %s 的会话里处理",
+				agenthub.ErrInvalid, handoffID, h.GroupID, bound)
+		}
+	}
+	h, err := t.m.ackHubHandoff(ctx, handoffID, args.Accept, args.Reason, t.agentID, false)
 	if err != nil {
 		return "", err
 	}

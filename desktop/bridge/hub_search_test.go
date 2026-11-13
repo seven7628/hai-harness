@@ -714,7 +714,7 @@ func TestHubSearchNotExposedAsAgentTool(t *testing.T) {
 	m, buf := testManager(t)
 	a := createHubAgent(t, m, buf, 1, "NoSearch")
 	eng := tools.NewToolEngine()
-	registerHubGroupTools(eng, m, a.ID)
+	registerHubGroupTools(eng, m, a.ID, "grp_bound")
 	registered := []string{}
 	for _, tl := range eng.Tools() {
 		name := strings.ToLower(tl.Name())

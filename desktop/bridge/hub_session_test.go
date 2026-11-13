@@ -8,10 +8,15 @@ package main
 //  3. 智能体 runtime 不混进 m.workspaces（那些遍历是项目语义）。
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seven7628/hai-harness/agenthub"
+	"github.com/seven7628/hai-harness/agents"
+	"github.com/seven7628/hai-harness/provider"
 )
 
 // writeTestSkill 在 dir/<name>/SKILL.md 写一个最小可用技能。
@@ -281,6 +286,289 @@ func TestHubRuntimeMCPConfigNeverLoadsProjectLayer(t *testing.T) {
 	for _, layer := range m.hubRuntime(string(agent.ID)).mcpLayers {
 		if layer.Path == evil || strings.HasPrefix(filepath.Clean(layer.Path), filepath.Clean(ws.path)+string(filepath.Separator)) {
 			t.Fatalf("hub home 的 MCP 层被当项目层加载: %+v", layer)
+		}
+	}
+}
+
+// —— 场景 1：Hub 单聊（DM）vs 群内 @同一智能体 的会话隔离回归 ——
+//
+// 结论：同一智能体的两个作用域是两个独立 bridgeSession，id / 实例 / ctx / loop /
+// 工具引擎 / 群闩（hubGroupBusy 等）全部不共享；DM 与群各自落自己的索引/群日志，
+// checkpoint record 与 session jsonl 也是不同文件，冷恢复后依然各归各。
+//
+// 既有单侧覆盖（不重复造）：
+//   - DM 侧「每 agent 只有一个 DM 会话」：hub_dm_test.go:400 TestHubDMConcurrentAssemblySingleSession
+//   - 群侧「每 agent 每群一个群会话」：hub_group_session_test.go:91 TestHubGroupSessionLazySingleton
+// 缺的是「同 agent 两作用域并存」，即本组测试。
+
+// setDMFakeLoop 给 DM 会话装确定性 loop：走生产 hubLoopOptions（保留 L1/L2 与
+// L4 记忆装配），只把模型换成 fake —— 群侧对应 setGroupFakeLoopIters。
+func setDMFakeLoop(t *testing.T, m *manager, bs *bridgeSession, agentID string, fake provider.Provider) {
+	t.Helper()
+	loaded, _, err := m.hubLoadAgent(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := m.hubRuntime(agentID)
+	spec := m.hubSpecFor(loaded, agenthub.Scope{Kind: agenthub.ScopeDM}, ws.path)
+	opts := m.hubLoopOptions(ws, bs.id, spec, bs.hubEngine)
+	opts = append(opts,
+		agents.WithProvider(fake),
+		agents.WithModel("dm-fake"),
+		agents.WithMaxIterations(1),
+	)
+	bs.s.SetLoop(agents.NewAgentLoop(opts...))
+	bs.loop = bs.s.Loop()
+}
+
+// isolationPrompt 摊平一次模型请求的全部字节（所有角色 + 内容块 + 工具参数）：
+// 隔离断言要看模型真正读到的全部内容，包括 hidden 快照块，而不只是 user 正文。
+func isolationPrompt(req *provider.StreamRequest) string {
+	if req == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, msg := range req.Messages {
+		for _, c := range msg.Content {
+			b.WriteString(c.Content)
+			b.WriteByte('\n')
+		}
+		b.WriteString(msg.Reasoning)
+		b.WriteByte('\n')
+		for _, tc := range msg.ToolCalls {
+			b.WriteString(tc.Name)
+			b.WriteByte(' ')
+			b.WriteString(tc.Arguments)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// 场景1-1：同一 agent 的 DM 与群会话 id/实例/ctx/loop 全不同，且在 ws.sessions 里并存。
+func TestHubDMAndGroupSessionsCoexistPerAgent(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "IsoA")
+	g := groupWithMembers(t, m, buf, 2, "隔离群", memberRef{a.ID, "owner"})
+
+	dmSID := "hub." + string(a.ID) + ".dm"
+	grpSID := "hub." + string(a.ID) + ".g." + string(g.ID)
+	if got := hubSessionID(string(a.ID), agenthub.Scope{Kind: agenthub.ScopeDM}); got != dmSID {
+		t.Fatalf("DM sid = %q, want %q", got, dmSID)
+	}
+	if got := hubSessionID(string(a.ID), agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID}); got != grpSID {
+		t.Fatalf("群 sid = %q, want %q", got, grpSID)
+	}
+	if dmSID == grpSID {
+		t.Fatal("DM 与群算出了同一个 sid")
+	}
+
+	dm, err := m.hubDMSession(string(a.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grp, err := m.hubGroupSession(string(a.ID), string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dm.id != dmSID || grp.id != grpSID {
+		t.Fatalf("sid 装配错位: dm=%q grp=%q", dm.id, grp.id)
+	}
+	// 实例层面的隔离：同一个 hubSessionSpec 之外，什么都不许共享。
+	if dm == grp {
+		t.Fatal("DM 与群返回了同一个 *bridgeSession")
+	}
+	if dm.s == grp.s {
+		t.Fatal("DM 与群共用了同一个 session.Session（上下文会串）")
+	}
+	if dm.ctx == grp.ctx {
+		t.Fatal("DM 与群共用了同一个 ctx（关一个会带走另一个）")
+	}
+	if dm.loop == nil || grp.loop == nil {
+		t.Fatal("loop 未装配")
+	}
+	if dm.loop == grp.loop {
+		t.Fatal("DM 与群共用了同一个 AgentLoop")
+	}
+	if dm.hubEngine == grp.hubEngine {
+		t.Fatal("DM 与群共用了同一个工具引擎")
+	}
+	if dm.wake == grp.wake {
+		t.Fatal("DM 与群共用了同一个唤醒 channel")
+	}
+	// 流式草稿 sink：DM 与群各一个（场景2b 起 DM 也按 LLM 轮次分段），但绝不是同一个
+	// 实例 —— 共用会让两个会话的草稿/段归属互相覆盖。作用域字段见
+	// TestHubHubMessageEventsCarryOwnScopeOnly（DM=空 group_id，群=本群 id）。
+	if dm.hubDelta == nil || grp.hubDelta == nil {
+		t.Fatalf("草稿 sink 缺失: dm=%v grp=%v", dm.hubDelta != nil, grp.hubDelta != nil)
+	}
+	if dm.hubDelta == grp.hubDelta {
+		t.Fatal("DM 与群共用了同一个草稿 sink（草稿/段会串）")
+	}
+
+	// 同一 agent runtime 里两个会话同时登记（互不顶掉）。
+	ws := m.hubRuntime(string(a.ID))
+	ws.mu.Lock()
+	live := len(ws.sessions)
+	gotDM, gotGrp := ws.sessions[dmSID], ws.sessions[grpSID]
+	ws.mu.Unlock()
+	if live != 2 {
+		t.Fatalf("ws.sessions = %d, want 2（DM + 群）", live)
+	}
+	if gotDM != dm || gotGrp != grp {
+		t.Fatal("ws.sessions 里登记的不是这两个实例")
+	}
+
+	// 懒创建语义按作用域各自成立：再取一次还是原实例。
+	if again, err := m.hubDMSession(string(a.ID)); err != nil || again != dm {
+		t.Fatalf("DM 二次取会话不是原实例: %v", err)
+	}
+	if again, err := m.hubGroupSession(string(a.ID), string(g.ID)); err != nil || again != grp {
+		t.Fatalf("群二次取会话不是原实例: %v", err)
+	}
+}
+
+// 场景1-4：DM 与群的 checkpoint record / session jsonl 是不同文件；按确定性 sid
+// 冷恢复后仍是两个隔离会话，索引与群日志不互相重放。
+func TestHubDMAndGroupRecordsAndColdRecoveryStaySeparate(t *testing.T) {
+	m, buf := testManager(t)
+	a := createHubAgent(t, m, buf, 1, "RecoverIso")
+	g := groupWithMembers(t, m, buf, 2, "恢复群", memberRef{a.ID, "owner"})
+	agentID := string(a.ID)
+	dmSID := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeDM})
+	grpSID := hubSessionID(agentID, agenthub.Scope{Kind: agenthub.ScopeGroup, GroupID: g.ID})
+
+	const dmOnly = "DM-ONLY-冷恢复前的私聊正文"
+	const groupOnly = "GROUP-ONLY-冷恢复前的群正文"
+
+	// 两边各跑一轮真实会话（索引/群日志 → 会话文件 + record）。
+	dm, err := m.hubDMSession(agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setDMFakeLoop(t, m, dm, agentID, &evalProvider{reply: "DM 冷恢复前的回复"})
+	if ok, errMsg, _ := hubCmd(t, m, buf, 3, "hub_send", map[string]any{
+		"target": map[string]any{"kind": "dm", "agent_id": agentID}, "text": dmOnly,
+	}); !ok {
+		t.Fatalf("dm send: %s", errMsg)
+	}
+	waitHubIndex(t, m, a.ID, 2)
+
+	grp, err := m.hubGroupSession(agentID, string(g.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setGroupFakeLoop(t, m, grp, g, agentID, &evalProvider{reply: "群冷恢复前的回复"})
+	if ok, errMsg, _ := hubCmd(t, m, buf, 4, "hub_group_send", map[string]any{
+		"group_id": string(g.ID), "text": groupOnly, "mentions": []string{agentID},
+	}); !ok {
+		t.Fatalf("group send: %s", errMsg)
+	}
+	waitGroupMessages(t, m, g.ID, func(msgs []agenthub.Message) bool {
+		for _, msg := range msgs {
+			if msg.Sender.Kind == agenthub.SenderAgent && strings.Contains(msg.Text, "群冷恢复前的回复") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// 模拟进程重启：把两个会话从 runtime 摘掉并停掉（drain 掉 checkpoint 提交）。
+	ws := m.hubRuntime(agentID)
+	ws.mu.Lock()
+	oldDM, oldGrp := ws.sessions[dmSID], ws.sessions[grpSID]
+	delete(ws.sessions, dmSID)
+	delete(ws.sessions, grpSID)
+	ws.mu.Unlock()
+	if oldDM == nil || oldGrp == nil {
+		t.Fatal("precondition: 两个会话都该在 ws.sessions 里")
+	}
+	stopSession(oldDM)
+	stopSession(oldGrp)
+
+	// record 路径：同一个 wsKey（hub-<agent>）下按 sid 分文件，不是一份记录。
+	store, err := newRecordStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsKey := "hub-" + agentID
+	dmRecord, err := store.RecordPath(wsKey, dmSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpRecord, err := store.RecordPath(wsKey, grpSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dmRecord == grpRecord {
+		t.Fatalf("DM 与群共用同一个 record 文件: %q", dmRecord)
+	}
+	for _, path := range []string{dmRecord, grpRecord} {
+		if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+			t.Fatalf("record 未落盘/为空: %q (%v)", path, err)
+		}
+	}
+
+	// session jsonl（FileStore）同样按 sid 分文件。
+	home := hubAgentHome(agentID)
+	dmJSONL := filepath.Join(home, "sessions", dmSID+".jsonl")
+	grpJSONL := filepath.Join(home, "sessions", grpSID+".jsonl")
+	if dmJSONL == grpJSONL {
+		t.Fatal("DM 与群共用同一个 session jsonl")
+	}
+	for _, path := range []string{dmJSONL, grpJSONL} {
+		if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+			t.Fatalf("session jsonl 未落盘/为空: %q (%v)", path, err)
+		}
+	}
+
+	// 冷恢复：确定性 sid 重新装配 → 必须是新实例、id 不变、仍是两个。
+	dm2, err := m.hubDMSession(agentID)
+	if err != nil {
+		t.Fatalf("cold dm: %v", err)
+	}
+	grp2, err := m.hubGroupSession(agentID, string(g.ID))
+	if err != nil {
+		t.Fatalf("cold group: %v", err)
+	}
+	if dm2 == oldDM || grp2 == oldGrp {
+		t.Fatal("冷恢复复用了已关闭的旧实例")
+	}
+	if dm2 == grp2 {
+		t.Fatal("冷恢复把 DM 与群装成了同一个会话")
+	}
+	if dm2.id != dmSID || grp2.id != grpSID {
+		t.Fatalf("冷恢复 sid 变了: dm=%q grp=%q", dm2.id, grp2.id)
+	}
+	ws.mu.Lock()
+	live := len(ws.sessions)
+	backDM, backGrp := ws.sessions[dmSID], ws.sessions[grpSID]
+	ws.mu.Unlock()
+	if live != 2 || backDM != dm2 || backGrp != grp2 {
+		t.Fatalf("冷恢复后 ws.sessions = %d (%v/%v)", live, backDM, backGrp)
+	}
+
+	// Store 断言：索引与群日志各归各，冷恢复不会把对方的消息重放到自己这边。
+	fst, err := m.hubStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dmMsgs, err := fst.ReadDirectMessages(context.Background(), a.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range dmMsgs {
+		if strings.Contains(msg.Text, "GROUP-ONLY") {
+			t.Fatalf("群正文出现在 DM 索引: %+v", msg)
+		}
+	}
+	grpMsgs, err := fst.ReadMessages(context.Background(), g.ID, 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range grpMsgs {
+		if strings.Contains(msg.Text, "DM-ONLY") {
+			t.Fatalf("DM 正文出现在群日志: %+v", msg)
 		}
 	}
 }

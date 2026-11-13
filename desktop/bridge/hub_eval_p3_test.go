@@ -530,7 +530,8 @@ func TestEval7HistoryReachesEarlyMessages(t *testing.T) {
 	}
 
 	// ② 模型面：group_history 工具同样支持 before_seq 与 query 检索全量历史。
-	bs, err := m.hubDMSession(string(agents[0].ID))
+	// 群工具只在群作用域会话注册（场景1），所以拿群会话而不是 DM 会话。
+	bs, err := m.hubGroupSession(string(agents[0].ID), string(g.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
