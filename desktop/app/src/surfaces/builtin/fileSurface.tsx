@@ -7,6 +7,7 @@ import { FileIcon } from '../../components/icons'
 import { FilePreviewTab } from '../../components/FilePreview'
 import { Editor } from '../../components/Editor'
 import { PreviewPanel } from '../preview/PreviewPanel'
+import { focusSpec } from '../../store/useAppStore'
 import { registerSurface } from '../registry'
 import type { SurfaceProvider } from '../types'
 
@@ -22,7 +23,11 @@ export const fileSurface: SurfaceProvider = {
   capabilities: ['read', 'view', 'write'],
   title: (_tab, t) => t('rp.tab.file'),
   icon: () => <FileIcon size={12} />,
-  defaultSpec: () => ({ kind: 'file' }),
+  // 打开时的默认实例（PR-11 起 makeTab 的初值来源，形状与 store 那一版逐字段一致）：
+  // payload = fileFocus（用户/Agent 最后一次定位的文件）+ openSeq=1（「新标签从默认视图开始」
+  // 的触发器，阶段 2 起跟着标签走）。实现**只有一份** —— focusSpec 仍在 store，这里调它，
+  // 不在这里重写「有 toolId → diff、否则 source」那套条件。
+  defaultSpec: (s) => ({ ...focusSpec(s), openSeq: 1 }),
   // 按 tab.mode 分发：
   //   edit    → 编辑器（PR-05b）
   //   preview → 渲染器注册表（R08a；缺渲染器/依赖时给 unavailable 占位，不白屏）

@@ -211,3 +211,47 @@ test('activity provider 的 render 只接 activity 标签，且不向组件传 p
   // 别的 kind 明确返回 null（RightPanel 的判断依赖这一点；见 activitySurface.tsx 注释）
   assert.equal(p.render({ tab: { id: 'g', kind: 'git' }, scope: 's' }), null)
 })
+
+// —— PR-11：defaultSpec 是 makeTab 的唯一初值来源 ——
+//
+// 这两条把「从 store 的 makeTab switch 搬到 provider」的逻辑**逐字段**钉住：搬家最容易的
+// 回归是「搬了形状、丢了某个可选字段」（toolId/startLine/openSeq 少一个，症状是重启或
+// 点「文件」标签后定位不到行、或视图不复位）。期望值直接写成**存储里的最终形状**，
+// 不写成「等于 focusSpec(...)」—— 那等于用实现证明实现。
+test('file provider 的 defaultSpec = fileFocus 的 payload + openSeq=1（与旧 makeTab 逐字段一致）', () => {
+  const p = getSurface('file')
+  assert.ok(p, 'file provider 未注册')
+  // ① fileFocus 空（没定位过任何文件）→ 空 file 标签，但 openSeq 仍是 1
+  assert.deepEqual(p.defaultSpec?.({} as never), { kind: 'file', openSeq: 1 })
+  // ② 有 toolId → diff，并带上 toolId / startLine
+  assert.deepEqual(
+    p.defaultSpec?.({ fileFocus: { path: '/w/src/a.ts', toolId: 'tool-1', seq: 3, startLine: 12 } } as never),
+    { kind: 'file', path: '/w/src/a.ts', mode: 'diff', toolId: 'tool-1', startLine: 12, openSeq: 1 },
+  )
+  // ③ 无 toolId → source（「有 toolId 才 diff」这条判据只该有一份，仍在 store 的 focusSpec 里）
+  assert.deepEqual(
+    p.defaultSpec?.({ fileFocus: { path: '/w/src/b.ts', seq: 4 } } as never),
+    { kind: 'file', path: '/w/src/b.ts', mode: 'source', openSeq: 1 },
+  )
+})
+
+test('web provider 的 defaultSpec 只在「池里有真实页面」时带 viewId（about:blank 不算）', () => {
+  const p = getSurface('web')
+  assert.ok(p, 'web provider 未注册')
+  // ① 没有 embedNav → 空 web 标签（交给 syncWebTabs 的收养分支）
+  assert.deepEqual(p.defaultSpec?.({} as never), { kind: 'web' })
+  // ② activeId 指向 about:blank（池里的常驻自举载体）→ **不认**这个 id
+  assert.deepEqual(
+    p.defaultSpec?.({
+      embedNav: { activeId: 't1', targets: [{ id: 't1', url: 'about:blank' }] },
+    } as never),
+    { kind: 'web' },
+  )
+  // ③ 真实页面 → 带上 viewId
+  assert.deepEqual(
+    p.defaultSpec?.({
+      embedNav: { activeId: 't7', targets: [{ id: 't7', url: 'https://a.example/' }] },
+    } as never),
+    { kind: 'web', viewId: 't7' },
+  )
+})

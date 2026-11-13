@@ -70,18 +70,40 @@ global.window = {
 }
 
 // 3) esbuild 打包真实 store 到临时 CJS 后 require（与 test-store-scoping.mjs 同策略）
+//
+// PR-11：入口从「store 本身」改成「先副作用 import surfaces/builtin，再 re-export store」——
+// 与生产的模块图同构（main.tsx 也是先注册 provider 再渲染）。为什么必须同构：PR-11 起
+// makeTab 的初值由 provider 的 defaultSpec 给（store 只发 id/kind），只 bundle store 等于
+// 「四个内置 provider 一个都没注册」，那时 makeTab 只能退回 { id, kind } —— L19-L27 那组
+// 「点 ＋ 开网页 → 认的是池里的真实页面」就不再走用户的路径了（断言会变成测兜底分支）。
 const dir = mkdtempSync(join(tmpdir(), 'right-tabs-'))
 const outfile = join(dir, 'store-bundle.cjs')
 await build({
-  entryPoints: [join(__dirname, '../src/store/useAppStore.ts')],
+  stdin: {
+    contents: "import './src/surfaces/builtin'\nexport * from './src/store/useAppStore'",
+    resolveDir: join(__dirname, '..'),
+    loader: 'ts',
+  },
   bundle: true,
   format: 'cjs',
   platform: 'node',
   outfile,
   logLevel: 'silent',
   // store 间接依赖 src/transport/mock.ts，它 import 了 README/brand 资源（`?raw`/`?no-inline`/
-  // `?url` 后缀）。node 侧没有 vite 的资源插件链 → 这里给 esbuild 补 loader，否则打包直接失败。
-  loader: { '.md': 'text', '.svg': 'text', '.png': 'dataurl' },
+  // `?url` 后缀）；builtin 又牵进四个面板组件（图标/预览渲染器）。node 侧没有 vite 的资源插件链
+  // → 这里给 esbuild 补 loader，否则打包直接失败（与 test:builtin-surfaces 同一组）。
+  loader: {
+    '.md': 'text',
+    '.svg': 'text',
+    '.png': 'dataurl',
+    '.css': 'text',
+    '.ttf': 'dataurl',
+    '.woff': 'dataurl',
+    '.woff2': 'dataurl',
+    '.jpg': 'dataurl',
+    '.jpeg': 'dataurl',
+    '.gif': 'dataurl',
+  },
 })
 const { useAppStore, putFilePreview } = require(outfile)
 
