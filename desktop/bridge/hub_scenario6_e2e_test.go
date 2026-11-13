@@ -10,12 +10,12 @@ package main
 //	C. 每个 LLM 轮次一条气泡（段正文 = 该轮 LLMEnd.Content），纯 reasoning 轮不造
 //	   气泡、中间段不路由。
 //
-// 已知缺口（这里不用假断言盖住）：command=compact 与正文**同批**投递时，强制压缩
-// 会在本轮结算段 Stop（agents/agent_loop.go 的 forced 分支），正文不会进入模型
-// 上下文，任务以空摘要结算。因此 A 的「命令先于正文」用两次 session_send 证明：
-// 先只发 compact（command_only，不建账、不产生任务），再发正文批次 —— 压缩的
-// compress_end 早于正文那轮 agent_start。同批 compact+正文的正文消费需要生产侧修，
-// 不在本测试的改动范围。
+// 同批契约（command=compact + 正文）：命令与正文在同一批进目标会话，压缩在本轮
+// 结算段先执行（manual），随后**同一个 Run** 继续回答正文 —— 不产生第二次 Run。
+// 纯 /compact（没有正文）仍停在压缩之后。实际事件序是
+// agent_start → compress_start → compress_end → llm_end → agent_end：压缩在
+// AgentStart 之后、正文那轮模型调用之前，所以「命令先于正文」的判据是
+// compress_end < 正文那轮 llm_end，且整批只有一个 agent_start。
 //
 // 全部确定性：不碰网络、不读真实 settings（testManager 已隔离 HOME）；等待一律是
 // 轮询锚点（convWait / p404aWaitGroupIdle / waitResultNotifyDrained / waitEventOffsets），
@@ -118,19 +118,6 @@ func sc6PNGDataURL(t *testing.T, path string) string {
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(b)
 }
 
-// sc6WaitManualCompressEnd 等目标会话真的执行了 compact（reason=manual 的 compress_end）。
-func sc6WaitManualCompressEnd(t *testing.T, buf *syncBuf, sid string) {
-	t.Helper()
-	convWait(t, "目标会话执行 compact（manual 压缩事件）", func() bool {
-		for _, ev := range hubEvents(t, buf, "compress_end") {
-			if ev["session_id"] == sid && ev["reason"] == "manual" {
-				return true
-			}
-		}
-		return false
-	})
-}
-
 // sc6WakeBlocks 返回一次模型请求里的全部 hub_group_wake 块（快照只该有一份）。
 func sc6WakeBlocks(req *provider.StreamRequest) []core.Content {
 	var out []core.Content
@@ -147,97 +134,16 @@ func sc6WakeBlocks(req *provider.StreamRequest) []core.Content {
 	return out
 }
 
-// TestHubScenario6BatchIsolationAndProjectResult 覆盖场景1/3/4：批次账本 + 隔离 +
-// Project 真消费 + 回推总结。两个子用例各自 new manager（互不污染）。
+// TestHubScenario6BatchIsolationAndProjectResult 覆盖场景1/3/4：同一批 session_send
+// （compact + 正文 + files + images）的账本/附件归一、Project 真消费、回推总结，
+// 以及同一智能体 DM 与群的上下文/落盘隔离。
 func TestHubScenario6BatchIsolationAndProjectResult(t *testing.T) {
-	t.Run("batch-ledger", sc6BatchLedger)
-	t.Run("project-result-and-isolation", sc6ProjectResultAndIsolation)
-}
-
-// sc6BatchLedger：一批 session_send（compact + 正文 + 文件 + 图片）真的建了账：
-// 命令进 Task、附件只存归一化路径引用、命令在目标会话里执行。
-func sc6BatchLedger(t *testing.T) {
-	m, buf := testManager(t)
-	root := t.TempDir()
-	a := createWorkspaceAgent(t, m, buf, 1, "批次A", []string{root})
-	b := createWorkspaceAgent(t, m, buf, 2, "批次B", []string{root})
-	g := assignGroup(t, m, buf, 3, "批次群", map[agenthub.AgentID]string{
-		a.ID: "owner", b.ID: "member",
-	})
-	bsA := mustGroupSession(t, m, string(a.ID), string(g.ID))
-	setGroupFakeLoop(t, m, bsA, g, string(a.ID), newConvProvider("批次结果收到"))
-	// B 永远不该被叫醒；也装 fake，避免任何路径退回真实 provider。
-	bsB := mustGroupSession(t, m, string(b.ID), string(g.ID))
-	setGroupFakeLoop(t, m, bsB, g, string(b.ID), newConvProvider("批次B不该说话"))
-
-	ws := filepath.Join(root, "proj")
-	if err := os.MkdirAll(ws, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	m.wsReg = newWorkspaceRegistry(filepath.Join(t.TempDir(), "workspaces.json"))
-	if _, err := m.wsReg.add(ws); err != nil {
-		t.Fatal(err)
-	}
-	target, err := m.create(ws, "s-batch", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// compact 需要真压缩器（否则命令在注入段按「未配置」失败，compress_* 不会出现）。
-	target.s.SetLoop(agents.NewAgentLoop(
-		agents.WithProvider(&fixedEvalProvider{reply: "批次目标正文"}),
-		agents.WithModel("sc6-batch-fake"),
-		agents.WithCompressor(agents.NewLLMCompressor(
-			&fixedEvalProvider{reply: "## 摘要\n- 批次压缩完成"}, "sc6-batch-fake")),
-	))
-
-	mdPath := filepath.Join(ws, "a.md")
-	if err := os.WriteFile(mdPath, []byte("# notes\n三家对比表要点"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	pngPath := filepath.Join(ws, "a.png")
-	writeTestPNG(t, pngPath, 8, 8)
-
-	res := sc6SessionSend(t, bsA, map[string]any{
-		"workspace": ws, "session_id": "s-batch",
-		"command": "compact", "text": "做一份三家对比表",
-		"files": []string{mdPath}, "images": []string{pngPath},
-	})
-	if res["accepted"] != true || res["queued"] != false {
-		t.Fatalf("批次没被接收: %v", res)
-	}
-	taskID := str(res, "task_id")
-	if taskID == "" {
-		t.Fatalf("带正文的批次必须建账拿 task_id: %v", res)
-	}
-	receipt := sc6Receipt(t, res)
-	if receipt["name"] != "compact" || receipt["delivered"] != true {
-		t.Fatalf("命令回执 = %v, want compact/delivered", receipt)
-	}
-
-	task := p3bLoadTask(t, m, agenthub.TaskID(taskID))
-	if task.Command != "compact" {
-		t.Fatalf("账本 command = %q, want compact", task.Command)
-	}
-	sc6AssertAttachment(t, task, agenthub.AttachmentKindFile, mdPath)
-	sc6AssertAttachment(t, task, agenthub.AttachmentKindImage, pngPath)
-	// 附件只存引用：账本/任务事件里不能出现图片本体。
-	if raw, err := json.Marshal(task); err == nil && strings.Contains(string(raw), "data:image") {
-		t.Fatalf("账本里出现了图片 data URL: %s", raw)
-	}
-
-	// 命令真的在目标会话里执行了（manual 压缩），随后会话回到空闲。
-	sc6WaitManualCompressEnd(t, buf, "s-batch")
-	convWait(t, "目标会话执行完命令后回到空闲", func() bool { return !target.s.IsRunning() })
-}
-
-// sc6ProjectResultAndIsolation：先 compact 再派正文 —— Project 会话真消费正文
-// （`@绝对路径` + image 块）、把哨兵摘要回推给发起者；DM 与群互不串上下文/文件。
-func sc6ProjectResultAndIsolation(t *testing.T) {
 	const (
 		summary   = "SC6-PROJECT-SUMMARY：三家对比表已完成"
 		aReply    = "SC6-A-BUBBLE：收到项目结果，我来总结"
 		dmOnly    = "SC6-DM-ONLY-私聊哨兵"
 		groupOnly = "SC6-GROUP-ONLY-群哨兵"
+		body      = "做一份三家对比表"
 	)
 	m, buf := testManager(t)
 	root := t.TempDir()
@@ -282,70 +188,104 @@ func sc6ProjectResultAndIsolation(t *testing.T) {
 	writeTestPNG(t, pngPath, 8, 8)
 	wantImage := sc6PNGDataURL(t, pngPath)
 
-	// 1) 命令单独一批：compact 是独立操作（压缩后停在当前状态），不建账。
-	compact := sc6SessionSend(t, bsA, map[string]any{
-		"workspace": ws, "session_id": "s-proj", "command": "compact",
-	})
-	if compact["accepted"] != true || str(compact, "status") != agenthub.StatusCommandOnly {
-		t.Fatalf("command_only 批次 = %v", compact)
-	}
-	if str(compact, "task_id") != "" {
-		t.Fatalf("只有命令不该建账: %v", compact)
-	}
-	if receipt := sc6Receipt(t, compact); receipt["delivered"] != true {
-		t.Fatalf("命令回执 = %v, want delivered", receipt)
-	}
-	sc6WaitManualCompressEnd(t, buf, "s-proj")
-	convWait(t, "压缩后目标会话空闲", func() bool { return !target.s.IsRunning() })
-
-	// 2) 正文批次：文件引用 + 图片 + 文本。正文那轮必须晚于压缩。
-	sent := sc6SessionSend(t, bsA, map[string]any{
-		"workspace": ws, "session_id": "s-proj", "text": "做一份三家对比表",
+	// 1) 同一批：命令 + 正文 + 文件 + 图片。命令先入 inbox、正文在后，同一个 Run 消费。
+	res := sc6SessionSend(t, bsA, map[string]any{
+		"workspace": ws, "session_id": "s-proj",
+		"command": "compact", "text": body,
 		"files": []string{mdPath}, "images": []string{pngPath},
 	})
-	if sent["accepted"] != true {
-		t.Fatalf("正文批次没被接收: %v", sent)
+	if res["accepted"] != true || res["queued"] != false {
+		t.Fatalf("批次没被接收: %v", res)
 	}
-	id := agenthub.TaskID(str(sent, "task_id"))
+	id := agenthub.TaskID(str(res, "task_id"))
 	if id == "" {
-		t.Fatalf("正文批次没有 task_id: %v", sent)
+		t.Fatalf("带正文的批次必须建账拿 task_id: %v", res)
+	}
+	receipt := sc6Receipt(t, res)
+	if receipt["name"] != "compact" || receipt["delivered"] != true {
+		t.Fatalf("命令回执 = %v, want compact/delivered", receipt)
+	}
+	task := p3bLoadTask(t, m, id)
+	if task.Command != "compact" {
+		t.Fatalf("账本 command = %q, want compact", task.Command)
+	}
+	sc6AssertAttachment(t, task, agenthub.AttachmentKindFile, mdPath)
+	sc6AssertAttachment(t, task, agenthub.AttachmentKindImage, pngPath)
+	// 附件只存引用：账本/任务事件里不能出现图片本体。
+	if raw, err := json.Marshal(task); err == nil && strings.Contains(string(raw), "data:image") {
+		t.Fatalf("账本里出现了图片 data URL: %s", raw)
 	}
 
-	// 3) 目标请求：@归一化路径 + 图片 data URL + 正文都在模型上下文里。
+	// 2) Project 真消费同一批的正文/附件：模型请求里正文 + `@路径` + image 块都在。
 	convWait(t, "Project 会话被派发并开跑", func() bool { return tp.callCount() >= 1 })
 	req := tp.lastRequest()
+	if !requestHasTextContaining(req, body) {
+		t.Fatal("目标请求缺派发正文（同批 compact 后必须继续回答）")
+	}
 	if !requestHasTextContaining(req, "@"+hubCanonicalPath(mdPath)) {
 		t.Fatalf("目标请求缺 `@%s` 文件引用", hubCanonicalPath(mdPath))
-	}
-	if !requestHasTextContaining(req, "做一份三家对比表") {
-		t.Fatal("目标请求缺派发正文")
 	}
 	if !requestHasImageBlock(req, wantImage) {
 		t.Fatalf("目标请求缺图片块（data URL %s…）", wantImage[:40])
 	}
 
-	// 4) 顺序：命令的 compress_end 早于正文那轮 agent_start（最后一条 s-proj 的
-	// agent_start 就是正文那轮：压缩批次不产生正文轮）。
-	compressAt, bodyAt := waitEventOffsets(t, buf,
-		func(ev map[string]any) bool {
-			return ev["event_type"] == "compress_end" && ev["session_id"] == "s-proj" && ev["reason"] == "manual"
-		},
-		func(ev map[string]any) bool {
-			return ev["event_type"] == "agent_start" && ev["session_id"] == "s-proj"
-		},
-	)
-	if compressAt >= bodyAt {
-		t.Fatalf("顺序反了：compress_end 在 %d，正文那轮 agent_start 在 %d（命令必须先于正文）", compressAt, bodyAt)
-	}
-
-	// 5) 结算 + 回推：任务 delivered、通知排空、目标空闲。
+	// 3) 结算：正文真被模型回答，账本摘要非空（不再是空摘要）。
 	convWait(t, "Project 任务结算并回推完成", func() bool {
 		return p3bLoadTask(t, m, id).Status == agenthub.TaskDelivered
 	})
 	waitResultNotifyDrained(t, m)
 	convWait(t, "目标会话运行结束", func() bool { return !target.s.IsRunning() })
+	task = p3bLoadTask(t, m, id)
+	if task.Result == nil || strings.TrimSpace(task.Result.Summary) == "" {
+		t.Fatalf("任务 summary 为空：同批正文没有被回答（result=%+v）", task.Result)
+	}
+	if !strings.Contains(task.Result.Summary, summary) {
+		t.Fatalf("任务 summary = %q, want 含项目哨兵 %q", task.Result.Summary, summary)
+	}
 
-	// 6) 群日志：恰好一张结果卡 + 发起者一条总结气泡，卡先于气泡。
+	// 4) 事件序：同一批只有一个 Run（一个 agent_start）；压缩先于正文那轮模型调用。
+	//    实际序 = agent_start → compress_start → compress_end → llm_end → agent_end
+	//    （压缩在 AgentStart 之后的结算段，所以不能要求 compress_end 早于 agent_start）。
+	raw := buf.String()
+	offset := func(pred func(map[string]any) bool) int { return rawEventOffset(raw, pred) }
+	startAt := offset(func(ev map[string]any) bool {
+		return ev["event_type"] == "agent_start" && ev["session_id"] == "s-proj"
+	})
+	compressStartAt := offset(func(ev map[string]any) bool {
+		return ev["event_type"] == "compress_start" && ev["session_id"] == "s-proj" && ev["reason"] == "manual"
+	})
+	compressEndAt := offset(func(ev map[string]any) bool {
+		return ev["event_type"] == "compress_end" && ev["session_id"] == "s-proj" && ev["reason"] == "manual"
+	})
+	answerAt := offset(func(ev map[string]any) bool {
+		return ev["event_type"] == "llm_end" && ev["session_id"] == "s-proj"
+	})
+	for _, evt := range []struct {
+		name string
+		at   int
+	}{
+		{"agent_start", startAt}, {"compress_start", compressStartAt},
+		{"compress_end", compressEndAt}, {"llm_end", answerAt},
+	} {
+		if evt.at < 0 {
+			t.Fatalf("事件流缺 %s（session=s-proj）", evt.name)
+		}
+	}
+	if !(startAt < compressStartAt && compressStartAt < compressEndAt && compressEndAt < answerAt) {
+		t.Fatalf("事件序 = agent_start %d / compress_start %d / compress_end %d / llm_end %d，want 严格递增（同一轮先压缩再回答正文）",
+			startAt, compressStartAt, compressEndAt, answerAt)
+	}
+	starts := 0
+	for _, ev := range readAllLines(buf) {
+		if ev["event_type"] == "agent_start" && ev["session_id"] == "s-proj" {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("同批产生了 %d 个 agent_start, want 1（压缩后必须在同一 Run 继续）", starts)
+	}
+
+	// 5) 群日志：恰好一张结果卡 + 发起者一条总结气泡，卡先于气泡。
 	waitGroupMessages(t, m, g.ID, func(msgs []agenthub.Message) bool {
 		return len(p3bTaskResultCards(msgs, id)) == 1 && len(agentTextMessages(msgs, a.ID)) == 1
 	})
@@ -390,7 +330,7 @@ func sc6ProjectResultAndIsolation(t *testing.T) {
 		t.Fatalf("task_result_delivered = %d, want 1（只推一次）", n)
 	}
 
-	// 7) 旁观者不被叫醒，回推不产生 @ 路由。
+	// 6) 旁观者不被叫醒，回推不产生 @ 路由。
 	if n := fb.callCount(); n != 0 {
 		t.Fatalf("旁观者被叫醒 %d 次（结果卡不能路由 @）", n)
 	}
@@ -401,7 +341,7 @@ func sc6ProjectResultAndIsolation(t *testing.T) {
 		t.Fatalf("结果卡产生了 %d 条 @ 路由（hub_round）, want 0", n)
 	}
 
-	// 8) 隔离：同一智能体的 DM 与群各看各的（哨兵 + 文件双证据）。
+	// 7) 隔离：同一智能体的 DM 与群各看各的（哨兵 + 文件双证据）。
 	dm, err := m.hubDMSession(string(a.ID))
 	if err != nil {
 		t.Fatal(err)
