@@ -1311,6 +1311,8 @@ const zh: Record<string, string> = {
   'browser.menu.close': '关闭',
   'browser.menu.closeOthers': '关闭其他标签',
   'browser.menu.closeRight': '关闭右侧所有标签',
+  'browser.menu.closeAll': '关闭全部标签',
+  'browser.menu.reopen': '重开',
   'browser.menu.copyPath': '复制文件路径',
   'browser.menu.reveal': '在访达中显示',
   'browser.menu.openDefault': '用默认程序打开',
@@ -1800,6 +1802,7 @@ const zh: Record<string, string> = {
   'rp.tabs.empty': '没有打开的标签',
   'rp.tabs.emptyHint': '点 ＋ 打开一个标签，或从左侧文件树打开文件。',
   'rp.tabs.closedEmpty': '没有可重开的标签',
+  'rp.tabs.overflow': '还有 {n} 个标签（点开列表）',
   // 链路 tab
   'rp.trace.noRun': '尚无运行',
   'rp.trace.noRunHint': '发起对话后这里显示最近一次执行链路（trace）',
@@ -3421,6 +3424,8 @@ const en: Record<string, string> = {
   'browser.menu.close': 'Close',
   'browser.menu.closeOthers': 'Close other tabs',
   'browser.menu.closeRight': 'Close tabs to the right',
+  'browser.menu.closeAll': 'Close all tabs',
+  'browser.menu.reopen': 'Reopen tab',
   'browser.menu.copyPath': 'Copy file path',
   'browser.menu.reveal': 'Reveal in Finder',
   'browser.menu.openDefault': 'Open with default app',
@@ -3842,6 +3847,7 @@ const en: Record<string, string> = {
   'rp.tabs.empty': 'No open tabs',
   'rp.tabs.emptyHint': 'Use ＋ to open a tab, or open a file from the tree.',
   'rp.tabs.closedEmpty': 'No recently closed tabs',
+  'rp.tabs.overflow': '{n} more tabs (open list)',
   // Trace tab
   'rp.trace.noRun': 'No runs yet',
   'rp.trace.noRunHint': 'Start a conversation and the latest execution trace appears here',
