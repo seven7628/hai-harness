@@ -152,8 +152,12 @@ async function sendWithImage(testid, text) {
   check(await page.locator('.hub-attach-chip--img').count() === 2, '粘贴图片 → 又多一张缩略图（不静默丢弃）')
   await page.screenshot({ path: `${OUT}/dm-strip-drop-paste.png` })
   // 清空这三条（2 张图 + 1 个文件），回到「只发一张图」的用例。
+  // 图片是扇形叠牌：hover 会把牌抽正（× 随牌一起移动），所以先 hover 再点 ×，
+  // 与真人的操作路径一致；否则点击点会落在牌自己的图上。
   for (let i = await page.locator('.hub-attach-chip--img').count(); i > 0; i--) {
-    await page.locator('.hub-attach-strip .hub-attach-chip--img .hub-attach-x').first().click()
+    const card = page.locator('.hub-attach-strip .hub-attach-chip--img').first()
+    await card.hover()
+    await card.locator('.hub-attach-x').click()
   }
   await page.locator('.hub-attach-strip .hub-attach-chip--file .hub-attach-x').first().click()
   await page.waitForTimeout(200)

@@ -200,7 +200,13 @@ export function HubImageLightbox({
   )
 }
 
-/** composer 上方的待发附件条带：图片缩略图（可放大）+ 文件引用（名 + 大小 + ×）。 */
+/**
+ * composer 上方的待发附件条带：图片扇形（可放大 / 抽出 / 移除）+ 文件引用（名 + 大小 + ×）。
+ *
+ * 图片区与主会话 Composer 的 `.cy-imgs` 同构：一张图不是一叠牌（data-n='1' 走 128×88
+ * 大缩略图），多张按 `--i` / `--mid` 叠成一手牌，风琴角 = `(i - mid) * 6deg`。
+ * 几何走 CSS 变量（行内 style），动效全在 hub.css —— 组件只管结构与语义。
+ */
 export default function AttachmentStrip({
   images,
   files,
@@ -216,53 +222,73 @@ export default function AttachmentStrip({
 }) {
   const [zoom, setZoom] = useState<number | null>(null)
   const closeZoom = useCallback(() => setZoom(null), [])
+  // 扇形中轴：三张时 1，四张时 1.5 —— 与 CSS 的 `(var(--i) - var(--mid)) * 6deg` 配套。
+  const mid = (images.length - 1) / 2
   if (images.length === 0 && files.length === 0 && !notice && !busy) return null
   return (
     <>
       {(images.length > 0 || files.length > 0 || busy) ? (
-        <div className="hub-attach-strip" role="list" aria-label="待发送的附件">
-          {images.map((a, i) => (
-            <div className="hub-attach-chip hub-attach-chip--img" role="listitem" key={`img-${i}`}>
-              <button
-                type="button"
-                className="hub-attach-thumb"
-                onClick={() => setZoom(i)}
-                title="查看大图"
-                aria-label={`查看图片 ${i + 1}（共 ${images.length} 张）`}
-              >
-                {a.data_url ? <img src={a.data_url} alt="" /> : <span className="hub-attach-ph">图</span>}
-              </button>
-              <button
-                type="button"
-                className="hub-attach-x"
-                onClick={() => onRemove('image', i)}
-                title="移除图片"
-                aria-label={`移除图片 ${i + 1}`}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-          {files.map((a, i) => (
+        <div className="hub-attach-strip" role="group" aria-label="待发送的附件">
+          {images.length > 0 ? (
             <div
-              className="hub-attach-chip hub-attach-chip--file"
-              role="listitem"
-              key={`file-${a.path ?? a.name ?? i}`}
-              title={a.path ? `${a.path}\n发送时会作为 @引用 写进正文` : (a.name ?? '')}
+              className="hub-attach-imgs"
+              data-n={images.length}
+              role="list"
+              aria-label={`待发送的图片 ${images.length} 张`}
             >
-              <span className="hub-attach-file-name">{a.name || a.path || '文件'}</span>
-              <span className="hub-attach-file-size">{typeof a.bytes === 'number' ? fmtBytes(a.bytes) : '—'}</span>
-              <button
-                type="button"
-                className="hub-attach-x"
-                onClick={() => onRemove('file', i)}
-                title="移除引用"
-                aria-label={`移除文件引用 ${a.name || a.path || i + 1}`}
-              >
-                ×
-              </button>
+              {images.map((a, i) => (
+                <div
+                  className="hub-attach-chip hub-attach-chip--img"
+                  role="listitem"
+                  key={`img-${i}`}
+                  style={{ ['--i' as string]: i, ['--mid' as string]: mid }}
+                >
+                  <button
+                    type="button"
+                    className="hub-attach-thumb"
+                    onClick={() => setZoom(i)}
+                    title={a.name ? `${a.name}\n点击查看大图` : '点击查看大图'}
+                    aria-label={`查看图片 ${i + 1}（共 ${images.length} 张）`}
+                  >
+                    {a.data_url ? <img src={a.data_url} alt="" /> : <span className="hub-attach-ph">图</span>}
+                  </button>
+                  <button
+                    type="button"
+                    className="hub-attach-x"
+                    onClick={() => onRemove('image', i)}
+                    title="移除图片"
+                    aria-label={`移除图片 ${i + 1}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
+          ) : null}
+          {files.length > 0 ? (
+            <div className="hub-attach-files" role="list" aria-label={`待发送的文件引用 ${files.length} 个`}>
+              {files.map((a, i) => (
+                <div
+                  className="hub-attach-chip hub-attach-chip--file"
+                  role="listitem"
+                  key={`file-${a.path ?? a.name ?? i}`}
+                  title={a.path ? `${a.path}\n发送时会作为 @引用 写进正文` : (a.name ?? '')}
+                >
+                  <span className="hub-attach-file-name">{a.name || a.path || '文件'}</span>
+                  <span className="hub-attach-file-size">{typeof a.bytes === 'number' ? fmtBytes(a.bytes) : '—'}</span>
+                  <button
+                    type="button"
+                    className="hub-attach-x"
+                    onClick={() => onRemove('file', i)}
+                    title="移除引用"
+                    aria-label={`移除文件引用 ${a.name || a.path || i + 1}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           {busy ? <span className="hub-attach-busy" role="status">压缩图片中…</span> : null}
         </div>
       ) : null}

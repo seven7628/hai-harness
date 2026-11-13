@@ -70,12 +70,18 @@ function AttachmentsBody({
               className="hub-msg-img"
               key={`img-${i}`}
               onClick={() => setZoom(i)}
-              title={a.name || '查看大图'}
-              aria-label={`查看图片 ${i + 1}（共 ${images.length} 张）`}
+              title={a.name ? `${a.name}\n点击查看大图` : '点击查看大图'}
+              aria-label={`查看大图：图片 ${i + 1}（共 ${images.length} 张）`}
             >
-              {a.data_url
-                ? <img src={a.data_url} alt={a.name || ''} />
-                : <span className="hub-msg-img-ph">{a.name || '图片'}</span>}
+              {a.data_url ? (
+                <>
+                  <img src={a.data_url} alt={a.name || ''} />
+                  {/* 只在 hover/聚焦时浮出来：气泡里不常驻「查看大图」四个字。 */}
+                  <span className="hub-msg-img-zoom" aria-hidden="true">查看大图</span>
+                </>
+              ) : (
+                <span className="hub-msg-img-ph">{a.name || '图片'}</span>
+              )}
             </button>
           ))}
           {hidden > 0 ? (

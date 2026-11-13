@@ -2905,7 +2905,7 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   pointer-events: none;
 }
 
-/* composer 上方的待发附件条带：换行排列，永不撑破列宽。 */
+/* composer 上方的待发附件条带：图片扇形 + 文件 chip，换行排列，永不撑破列宽。 */
 .hub-demo .hub-attach-strip {
   display: flex;
   flex-wrap: wrap;
@@ -2923,22 +2923,60 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   border-radius: 9px;
   background: var(--surface);
 }
+
+/* —— 待发图片：扇形叠放（与主会话 .cy-imgs 同构，类名留在 .hub-demo 里） ——
+   一张图不是一叠牌（data-n='1' 走 128×88 大缩略图）；多张按 `(i - mid) * 6deg`
+   叠成一手牌，悬停/聚焦时抽正、上浮、放大，同组其它牌退到 0.8。
+   容器左/上留白：抽出来的牌 + 旋转后的边角不能压到上面的 chip 或裁掉焦点环。 */
+.hub-demo .hub-attach-imgs {
+  display: flex;
+  align-items: flex-end;
+  min-width: 0;
+  max-width: 100%;
+  padding: 9px 2px 1px 12px;
+}
 .hub-demo .hub-attach-chip--img {
-  width: 52px;
-  height: 52px;
-  flex: 0 0 auto;
-  overflow: hidden;
+  position: relative;
+  flex: none;
+  width: 64px;
+  height: 45px;
+  margin-left: -13px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  transform-origin: bottom center;
+  transform: rotate(calc((var(--i, 0) - var(--mid, 0)) * 6deg));
+  /* 叠放顺序与主会话相反（左边的牌压住右边）：这样每张牌右上角的 × 永远露在
+     隔壁牌的图上，既看得见也点得到（默认顺序下 × 正好落在 13px 的重叠区里，
+     被下一张牌的 <img> 挡住，点击会被拦）。扇形几何/动效与 .cy-im 一致。 */
+  z-index: calc(100 - var(--i, 0));
+  transition: transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1), opacity 180ms ease, box-shadow 180ms ease;
+  /* 入场：新加的牌按 --i 依次 pop 出来。只动 opacity/scale/translate（独立变换属性），
+     不碰上面那条 transform —— 否则会覆盖扇形角、hover 也过渡不回来。
+     fill 用 backwards：延迟期间保持 from（还没出来），结束后释放，hover 过渡照常。 */
+  animation: hub-attach-im-in 200ms cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+.hub-demo .hub-attach-imgs .hub-attach-chip--img:first-child { margin-left: 0; }
+.hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img {
+  width: 128px;
+  height: 88px;
+  transform: none;
 }
 .hub-demo .hub-attach-thumb {
   display: block;
   width: 100%;
   height: 100%;
   padding: 0;
-  border: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  overflow: hidden;
   background: var(--surface-2);
   cursor: zoom-in;
 }
 .hub-demo .hub-attach-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* 焦点环画在缩略图内缘：牌是旋转的，外扩的环会被隔壁牌盖住一半。 */
 .hub-demo .hub-attach-thumb:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .hub-demo .hub-attach-ph {
   display: grid;
@@ -2948,6 +2986,24 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   color: var(--muted-2);
   font-size: 11px;
 }
+.hub-demo .hub-attach-chip--img:hover,
+.hub-demo .hub-attach-chip--img:focus-within {
+  transform: rotate(0deg) translateY(-4px) scale(1.05);
+  z-index: 200; /* 高于静止时的 calc(100 - i)：抽出来的牌压住整叠 */
+  box-shadow: 0 12px 24px -14px rgba(0, 0, 0, 0.85);
+}
+/* 单图不叠牌：不旋转，抽出也只是轻微上浮（128×88 的 1.05 会糊边）。 */
+.hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img:hover,
+.hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img:focus-within {
+  transform: translateY(-4px) scale(1.03);
+}
+.hub-demo .hub-attach-imgs:hover .hub-attach-chip--img:not(:hover) { opacity: 0.8; }
+/* 入场：从 0.86 放大到 1 + 淡入 + 从下方 6px 升上来（独立变换属性，与扇形 transform 叠加）。 */
+@keyframes hub-attach-im-in {
+  from { opacity: 0; scale: 0.86; translate: 0 6px; }
+  to { opacity: 1; scale: 1; translate: 0 0; }
+}
+/* × 移除：留在牌的右上角（hover 抽出后整颗露出来）；牌被裁的是圆角缩略图，不是这颗按钮。 */
 .hub-demo .hub-attach-x {
   position: absolute;
   top: 2px;
@@ -2964,6 +3020,15 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   z-index: 2;
 }
 .hub-demo .hub-attach-x:hover { background: var(--danger); color: var(--user-text); }
+.hub-demo .hub-attach-x:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.hub-demo .hub-attach-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
 .hub-demo .hub-attach-chip--file {
   display: inline-flex;
   align-items: center;
@@ -3084,6 +3149,7 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   max-width: 100%;
 }
 .hub-demo .hub-msg-img {
+  position: relative;
   width: 112px;
   height: 84px;
   padding: 0;
@@ -3092,9 +3158,33 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   overflow: hidden;
   background: var(--surface-2);
   cursor: zoom-in;
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
 }
 .hub-demo .hub-msg-img img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* 气泡里的图已经是「发出去了」的成品：hover/聚焦给一点点放大 + 抬起，告诉你能点开。 */
+.hub-demo .hub-msg-img:hover,
+.hub-demo .hub-msg-img:focus-visible {
+  transform: translateY(-1px) scale(1.03);
+  border-color: var(--border-strong);
+  box-shadow: 0 10px 22px -14px rgba(0, 0, 0, 0.85);
+}
 .hub-demo .hub-msg-img:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* 「查看大图」：只在 hover/聚焦时浮出来（缩略图上不常驻文字，气泡才干净）。 */
+.hub-demo .hub-msg-img-zoom {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 3px 5px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.3;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+.hub-demo .hub-msg-img:hover .hub-msg-img-zoom,
+.hub-demo .hub-msg-img:focus-visible .hub-msg-img-zoom { opacity: 1; }
 .hub-demo .hub-msg-img-ph {
   display: grid;
   place-items: center;
@@ -3160,9 +3250,27 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 @media (max-width: 640px) {
   .hub-demo .hub-attach-lb { padding: 10px; }
   .hub-demo .hub-attach-lb img { max-height: calc(100dvh - 150px); }
+  /* 390 下 8~10 张牌会超过列宽：牌在条带内部横向滚动，文档本身绝不溢出。
+     上方 18px 是给「旋转后的边角 + 抽出上浮」的余量，否则 overflow 会切掉牌顶。 */
+  .hub-demo .hub-attach-imgs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 18px 4px 6px 12px;
+    scrollbar-width: thin;
+  }
+  .hub-demo .hub-attach-chip--img { width: 52px; height: 37px; margin-left: -12px; }
+  .hub-demo .hub-attach-imgs[data-n='1'] .hub-attach-chip--img { width: 108px; height: 74px; }
   .hub-demo .hub-msg-img { width: 88px; height: 66px; }
   .hub-demo .hub-msg-file { max-width: 100%; }
   .hub-demo .hub-msg-file-name { max-width: 120px; }
+}
+
+/* 减少动态：入场 pop / 悬停过渡全关，但抽正、缩放这些「状态」保留（只是瞬时到位）。 */
+@media (prefers-reduced-motion: reduce) {
+  .hub-demo .hub-attach-chip--img,
+  .hub-demo .hub-attach-thumb,
+  .hub-demo .hub-msg-img,
+  .hub-demo .hub-msg-img-zoom { animation: none; transition: none; }
 }
 
 /* —— Hub 单聊/群内联「任务等待你」卡（P4-UI-15） ——
