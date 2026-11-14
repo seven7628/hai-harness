@@ -206,8 +206,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-14 13:05",
-    "current": "24 PR 序列全部收口（R08e 用户裁掉）；待定：插件页清除数据 / uiSnapshot.titleOf 去重"
+    "updated": "2026-11-14 12:52",
+    "current": "R17a（插件数据生命周期，并行）/ R17b 本链；待定：CJK 字体复验 R-18"
   },
   "rounds": [
     {
@@ -1514,7 +1514,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "level": "bad",
       "title": "desktop/bridge/main_test.go 未入库",
       "d": "68 个已跟踪测试文件依赖它（testManager/syncBuf/cmd/readLines），但该文件被 .git/info/exclude:84 排除、从未提交 → 干净检出下整个 bridge 测试包不可编译。",
-      "a": "单独一轮仓库卫生：移除 exclude 行 + 提交 main_test.go（3282 行、无绝对路径、无密钥）；不混进功能轮次。"
+      "a": "单独一轮仓库卫生：移除 exclude 行 + 提交 main_test.go（3282 行、无绝对路径、无密钥）；不混进功能轮次。<br><b>已解决（R17b 取证）</b>：<code>git ls-files desktop/bridge/main_test.go</code> 有输出（已入库），同包已跟踪 <code>*_test.go</code> 共 236 个，干净检出可编译。",
+      "status": "closed"
     },
     {
       "id": "R-18",
@@ -1577,7 +1578,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "level": "high",
       "title": "前端测试资产同样从未入库（比 Go 更严重）",
       "d": ".gitignore:66 整目录忽略 <code>desktop/app/e2e/</code>（53 个脚本）、:62 <code>*.test.ts</code>（7 个 electron 测试），<code>git ls-files</code> = 0。干净检出下 <code>npm test</code> 一步都跑不了。",
-      "a": "R05a3 一并转正：e2e 目录、electron 测试、MCP testdata fixture；逐个跑通再入库，跑不通的明示删除。"
+      "a": "R05a3 一并转正：e2e 目录、electron 测试、MCP testdata fixture；逐个跑通再入库，跑不通的明示删除。<br><b>已解决（R17b 取证）</b>：<code>git ls-files desktop/app/e2e | wc -l</code> = 69、electron <code>*.test.ts</code> = 11，均已入库并被 <code>npm test</code> 真实调用；MCP fixture 那一半不属本条，仍挂在 R-10 未关。",
+      "status": "closed"
     },
     {
       "id": "R-10",
@@ -1613,6 +1615,14 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "title": "标签动作不再 touch/创建会话 view —— LRU 触摸面变化",
       "d": "R11b 删掉「标签动作无条件 setView」后，切标签不再把会话 view 拉回旧值，也不再顺带创建/触摸 view。",
       "a": "test:right-tabs I 组改用 setRightLayout 造 view；观察 preview container / auto-open 的行为，若 LRU 过早驱逐再补显式触摸。"
+    },
+    {
+      "id": "R-22",
+      "level": "warn",
+      "title": "Creator Mode 探针大半不在 npm test 链 —— 断言靠人记得跑",
+      "d": "8 个 Creator Mode 探针（tabbar 5225 / surface-boundary 5226 / ui-snapshot 5227 / plugin-loader 5228 / plugin-tab-persist 5229 / surfaces-page 5230 / plugin-entries 5231 / external-surface 5232）都只有手跑入口，<code>npm test</code> 里只覆盖了 right-tabs / session-tabs / surface-index / surface-protocol / surface-registry 五个。R02 评审点过「新测试不进链条」，当时只修了一半。",
+      "a": "<b>已解决（R17b）</b>：新增 <code>npm run test:creator-mode</code>（8 个探针按端口序 <code>&amp;&amp;</code> 串联，补上缺的 <code>e2e:ui-snapshot</code> / <code>e2e:plugin-tab-persist</code>），并追加到 <code>npm test</code> 尾部 —— test:creator-mode 入链，实测 427 行 ✅ 全绿（422 条断言 + 5 条探针小结），+40.6 秒（首跑 49s），连跑两次计数一致、零 flake；跑完 5225-5232 无残留监听。",
+      "status": "closed"
     }
   ],
   "hotspots": [
@@ -1638,9 +1648,9 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     "每个 PR 可独立 revert；表外 PR 先裁决。"
   ],
   "next3": [
-    "<b>R01</b>：<code>lib/layout.ts</code> 三态换算 + 单测（纯函数先落，可独立验）。",
-    "<b>R01</b>：store 加 <code>rightLayout</code>（会话级）+ <code>setRightLayout/FromDrag</code>，<code>rightExpanded</code> 派生。",
-    "<b>R01</b>：App.tsx 接线并删 <code>rightOverHalf</code>（:41/:160/:163 三处），跑 P04 拖拽帧基线。"
+    "<b>CJK 字体复验（R-18）</b>：换一台 macOS / Linux 重跑 LibreOffice 的 docx→PDF，把「中文是否落字形」按真转换结果写回风险表（本机 26.8 实测三组字体全空白，不能算数）。",
+    "<b><code>source</code> 上 wire</b>：插件安装来源（内置 / 本地目录 / 外部目录）从 index 透到设置页插件行，让用户看得出「这个是从哪装进来的」，卸载/重装时也有据可依。",
+    "<b><code>relIfInside</code> 双份口径去重</b>：<code>store/useAppStore.ts:2168 relIfInside</code> 与 <code>lib/filePaths.ts:15 toRelIfInside</code> 是同一算法的两份实现（注释自己写着「同口径」），合并成一份并加单测钉住工作区内/外两种输出。"
   ],
   "docs": [
     "<a href=\"00-conventions.md\">00 前置规范与 PR 约束</a>（活文档 v0.1）",
@@ -1783,9 +1793,10 @@ renderRows();
 (() => {
   const box = $('#risklist');
   for (const r of D.risks) {
+    const closed = r.status === 'closed';
     const n = el('div', 'risk');
-    n.innerHTML = '<div class="h"><b>' + r.id + '</b><span class="pill ' + (r.level === 'bad' ? 'blocked' : r.level === 'warn' ? 'review' : 'todo') + '">' +
-      (r.level === 'bad' ? '阻塞' : r.level === 'warn' ? '待处理' : '观察') + '</span><strong>' + r.title + '</strong></div>' +
+    n.innerHTML = '<div class="h"><b>' + r.id + '</b><span class="pill ' + (closed ? 'done' : r.level === 'bad' ? 'blocked' : r.level === 'warn' ? 'review' : 'todo') + '">' +
+      (closed ? '已解决' : r.level === 'bad' ? '阻塞' : r.level === 'warn' ? '待处理' : '观察') + '</span><strong>' + r.title + '</strong></div>' +
       '<div class="d">' + r.d + '</div><div class="a">→ ' + r.a + '</div>';
     box.append(n);
   }
