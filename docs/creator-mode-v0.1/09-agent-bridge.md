@@ -297,11 +297,14 @@ host.command('composer.quote', { text, source: { kind:'pdf', file:'unit-3.pdf', 
 
 ## 7. 安全与配额
 
-- **L0 前置，但先做 spike**：`contextBridge.exposeInMainWorld` 注入的 `desktop` 是否可被覆写/删除，尚未验证；先跑 10 行探针看属性描述符。
-  - 可覆写 → loader 捕获真对象到模块作用域，再把 `window.desktop` 换成收窄视图；
-  - 不可覆写 → 改为 preload 只暴露收窄对象（宿主代码另走一条内部 IPC），或把插件放进 sandboxed iframe（真正的隔离，成本另算）。
+- **L0（用户定稿）：插件代码里不存在 `window.desktop`，不是"不传给它"**。
+  - preload **不再暴露** `window.desktop`；只暴露一个一次性交接函数（如 `window.__claimHostApi`），第一次调用返回完整入口，之后永远返回 `undefined`。
+  - 宿主在 `main.tsx` 第一行（任何插件加载之前）调用它，把完整入口存进模块私有变量；插件代码、插件回调、插件事件处理里都读不到。
+  - 插件只通过 `apply({ host })` 拿到两个包装函数：`host.command` / `host.onEvent`；这两个函数闭包持有真入口，但插件无法从函数里取出它。
+  - 代价：宿主内部 105 处 `window.desktop.xxx` 改为走私有 `bridge` 模块（1–2 轮，无用户可见变化）。
+  - 门禁：探针插件断言 `window.desktop === undefined`、`__claimHostApi()` 返回空、`host.command`/`host.onEvent` 可用。
 - **诚实边界**：插件是 `import()` 进宿主**同一 realm** 的，能读同源 `localStorage`（项目路径、会话标题、prefs）、能改宿主全局。L0 是**降低误用**，不是安全边界；真正的边界只有隔离（iframe / 独立 world / 独立 WebContents）。
-- **L0 必删清单**：**原始** `onEvent`（广播所有 bridge 事件）、**原始** `command`（任意桥命令）、`providerKey` / `providerCopyKey`、全部 `fs*`、`settingsGet/Set`、`oauth*`、`startBridge/stopBridge`、`pick*`、`openPath` / `showItemInFolder`。插件只留 host API。
+- **L0 的"必删"随全局对象一起消失**：`onEvent`（广播所有 bridge 事件）、`command`（任意桥命令）、`providerKey` / `providerCopyKey`、全部 `fs*`、`settingsGet/Set`、`oauth*`、`startBridge/stopBridge`、`pick*`、`openPath` / `showItemInFolder` —— 插件世界里连 `desktop` 这个名字都没有，不需要逐条删。
 - **token**：per-plugin capability token，loader 闭包持有；main 校验 token ↔ plugin_id；payload 不带 plugin_id（§4.1）。
 - **不可信输入**：插件文本以用户消息 + 来源标注进入；不拼 system prompt；schema 校验后再交给插件。
 - **额度**（V1 默认，可在设置页调）：并发 run 1/插件；20 run/小时；input ≤32 KiB；instructions ≤8 KiB；schema ≤16 KiB；单 run ≤10 min；工具结果 ≤64 KiB；取消即停。
@@ -343,7 +346,7 @@ host.command('composer.quote', { text, source: { kind:'pdf', file:'unit-3.pdf', 
 
 | 阶段 | 内容 | 估 |
 |---|---|---|
-| **L0** | 先 spike（属性可覆写？）+ `window.desktop` 收窄/token/独立 IPC + 探针；不可覆写则改 preload 收窄或 iframe | 1–2 轮（spike 决定上界） |
+| **L0** | preload 改一次性交接 + 宿主 `bridge` 模块（105 处调用点）+ 插件侧 `window.desktop === undefined` 门禁 | 1–2 轮 |
 | **P1** | `runtimePlugin` + 6 处分支/4 道守卫 + `sessionOwner` + 11 处过滤 + `agent.run` + `composer.quote` | **5–6 轮** |
 | **P2** | manifest `tools[]` + 代理工具 + 工具调用协议 + 审批 + 项目会话授权 | 2–3 轮 |
 | **P3** | 当前会话只读订阅 / 通用 channel（可选） | 2 轮 |
@@ -360,6 +363,8 @@ P2 完成才有「用户在项目会话里说一句，PDF 面板自己更新」�
 3. **缺负向守卫**（停用/卸载后 `m.runtime` 会兜底造项目 runtime，把虚拟路径写进 workspaces.json）→ `isPluginHomePath` 在 `m.runtime` / `createOpts` / `workspaceSync|Add` / `knownWorkspace` 四道硬拒绝；"虚拟路径永不进 workspaces.json"是**后端不变式**，不是前端过滤。
 
 协议定稿（用户 2026-11-14）：对外**只有 `command` + `onEvent` 两条通道**，`agent.run`/`quote`/`tool.result` 全部是命令名，`tool.call`/`agent.delta` 全部是事件名；具名 `host.agent` / `host.tools` / `host.composer` API 取消。
+
+L0 定稿（用户 2026-11-14）：插件世界不存在 `window.desktop`；preload 只放一次性交接函数，宿主启动时领走；插件只有 `host.command` / `host.onEvent` 两个函数。
 
 其余已吸收：D3 改为"与普通会话一致，切模型会更新全局 active"；工具集加 denylist（surface_*/mesh/cron/promote_task/git_worktree），`memory_dream` 按用户决定保留；agent 事件走独立 IPC、不复用 `onEvent`；plugin_id 由 token 派生；L0 先 spike，且明说"同 realm 下 L0 不是安全边界"；成本 P1 从 3 轮上调到 **5–6 轮**。
 
