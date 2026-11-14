@@ -59,6 +59,13 @@ const (
 	// maxSurfaceDirBytes 整目录上限（1 MiB）：manifest + panel.js + icon 的合理量级。
 	maxSurfaceDirBytes = 1 << 20
 
+	// maxSurfaceEntries manifest.entries[] 的条数上限（D-2 / R16）。
+	// 20 是「一个插件能一眼列完入口」的量级：再多就不是菜单，是目录页了。
+	maxSurfaceEntries = 20
+	// maxSurfaceEntryTitleChars 单个入口标题的**字符**（rune）上限，不是字节：
+	// 一个 10 字的中文标题是 30 字节，用字节数判会把正常标题判死。
+	maxSurfaceEntryTitleChars = 64
+
 	surfaceDirMode  = 0o700 // 目录 0700
 	surfaceFileMode = 0o600 // 文件 0600（index / manifest / panel.js / audit 一律）
 )
@@ -120,6 +127,21 @@ type surfaceManifest struct {
 	// bridge 不消费它（ui 通道没有回执），读它只是为了让「同一份 surface.json 的
 	// 声明」在一处可查：渲染层从索引 IPC 读，Go 从这份结构读。
 	Data []string `json:"data"`
+	// Entries 插件声明的**多个入口**（D-2 / R16）：每个 entry 是同一 kind 的一个标签实例
+	//（渲染层用 `params.entry = <id>` 区分页面）。bridge 只校验形状与路径纪律 ——
+	// 入口渲染在渲染层，这一侧不存 index（index.json 的 schema 不动：entries 是 manifest 字段）。
+	Entries []surfaceEntryDecl `json:"entries"`
+}
+
+// surfaceEntryDecl manifest.entries[] 的一项（D-2 的形状：id/title/icon?/order?）。
+//
+// 刻意**不**给 entry 加 kind / capabilities：一个插件仍只注册一个 kind（D-2 的第一条规则），
+// 每个 entry 只是它的一面；多给一层能力就等于让一个 manifest 声明出两个插件。
+type surfaceEntryDecl struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Icon  string `json:"icon"`
+	Order int    `json:"order"`
 }
 
 // surfaceReceipt 安装 / 卸载的回执（工具层直接序列化给模型与脚本）。
@@ -679,6 +701,11 @@ func validateSurfaceSource(target string) (surfaceSource, error) {
 	if st.Size() > maxSurfaceEntryBytes {
 		return surfaceSource{manifest: mf}, fmt.Errorf("%s: entry %q 有 %s，超过 256 KiB 上限", mf.ID, entry, humanKiB(st.Size()))
 	}
+	// entries[] 与 entry/icon 同属「manifest 指哪读哪」的声明：形状/重复/逃逸必须在**写盘前**
+	// 判死（D-3）。它在体积校验之后、hash 之前 —— 便宜的先跑，且失败时还没算过任何东西。
+	if err := validateSurfaceEntries(target, mf.ID, mf.Entries); err != nil {
+		return surfaceSource{manifest: mf}, err
+	}
 
 	total, err := surfaceTreeSize(target)
 	if err != nil {
@@ -721,6 +748,86 @@ func resolveSurfaceEntry(target, entry string) (string, error) {
 		return "", fmt.Errorf("entry %q 经软链逃出了 target", entry)
 	}
 	return realEntry, nil
+}
+
+// validateSurfaceEntries 校验 manifest.entries[]（D-3：任何一条不过 = 安装 rejected）。
+//
+// 三条边界上的取舍，改之前先读：
+//  1. **零条合法**（缺省 / 空数组）：宿主会给一个默认入口（D-2 的硬约束是「至少一个可见入口」），
+//     所以这里不能把「没写 entries」判成错 —— 那样所有老 manifest 都会装不上。
+//  2. **title 按 rune 数**：`len([]rune(s))`，与 version 的既有校验同口径（字节数会把中文判死）。
+//  3. **icon 只查「在目录内」，不查「存在」**：逃逸是安全问题（拒绝安装），缺失只是少一个图标
+//     （D-3 明说用 kind 图标兜底、不阻塞安装）。两者处置不同，判据也就必须分开写。
+func validateSurfaceEntries(target, id string, list []surfaceEntryDecl) error {
+	if len(list) == 0 {
+		return nil
+	}
+	if len(list) > maxSurfaceEntries {
+		return fmt.Errorf("%s: entries 有 %d 项，超过 %d 项上限", id, len(list), maxSurfaceEntries)
+	}
+	seen := make(map[string]struct{}, len(list))
+	for i, e := range list {
+		entryID := strings.TrimSpace(e.ID)
+		if !surfaceIDPattern.MatchString(entryID) {
+			return fmt.Errorf("%s: entries[%d].id 不合法：%q（需匹配 ^[a-z][a-z0-9-]{1,40}$）", id, i, entryID)
+		}
+		if _, dup := seen[entryID]; dup {
+			// 重复 id = 两个入口共用一个 params.entry：打开「课表」会命中上一次的标签，
+			// 面板也分不清该画哪一页。这在写盘前必须死（装完再发现只能卸载重装）。
+			return fmt.Errorf("%s: entries 的 id 重复：%q（每个入口的 params.entry 必须唯一）", id, entryID)
+		}
+		seen[entryID] = struct{}{}
+		title := strings.TrimSpace(e.Title)
+		if title == "" {
+			return fmt.Errorf("%s: entries[%d] (%s) 的 title 不能为空", id, i, entryID)
+		}
+		if n := len([]rune(title)); n > maxSurfaceEntryTitleChars {
+			return fmt.Errorf("%s: entries[%d] (%s) 的 title 过长（%d 字符，上限 %d）", id, i, entryID, n, maxSurfaceEntryTitleChars)
+		}
+		if err := validateSurfaceEntryIcon(target, e.Icon); err != nil {
+			return fmt.Errorf("%s: entries[%d] (%s) 的 icon %v", id, i, entryID, err)
+		}
+	}
+	return nil
+}
+
+// validateSurfaceEntryIcon 入口图标的路径纪律（与 resolveSurfaceEntry 同款三道闸）。
+//
+// 与 resolveSurfaceEntry 的唯一差别：**文件不存在不算错**（D-3：用 kind 图标兜底，不阻塞安装）。
+// 因此「语法上在目录内」是硬判据，「解析后仍在目录内」（软链逃逸）只在文件真的存在时才判 ——
+// 不存在的路径谈不上逃逸，而存在的软链指到目录外就是一次任意文件读取。
+func validateSurfaceEntryIcon(target, icon string) error {
+	icon = strings.TrimSpace(icon)
+	if icon == "" {
+		return nil // 没声明图标：渲染层用 kind 图标（合法）
+	}
+	if filepath.IsAbs(icon) {
+		return fmt.Errorf("不许是绝对路径：%q", icon)
+	}
+	// 反斜杠在 darwin/linux 上是合法文件名字符，但渲染层的 relInDir 与 index 协议都拒它：
+	// 放进来会出现「Go 校验通过、渲染层 URL 拼不出来」的半合法状态。一处口径，两处都拒。
+	if strings.Contains(icon, `\`) {
+		return fmt.Errorf("不许含反斜杠：%q", icon)
+	}
+	clean := filepath.Clean(icon)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("逃出了插件目录（不许含 ..）：%q", icon)
+	}
+	realTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return fmt.Errorf("解析插件目录失败：%v", err)
+	}
+	realIcon, err := filepath.EvalSymlinks(filepath.Join(realTarget, clean))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // 缺失 → 渲染层兜底（不是安全问题）
+		}
+		return fmt.Errorf("解析失败：%v", err)
+	}
+	if !strings.HasPrefix(realIcon, realTarget+string(os.PathSeparator)) {
+		return fmt.Errorf("经软链逃出了插件目录：%q", icon)
+	}
+	return nil
 }
 
 // surfaceTreeSize 目录总大小（含 manifest / icon；不含符号链接指向的内容）。

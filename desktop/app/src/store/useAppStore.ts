@@ -1482,12 +1482,33 @@ export function focusSpec(s: { fileFocus?: FileFocus }): TabSpec {
 //   · file → path + mode：同一文件可同时有 diff 与 source 两个标签（D5），
 //     但同一 (path, mode) 只有一个实例。toolId **不进键** —— 同一文件的 diff 标签只有一个，
 //     再次打开（点另一处改动）只更新它的 toolId/startLine，否则用户会看到两个同名 diff 标签。
+//   · plugin → kind + params.entry（R16）：一个插件可以声明多个入口，每个入口是**一个标签
+//     实例**（D-2 的第一条规则）。不把 entry 进键的后果是可观测的：点完「课表」再点「课程资源」，
+//     第二个入口只会把第一个标签的 params 换掉 —— 用户以为点了没反应。params 里除 entry 之外
+//     的键**不进键**：页面内部路由（列表→详情）归插件自理（D-2），宿主不因为它多开标签。
 //   · 其它 kind → undefined（沿用阶段 1 的「每类每 scope 一个实例」，匹配由调用方按 kind 做）。
 // 路径先归一化（fileKeyOf）：工作区内的绝对路径与相对路径指向同一个文件，必须落同一个标签，
 // 否则「从对话点开」与「从左栏文件树点开」会各开一个（用户看到的就是重复）。
 function tabKeyOf(t: TabInstance | TabSpec, ws: string | undefined): string | undefined {
-  if (t.kind !== 'file' || !t.path) return undefined
-  return `file\u0000${fileKeyOf(t.path, ws)}\u0000${t.mode ?? 'source'}`
+  if (t.kind === 'file' && t.path) return `file\u0000${fileKeyOf(t.path, ws)}\u0000${t.mode ?? 'source'}`
+  const plugin = pluginEntryOf(t)
+  return plugin ? `plugin\u0000${plugin.kind}\u0000${plugin.entry}` : undefined
+}
+
+/**
+ * 插件标签的 (kind, params.entry)。**唯一**一处按插件实例的形状读 params（理由与
+ * toPersistedTab 相同：TabInstance 联合里没有这个成员，也不该为它扩一个不可达分支）。
+ * entry 缺失（老标签 / 插件自己 openTab 时没带）→ ''，与「默认入口」不混淆：
+ * 那是一个真实的 key，不是「没有 key」（后者会退回「每类一个实例」）。
+ */
+function pluginEntryOf(t: TabInstance | TabSpec): { kind: string; entry: string } | undefined {
+  const kind = (t as { kind: string }).kind
+  if (!isPluginKind(kind)) return undefined
+  const params = (t as { params?: unknown }).params
+  const entry = params && typeof params === 'object' && !Array.isArray(params)
+    ? (params as Record<string, unknown>).entry
+    : undefined
+  return { kind, entry: typeof entry === 'string' ? entry : '' }
 }
 
 // activePageIdOf：原生视图池里「当前激活的**真实页面**」的 id。

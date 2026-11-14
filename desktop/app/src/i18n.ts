@@ -1105,6 +1105,10 @@ const zh: Record<string, string> = {
   'surfaces.declared.commands': '声明的命令：',
   'surfaces.declared.data': '订阅的数据：',
   'surfaces.declared.none': '无',
+  // R16：入口在宿主界面的落点（D-2 的第 3 处：设置页每行的「打开」+ 提示）
+  'surfaces.open': '打开',
+  'surfaces.openHint': '入口在右栏 ＋ → 面板插件',
+  'surfaces.openDisabled': '插件已停用：启用后入口才会回到右栏',
   'surfaces.cancel': '取消',
   'surfaces.uninstall.title': '卸载面板插件',
   'surfaces.uninstall.msg': '把 {id} 的目录移进 .trash（回收站），并从插件清单里去掉。右栏里已经打开的标签会变成墓碑。',
@@ -1878,6 +1882,8 @@ const zh: Record<string, string> = {
   'rp.tabs.emptyHint': '点 ＋ 打开一个标签，或从左侧文件树打开文件。',
   'rp.tabs.closedEmpty': '没有可重开的标签',
   'rp.tabs.overflow': '还有 {n} 个标签（点开列表）',
+  // R16：插件入口（D-2 的三处宿主渲染点共用这一个分组名）
+  'rp.tabs.plugins': '面板插件',
   // PR-10：面板崩溃卡 / 墓碑（错误边界 + 连续失败自动禁用）
   'rp.surface.crashBadge': '面板崩溃',
   'rp.surface.details': '错误详情',
@@ -3304,6 +3310,10 @@ const en: Record<string, string> = {
   'surfaces.declared.commands': 'Declared commands:',
   'surfaces.declared.data': 'Subscribed data:',
   'surfaces.declared.none': 'none',
+  // R16: where the entrances live (D-2 #3: per-row "Open" + hint on the settings page)
+  'surfaces.open': 'Open',
+  'surfaces.openHint': 'Entrances live in the right panel ＋ → Panel plugins',
+  'surfaces.openDisabled': 'Plugin is disabled: enable it to bring the entrances back',
   'surfaces.cancel': 'Cancel',
   'surfaces.uninstall.title': 'Uninstall surface',
   'surfaces.uninstall.msg': 'Move {id} into .trash (recycle bin) and drop it from the surface index. Open tabs for it become tombstones.',
@@ -4003,6 +4013,8 @@ const en: Record<string, string> = {
   'rp.tabs.emptyHint': 'Use ＋ to open a tab, or open a file from the tree.',
   'rp.tabs.closedEmpty': 'No recently closed tabs',
   'rp.tabs.overflow': '{n} more tabs (open list)',
+  // R16: plugin entrances (one group label shared by the three host-rendered places)
+  'rp.tabs.plugins': 'Panel plugins',
   // PR-10: panel crash card / tombstone (error boundary + auto-disable after repeated failures)
   'rp.surface.crashBadge': 'Panel crashed',
   'rp.surface.details': 'Error details',

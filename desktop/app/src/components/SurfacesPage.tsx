@@ -23,6 +23,9 @@ import type { SurfaceAuditLine, SurfaceIndex, SurfaceIndexItem } from '../transp
 import { setSurfaceEnabled, surfaceReasonText } from '../surfaces/manage'
 import ConfirmModal from './ConfirmModal'
 import { Switch } from './SettingsGroups'
+import { useAppStore } from '../store/useAppStore'
+import type { TabSpec } from '../store/useAppStore'
+import { entryItemsOf } from '../surfaces/plugin/entries'
 
 /**
  * 宿主允许插件调用的只读命令（**展示用副本**）。
@@ -47,6 +50,15 @@ export default function SurfacesPage() {
   // 每行一条错误（键 = 插件 id；页级错误用空串键）：贴在那一行下面，不弹窗。
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  // R16：设置页的「打开」= D-2 的第 3 处入口。它**不自己造标签**，只调 store 的 openTab ——
+  // 右栏的展开、去重（同一 entry 再点一次 = 激活）都由那一个动作负责，页面不复制一份。
+  const openTab = useAppStore((s) => s.openTab)
+  const onOpen = useCallback((item: SurfaceIndexItem) => {
+    const first = entryItemsOf(item)[0]
+    if (!first) return // 理论上不可达：零 entries 也必然有一条默认入口（D-2 硬约束）
+    // 形状 cast 与 RightPanel / loader 的 host.openTab 同口径（TabInstance 联合里没有 plugin 成员）。
+    openTab({ kind: first.kind, params: { entry: first.entryId } } as unknown as TabSpec)
+  }, [openTab])
 
   // reason → 一句人话：映射在 surfaces/manage.ts（与墓碑的「重新启用」共用）。
   // 调用点一律走 tRef.current（见下），这样 useCallback 的依赖里不必挂那个每帧都变的 t。
@@ -224,6 +236,18 @@ export default function SurfacesPage() {
               {/* 版本 + 短 hash：hash 前 8 位够用来对「装的是不是同一版」（长 hash 在 index 里） */}
               <span className="mcp-type mono">{item.version || '—'}</span>
               <span className="mcp-type mono" title={item.hash}>{item.hash ? item.hash.slice(0, 8) : '—'}</span>
+              {/* 打开该插件的**第一个**入口（order 最小；零 entries 时是宿主合成的默认入口）。
+                  停用后置灰：入口那时已经从右栏消失，这里能点开一个「开了也没入口」的标签
+                  只会让人以为插件还活着。 */}
+              <button
+                className="btn surface-open"
+                data-surface-open={item.id}
+                disabled={busyId === item.id || !item.enabled}
+                title={item.enabled ? undefined : t('surfaces.openDisabled')}
+                onClick={() => onOpen(item)}
+              >
+                {t('surfaces.open')}
+              </button>
               <Switch
                 on={item.enabled}
                 disabled={busyId === item.id}
@@ -259,6 +283,14 @@ export default function SurfacesPage() {
                   <span className="mcp-type mono" key={`d-${c}`} data-surface-data={c}>{c}</span>
                 ))
               )}
+            </div>
+
+            {/* R16 / D-2 第 4 条：入口在哪。写在**每一行**（而不是页面顶部一句话）：
+                用户是看着某一行的「打开」按钮问「其它入口在哪」的，提示要贴着那个问题。 */}
+            <div className="mcp-s-cmd" data-surface-open-hint>
+              <span className="set-desc">
+                {item.enabled ? t('surfaces.openHint') : t('surfaces.openDisabled')}
+              </span>
             </div>
 
             {/* manifest 坏掉的原因：这一条**照常显示**（用户还看得见装了什么、为什么不能用） */}
