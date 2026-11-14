@@ -1,11 +1,14 @@
-/* 手机壳样式（P8-01a）。
+/* 手机壳样式（P8-01a → P8-01b 接 Hub 屏幕）。
  *
  * 只引令牌层 + Hub 样式，**不引 index.css**（13k 行三栏桌面布局 + tailwind）：
  *   · runtime-palette.css：v2 色板（html[data-skin='runtime'][data-theme]），基色 + 语义色；
  *   · runtime-tokens.css：令牌改名层（--line / --card / --accent / --r-md / --font…）；
- *   · hub/hub.css：Hub 组件的 --hub-* 令牌与版式（P8-01b 直接复用，先挂上免得到时重搭）；
+ *   · hub/hub.css：Hub 组件的 --hub-* 令牌与版式（内部 @import demo.css，会话区/
+ *     chat-header/composer 的解剖都在那里，所以手机不需要复制一套消息样式）；
  *   · runtime-skin.css：会话面皮肤（同上）。
- * 移动布局规则全部在文件末尾的「mobile shell」段，单列 + safe-area + 44px 点击区。
+ *
+ * 本文件只写**布局覆盖**：单列、100dvh、safe-area、44px 点击区、抽屉、composer 贴底。
+ * 颜色/字号/间距全部沿用上面的令牌与 hub.css —— 手机不另起一套视觉语言。
  */
 @import '../runtime-palette.css';
 @import '../runtime-tokens.css';
@@ -36,9 +39,12 @@ body {
 }
 
 .m-app {
-  min-height: 100dvh;
+  /* 固定一屏高：会话页的消息区自己滚、composer 贴底（min-height 会让 composer 跑到
+     首屏之外，手机上没有「滚动到输入框」这种直觉）。 */
+  height: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   /* 刘海/home 条：内容躲开安全区，背景铺满（padding 在容器上，背景仍在 body 上）。 */
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
     env(safe-area-inset-left);
@@ -101,7 +107,8 @@ body {
 }
 
 .m-main {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -109,6 +116,15 @@ body {
   max-width: 640px;
   margin: 0 auto;
   padding: 16px 12px 24px;
+  overflow-y: auto;
+}
+
+/* Hub 列表/会话：铺满（不再居中 640，也不留卡片内边距）。 */
+.m-main--flush {
+  max-width: none;
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
 }
 
 .m-card {
@@ -272,9 +288,368 @@ body {
   opacity: 0.8;
 }
 
+/* ─────────── Hub 列表 / 会话 / 详情抽屉（P8-01b） ───────────
+ *
+ * 这里**不重画** Hub：列表行、消息块、任务卡、Needs、composer、状态条全部来自
+ * hub.css + demo.css。手机只改容器尺寸与触控目标：
+ *   · 列表：HubSidebar 从「左栏 38vh」变成整屏一列；
+ *   · 会话：HubSurface 的 .hub-demo.main 从 100dvh 变成「填满剩余高度」，
+ *     composer 因此自然贴底，消息区自己滚；
+ *   · 抽屉：HubInspector 原样搬进右侧抽屉（能力不隐藏）。
+ */
+
+/* 顶栏右侧动作组：两个 44px 图标按钮（语言/主题），最后一个吃掉 .m-icon-btn 的负边距。 */
+.m-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.m-head-actions .m-icon-btn {
+  margin-right: 0;
+}
+
+.m-head-actions .m-icon-btn:last-child {
+  margin-right: -8px;
+}
+
+/* —— 列表 —— */
+
+.m-hub-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+
+.m-hub-list .hub-side {
+  /* 桌面是「左栏里限高 38vh 的一段」，手机是整页：吃掉剩余高度，滚动留给内部列表。 */
+  flex: 1 1 auto;
+  max-height: none;
+  margin: 0;
+  border-bottom: 0;
+  background: var(--paper);
+}
+
+.m-hub-list .hub-side-head {
+  min-height: 48px;
+  padding: 4px 12px;
+}
+
+/* 触控目标：行高 ≥56，tab/范围/搜索框 ≥44（WCAG 2.5.8 / iOS HIG）。 */
+.m-hub-list .hub-side-row {
+  min-height: 56px;
+  padding: 6px 10px;
+}
+
+.m-hub-list .hub-side-tabs button,
+.m-hub-list .hub-side-scopes button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 10px;
+}
+
+/* 搜索范围在桌面是三个小文字按钮；手机做成胶囊，44px 的触控盒才不会看着像方块。 */
+.m-hub-list .hub-side-scopes button {
+  border-radius: 999px;
+}
+
+.m-hub-list .hub-side-search-box {
+  min-height: 44px;
+}
+
+/* 16px 是 iOS Safari 的底线：小于它，聚焦时页面会被强制放大（搜索框原值 12.5px）。 */
+.m-hub-list .hub-side-search-input {
+  font-size: 16px;
+}
+
+.m-hub-list .hub-side-results {
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
+}
+
+.m-hub-list .hub-search-hit {
+  min-height: 56px;
+  padding: 8px 10px;
+}
+
+.m-hub-banner {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--amber, #f5b544) 12%, transparent);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.m-hub-error {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* —— 会话 —— */
+
+.m-conv {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper-2);
+}
+
+.m-conv-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 48px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.m-conv-back,
+.m-conv-inspector {
+  margin-right: 0;
+}
+
+.m-conv-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-conv-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  min-width: 0;
+}
+
+/* demo.css 的 `.hub-demo .main` 是 100dvh（整页 demo）；手机这里要的是「填满剩余」，
+   否则 composer 会被顶到视口外。只改高度来源，不动内部解剖。 */
+.m-conv .hub-demo.main {
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+}
+
+/* 手机上的会话头收紧一档：桌面 64px 是为三栏留呼吸，手机每像素都算消息区。 */
+.m-conv .hub-demo .chat-header {
+  min-height: 56px;
+  height: auto;
+  padding: 6px 10px;
+  gap: 8px;
+}
+
+/* 输入框 16px（iOS 聚焦不放大）。textareas 全部命中：DM/群 composer 与派任务表单。 */
+.m-conv textarea {
+  font-size: 16px;
+}
+
+.m-conv .hub-demo .composer {
+  padding: 6px 6px 6px 8px;
+}
+
+.m-conv .hub-demo .composer .icon-btn {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 0;
+}
+
+/* 桌面键盘提示（Enter 发送 / Shift+Enter 换行）在触屏上没有意义，占的是一行消息高度。 */
+.m-conv .hub-demo .composer-hint {
+  display: none;
+}
+
+.m-conv .hub-demo .composer .send-btn {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 0;
+}
+
+/* composer 底部安全区：home 条不能盖住发送键（.m-app 已有 padding，这里再兜一层
+   —— 附件条/提示行会把 composer 顶高一档，实际贴底的是它自己的 padding）。 */
+.m-conv .hub-demo .composer-wrap {
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+
+/* —— 详情抽屉（Context / 任务 / Needs / 会话 / 概览）—— */
+
+.m-drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+}
+
+.m-drawer-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 45%);
+}
+
+.m-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(88vw, 400px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--paper-2);
+  border-left: 1px solid var(--line);
+  box-shadow: -16px 0 40px rgb(0 0 0 / 35%);
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: m-drawer-in 0.18s ease-out;
+}
+
+.m-drawer:focus {
+  outline: none;
+}
+
+.m-drawer > .hub-inspector {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  width: 100%;
+}
+
+/* 抽屉里的触控目标：页签与关闭按钮原本是 24px 的桌面密度。 */
+.m-drawer .hub-inspector-head {
+  padding: 4px 6px;
+}
+
+.m-drawer .hub-inspector-tabs button[role='tab'] {
+  min-height: 44px;
+  min-width: 44px;
+  /* 5 个页签 + 关闭按钮要在 343px 的抽屉里排下（min-width 44 是触控底线，
+     省下来的宽度从横向内边距出）：否则 Context 会被截成「Conte›」。 */
+  padding: 0 6px;
+}
+
+.m-drawer .hub-inspector-close {
+  width: 44px;
+  height: 44px;
+}
+
+.m-drawer .hub-btn,
+.m-drawer .hub-ov-task {
+  min-height: 44px;
+}
+
+@keyframes m-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+/* —— 底栏（连接状态 / 重连 / 重新配对）—— */
+
+.m-foot {
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 2px 10px;
+  min-height: 48px;
+}
+
+.m-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.m-link-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.m-foot-origin {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.m-foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.m-foot-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-sm, 8px);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.m-foot-btn:active {
+  background: var(--paper-3);
+}
+
+/* —— toast（host/panels 的 showToast 落点）—— */
+
+.m-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(20px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 90;
+  max-width: calc(100vw - 32px);
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 35%);
+}
+
+.m-toast-error {
+  background: var(--red, #ff7386);
+  color: #fff;
+}
+
+.m-shell-warn {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(8px + env(safe-area-inset-bottom));
+  z-index: 85;
+  padding: 8px 12px;
+  border-radius: var(--r-sm, 8px);
+  background: var(--paper-3);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .m-icon-btn,
   .m-btn {
     transition: none;
+  }
+
+  .m-drawer {
+    animation: none;
   }
 }
