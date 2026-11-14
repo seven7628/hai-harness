@@ -9,8 +9,14 @@
 // 三件事决定了面板「长得像这个应用」：
 //   1. 颜色/主题**只**从 `host.theme()` 取（不要写死 #fff —— 暗色下会瞎）；
 //   2. 标题/图标走 provider（标签条只认 provider.title / provider.icon）；
-//   3. 数据**只**通过 `host.command()` 取（白名单在 manifest.commands 里声明，
-//      真正放行在 bridge；未声明会拿到 {ok:false, reason:'denied'}，不会抛）。
+//   3. 一切宿主能力**只**经 `host.command(name, payload)`（白名单在 manifest.commands 里
+//      声明；未声明拿到 {ok:false, reason:'not_declared'}，**永不抛** —— 拒绝是一个值）；
+//      事件**只**经 `host.onEvent(type, fn)`（未在 manifest.data 声明会抛，所以写错名字
+//      在 apply 阶段就能发现）。这两个就是插件的全部口子（09-agent-bridge §5）。
+//
+// D11（旧只读命令已不可用）：`workspace_list` / `session_list` / `git_snapshot` /
+// `ui_inspect` 既不是 command、也不再放行 —— 它们能读真实项目/会话元数据，与「插件不碰
+// Project」冲突。声明了它们也不会生效（一律 denied），所以别照着旧例子抄。
 //
 // R16 起这份模板演示**多入口**：surface.json 的 entries 声明了三个入口（总览/课表/资源），
 // 宿主把它们画在右栏 ＋ → 面板插件、空态能力面板、以及设置页的「打开」上；点哪一个都用
@@ -40,44 +46,123 @@ export const surface = {
     })
     const h2Style = (theme) => ({ color: theme.tokens.accent, fontWeight: 600, margin: '0 0 6px' })
 
-    // —— 总览：宿主能力的最小用法（host.command + host.events）——
+    // —— 总览：新 API 的最小用法（host.command + host.onEvent + composer.quote）——
+    //
+    // 这一页演示三件事，每一件都对应一个「用错了就会出事」的点：
+    //   ① agent.run 的**回执只含 run_id/session_id**，内容靠事件流（agent.delta …）；
+    //      所以必须先在 manifest.data 里声明要收的事件，且每个订阅都要 off()。
+    //   ② 事件订阅与组件生命周期同长：卸载时 off()，否则面板关掉之后回调还在跑
+    //      （loader 也会兜底回收，但插件不该指望宿主替它收尾）。
+    //   ③ composer.quote **只插草稿、绝不自动发送**（D7）：发不发由用户按回车决定。
     function Overview() {
       const theme = host.theme()
-      const [workspaces, setWorkspaces] = useState([])
-      const [error, setError] = useState('')
-      const [tick, setTick] = useState(0)
+      const [question, setQuestion] = useState('把这周的课程安排整理成一张表')
+      const [answer, setAnswer] = useState('')
+      const [status, setStatus] = useState('')
+      const [busy, setBusy] = useState(false)
+      const sessionRef = React.useRef('') // 插件自己记会话 id（D4：宿主不替你记）
+      const runRef = React.useRef('')
 
+      // 每个 onEvent 都返回 disposer；effect 的 cleanup 里逐个调用。
+      // 写成 `const off = host.onEvent(...)` 而不是 `.on(...)`：没有 host.events 这个对象了。
       useEffect(() => {
-        let alive = true
-        host
-          .command('workspace_list', {})
-          .then((r) => {
-            if (!alive) return
-            // 拒绝是一个**值**（ok:false + reason），不是异常 —— 照实显示，别吞掉。
-            if (!r.ok) setError(r.reason || 'denied')
-            else setWorkspaces(r.data?.workspaces || [])
-          })
+        const offDelta = host.onEvent('agent.delta', (ev) => setAnswer((prev) => prev + ((ev.data && ev.data.text) || '')))
+        const offDone = host.onEvent('agent.done', () => {
+          setBusy(false)
+          setStatus('完成')
+        })
+        const offError = host.onEvent('agent.error', (ev) => {
+          setBusy(false)
+          setStatus('出错：' + ((ev.data && ev.data.reason) || 'error'))
+        })
+        // 本地事件（不需要 token）：插件装卸/启停时宿主会推它。这里只演示「收到就算数」。
+        const offChanged = host.onEvent('surfaces_changed', () => setStatus('插件清单有变化'))
         return () => {
-          alive = false
+          offDelta()
+          offDone()
+          offError()
+          offChanged()
         }
-      }, [tick])
+      }, [])
 
-      // 已声明的 op 才能订阅（manifest.data）。这里用它做「别的地方变了 → 我也刷新」。
-      useEffect(() => host.events.on('surfaces_changed', () => setTick((n) => n + 1)), [])
+      const ask = async () => {
+        setBusy(true)
+        setAnswer('')
+        setStatus('')
+        // ① 先要一个会话（D4：不传 session_id 给 agent.run 也是新建，这里演示显式建）
+        if (!sessionRef.current) {
+          const s = await host.command('agent.session', { title: '成本看板' })
+          if (!s.ok) {
+            setBusy(false)
+            setStatus('建会话失败：' + (s.reason || 'denied'))
+            return
+          }
+          // 回执把 data 里的字段摊在顶层（loader 归一），两种读法都对，这里用扁平的那个。
+          sessionRef.current = s.session_id || (s.data && s.data.session_id) || ''
+        }
+        // ② 发起 run：**立即**回 run_id，内容随后从事件流里来
+        const r = await host.command('agent.run', { session_id: sessionRef.current, input: question })
+        if (!r.ok) {
+          setBusy(false)
+          setStatus('发起失败：' + (r.reason || 'denied'))
+          return
+        }
+        runRef.current = r.run_id || (r.data && r.data.run_id) || ''
+      }
 
-      const style = { padding: 12, color: theme.tokens.fg, font: '13px/1.6 system-ui, sans-serif' }
+      const cancel = async () => {
+        const r = await host.command('agent.cancel', { run_id: runRef.current })
+        if (r.ok) await host.command('ui.toast', { message: '已请求停止' })
+        setStatus(r.ok ? '已请求停止' : '停止失败：' + (r.reason || 'denied'))
+      }
+
+      const quote = async () => {
+        // 只插草稿（D7）：回执 ok 之后输入框里就有这段字，光标在末尾，发不发由用户决定。
+        const r = await host.command('composer.quote', {
+          text: question,
+          source: { id: 'cost-board:question', title: '成本看板 · 问题' },
+        })
+        setStatus(r.ok ? '已插入草稿（不会自动发送）' : '引用失败：' + (r.reason || 'denied'))
+      }
+
+      const btn = {
+        padding: '4px 10px',
+        marginRight: 8,
+        borderRadius: 6,
+        border: `1px solid ${theme.tokens.border}`,
+        background: theme.tokens.bg2 || 'transparent',
+        color: theme.tokens.fg,
+        cursor: 'pointer',
+        font: 'inherit',
+      }
       return h(
         'div',
-        { style, 'data-surface': 'cost-board', 'data-entry': 'overview' },
+        { style: pageStyle(theme), 'data-surface': 'cost-board', 'data-entry': 'overview' },
         h('div', { style: h2Style(theme) }, '成本看板'),
-        error
-          ? h('div', { style: { color: theme.tokens.err } }, '读不到工作区：' + error)
-          : h('div', null, `工作区 ${workspaces.length} 个`),
         h(
-          'ul',
-          { style: { margin: '8px 0 0', paddingLeft: 18 } },
-          workspaces.slice(0, 8).map((w, i) => h('li', { key: w.path || i }, w.title || w.name || w.path)),
+          'div',
+          { style: { color: theme.tokens.muted || theme.tokens.fg, marginBottom: 8 } },
+          '问一句，结果流式回到这里；引用只进草稿，不会自动发送。',
         ),
+        h('textarea', {
+          value: question,
+          onChange: (e) => setQuestion(e.target.value),
+          rows: 3,
+          'data-template-question': '',
+          style: { width: '100%', boxSizing: 'border-box', padding: 6, color: theme.tokens.fg, background: 'transparent', border: `1px solid ${theme.tokens.border}`, borderRadius: 6, font: 'inherit' },
+        }),
+        h(
+          'div',
+          { style: { margin: '8px 0' } },
+          h('button', { type: 'button', style: btn, onClick: ask, disabled: busy, 'data-template-ask': '' }, busy ? '运行中…' : '问 Agent'),
+          h('button', { type: 'button', style: btn, onClick: quote, 'data-template-quote': '' }, '引用到草稿'),
+          busy ? h('button', { type: 'button', style: btn, onClick: cancel }, '停止') : null,
+        ),
+        // 拒绝是一个**值**（ok:false + reason），不是异常 —— 照实显示，别吞掉。
+        status ? h('div', { style: { color: theme.tokens.muted || theme.tokens.fg }, 'data-template-status': '' }, status) : null,
+        answer
+          ? h('pre', { 'data-template-answer': '', style: { whiteSpace: 'pre-wrap', margin: '8px 0 0', font: 'inherit' } }, answer)
+          : null,
       )
     }
 

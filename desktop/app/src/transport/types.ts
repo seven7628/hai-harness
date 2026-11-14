@@ -749,7 +749,7 @@ export interface SurfaceIndexItem {
   entries: SurfaceEntryDecl[]
   /** 声明的宿主命令（白名单的一半；另一半在 bridge） */
   commands: string[]
-  /** 声明的 ui op（host.events.on 的闸门） */
+  /** 声明的事件 type（host.onEvent 的闸门；含 agent.* 与本地 surfaces_changed） */
   data: string[]
   /** `<id>` 目录内的相对路径（缺省 panel.js；可改名，如 dist/panel.js） */
   entry: string
