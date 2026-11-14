@@ -14,7 +14,7 @@
 //     取自 manifest（总览/课表/资源，**不是** id）+ data-entry 正确 + 多插件时插件名小标。
 //   T2 空态能力面板（tabs 为空时那块）：同一份入口也在；点「课表」→ 标签打开、aria-selected、
 //      标题=课表、params.entry=schedule、面板画的是课表页。
-//   T3 第二个入口：同一 kind 的第二个标签**并存**（身份 = (kind, entry)），标题与页面各自正确。
+//   T3 第二个入口：同一 kind 的第二个标签**并存**（身份含 params.entry），标题与页面各自正确。
 //   T4 reload：两个标签都恢复，标题、entry、页面内容都对。
 //   T5 零 entries 的插件：仍有一个默认入口（标题取 name；没有 name 时退到 id），能打开，
 //      params.entry === 'default'。
@@ -23,6 +23,8 @@
 //   T7 重新启用：入口回来、同一入口能再打开并渲染。
 //   T8 设置页：「打开」按钮 → store.openTab({kind, params:{entry:'overview'}})（第一个 entry）；
 //      每行有「入口在右栏 ＋ → 面板插件」提示；停用后按钮置灰、提示换成启用说明。
+//   T8b 标签身份契约（PR-00 的 dedupeKey）：同 entry 同 params = 1 个标签；同 entry 不同 params
+//      = 2 个；键序不同 = 同一个（稳定序列化）；provider 声明 dedupeKey → 按它的键合并。
 //   T9 全程零 pageerror。
 //
 // 用法：cd desktop/app && node e2e/verify_plugin_entries.mjs
@@ -49,9 +51,12 @@ const WS = '/mock/proj-plugin-entries'
 
 // —— 插件资产（真的静态文件：loader 的 `import()` 必须真的能拉到它们）——
 //
-// 两个插件刻意是两种形状，缺一个都测不到 R16 的硬约束：
+// 三个插件刻意是三种形状，缺一个都测不到 R16 的契约：
 //   · cost-board = **仓里的真模板**（3 个 entries）：测「manifest → 三处入口 → 一插件多标签」；
-//   · plain      = 零 entries：测「零入口必有一个默认入口」（D-2 的硬约束，不是体验优化）。
+//   · plain      = 零 entries、**不声明 dedupeKey**：测「零入口必有一个默认入口」+ 缺省身份键
+//                  （entry + 其余 params 的稳定序列化）；
+//   · ctx        = 零 entries、**声明 dedupeKey**：测「provider 说了算」——PR-00 就写在契约里、
+//                  R16 第一版把它忽略掉的字段。
 const PLUGINS = path.join(PROBE_DIR, 'plugins')
 fs.mkdirSync(PROBE_DIR, { recursive: true })
 fs.rmSync(PLUGINS, { recursive: true, force: true })
@@ -61,6 +66,28 @@ for (const f of fs.readdirSync(TEMPLATE_DIR)) {
   if (f === 'surface.json') continue
   fs.copyFileSync(path.join(TEMPLATE_DIR, f), path.join(PLUGINS, tplManifest.id, f))
 }
+fs.mkdirSync(path.join(PLUGINS, 'ctx'), { recursive: true })
+fs.writeFileSync(path.join(PLUGINS, 'ctx', 'panel.js'), `
+// 声明了 dedupeKey 的插件：标签身份归 provider（PR-00 的契约）。
+// 同一 courseId = 同一份上下文 → 合并成一个标签；换 courseId 才开新标签。
+export const surface = {
+  kind: 'plugin:ctx',
+  apply({ React, surfaces }) {
+    surfaces.register({
+      kind: 'plugin:ctx',
+      group: 'plugin',
+      order: 30,
+      title: () => '上下文面板',
+      dedupeKey: (tab) => String((tab.params || {}).courseId || ''),
+      render: ({ tab }) => React.createElement(
+        'div',
+        { 'data-surface': 'ctx', 'data-params': JSON.stringify(tab.params ?? null) },
+        'params=' + JSON.stringify(tab.params ?? null),
+      ),
+    })
+  },
+}
+`, { recursive: true })
 fs.mkdirSync(path.join(PLUGINS, 'plain'), { recursive: true })
 fs.writeFileSync(path.join(PLUGINS, 'plain', 'panel.js'), `
 // 零 entries 的插件：宿主必须给它一个默认入口（标题取 name → id），
@@ -171,6 +198,7 @@ const tabs = () => {
   return (s.tabsByScope[scope()]?.tabs ?? []).map((t) => ({
     kind: (t as { kind: string }).kind,
     entry: ((t as { params?: Record<string, unknown> }).params ?? {}).entry,
+    params: (t as { params?: unknown }).params,
     active: (t as { id: string }).id === s.tabsByScope[scope()]?.activeId,
   }))
 }
@@ -198,6 +226,9 @@ w.__probe = {
   },
   openCalls: () => openCalls.map((c) => JSON.parse(JSON.stringify(c))),
   resetOpenCalls: () => { openCalls.length = 0 },
+  // 直接按 spec 打开（T8b 要带**其它** params，菜单只给 entry）——
+  // 走的仍是生产动作 openTab，不 setState 造标签。
+  openSpec: (spec: unknown) => useAppStore.getState().openTab(spec as never),
 }
 
 void useAppStore.getState().start(WS)
@@ -257,6 +288,19 @@ const plainItem = (extra = {}) => ({
   entries: [],
   ...extra,
 })
+const ctxItem = (extra = {}) => ({
+  id: 'ctx',
+  version: '1.0.0',
+  hash: 'hctx'.padEnd(64, '3'),
+  enabled: true,
+  kind: 'plugin:ctx',
+  name: '上下文面板',
+  commands: [],
+  data: [],
+  entry: 'panel.js',
+  entries: [],
+  ...extra,
+})
 const TPL_KIND = `plugin:${tplManifest.id}`
 const TPL_TITLES = (tplManifest.entries || []).map((e) => e.title)
 
@@ -304,7 +348,7 @@ try {
     await page.reload({ waitUntil: 'domcontentloaded' })
     await page.waitForFunction(() => !!window.__probe, null, { timeout: 30000 })
     await expand()
-    await page.waitForFunction((kinds) => kinds.every((k) => window.__probe.surfaces.has(k)), [TPL_KIND, 'plugin:plain'], { timeout: 8000 }).catch(() => {})
+    await page.waitForFunction((kinds) => kinds.every((k) => window.__probe.surfaces.has(k)), [TPL_KIND, 'plugin:plain', 'plugin:ctx'], { timeout: 8000 }).catch(() => {})
   }
 
   // 干净起点：**不用** addInitScript 清 localStorage（那会在每次 reload 时把标签集与索引一起抹掉，
@@ -332,10 +376,10 @@ try {
 
   // ---- T1 ＋ 菜单：manifest.entries → 分组里的三条 ----
   console.log('\nT1 ＋ 菜单：真模板的 3 个 entries + 零入口插件的默认入口')
-  await setIndex([tplItem(), plainItem()])
+  await setIndex([tplItem(), plainItem(), ctxItem()])
   await injectChanged()
-  await page.waitForFunction((kinds) => kinds.every((k) => window.__probe.surfaces.has(k)), [TPL_KIND, 'plugin:plain'], { timeout: 8000 }).catch(() => {})
-  check('两个插件都进了注册表', (await hasKind(TPL_KIND)) && (await hasKind('plugin:plain')))
+  await page.waitForFunction((kinds) => kinds.every((k) => window.__probe.surfaces.has(k)), [TPL_KIND, 'plugin:plain', 'plugin:ctx'], { timeout: 8000 }).catch(() => {})
+  check('三个插件都进了注册表', (await hasKind(TPL_KIND)) && (await hasKind('plugin:plain')) && (await hasKind('plugin:ctx')))
   await openMenu()
   check('＋ 菜单出现「面板插件」分组',
     (await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-entries]').count()) === 1)
@@ -343,23 +387,23 @@ try {
     (await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-entries]').innerText()).trim() === '面板插件',
     await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-entries]').innerText())
   const itemCount = await menuItems().count()
-  check('入口 4 个（模板 3 + 零入口 1）', itemCount === 4, String(itemCount))
+  check('入口 5 个（模板 3 + 两个零入口插件各 1）', itemCount === 5, String(itemCount))
   const menuTitles = (await menuItems().allInnerTexts()).map((s) => s.trim())
   check('前三个标题取自 manifest（总览/课表/资源）',
     JSON.stringify(menuTitles.slice(0, 3)) === JSON.stringify(TPL_TITLES), JSON.stringify(menuTitles))
   const menuKeys = await menuItems().evaluateAll((ns) => ns.map((n) => n.getAttribute('data-plugin-entry')))
-  check('data-plugin-entry 顺序 = 模板三项 + plain/default',
-    JSON.stringify(menuKeys) === JSON.stringify([`${tplManifest.id}/overview`, `${tplManifest.id}/schedule`, `${tplManifest.id}/resources`, 'plain/default']),
+  check('data-plugin-entry 顺序 = 模板三项 + plain/default + ctx/default',
+    JSON.stringify(menuKeys) === JSON.stringify([`${tplManifest.id}/overview`, `${tplManifest.id}/schedule`, `${tplManifest.id}/resources`, 'plain/default', 'ctx/default']),
     JSON.stringify(menuKeys))
   const menuEntries = await menuItems().evaluateAll((ns) => ns.map((n) => n.getAttribute('data-entry')))
-  check('data-entry 来自 manifest.entries[].id',
-    JSON.stringify(menuEntries) === JSON.stringify(['overview', 'schedule', 'resources', 'default']),
+  check('data-entry 来自 manifest.entries[].id（零入口插件是 default）',
+    JSON.stringify(menuEntries) === JSON.stringify(['overview', 'schedule', 'resources', 'default', 'default']),
     JSON.stringify(menuEntries))
-  check('多插件时有插件名小标（2 个）',
-    (await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-group]').count()) === 2)
+  check('多插件时有插件名小标（3 个）',
+    (await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-group]').count()) === 3)
   const groupLabels = await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-group]').allInnerTexts()
-  check('小标 = 插件显示名（成本看板 / 零入口面板）',
-    JSON.stringify(groupLabels.map((s) => s.trim())) === JSON.stringify(['成本看板', '零入口面板']),
+  check('小标 = 插件显示名（成本看板 / 零入口面板 / 上下文面板）',
+    JSON.stringify(groupLabels.map((s) => s.trim())) === JSON.stringify(['成本看板', '零入口面板', '上下文面板']),
     JSON.stringify(groupLabels))
 
   // ---- T2 空态能力面板：同一份入口 + 从这里点开「课表」 ----
@@ -368,10 +412,10 @@ try {
   await closeAllTabs()
   await page.waitForSelector('.rtabs-empty-plugin')
   check('空态能力面板出现插件分组', (await page.locator('.rtabs-empty-plugin[data-plugin-entries]').count()) === 1)
-  check('空态里也是 4 个入口', (await emptyItems().count()) === 4, String(await emptyItems().count()))
+  check('空态里也是 5 个入口', (await emptyItems().count()) === 5, String(await emptyItems().count()))
   const emptyTitles = (await emptyItems().allInnerTexts()).map((s) => s.trim())
-  check('空态标题与菜单同源（总览/课表/资源/零入口面板）',
-    JSON.stringify(emptyTitles) === JSON.stringify([...TPL_TITLES, '零入口面板']), JSON.stringify(emptyTitles))
+  check('空态标题与菜单同源（总览/课表/资源/零入口面板/上下文面板）',
+    JSON.stringify(emptyTitles) === JSON.stringify([...TPL_TITLES, '零入口面板', '上下文面板']), JSON.stringify(emptyTitles))
   await emptyItem(`${tplManifest.id}/schedule`).click()
   await page.waitForSelector(`.rtab[data-kind="${TPL_KIND}"][data-entry="schedule"]`)
   const schTab = tabOf('schedule')
@@ -433,7 +477,7 @@ try {
     (await page.locator('[data-surface="plain"]').getAttribute('data-params')) === JSON.stringify({ entry: 'default' }),
     await page.locator('[data-surface="plain"]').getAttribute('data-params'))
   // 没有 name 时标题退到 id：同一个插件换一份没有 name 的 index 即可
-  await setIndex([tplItem(), plainItem({ name: '' })])
+  await setIndex([tplItem(), plainItem({ name: '' }), ctxItem()])
   await injectChanged()
   await openMenu()
   // 有界软等待：快照更新是 loader 那一轮 sync 的副作用（readIndex → 微任务），
@@ -449,7 +493,7 @@ try {
 
   // ---- T6 禁用：三处入口消失，标签变墓碑（不自动关）----
   console.log('\nT6 禁用插件：入口立刻消失，已开标签走既有墓碑机制')
-  await setIndex([tplItem({ enabled: false }), plainItem({ name: '' })])
+  await setIndex([tplItem({ enabled: false }), plainItem({ name: '' }), ctxItem()])
   await injectChanged()
   await waitKindGone(TPL_KIND)
   check('禁用后 provider 已卸下（入口消失的来源）', !(await hasKind(TPL_KIND)))
@@ -476,7 +520,7 @@ try {
 
   // ---- T7 重新启用：入口回来 ----
   console.log('\nT7 重新启用：入口回来，同一入口能再打开')
-  await setIndex([tplItem(), plainItem({ name: '' })])
+  await setIndex([tplItem(), plainItem({ name: '' }), ctxItem()])
   await injectChanged()
   await page.waitForFunction((k) => window.__probe.surfaces.has(k), TPL_KIND, { timeout: 8000 }).catch(() => {})
   await openMenu()
@@ -491,9 +535,9 @@ try {
   console.log('\nT8 设置页：每行「打开」发到 store（第一个 entry）+ 入口提示')
   await reload()
   await page.waitForSelector('[data-surface-id]')
-  check('设置页列出两个插件', (await page.locator('[data-surface-id]').count()) === 2,
+  check('设置页列出三个插件', (await page.locator('[data-surface-id]').count()) === 3,
     String(await page.locator('[data-surface-id]').count()))
-  check('每行都有「打开」按钮', (await page.locator('[data-surface-open]').count()) === 2)
+  check('每行都有「打开」按钮', (await page.locator('[data-surface-open]').count()) === 3)
   check('行内提示 = 入口在右栏 ＋ → 面板插件',
     (await page.locator(`[data-surface-id="${tplManifest.id}"] [data-surface-open-hint]`).innerText())
       .replace(/\s+/g, ' ').trim() === '入口在右栏 ＋ → 面板插件',
@@ -521,6 +565,37 @@ try {
   check('停用后提示改成「启用后入口才会回到右栏」',
     (await page.locator(`[data-surface-id="${tplManifest.id}"] [data-surface-open-hint]`).innerText()).includes('启用后入口才会回到右栏'),
     await page.locator(`[data-surface-id="${tplManifest.id}"] [data-surface-open-hint]`).innerText())
+
+  // ---- T8b 同一入口的不同上下文：PR-00 的 dedupeKey 契约 ----
+  console.log('\nT8b 标签身份：provider.dedupeKey 优先；缺省 = entry + 其余 params 的稳定序列化')
+  const openSpec = (spec) => page.evaluate((s) => window.__probe.openSpec(s), spec)
+  const kindTabs = (kind) => page.evaluate((k) => window.__probe.tabs().filter((t) => t.kind === k), kind)
+  // (1) 同一 entry、同一份 params → 只有一个标签（幂等键命中）
+  await openSpec({ kind: 'plugin:plain', params: { entry: 'default', fileId: 42 } })
+  await openSpec({ kind: 'plugin:plain', params: { entry: 'default', fileId: 42 } })
+  let plainCtx = await kindTabs('plugin:plain')
+  check('同一 entry、同 params → 1 个标签（幂等）', plainCtx.length === 1, JSON.stringify(plainCtx))
+  // (2) 同一 entry、fileId 不同 → 2 个（R16 第一版只看 entry，这条是**被修掉的 bug**）
+  await openSpec({ kind: 'plugin:plain', params: { entry: 'default', fileId: 7 } })
+  plainCtx = await kindTabs('plugin:plain')
+  check('同一 entry、fileId 不同 → 2 个标签（缺省身份含其余 params）', plainCtx.length === 2, JSON.stringify(plainCtx))
+  check('两个标签各自保留自己的 params（42 / 7）',
+    JSON.stringify(plainCtx.map((t) => t.params?.fileId).sort()) === JSON.stringify([42, 7]),
+    JSON.stringify(plainCtx.map((t) => t.params)))
+  // (3) 键序不影响身份：{a:1,b:2} 与 {b:2,a:1} 是同一份数据
+  await openSpec({ kind: 'plugin:plain', params: { entry: 'default', a: 1, b: 2 } })
+  await openSpec({ kind: 'plugin:plain', params: { entry: 'default', b: 2, a: 1 } })
+  plainCtx = await kindTabs('plugin:plain')
+  check('params 键序不同 → 仍是 3 个标签（稳定序列化，不是 4 个）', plainCtx.length === 3, JSON.stringify(plainCtx))
+  // (4) provider 声明 dedupeKey：按 courseId 合并，fileId 不进身份
+  await openSpec({ kind: 'plugin:ctx', params: { entry: 'default', courseId: 'c1', fileId: 1 } })
+  await openSpec({ kind: 'plugin:ctx', params: { entry: 'default', courseId: 'c1', fileId: 2 } })
+  let ctxTabs = await kindTabs('plugin:ctx')
+  check('provider.dedupeKey 生效：同 courseId、不同 fileId → 1 个标签', ctxTabs.length === 1, JSON.stringify(ctxTabs))
+  check('合并后标签的 params 是最新那次（fileId=2）', ctxTabs[0]?.params?.fileId === 2, JSON.stringify(ctxTabs))
+  await openSpec({ kind: 'plugin:ctx', params: { entry: 'default', courseId: 'c2', fileId: 3 } })
+  ctxTabs = await kindTabs('plugin:ctx')
+  check('dedupeKey 不同（courseId 变了）→ 第二个标签', ctxTabs.length === 2, JSON.stringify(ctxTabs))
 
   // ---- T9 全程零 pageerror ----
   console.log('\nT9 全程零 pageerror')
