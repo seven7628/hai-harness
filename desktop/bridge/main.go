@@ -2198,7 +2198,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	var recordSetupErr error
 	recordCorrupt := false // record 在但读不出来 → 打开时要靠事件重放自愈（见字段注释）
 	if !opts.noRecord {
-		if recordStore, recordSetupErr = newRecordStore(); recordSetupErr == nil {
+		if recordStore, recordSetupErr = recordStoreFor(ws, wsKey); recordSetupErr == nil {
 			// sidecar 回收默认放后台（见 session/compact_scheduler.go）：
 			// settings.checkpoint.background_compact=false 可回退到同步回收。
 			recordStore.SetBackgroundCompact(loadCheckpointSettings().backgroundCompact())
@@ -2274,9 +2274,12 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	reg := subagent.NewRegistry()
 	// 已结束任务的对象不再留在注册表里（只留终态摘要，见 subagent.Registry.reclaimTask）
 	// → 按 id 查历史任务时从 journal 还原。journal 路径只是 task id 的函数
-	// （sessions/<wsKey>/<sid>/agents/<taskId>.jsonl），跨进程同样成立。
+	// （<sessionsRoot>/<sid>/agents/<taskId>.jsonl），跨进程同样成立。
+	// sessionsRoot 由 runtime 决定（09 §4.3 第 3 点）：插件虚拟 Project 锚在
+	// plugin-sessions/<id>/sessions，项目/Hub 保持 wsSessionsDir 的既有口径。
+	sessionsRoot := ws.sessionsRoot()
 	reg.SetTaskRehydrator(func(taskID string) (*subagent.Task, bool) {
-		path, perr := journalPathFor(wsSessionsDir(wsPath), id, taskID)
+		path, perr := journalPathFor(sessionsRoot, id, taskID)
 		if perr != nil {
 			return nil, false
 		}
@@ -2344,7 +2347,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	// 闭包捕获变量本身，首次 Run 前 bs 已赋值，告警才能经 bs.emit 到达 UI。
 	warnHook := func(name, message string) { bs.warnHook(name, message) }
 	hookOpt := session.WithHooks(nil)
-	if ws.kind == runtimeHubAgent {
+	if ws.kind == runtimeHubAgent || ws.kind == runtimePlugin {
+		// 插件虚拟 Project 与 Hub 同规（09 §4.3 第 1 点）：插件 home 是**插件自己**
+		// 可写的目录，把它当 WorkspaceDir 就等于「插件写 hooks.json、宿主执行命令」。
 		hookOpt = m.hooksOptionUser(wsPath, id, warnHook)
 	} else {
 		hookOpt = m.hooksOption(wsPath, id, warnHook)
@@ -3280,7 +3285,12 @@ func (m *manager) dispatch(c command) {
 			m.respCode(c, false, "task_id 为空", "invalid_argument", nil)
 			return
 		}
-		path, perr := journalPathFor(wsSessionsDir(bs.workspace), bs.id, taskID)
+		// 会话子树根跟着 runtime 走（插件虚拟 Project 的 journal 在 plugin-sessions/<id>/sessions）。
+		agentHistRoot := wsSessionsDir(bs.workspace)
+		if bs.runtime != nil {
+			agentHistRoot = bs.runtime.sessionsRoot()
+		}
+		path, perr := journalPathFor(agentHistRoot, bs.id, taskID)
 		if perr != nil {
 			m.respCode(c, false, perr.Error(), "invalid_argument", nil)
 			return
@@ -4616,9 +4626,17 @@ func (m *manager) shutdownWorkspace(wsPath string) {
 	_, registered := m.workspaces[wsPath]
 	m.mu.Unlock()
 	if !registered {
+		// 插件虚拟 Project 不在 m.workspaces（09 §4.3 第 5 点）：关闭路径必须也能遍历到它，
+		// 否则 shutdown_workspace / shutdown 之后插件会话的 run goroutine 仍在跑。
+		if pid := pluginIDFromHomePath(wsPath); pid != "" {
+			m.closePluginRuntime(pid)
+		}
 		return
 	}
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 防御：注册表里已摘除（并发 delete_workspace），不造 runtime
+	}
 	ws.mu.Lock()
 	items := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
@@ -4674,6 +4692,9 @@ func (m *manager) shutdownAll() {
 	}
 	// Hub 智能体运行时同理（不在 m.workspaces 里，单独收尾）
 	m.shutdownHubRuntimes()
+	// 插件虚拟 Project 同样单独收尾（09 §4.3 第 5 点）：停 run goroutine、关 MCP 与
+	// 插件私有连接；home/sessions/events 不删（卸载不删，进程退出更不删）。
+	m.closePluginRuntimes()
 	// 预览转换器槽位回收（进程退出：不留任何工作区登记）
 	m.releaseAllPreviewSlots()
 	// 进程级单例的显式收尾（IM 连接不随工作区关闭而停，只能在这里停一次）
@@ -4697,13 +4718,33 @@ func (m *manager) deleteSession(wsPath, id string) {
 	}
 	m.mu.Lock()
 	ws, ok := m.workspaces[wsPath]
+	if !ok {
+		// 插件虚拟 Project 不在 m.workspaces（09 §4.3 第 4 点）：按 pluginID 找运行态。
+		if pid := pluginIDFromHomePath(wsPath); pid != "" {
+			ws, ok = m.pluginRuntimes[pid]
+		}
+	}
 	m.mu.Unlock()
+	// 删对目录：插件会话在 plugin-sessions/<id>/{sessions,events}，项目会话在
+	// {appData}/{sessions,events}/<wsKey>。**不能用 m.runtime 兜底推导**——它会给
+	// 从未注册过的项目路径造一份 runtime（这里刻意只做无副作用的查表）。
+	storeDir, eventsDir := wsSessionsDir(wsPath), wsEventsDir(wsPath)
+	if ok && ws != nil && ws.kind == runtimePlugin {
+		storeDir, eventsDir = ws.storeDir, ws.eventsDir
+	} else if !ok {
+		if sd, ed, dok := pluginSessionDirsForHome(wsPath); dok {
+			// 插件已卸载（无运行态）：历史会话仍要能删（09 §4.2）。
+			storeDir, eventsDir = sd, ed
+		}
+	}
 	if ok {
 		ws.mu.Lock()
 		bs := ws.sessions[id]
 		delete(ws.sessions, id)
 		ws.mu.Unlock()
-		if m.hub != nil {
+		// mesh 只登记项目会话（createIn 的 Register 同样只对 runtimeProject）：
+		// 插件 / Hub 会话从来没进 mesh，注销一次是无害的空操作，但也不必打扰对端。
+		if m.hub != nil && ws.kind == runtimeProject {
 			m.hub.Unregister(id) // Session Mesh 注销
 			m.pushMeshSessions() // 会话删除 → 对端 session_list 立即剔除
 		}
@@ -4711,12 +4752,20 @@ func (m *manager) deleteSession(wsPath, id string) {
 			stopSession(bs)
 		}
 	}
-	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".jsonl"))
-	_ = os.Remove(filepath.Join(wsEventsDir(wsPath), id+".jsonl"))
+	_ = os.Remove(filepath.Join(storeDir, id+".jsonl"))
+	_ = os.Remove(filepath.Join(eventsDir, id+".jsonl"))
 	// record 文件（checkpoint-first 目标恢复源）+ 其 .bak 一并删除；coord 已 drain 完毕
-	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json"))
-	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json.bak"))
-	removeSubagentJournals(wsSessionsDir(wsPath), id)
+	// record 目录跟着 record store 的根走（插件虚拟 Project 在 plugin-sessions/<id>/sessions
+	// 下的同名子目录里）。recordKey 与 sessionRecordKey 同源，否则删不掉写的那一份。
+	recDir := recordDirFor(ws, workspaceKey(wsPath))
+	if pid := pluginIDFromHomePath(wsPath); pid != "" {
+		recDir = filepath.Join(pluginSessionsDir(pid), "plugin-"+pid)
+	}
+	_ = os.Remove(filepath.Join(recDir, id+".record.json"))
+	_ = os.Remove(filepath.Join(recDir, id+".record.json.bak"))
+	_ = os.Remove(filepath.Join(recDir, id+".record.json.blocks"))
+	_ = os.Remove(filepath.Join(recDir, id+".record.json.blocks.idx"))
+	removeSubagentJournals(storeDir, id)
 	// 清理该会话的置顶标记与手动标题（防残留文件把已删会话又「复活」）
 	sessionPins.set(workspaceKey(wsPath), id, false)
 	sessionManualTitles.set(workspaceKey(wsPath), id, "")
@@ -4770,7 +4819,13 @@ func removeSubagentJournals(storeDir, sid string) {
 // DataDir 覆盖（appDataDirOverride，测试用）通过 wsSessionsDir 已生效；FileStore 构造的
 // MkdirAll 与 journalPathFor 的 MkdirAll 幂等，两者可自由先后。
 func subagentStateStore(workspace, sid string) subagent.StateStore {
-	base := subagentsBase(wsSessionsDir(workspace), sid)
+	return subagentStateStoreAt(wsSessionsDir(workspace), sid)
+}
+
+// subagentStateStoreAt 同 subagentStateStore，但会话子树根由调用方给（插件虚拟 Project
+// 传 plugin-sessions/<id>/sessions，见 ws.sessionsRoot）。
+func subagentStateStoreAt(sessionsRoot, sid string) subagent.StateStore {
+	base := subagentsBase(sessionsRoot, sid)
 	fs, err := session.NewFileStore(base)
 	if err != nil {
 		// 目录不可建（权限/磁盘）→ 降级为端口零值（no-op）：子任务照跑，只是不可恢复。
@@ -4811,6 +4866,12 @@ func subagentStateStore(workspace, sid string) subagent.StateStore {
 // deleteWorkspace 删除一个工作区的全部 HAI 元数据（{ws}/.go-code），保留用户工作区文件本身
 // （那是用户真实项目，绝不代删）。停全部会话 → 摘除运行态 → 删元数据目录。
 func (m *manager) deleteWorkspace(wsPath string) {
+	// 负向守卫（09 §4.4）：插件虚拟 home 不是工作区。走到这里会把 plugin-sessions/<id>
+	// 整棵删掉（下面 RemoveAll 会话/事件目录），而「卸载不删会话」是设计前提。
+	// 真拒绝发生在 dispatch（workspace_delete_payload 之前），这里是纵深防御。
+	if isPluginHomePath(wsPath) {
+		return
+	}
 	m.mu.Lock()
 	ws, ok := m.workspaces[wsPath]
 	if ok {
@@ -4899,8 +4960,27 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 	out := []map[string]any{}
 	wsKey := workspaceKey(wsPath)
 
-	ws.mu.Lock()
-	for id, bs := range ws.sessions {
+	// storeDir/eventsDir：运行态给了就用它的（插件虚拟 Project 有自己的子树），
+	// 没有运行态时——插件**已卸载**、会话保留可读可删（09 §4.2）——按 pluginID
+	// 直接推目录。项目路径不会走到这里：m.runtime 对它们恒定返回非 nil。
+	storeDir, eventsDir := "", ""
+	if ws != nil {
+		storeDir, eventsDir = ws.storeDir, ws.eventsDir
+	} else if s, e, ok := pluginSessionDirsForHome(wsPath); ok {
+		storeDir, eventsDir = s, e
+	} else {
+		return out
+	}
+
+	live := map[string]*bridgeSession{}
+	if ws != nil {
+		ws.mu.Lock()
+		for id, bs := range ws.sessions {
+			live[id] = bs
+		}
+		ws.mu.Unlock()
+	}
+	for id, bs := range live {
 		if seen[id] {
 			continue
 		}
@@ -4911,14 +4991,13 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 		out = append(out, map[string]any{
 			"id":         id,
 			"title":      resolveLiveSessionTitle(wsKey, bs, id),
-			"updated_at": sessionUpdatedAt(ws, id, bs.lastActive.Load()),
+			"updated_at": sessionUpdatedAt(storeDir, eventsDir, id, bs.lastActive.Load()),
 			"pinned":     sessionPins.isPinned(wsKey, id),
 			"running":    bs.running.Load() || bs.hubDispatchPending.Load(),
 		})
 	}
-	ws.mu.Unlock()
 
-	entries, err := os.ReadDir(ws.storeDir)
+	entries, err := os.ReadDir(storeDir)
 	if err == nil {
 		type diskTitleJob struct {
 			idx         int
@@ -4951,8 +5030,8 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 			}
 			out = append(out, map[string]any{
 				"id":         id,
-				"title":      defaultSessionTitle,         // 先占位；下方并行解析后原地填
-				"updated_at": sessionUpdatedAt(ws, id, 0), // 冷磁盘会话：lastActive 无 → 文件 mtime 回退
+				"title":      defaultSessionTitle,                          // 先占位；下方并行解析后原地填
+				"updated_at": sessionUpdatedAt(storeDir, eventsDir, id, 0), // 冷磁盘会话：lastActive 无 → 文件 mtime 回退
 				"pinned":     sessionPins.isPinned(wsKey, id),
 			})
 			jobs = append(jobs, diskTitleJob{idx: len(out) - 1, path: path, id: id, modNs: modNs, size: size})
@@ -4992,14 +5071,18 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 	return out
 }
 
-func sessionUpdatedAt(ws *workspaceRuntime, id string, lastActive int64) int64 {
+// sessionUpdatedAt 会话最近活跃时刻：内存值优先，否则回退事件/会话文件的 mtime。
+//
+// 目录由调用方给（而不是 runtime）：插件已卸载时没有 runtime，但磁盘上的会话
+// 仍要能列出并显示时间（09 §4.2「会话保留、只读、可手动删」）。
+func sessionUpdatedAt(storeDir, eventsDir, id string, lastActive int64) int64 {
 	if lastActive > 0 {
 		return lastActive
 	}
-	if fi, err := os.Stat(filepath.Join(ws.eventsDir, id+".jsonl")); err == nil {
+	if fi, err := os.Stat(filepath.Join(eventsDir, id+".jsonl")); err == nil {
 		return fi.ModTime().UnixMilli()
 	}
-	if fi, err := os.Stat(filepath.Join(ws.storeDir, id+".jsonl")); err == nil {
+	if fi, err := os.Stat(filepath.Join(storeDir, id+".jsonl")); err == nil {
 		return fi.ModTime().UnixMilli()
 	}
 	return 0
@@ -5865,9 +5948,23 @@ func toolSpillDir(sid string) string {
 	return filepath.Join(os.TempDir(), "hai-harness-toolspill", safe)
 }
 
+// newSessionEngine 项目 / Hub 会话的工具引擎（record/journal 的会话子树根 = wsSessionsDir(workspace)）。
+//
+// 插件虚拟 Project 走 newSessionEngineAt（sessionsRoot 由 runtime 提供，见 09 §4.3 第 3 点）；
+// 本函数是它的薄包装，保持既有 ~16 处调用点逐字不变。
 func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
+	return newSessionEngineAt(wsSessionsDir(workspace), workspace, sid, cs, pc, prov, model, effort, bgCtx, reg, qw, sk, subagentsReg, mcpm, plg, profile, sbx, hub, pyRT, egoOnLoad, egoBashBeforeExec, memCfg...)
+}
+
+// newSessionEngineAt 同 newSessionEngine，但会话子树根（journal / codemode store）由调用方给：
+// 项目 / Hub 传 wsSessionsDir(workspace)（= ws.sessionsRoot()），插件虚拟 Project 传
+// plugin-sessions/<id>/sessions。空值回退 wsSessionsDir(workspace)（测试/旧调用兜底）。
+func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
+	}
+	if sessionsRoot == "" {
+		sessionsRoot = wsSessionsDir(workspace)
 	}
 	// 子 agent 档位持有者：装配期与主 loop 同档，之后由 switch_effort 同步（见类型注释）。
 	effortRef := newSubagentEffortRef(provider.ReasoningEffortLevel(effort))
@@ -5939,11 +6036,11 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 		// 子任务输出 journal 路径解析器（D1）：sessions/<wsKey>/<sid>/agents/<taskId>.jsonl。
 		// 解析失败（含 taskId 非法）降级不落盘——journal 是尽力而为的旁路，绝不影响 spawn。
 		journalPath := func(taskID string) (string, error) {
-			return journalPathFor(wsSessionsDir(workspace), sid, taskID)
+			return journalPathFor(sessionsRoot, sid, taskID)
 		}
 		// 子任务状态存储（与主会话同一套 FileStore，只是目录不同）：每轮 checkpoint 落
 		// 有效上下文 + 用量，agent_resume 据此原地续跑（见 subagentStateStore）。
-		subStore := subagentStateStore(workspace, sid)
+		subStore := subagentStateStoreAt(sessionsRoot, sid)
 		for _, t := range subagent.NewAgentTools(spawnLoop, bgCtx, reg, journalPath, subagentsReg,
 			func(def *subagent.AgentDefinition) *agents.AgentLoop {
 				// 每次调用新建 → 读当前档位（switch_effort 后派生的子 agent 立即同档）。
@@ -6030,7 +6127,7 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	// 默认关闭（对齐 pi defaultActive:false）。**完全不注册**而不是注册成 hidden —— 见
 	// codemode.go 文件头。沙箱/解释器/store/工具表都在 registerCodemode 里接（与 bash、
 	// run_python 同一个 sbx 实例、同一个工作区锚）。开关热更新走 reload_settings（rebuildAll）。
-	registerCodemode(eng, workspace, sid, sbx, loadCodemodeSettingsQuiet())
+	registerCodemode(eng, workspace, sessionsRoot, sid, sbx, loadCodemodeSettingsQuiet())
 	// load_skill：技能渐进披露激活。**放在最后**——它的能力面（skillCapabilitiesFor）
 	// 要读 eng 的完整工具集，提前注册会漏掉 MCP/插件/codemode/cron/mesh 工具，
 	// 于是声明 requires.tools 的技能会被误判不可用。
@@ -6085,23 +6182,36 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 
 	// 执行通道沙箱装配（见 execSandbox 注释）。
 	sbx := m.execSandbox(workspace, sid, profile, gate, pyRT)
+	if ws.kind == runtimePlugin {
+		// 插件虚拟 Project：沙箱 root = 虚拟 home，且**不**放开整个 ~（见 pluginSandbox）。
+		// 项目会话的 execSandbox 会 WithHomeWrite（pip/npm 需要），插件不该有那个写面。
+		sbx = m.pluginSandbox(workspace, sid, gate)
+	}
 
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
 	// 合并 main 的 ws 运行时签名（subagents/mcp/plugins 走 ws.*，不再每次 m.runtime(workspace)），
 	// 保留 R08d 的办公工具注册。
-	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
-	// 办公组件验收工具（R08d）：kit 不可用则不注册（注册必然失败的工具只白耗轮次）。
-	// 放在 newSessionEngine 之后是为了不改那条 20 参数的签名 —— 工具需要的是宿主能力
-	// （缓存/信号量/受管运行时），不是引擎装配的一部分。
-	m.registerOfficeTools(eng, ws.path)
-	// UI 快照查询工具（PR-12）：**无条件**注册 —— 渲染层没连上时它回答
-	// {ok:false, reason:"no_snapshot"}，那是状态而不是失败（见 ui_tools.go）。
-	m.registerUITools(eng)
-	// Surface 插件安装器（PR-13/PR-14）：受 settings.features.surfaceTools 控制
-	//（缺省 **false**，见 surface_settings.go —— 常驻 schema 的成本纪律）。
-	// 开关判定在注册函数内部：调用点只有这一处，摆在外面就成了两处各自解释同一个开关。
-	m.registerSurfaceTools(eng)
+	var eng *tools.Engine
+	var effortRef *subagentEffortRef
+	if ws.kind == runtimePlugin {
+		// 分流点 3 + 工具面（09 §4.3 / §7）：journal/codemode 落 plugin-sessions/<id>/sessions，
+		// 工具面 = 全局层 + denylist（cron/mesh 传 nil，surface/ui 不注册）。
+		eng, effortRef = m.buildPluginEngine(ws, sid, prov, model, effort, reg, qw, bgCtx)
+	} else {
+		eng, effortRef = newSessionEngineAt(ws.sessionsRoot(), workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
+		// 办公组件验收工具（R08d）：kit 不可用则不注册（注册必然失败的工具只白耗轮次）。
+		// 放在 newSessionEngine 之后是为了不改那条 20 参数的签名 —— 工具需要的是宿主能力
+		// （缓存/信号量/受管运行时），不是引擎装配的一部分。
+		m.registerOfficeTools(eng, ws.path)
+		// UI 快照查询工具（PR-12）：**无条件**注册 —— 渲染层没连上时它回答
+		// {ok:false, reason:"no_snapshot"}，那是状态而不是失败（见 ui_tools.go）。
+		m.registerUITools(eng)
+		// Surface 插件安装器（PR-13/PR-14）：受 settings.features.surfaceTools 控制
+		//（缺省 **false**，见 surface_settings.go —— 常驻 schema 的成本纪律）。
+		// 开关判定在注册函数内部：调用点只有这一处，摆在外面就成了两处各自解释同一个开关。
+		m.registerSurfaceTools(eng)
+	}
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()

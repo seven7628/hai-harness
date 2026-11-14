@@ -33,12 +33,18 @@ import (
 )
 
 // sessionRecordKey 会话 record 的维度键（§6.1.3）：默认是工作区路径哈希；
-// Hub 智能体固定 hub-<agentID>（不跟 home 路径走 —— 目录改名/迁移后历史会话会「丢失」）；
+// Hub 智能体固定 hub-<agentID>、插件虚拟 Project 固定 plugin-<pluginID>
+// （都不跟 home 路径走 —— 目录改名/迁移/重启后历史会话仍可寻址，09 §4.3 第 2 点）；
 // sessionOpts.wsKey 最后生效（cron 派生会话用它隔离自己的存储目录）。
 func sessionRecordKey(ws *workspaceRuntime, wsPath string, opts sessionOpts) string {
 	key := workspaceKey(wsPath)
-	if ws != nil && ws.kind == runtimeHubAgent && ws.agentID != "" {
-		key = "hub-" + ws.agentID
+	if ws != nil {
+		switch {
+		case ws.kind == runtimeHubAgent && ws.agentID != "":
+			key = "hub-" + ws.agentID
+		case ws.kind == runtimePlugin && ws.pluginID != "":
+			key = "plugin-" + ws.pluginID
+		}
 	}
 	if opts.wsKey != "" {
 		key = opts.wsKey

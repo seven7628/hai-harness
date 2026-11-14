@@ -72,6 +72,36 @@ func newRecordStore() (*session.FileStorage, error) {
 	return session.NewSessionRecordStorage(recordRoot())
 }
 
+// recordStoreFor 按 runtime 选 record 存储根（09 §4.1「整棵子树锚在 pluginID 上」）。
+//
+// 项目 / Hub：root = ~/.go-code/sessions，键 = 会话 record 键 → 既有口径不变。
+// 插件虚拟 Project：root = plugin-sessions/<id>/sessions（该插件自己的会话子树），
+// 键仍是 plugin-<id> → record 落 plugin-sessions/<id>/sessions/plugin-<id>/<sid>.record.json。
+//
+// 为什么必须跟着 runtime 走：record 的 path 是 root/<键>/<sid>，而 delete_session 删的是
+// storeDir 下的同一份文件。两处根不一致时「删除会话」会删掉 jsonl 却留下 record ——
+// 下次打开会话又把它恢复出来（09 §4.3 第 4 点列出的「删一半」就是这一条）。
+func recordStoreFor(ws *workspaceRuntime, wsKey string) (*session.FileStorage, error) {
+	if ws != nil && ws.kind == runtimePlugin {
+		// 目录必须在这里建：原子提交的备份步骤要求 <root>/<键> 已存在（项目会话那侧
+		// 一直是 session.NewFileStore(storeDir) 顺手建好的，虚拟 Project 没有这一步）。
+		if err := os.MkdirAll(recordDirFor(ws, wsKey), 0o700); err != nil {
+			return nil, err
+		}
+		return session.NewSessionRecordStorage(ws.storeDir)
+	}
+	return newRecordStore()
+}
+
+// recordDirFor 某会话的 record 目录（store 根 + record 键）：删除路径与写入路径共用这一处，
+// 免得「写在哪 / 删在哪」各写一遍（那正是上面那条不变式的漏洞形态）。
+func recordDirFor(ws *workspaceRuntime, wsKey string) string {
+	if ws != nil && ws.kind == runtimePlugin {
+		return filepath.Join(ws.storeDir, wsKey)
+	}
+	return filepath.Join(recordRoot(), wsKey)
+}
+
 // checkpointCoordinator 是单个主 Session 的提交协调器（单写者）：
 // 请求入缓冲队列，worker 串行拍摄 reducer 快照并原子提交 record。
 // 提交失败不阻塞事件流：coordinator 仅失效 revision 缓存，等下一次边界重试。

@@ -28,7 +28,22 @@ const maxEventLineBytes = 16 * 1024 * 1024
 // 性能：避免每行 Unmarshal→Marshal 两次序列化——直接在原始行字节上删除
 // `"session_id":"..."` 字段（字符串扫描），仅坏行才回退 Unmarshal 校验。
 func (m *manager) buildSnapshot(wsPath, id string) (map[string]any, bool) {
-	return buildSnapshotFromPath(filepath.Join(wsEventsDir(wsPath), id+".jsonl"))
+	return buildSnapshotFromPath(filepath.Join(m.eventsDirFor(wsPath), id+".jsonl"))
+}
+
+// eventsDirFor 事件日志目录：插件虚拟 home 走它自己的 events 目录（plugin-sessions/<id>/events），
+// 其它 workspace 走既有的 wsEventsDir。插件已卸载（没有运行态）时按 pluginID 直接推目录 ——
+// 「卸载后会话仍可读」正是靠这条回退成立的（09 §4.2）。
+func (m *manager) eventsDirFor(wsPath string) string {
+	if isPluginHomePath(wsPath) {
+		if ws := m.pluginRuntimeByPath(wsPath); ws != nil {
+			return ws.eventsDir
+		}
+		if _, ed, ok := pluginSessionDirsForHome(wsPath); ok {
+			return ed
+		}
+	}
+	return wsEventsDir(wsPath)
 }
 
 // buildSnapshotFromPath 从任意事件日志文件聚合 snapshot（buildSnapshot 的底层实现；
