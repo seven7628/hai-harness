@@ -2291,6 +2291,62 @@
       "tests": "go test ./agenthub ./desktop/bridge -run 'Limits|Timeout|Waiting|Schedulable'；node scripts/test-hub-conv.mjs；tsc",
       "commit": "—",
       "status": "in_progress"
+    },
+    {
+      "id": "P8-01",
+      "phase": "P8",
+      "title": "手机 Hub 竖切：复用桌面 Hub 组件 + 移动 transport",
+      "deps": [],
+      "files": [
+        "desktop/app/mobile.html",
+        "desktop/app/src/mobile/**",
+        "desktop/app/src/host/panels.ts",
+        "desktop/app/src/transport/index.ts",
+        "desktop/app/src/hub/GroupView.tsx",
+        "desktop/app/src/hub/HubSurface.tsx",
+        "desktop/app/vite.config.ts"
+      ],
+      "acceptance": "390/430：列表→群/DM→发消息/流式/任务卡/Needs；新 mobile transport 合成 command_response；host seam 桌面行为零变化；新页可通过 HAI_MOBILE_WEB_DIR 托管，旧 /m/ 不回归。",
+      "tests": "npx tsc --noEmit；node mobile transport 单测；浏览器 390/430 截图；桌面 check-hub-* 关键脚本",
+      "commit": "—",
+      "status": "in_progress"
+    },
+    {
+      "id": "P8-02",
+      "phase": "P8",
+      "title": "手机会话页复用 Narrative/Composer + 审批/提问",
+      "deps": [
+        "P8-01"
+      ],
+      "files": [
+        "desktop/app/src/mobile/screens/SessionScreen.tsx",
+        "desktop/app/src/components/Narrative.tsx",
+        "desktop/app/src/components/Composer.tsx",
+        "desktop/app/src/host/panels.ts"
+      ],
+      "acceptance": "390/430：打开会话→流式→工具折叠→审批/提问→子智能体卡；复用桌面同一份 block/turn 渲染；无独立转录渲染器。",
+      "tests": "npx tsc --noEmit；test:hub-conv；浏览器 390/430；桌面主会话回归",
+      "commit": "—",
+      "status": "blocked"
+    },
+    {
+      "id": "P8-03",
+      "phase": "P8",
+      "title": "手机主题/布局收口 + 旧无构建页退役",
+      "deps": [
+        "P8-02"
+      ],
+      "files": [
+        "desktop/app/src/mobile/mobile.css",
+        "desktop/app/src/hub/hub.css",
+        "desktop/bridge/mobile_web/**",
+        "desktop/app/scripts/*mobile*",
+        "desktop/bridge/mobile_server.go"
+      ],
+      "acceptance": "三主题 390/430/640；safe-area/visualViewport；测试改写为 DOM/行为断言；旧 app.js/hub_model.js 删除；/m/ 默认走新页。",
+      "tests": "test:mobile-390；test:mobile-hub；tokens_sync；check-mobile-*；tsc",
+      "commit": "—",
+      "status": "blocked"
     }
   ],
   "deferred": [
@@ -3466,6 +3522,18 @@
     },
     "P7-04": {
       "status": "in_progress",
+      "commit": "—"
+    },
+    "P8-01": {
+      "status": "in_progress",
+      "commit": "—"
+    },
+    "P8-02": {
+      "status": "blocked",
+      "commit": "—"
+    },
+    "P8-03": {
+      "status": "blocked",
       "commit": "—"
     }
   },
