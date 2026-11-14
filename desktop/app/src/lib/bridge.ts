@@ -7,8 +7,9 @@
  *      null。页面上不再有 `window.desktop`（不是隐藏，是不存在）。
  *   2. `bridge` 是**模块私有常量**：不许挂回 window，不许作为参数/属性传给插件。
  *      插件世界里既没有承载 command/onEvent 的对象，也拿不到这个模块。
- *   3. 插件只能经 `apply({ host })` 拿到 host.command / host.onEvent
- *      （见 surfaces/plugin/loader.ts 的 createHost）。
+ *   3. 插件只能经 `apply({ host })` 拿到 host.command 与事件入口 —— L0 的事件入口仍是
+ *      `host.events.on`（§6.3 的 host.onEvent 是 P1 的改名，本轮**不改** loader 的 host
+ *      形态，见 surfaces/plugin/loader.ts 的 createHost）。
  *
  * 求值时机 = **模块求值即 claim**，早于任何插件加载。推论：探针不能「先 import 再往
  * window.desktop 塞 fake」—— 注入必须发生在 bundle 求值之前（e2e 探针页都在
