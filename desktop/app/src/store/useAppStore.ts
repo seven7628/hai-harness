@@ -71,6 +71,7 @@ import { startUISnapshot } from '../lib/uiSnapshot'
 // 依赖方向是 store → loader（loader 不 import store，见其文件头注释）。
 import { startPluginLoader, surfaceBaseUrl } from '../surfaces/plugin/loader'
 import { emitUI } from '../lib/uiBus'
+import { bridge } from '../lib/bridge'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
 // R11b：选择器同 webTab 系列一并 re-export —— RightPanel 等读点的 import 路径不分裂
 //（一半从 store、一半从 lib 取同一条判据，是这类判据最常见的分叉起点）。
@@ -2108,7 +2109,7 @@ export function rebuildWebTab(tab: WebTabInstance): void {
     return
   }
   if (!url) return
-  const d = typeof window !== 'undefined' ? window.desktop : undefined
+  const d = bridge
   if (!d?.embedOpenTarget) return
   void d.embedOpenTarget(url, { sid: st.activeSessionId ?? '', activate: true })
     .then((r) => {
@@ -2400,7 +2401,7 @@ export async function autoOpenVisualFile(rawPath: string, sid: string): Promise<
 }
 
 function subscribeEmbedEvents(): void {
-  if (typeof window === 'undefined' || !window.desktop?.onEmbedNav) return
+  if (!bridge?.onEmbedNav) return
 
   // —— 阶段 3：运行中会话集合 → 主进程（视图池 LRU 保护集）——
   // 会话在跑任务时 Agent 随时可能再命令它的页面 → 那些视图**不得**被休眠（命令打到死
@@ -2414,7 +2415,7 @@ function subscribeEmbedEvents(): void {
     const key = [...sids].sort().join(',')
     if (key === lastBusyKey) return
     lastBusyKey = key
-    void window.desktop?.embedSetBusySids?.(key ? key.split(',') : [])
+    void bridge?.embedSetBusySids?.(key ? key.split(',') : [])
   }
   useAppStore.subscribe((s) => pushBusySids(s.busySids))
 
@@ -2425,7 +2426,7 @@ function subscribeEmbedEvents(): void {
   // （embedShow 创建 + embedHide 立即隐藏——不占据侧边栏、不可见，满足「不期望
   // about:blank 占位影响用户」）；视图不显示，只有真实页面出现时才由 tab/导航显示。
   void (async () => {
-    const d = window.desktop!
+    const d = bridge!
     // 等待 bridge 就绪信号：Go 侧 bridge_ready 事件（§4.4）或任意命令响应兜底。
     for (let w = 0; w < 240 && !embedBridgeAlive; w++) await new Promise((r) => setTimeout(r, 500))
     for (let i = 0; i < 36; i++) {
@@ -2448,7 +2449,7 @@ function subscribeEmbedEvents(): void {
     }
   })()
 
-  window.desktop.onEmbedNav((s) => {
+  bridge.onEmbedNav((s) => {
     const nav = s as EmbedNavState
     useAppStore.setState({ embedNav: nav })
     // 未读点清除（R4）：激活页 + 面板可见 = 用户此刻真的看到了它 → 不再是未读。
@@ -2506,7 +2507,7 @@ function subscribeEmbedEvents(): void {
       useAppStore.getState().fetchBrowserPages()
     }
   })
-  window.desktop.onEmbedAiAction((a) => {
+  bridge.onEmbedAiAction((a) => {
     const act = a as EmbedAiAction
     useAppStore.setState({ embedAiActive: true })
     window.clearTimeout(embedAiQuietTimer)
@@ -9626,8 +9627,8 @@ function wire(): void {
   // 内存压力信号（2026-11-12，P1）：主进程轮询系统内存推来。
   // Chromium tab discarding 的模型 —— 内存吃紧时**主动**降级视图（丢可重取的
   // 历史，保留用户正在交互的东西），而不是等 V8 撞上崩溃线。
-  if (typeof window !== 'undefined' && window.desktop?.onMemPressure) {
-    window.desktop.onMemPressure((p) => {
+  if (bridge?.onMemPressure) {
+    bridge.onMemPressure((p) => {
       setMemPressure({ ...p, at: Date.now() })
       enforceViewBudget(true)
     })
@@ -9923,11 +9924,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     pluginLoaderStop?.()
     pluginLoaderStop = startPluginLoader({
       readIndex: async () =>
-        (window.desktop?.surfaceIndex ? await window.desktop.surfaceIndex() : { version: 1, items: [] }),
+        (bridge?.surfaceIndex ? await bridge.surfaceIndex() : { version: 1, items: [] }),
       // R17a：上面那条 readIndex 的兜底分支回的是**空 items**，它读起来像「一个插件都没装」。
       // 数据清理（known-ids 对账）是破坏性动作，绝不能建立在这条兜底上 —— 这里显式告诉
       // loader「index 算不算数」，浏览器版/没有 preload 时它是 false（= 一个键都不清、也不记账）。
-      indexAuthoritative: () => !!window.desktop?.surfaceIndex,
+      indexAuthoritative: () => !!bridge?.surfaceIndex,
       baseUrl: surfaceBaseUrl,
       send: (op, data) => {
         void transport.send({ id: ++cmdSeq, type: 'ui', payload: { op, data } })
@@ -10303,7 +10304,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // R0：销毁该会话的内嵌预览视图。视图池是进程级单例，删会话不会自动回收 →
     // 不清理就是内存泄漏 + 僵尸渲染进程（每个视图一个渲染进程）。
     void (async () => {
-      const d = window.desktop
+      const d = bridge
       if (!d?.embedStatus || !d?.embedCloseTarget) return
       try {
         const s2 = (await d.embedStatus()) as { targets?: { id: string; sid?: string }[] } | undefined
@@ -10332,7 +10333,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     // 主进程的「媒体根」清单同步删除（评审裁决 1 的「关闭时删除」）：
     // 不删的话，用户移除的工作区在进程生命周期内仍然是可流式读取的媒体根。
-    void window.desktop?.workspaceForget?.(path)
+    void bridge?.workspaceForget?.(path)
     const views = { ...s.views }
     for (const sid of wsSids) delete views[sid]
     // 标签集同工作区会话一并回收（含「无会话工作区」用工作区路径当 scope 的那一份，D7）
@@ -10363,7 +10364,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // R0：销毁该工作区全部会话的内嵌预览视图。视图池是进程级单例，删工作区不会自动回收 →
     // 不清理就是内存泄漏 + 僵尸渲染进程（每个视图一个渲染进程）。
     void (async () => {
-      const d = window.desktop
+      const d = bridge
       if (!d?.embedStatus || !d?.embedCloseTarget) return
       try {
         const s2 = (await d.embedStatus()) as { targets?: { id: string; sid?: string }[] } | undefined
@@ -10985,7 +10986,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ dirtyTabs: next })
     // 原生脏标记（macOS 标题栏的圆点 / 关窗时的系统提示）：任一标签脏即为脏。
     // 非 macOS 由主进程空实现（F32 的「零依赖」同样适用于主进程这一侧）。
-    if (typeof window !== 'undefined') void window.desktop?.setDirty?.(Object.keys(next).length > 0)
+    void bridge?.setDirty?.(Object.keys(next).length > 0)
   },
   cancelCloseConfirm: () => set({ closeConfirm: undefined }),
   closeFile: () => {
@@ -11242,7 +11243,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   enablePlugin: (id: string) => {
     // browser 插件且 presentation=embedded：先起内嵌端点（后台、不可见），Enable 才连得上。
-    // 必须用 send()（自动带 workspace）；window.desktop.command 不带 workspace 会被 bridge 拒绝。
+    // 必须用 send()（自动带 workspace）；直接调 bridge.command 不带 workspace 会被 bridge 拒绝。
     // 注意：不创建/显示视图——内嵌视图在真正使用 Browser Use 时才由 web tab 创建并 attach。
     const s = useAppStore.getState()
     const embedded = s.browserConfig?.presentation === 'embedded' || !s.browserConfig // 默认 embedded
@@ -11563,7 +11564,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         // 阶段 3：休眠标签的恢复在主进程里做（重建 + 加载，**沿用原 id**）。恢复失败必须让
         // 用户看见 —— 否则就是「点了没反应」的静默失败（与 openInBrowserTab 的失败口径一致：
         // 响亮报错只属于用户显式点击，而点标签正是用户显式动作）。
-        const r = window.desktop?.embedActivate?.(tab.viewId)
+        const r = bridge?.embedActivate?.(tab.viewId)
         void r?.then((res) => {
           if (res && res.ok === false) {
             const tp = get().embedNav?.targets?.find((x) => x.id === tab.viewId)
@@ -11624,7 +11625,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (gone.kind === 'web') {
       if (gone.viewId) {
         get().markPreviewSeen(gone.viewId)
-        void window.desktop?.embedCloseTarget?.(gone.viewId)
+        void bridge?.embedCloseTarget?.(gone.viewId)
       } else if (gone.pageId != null) {
         get().closeBrowserPage(gone.pageId)
       }
@@ -11814,7 +11815,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // （实测：e2e:auto 的「停在预览 tab」由绿转红）。activate:false 时**一律不动**面板。
     if (activate) get().focusBrowserForPreview()
     try {
-      const d = window.desktop
+      const d = bridge
       if (!d) {
         if (activate && !quiet) st.showToast(i18nT('common.browserUnsupported'), 'error')
         return
@@ -11848,7 +11849,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         //   · 同一 file:// 文件 → reload 该标签（重读磁盘，看到最新一次产出）；
         //   · http(s) → 什么都不做（只激活）：刷外部站点不是预览语义，还会打断用户正填的表单。
         // 两条都作用**指定**标签、都不碰 activeId/面板 → activate:false 也能安全刷新后台标签。
-        // 可选调用（?.）：桩环境（e2e 的 mock window.desktop）没有这两个 API 时退化成「只激活」，
+        // 可选调用（?.）：桩环境（e2e 的 fake host api）没有这两个 API 时退化成「只激活」，
         // 不让一次缺失的 API 把整个预览动作变成抛错。
         const refresh = async (): Promise<void> => {
           if (hit.url !== fileUrl) {
@@ -11912,7 +11913,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 面板切换同步生效（同 openInBrowserTab 的说明）：调用方依赖「调完即已切到 web tab」。
     st.focusBrowserForPreview()
     try {
-      const d = window.desktop
+      const d = bridge
       if (!d) {
         st.showToast(i18nT('common.browserUnsupported'), 'error')
         return
@@ -11954,7 +11955,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const ws = st.workspace ?? ''
     const activate = opts?.activate !== false // 默认 true：三个 previewXxx 与文件栏都是用户点击
     const quiet = opts?.quiet === true // 自动产出（产出即展示）：环境不支持时不弹；转换失败仍弹（见末尾 catch）
-    const d = window.desktop
+    const d = bridge
     // 能力面按 kind 取（三种格式各有一个 IPC；undefined = 该环境不支持，如浏览器 mock）
     const call = kind === 'xlsx' ? d?.watchXlsx : kind === 'docx' ? d?.watchDocx : d?.watchPptx
     if (!call) {

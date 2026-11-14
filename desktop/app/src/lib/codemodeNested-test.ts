@@ -238,7 +238,7 @@ test('spillPathFrom：pi 文案 / 本仓 slim 文案两种写法都认得，缺�
 // §6.2.3：Phase 2 才接 ExecuteOne 的事件转发），所以行为契约只能靠构造事件来钉住 ——
 // 将来引擎一开始发，宿主必须已经是「不建独立工具行 + 清单挂外层」的样子。
 //
-// 为什么能直接 import store：getTransport() 是惰性的（node 下无 window.desktop → mock），
+// 为什么能直接 import store：getTransport() 是惰性的（node 下无宿主桥 → mock），
 // 事件入口 dispatchEvent 与 zustand store 都是纯 JS。构建侧的代价是 store 的 import 图里有
 // vite 资源后缀（?url / ?no-inline / ?raw），esbuild 需要几个 loader（见 package.json）。
 type ToolBlock = Extract<MsgBlock, { kind: 'tool' }>

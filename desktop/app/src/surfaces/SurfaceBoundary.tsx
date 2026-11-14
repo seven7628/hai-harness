@@ -14,6 +14,7 @@ import { useT } from '../i18n'
 import { AUTO_DISABLE_AFTER, disableSurface, enableSurface, recordMountFailure, recordMountSuccess } from './health'
 import { pluginIDOf, setSurfaceEnabled, surfaceReasonText } from './manage'
 import type { SurfaceKind } from './types'
+import { bridge } from '../lib/bridge'
 
 /** 墓碑原因：disabled = 被禁用（自动或手动）；missing = 插件 provider 没注册（插件缺失）。 */
 export type UnavailableReason = 'disabled' | 'missing'
@@ -76,7 +77,7 @@ export function SurfaceTombstone({ kind, title, reason, auto, onRemove }: {
     setErr('')
     // 没有 IPC 时（浏览器里 npm run dev / 老 preload）退回 PR-10 的行为：这时本地禁用集
     // 是**唯一**能解的那一份，拿它去要求磁盘那一份等于让按钮永久失效。
-    if (!pluginId || !window.desktop?.surfaceSetEnabled) {
+    if (!pluginId || !bridge?.surfaceSetEnabled) {
       enableSurface(kind) // 内置 kind：与 PR-10 一样，只有本地禁用集
       return
     }

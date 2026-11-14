@@ -28,6 +28,7 @@ import JsonView from './JsonView'
 import { agentItemsToBlocks } from '../lib/agentSession'
 import { ToolImages } from './ToolImages'
 import { useT } from '../i18n'
+import { bridge } from '../lib/bridge'
 
 /** 异步任务六态 → 图标/文案/卡片类名/是否活动（全仓唯一一份六态映射） */
 function taskStatusMeta(status: AsyncTaskStatus, t: (k: string) => string) {
@@ -209,7 +210,7 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
               {...(b.artifactsTruncated ? { truncated: true } : {})}
               onPreview={(a) => openFile(a.path)}
               onReveal={(a) => {
-                const d = window.desktop
+                const d = bridge
                 if (!d?.showItemInFolder) return
                 void d.showItemInFolder(absArtifactPath(a.path, workspace))
               }}

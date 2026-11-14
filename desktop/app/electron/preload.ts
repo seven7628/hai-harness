@@ -104,7 +104,13 @@ export interface InputHistoryWireItem {
   images?: { mime: string; len: number; hash: string }[]
 }
 
-contextBridge.exposeInMainWorld('desktop', {
+// —— L0（D6）：一次性交接 ——
+//
+// 页面**不再**拿到 `window.desktop`（不是隐藏，是不存在）。暴露的只有一个函数：
+// 谁先调用谁拿走 api（宿主 = src/lib/bridge.ts，模块求值即 claim），第二次调用返回 null。
+// 插件因此永远拿不到承载 command/onEvent 的对象 —— 它只经 `apply({ host })` 拿到两个函数
+// （docs/creator-mode-v0.1/09-agent-bridge.md §6.1）。
+const api = {
   startupMark: (phase: string) => ipcRenderer.invoke('startup-mark', phase),
   pickWorkspace: () => ipcRenderer.invoke('pick-workspace'),
   homeDir: () => ipcRenderer.invoke('home-dir'),
@@ -281,73 +287,84 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.on('mem:pressure', listener)
     return () => ipcRenderer.removeListener('mem:pressure', listener)
   },
+}
+
+let claimed = false
+contextBridge.exposeInMainWorld('__haiClaimHostApi', () => {
+  if (claimed) return null
+  claimed = true
+  return api
 })
+
+/** preload 交出来的 api 的形状（渲染层对应 src/lib/bridge.ts 的 DesktopApi）。 */
+export interface HostApi {
+  pickWorkspace: () => Promise<string | null>
+  homeDir: () => Promise<string>
+  createWorkspaceFolder: (parent: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
+  startBridge: () => Promise<{ ok: boolean; error?: string }>
+  command: (cmd: unknown) => Promise<{ ok: boolean; error?: string }>
+  stopBridge: () => Promise<{ ok: boolean }>
+  settingsGet: () => Promise<AppSettings>
+  settingsSet: (patch: Partial<AppSettings>) => Promise<AppSettings>
+  inputHistoryGet: (p: { scope: string }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
+  inputHistorySet: (p: { scope: string; items: InputHistoryWireItem[] }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
+  inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => Promise<{ ok: boolean; error?: string }>
+  sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => Promise<{ ok: boolean; text?: string; error?: string }>
+  externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
+  officeKit: (req?: { refresh?: boolean }) => Promise<{ ok: boolean; kit?: OfficeKitStatus; error?: string }>
+  importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
+  pickApp: () => Promise<{ name: string; bundleId?: string } | null>
+  providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string | null }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
+  providerKeyStatus: (provider: string) => Promise<boolean>
+  providerKey: (provider: string) => Promise<string>
+  providerCopyKey: (p: { from: string; to: string }) => Promise<{ ok: boolean; copied?: boolean; error?: string }>
+  mcpSave: (servers: Record<string, MCPServerCfg>) => Promise<{ ok: boolean; error?: string }>
+  fsList: (dir: string) => Promise<{ ok: boolean; path: string; entries: { name: string; path: string; isDir: boolean; size?: number }[]; error?: string }>
+  fsReadRef: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; content?: string; error?: string }>
+  fsReadImage: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; dataUrl?: string; mime?: string; error?: string }>
+  fsStat: (p: string) => Promise<{ ok: boolean; size?: number; isFile?: boolean; error?: string }>
+  pickFsFile: (opts?: { multi?: boolean; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null | string[]>
+  pickFsDir: () => Promise<string | null>
+  // 拖拽/选择得到的 File → 磁盘路径（JS 构造的 File 返回空串）
+  getPathForFile: (file: File) => string
+  watchXlsx: (req: { path: string; workspace: string; approximate?: boolean }) => Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
+  applyTheme: (theme: string) => Promise<{ ok: boolean }>
+  embedShow: (p: { url?: string; rect?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
+  embedResize: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
+  embedHide: () => Promise<{ ok: boolean }>
+  embedCommand: (p: { method: string; params?: unknown }) => Promise<{ ok: boolean; result?: unknown; error?: string }>
+  embedStatus: () => Promise<unknown>
+  embedDebuggerProxy: () => Promise<{ ok: boolean; endpoint?: string; port?: number; error?: string }>
+  embedDebuggerProxyStop: () => Promise<{ ok: boolean }>
+  embedNavigate: (url: string) => Promise<{ ok: boolean; error?: string }>
+  embedBack: () => Promise<{ ok: boolean }>
+  embedForward: () => Promise<{ ok: boolean }>
+  embedReload: () => Promise<{ ok: boolean }>
+  // 本地文件动作（Artifacts 产出卡片）
+  openPath: (p: string) => Promise<{ ok: boolean; error?: string }>
+  showItemInFolder: (p: string) => Promise<{ ok: boolean; error?: string }>
+  onEmbedNav: (cb: (state: unknown) => void) => () => void
+  onEmbedAiAction: (cb: (action: unknown) => void) => () => void
+  embedOpenTarget: (url: string, opts?: { sid?: string; activate?: boolean; srcPath?: string }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
+  embedSetSession: (sid: string) => Promise<{ ok: boolean; error?: string; state?: unknown }>
+  embedActivate: (id: string) => Promise<{ ok: boolean; error?: string }>
+  embedCloseTarget: (id: string) => Promise<{ ok: boolean; error?: string }>
+  embedSetBusySids: (sids: string[]) => Promise<{ ok: boolean }>
+  // 刷新/导航**指定**标签（不是激活视图）；命中已有预览标签时由 store 调用
+  embedReloadTarget: (id: string) => Promise<{ ok: boolean; error?: string }>
+  embedNavigateTarget: (id: string, url: string) => Promise<{ ok: boolean; error?: string }>
+  onEvent: (cb: (payload: string | { lines: string[] }) => void) => () => void
+  onExit: (cb: (info: BridgeExitInfo) => void) => () => void
+  // hub:// 深链（P4-02）：返回取消订阅。
+  onHubDeepLink: (cb: (url: string) => void) => () => void
+  hubTakeDeepLinks: () => Promise<string[]>
+  // 内存压力信号（主进程轮询系统内存推来；见 electron/main.ts 的 startMemPressureWatch）
+  onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void
+}
 
 declare global {
   interface Window {
-    desktop: {
-      pickWorkspace: () => Promise<string | null>
-      homeDir: () => Promise<string>
-      createWorkspaceFolder: (parent: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
-      startBridge: () => Promise<{ ok: boolean; error?: string }>
-      command: (cmd: unknown) => Promise<{ ok: boolean; error?: string }>
-      stopBridge: () => Promise<{ ok: boolean }>
-      settingsGet: () => Promise<AppSettings>
-      settingsSet: (patch: Partial<AppSettings>) => Promise<AppSettings>
-      inputHistoryGet: (p: { scope: string }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
-      inputHistorySet: (p: { scope: string; items: InputHistoryWireItem[] }) => Promise<{ ok: boolean; items?: InputHistoryWireItem[]; error?: string }>
-      inputHistoryForget: (p: { prefix: string; subtree?: boolean }) => Promise<{ ok: boolean; error?: string }>
-      sttTranscribe: (p: { audio: ArrayBuffer; mimeType: string }) => Promise<{ ok: boolean; text?: string; error?: string }>
-      externalSkillsStatus: () => Promise<ExternalSkillsStatusResult>
-      officeKit: (req?: { refresh?: boolean }) => Promise<{ ok: boolean; kit?: OfficeKitStatus; error?: string }>
-      importExternalSkills: () => Promise<{ ok: boolean; result?: ExternalSkillsImportResult; error?: string }>
-      pickApp: () => Promise<{ name: string; bundleId?: string } | null>
-      providerSave: (p: { provider: string; active?: string; base_url?: string; label?: string; protocol?: string; models?: Record<string, number>; max_tokens?: Record<string, number>; input_types?: Record<string, string[]>; openai_compat?: { minimal?: boolean; base_path?: string; reasoning_effort?: boolean; max_completion_tokens?: boolean; stream_usage?: boolean; tools?: boolean }; auth_type?: 'api_key' | 'oauth'; usage_input_includes_cache?: boolean | null; cache_ttl_1h?: boolean | null; api_key?: string | null }) => Promise<{ ok: boolean; hasKey?: boolean; error?: string }>
-      providerKeyStatus: (provider: string) => Promise<boolean>
-      providerKey: (provider: string) => Promise<string>
-      providerCopyKey: (p: { from: string; to: string }) => Promise<{ ok: boolean; copied?: boolean; error?: string }>
-      mcpSave: (servers: Record<string, MCPServerCfg>) => Promise<{ ok: boolean; error?: string }>
-      fsList: (dir: string) => Promise<{ ok: boolean; path: string; entries: { name: string; path: string; isDir: boolean; size?: number }[]; error?: string }>
-      fsReadRef: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; content?: string; error?: string }>
-      fsReadImage: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; dataUrl?: string; mime?: string; error?: string }>
-      fsStat: (p: string) => Promise<{ ok: boolean; size?: number; isFile?: boolean; error?: string }>
-      pickFsFile: (opts?: { multi?: boolean; filters?: { name: string; extensions: string[] }[] }) => Promise<string | null | string[]>
-      pickFsDir: () => Promise<string | null>
-      // 拖拽/选择得到的 File → 磁盘路径（JS 构造的 File 返回空串）
-      getPathForFile: (file: File) => string
-      watchXlsx: (req: { path: string; workspace: string; approximate?: boolean }) => Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>
-      applyTheme: (theme: string) => Promise<{ ok: boolean }>
-      embedShow: (p: { url?: string; rect?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
-      embedResize: (rect: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean }>
-      embedHide: () => Promise<{ ok: boolean }>
-      embedCommand: (p: { method: string; params?: unknown }) => Promise<{ ok: boolean; result?: unknown; error?: string }>
-      embedStatus: () => Promise<unknown>
-      embedDebuggerProxy: () => Promise<{ ok: boolean; endpoint?: string; port?: number; error?: string }>
-      embedDebuggerProxyStop: () => Promise<{ ok: boolean }>
-      embedNavigate: (url: string) => Promise<{ ok: boolean; error?: string }>
-      embedBack: () => Promise<{ ok: boolean }>
-      embedForward: () => Promise<{ ok: boolean }>
-      embedReload: () => Promise<{ ok: boolean }>
-      // 本地文件动作（Artifacts 产出卡片）
-      openPath: (p: string) => Promise<{ ok: boolean; error?: string }>
-      showItemInFolder: (p: string) => Promise<{ ok: boolean; error?: string }>
-      onEmbedNav: (cb: (state: unknown) => void) => () => void
-      onEmbedAiAction: (cb: (action: unknown) => void) => () => void
-      embedOpenTarget: (url: string, opts?: { sid?: string; activate?: boolean; srcPath?: string }) => Promise<{ ok: boolean; error?: string; state?: unknown }>
-      embedSetSession: (sid: string) => Promise<{ ok: boolean; error?: string; state?: unknown }>
-      embedActivate: (id: string) => Promise<{ ok: boolean; error?: string }>
-      embedCloseTarget: (id: string) => Promise<{ ok: boolean; error?: string }>
-      embedSetBusySids: (sids: string[]) => Promise<{ ok: boolean }>
-      // 刷新/导航**指定**标签（不是激活视图）；命中已有预览标签时由 store 调用
-      embedReloadTarget: (id: string) => Promise<{ ok: boolean; error?: string }>
-      embedNavigateTarget: (id: string, url: string) => Promise<{ ok: boolean; error?: string }>
-      onEvent: (cb: (payload: string | { lines: string[] }) => void) => () => void
-      onExit: (cb: (info: BridgeExitInfo) => void) => () => void
-      // hub:// 深链（P4-02）：返回取消订阅。
-      onHubDeepLink: (cb: (url: string) => void) => () => void
-      hubTakeDeepLinks: () => Promise<string[]>
-      // 内存压力信号（主进程轮询系统内存推来；见 electron/main.ts 的 startMemPressureWatch）
-      onMemPressure: (cb: (p: { free: number; total: number; swapFree: number; swapTotal: number }) => void) => () => void
-    }
+    /** 宿主唯一可见的 preload 面：一次性交接（第二次调用返回 null）。 */
+    __haiClaimHostApi: () => HostApi | null
   }
 }

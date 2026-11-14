@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
+import { bridge } from '../lib/bridge'
 
 // 品牌时刻逐笔路径（brand/hai-logo.html 定稿）：H 左竖 + 横杠（浓墨）、A 右腿 + I（淡墨）、
 // 朱砂共用斜边最后落下 —— 这一笔让 H 和 A 同时成立。
@@ -50,7 +51,7 @@ export default function BootScreen({ onEnter }: { onEnter: () => void }) {
   //   浏览器 mock → 自动进假工作区（同样停 SPLASH_HOLD，保持一致体验）。
   useEffect(() => {
     if (!done) return
-    if (window.desktop) {
+    if (bridge) {
       if (!workspace) return // 首次：等用户选目录
       autoBoot() // 兜底：挂载时若 workspace 未就绪（no-op），此处再试（幂等）
       const timer = setTimeout(() => onEnterRef.current(), SPLASH_HOLD)
@@ -98,12 +99,12 @@ export default function BootScreen({ onEnter }: { onEnter: () => void }) {
   }, [])
 
   const pick = async () => {
-    if (!window.desktop) {
+    if (!bridge) {
       void start('/mock/workspace')
       onEnterRef.current()
       return
     }
-    const ws = await window.desktop.pickWorkspace()
+    const ws = await bridge.pickWorkspace()
     if (ws) {
       void start(ws)
       onEnterRef.current()
@@ -131,7 +132,7 @@ export default function BootScreen({ onEnter }: { onEnter: () => void }) {
         </span>
       </div>
 
-      {!workspace && !!window.desktop && (
+      {!workspace && !!bridge && (
         <div className="boot-cta">
           <p className="boot-desc">{t('boot.desc')}</p>
           <button className="btn primary" onClick={pick} disabled={status === 'starting'}>

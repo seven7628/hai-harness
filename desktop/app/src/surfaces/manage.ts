@@ -5,9 +5,10 @@
 // 「参数不对」，另一边说成「网络问题」。
 //
 // 刻意**不做** IPC 包装层（没有 surfaceSetEnabled 的二次封装）：预加载已经把
-// window.desktop.surfaceSetEnabled 暴露成同名 Promise 方法，再包一层只会让
-// 「e2e 假 window.desktop 要照哪一份实现」变成第二个问题。
+// bridge.surfaceSetEnabled 暴露成同名 Promise 方法，再包一层只会让
+// 「e2e 的 fake host api 要照哪一份实现」变成第二个问题。
 import type { SurfaceActionResult } from '../transport/types'
+import { bridge } from '../lib/bridge'
 
 /**
  * surfaceReasonText 把 bridge 的封闭 reason 映射成一句人话。
@@ -36,13 +37,13 @@ export function pluginIDOf(kind: string): string {
 }
 
 /**
- * setSurfaceEnabled 翻转一个面板插件的启用位（生产 = window.desktop → 主进程 → 桥）。
+ * setSurfaceEnabled 翻转一个面板插件的启用位（生产 = 宿主桥 → 主进程 → 桥）。
  *
- * 返回 `{ok, reason}`：没有 window.desktop（浏览器 / mock 档）时不假装成功，而是
+ * 返回 `{ok, reason}`：没有宿主桥（浏览器 / mock 档）时不假装成功，而是
  * 回 `ok:false, reason:'error'` —— 「点了没反应」比「点了报错」更难查。
  */
 export async function setSurfaceEnabled(id: string, enabled: boolean): Promise<SurfaceActionResult> {
-  const d = typeof window === 'undefined' ? undefined : window.desktop
+  const d = bridge
   if (!d?.surfaceSetEnabled) return { ok: false, reason: 'error' }
   try {
     const r = await d.surfaceSetEnabled(id, enabled)

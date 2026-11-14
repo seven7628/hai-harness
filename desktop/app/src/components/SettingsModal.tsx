@@ -16,6 +16,7 @@ import MobileTab from './MobileTab'
 import UsageStats from './UsageStats'
 import ProviderPage from './ProviderPage'
 import type { MeshSettings, AppSettings, HubConversationSettings } from '../transport/types'
+import { bridge } from '../lib/bridge'
 
 // 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
 // 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不分组，顶部基础项）。
@@ -946,8 +947,8 @@ function PluginTab() {
     setEngineMsg('')
     try {
       // 先落盘 settings.json（bridge 启动/热读读它；命令带 engine payload 兜底时序）
-      if (window.desktop?.settingsSet) {
-        const r = await window.desktop.settingsSet({ browser_engine: next } as Partial<AppSettings>)
+      if (bridge?.settingsSet) {
+        const r = await bridge.settingsSet({ browser_engine: next } as Partial<AppSettings>)
         if (!r.ok) {
           setEngineMsg(r.error ?? t('plugin.engine.errSave'))
           return
@@ -965,7 +966,7 @@ function PluginTab() {
     setEgoInstalling(true)
     setEngineMsg('')
     try {
-      const r = await window.desktop?.egoInstall()
+      const r = await bridge?.egoInstall()
       if (r?.ok) setEngineMsg(t('plugin.engine.egoInstalled'))
       else setEngineMsg(r?.error ?? t('plugin.engine.egoInstallFail'))
       // 安装完成 → 强制重新检测（refresh_ego 忽略 bridge 缓存）：已安装立即落持久化记录，
@@ -982,7 +983,7 @@ function PluginTab() {
     setEgoLaunching(true)
     setEngineMsg('')
     try {
-      const r = await window.desktop?.egoLaunch()
+      const r = await bridge?.egoLaunch()
       if (!r?.ok) setEngineMsg(r?.error ?? t('plugin.engine.egoLaunchFail'))
       else setEngineMsg('')
       // 启动后稍等再查（进程/CLI 注册需要一点时间），强制重新检测拿最新状态

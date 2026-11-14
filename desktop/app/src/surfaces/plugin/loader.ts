@@ -34,6 +34,7 @@ import { reconcileKnownIds } from './storage'
 import { clearSurfaceLoadError, setSurfaceLoadError } from './status'
 import type { SurfaceIndex, SurfaceIndexItem, SurfaceCommandReply } from '../../transport/types'
 import type { DistributiveOmit, HostApi, SurfaceKind, SurfaceProvider, SurfaceTab } from '../types'
+import { bridge } from '../../lib/bridge'
 
 /** 生产 base URL：`hai-surface://<id>`（协议见 electron/surface-protocol.ts）。 */
 export function surfaceBaseUrl(id: string): string {
@@ -72,7 +73,7 @@ export interface PluginHostDeps {
   /** 主题（缺省读 <html data-theme> + index.css 的 CSS 变量）。 */
   theme?: () => { mode: 'light' | 'dark'; tokens: Record<string, string> }
   /**
-   * 当前环境能不能读到**权威** index（生产 = `!!window.desktop?.surfaceIndex`）。
+   * 当前环境能不能读到**权威** index（生产 = `!!bridge?.surfaceIndex`）。
    * 缺省（不给这个函数）= 不权威 = 不做数据清理。每次 sync 都重新问一遍：环境可能在运行中变
    * （比如 mobile/browser 模式下永远拿不到，那就不该有任何跨重启清理发生）。
    */
@@ -90,7 +91,7 @@ export interface PluginFailure {
  *
  * `authoritativeIndex` 缺省 **false**：传进来的 index 不权威时，数据清理（known-ids 对账）
  * 既不执行也不记账。为什么必须有这个开关：浏览器版（vite 直开、没有 preload）没有
- * `window.desktop.surfaceIndex`，store 那条路回的是硬编码的 `{items:[]}` —— 若把
+ * `bridge.surfaceIndex`，store 那条路回的是硬编码的 `{items:[]}` —— 若把
  * 「拿不到 index」读成「插件全没了」，一次网页会话就会清空全部插件数据。
  * 也不能靠 `items` 非空去猜：卸载**最后一个**插件时 index 恰好是空的，那一次必须能清。
  */
@@ -200,7 +201,7 @@ function createHost(item: SurfaceIndexItem, deps: PluginHostDeps, disposers: Arr
     // 就是整棵子树卸载（PR-10 的崩溃卡），而那并不是「越权」该有的表现。
     command: async (name: string, payload?: unknown): Promise<SurfaceCommandReply> => {
       if (!declared.has(name)) return { ok: false, reason: 'denied' }
-      const api = typeof window === 'undefined' ? undefined : window.desktop
+      const api = bridge
       if (!api?.surfaceCommand) return { ok: false, reason: 'denied' }
       try {
         const args = payload && typeof payload === 'object' && !Array.isArray(payload)
@@ -449,7 +450,7 @@ export function syncPlugins(
 }
 
 export interface PluginLoaderDeps extends PluginHostDeps {
-  /** 读索引（生产 = window.desktop.surfaceIndex，走主进程；e2e = 探针内的假数据） */
+  /** 读索引（生产 = bridge.surfaceIndex，走主进程；e2e = 探针内的假数据） */
   readIndex: () => Promise<SurfaceIndex>
   baseUrl?: SurfaceBaseUrl
 }

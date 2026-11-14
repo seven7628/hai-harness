@@ -15,6 +15,7 @@
 //  ③ 量不到矩形就什么都不下发（见 lib/embedRect.ts 的 80×80 事故）。
 import { fileUrlOf } from './localAsset'
 import type { EmbedRect } from './embedRect'
+import { bridge, type DesktopApi } from './bridge'
 
 /** 一个池里目标的形状（只取这里用得到的字段，口径见 electron/embed.ts EmbedTargetInfo）。 */
 export interface EmbedTargetLike {
@@ -50,8 +51,8 @@ export interface PreviewViewHandle {
 
 export type AttachResult = { ok: true; handle: PreviewViewHandle } | { ok: false; error: string }
 
-const desktop = (): Window['desktop'] | undefined =>
-  (globalThis as { window?: Window }).window?.desktop
+// 桥是模块私有常量（见 src/lib/bridge.ts）：不再每次去 window 上捞，宿主没有桥就是 null。
+const desktop = (): DesktopApi | null => bridge
 
 /**
  * 建/复用视图并激活它（**不**负责显示，显示由 showPreviewView 带矩形完成）。

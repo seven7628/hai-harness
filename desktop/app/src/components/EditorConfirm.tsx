@@ -7,6 +7,7 @@ import { useAppStore } from '../store/useAppStore'
 import type { FileTabInstance } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { editorDocs } from '../lib/editorRuntime'
+import { bridge } from '../lib/bridge'
 
 export function EditorConfirm() {
   const t = useT()
@@ -41,7 +42,7 @@ export function EditorConfirm() {
         const r = await editorDocs.save(e.tabId)
         if (!r.ok) return revealAndClose(e.tabId)
       }
-      window.desktop?.quitAnyway?.()
+      bridge?.quitAnyway?.()
       cancel()
       return
     }
@@ -53,7 +54,7 @@ export function EditorConfirm() {
 
   const onDiscard = () => {
     if (quit) {
-      window.desktop?.quitAnyway?.()
+      bridge?.quitAnyway?.()
       cancel()
       return
     }

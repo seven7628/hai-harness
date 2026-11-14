@@ -10,6 +10,7 @@
 import { useAppStore } from '../store/useAppStore'
 import type { AppState } from '../store/useAppStore'
 import { createEditorDocs } from './editorDocs'
+import { bridge } from '../lib/bridge'
 
 export const editorDocs = createEditorDocs({
   send: (type, payload) => useAppStore.getState().editCommand(type, payload),
@@ -27,12 +28,12 @@ function liveTabIds(s: AppState): Set<string> {
 }
 
 // bindQuitRequest：把主进程的退出询问接到确认框上。**幂等且可重试** —— 模块加载时
-// window.desktop 可能还没就位（L1 测试环境根本没有；探针/setup 顺序也可能晚一步），
+// 宿主桥可能是 null（L1 测试环境根本没有；浏览器直开也没有），
 // 所以 Editor 挂载时会再调一次。脏文档只可能由编辑器产生 → 那时一定已绑定成功。
 let quitBound = false
 export function bindQuitRequest(): void {
   if (quitBound || typeof window === 'undefined') return
-  const d = window.desktop
+  const d = bridge
   if (!d?.onQuitRequest) return
   quitBound = true
   d.onQuitRequest(() => useAppStore.setState({ closeConfirm: { reason: 'quit' } }))

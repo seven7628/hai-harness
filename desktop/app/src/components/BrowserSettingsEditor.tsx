@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAppStore, type BrowserCfg } from '../store/useAppStore'
 import { useT } from '../i18n'
 import Sel from './Sel'
+import { bridge } from '../lib/bridge'
 
 // 浏览器插件设置编辑器（插件卡内联展开）。分组：登录/会话、浏览器基础、隐私/安全、高级（折叠）。
 // 数据源 = browser_config_get（有效配置，含默认）；保存 = browser_config_set（bridge 校验 +
@@ -104,7 +105,7 @@ export function BrowserSettingsEditor({ onClose }: { onClose: () => void }) {
   // —— 登录同步：一键导入用户 Chrome 登录状态（值不透明：只提示成功/失败，不展示任何细节）——
   const runChromeImport = async () => {
     setCookieMsg(null)
-    if (!window.desktop) {
+    if (!bridge) {
       setCookieMsg({ ok: false, text: t('plugin.browser.cookie.noDesktop') })
       return
     }
@@ -112,7 +113,7 @@ export function BrowserSettingsEditor({ onClose }: { onClose: () => void }) {
     if (!window.confirm(t('plugin.browser.cookie.confirmQuit'))) return
     setCookieBusy(true)
     try {
-      const r = await window.desktop.chromeImportLogin()
+      const r = await bridge.chromeImportLogin()
       if (!r.ok) {
         setCookieMsg({
           ok: false,

@@ -39,6 +39,7 @@ import { ArtifactCard, absArtifactPath } from './ArtifactCard'
 import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { UsageActivityMini } from './UsageStats'
 import { useLang, useT } from '../i18n'
+import { bridge } from '../lib/bridge'
 
 
 /* 后台任务落地：两种块（回执 / 完整结果）用同一个 note 渲染 —— 它们说的是同一句
@@ -1169,7 +1170,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
               {...(b.truncated ? { truncated: true } : {})}
               onPreview={(a) => openFile(a.path)}
               onReveal={(a) => {
-                const d = window.desktop
+                const d = bridge
                 if (!d?.showItemInFolder) return
                 void d.showItemInFolder(absArtifactPath(a.path, workspace))
               }}

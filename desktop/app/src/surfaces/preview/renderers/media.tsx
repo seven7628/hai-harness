@@ -25,6 +25,7 @@ import { formatBitrate, formatDuration, mediaKindOf, needsTranscodeByExt } from 
 import { parseMediaProbe, probeSummary, type MediaProbe } from '../../../lib/mediaProbe'
 import { acquireMediaElement } from '../../../lib/mediaStage'
 import type { PreviewProps } from '../types'
+import { bridge } from '../../../lib/bridge'
 
 interface Loaded {
   url?: string
@@ -50,7 +51,7 @@ export default function MediaPreview({ file, tabId, onUnavailable }: PreviewProp
   // 重新拉 probe」的死循环。effect 里要用文案就取模块级的 tStatic（读 store 当前语言）。
   useEffect(() => {
     let alive = true
-    const d = typeof window === 'undefined' ? undefined : window.desktop
+    const d = bridge
     if (!d?.mediaUrl || !d?.mediaProbe) {
       const reason = tStatic('rp.preview.mediaNoChannel')
       setLoaded({ error: reason })
@@ -126,7 +127,7 @@ export default function MediaPreview({ file, tabId, onUnavailable }: PreviewProp
   const openExternal = useCallback(() => {
     const abs = loaded.abs
     if (!abs) return
-    void window.desktop?.openPath?.(abs)
+    void bridge?.openPath?.(abs)
   }, [loaded.abs])
 
   if (loaded.error) {

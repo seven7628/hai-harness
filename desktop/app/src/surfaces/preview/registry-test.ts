@@ -149,7 +149,7 @@ test('detectPreviewDeps：能力面齐全 → ok；缺一个方法 → 不可用
   assert.equal(dependencyStatus('conversion')?.ok, true)
   assert.equal(dependencyStatus('embed')?.ok, true)
 
-  // 浏览器预览模式（没有 window.desktop）：两条依赖都不可用，理由必须**分别**点到通道
+  // 浏览器预览模式（没有宿主桥）：两条依赖都不可用，理由必须**分别**点到通道
   detectPreviewDeps(undefined)
   const conv = dependencyStatus('conversion')
   const embed = dependencyStatus('embed')
