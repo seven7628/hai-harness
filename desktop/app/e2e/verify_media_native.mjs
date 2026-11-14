@@ -157,7 +157,7 @@ const openPreview = (win, rel) => win.evaluate(async ([m, p]) => {
 const activateTab = (win, id) => win.evaluate(async ([m, tid]) => {
   (await import(m)).useAppStore.getState().activateTab(tid)
 }, [STORE, id])
-const mediaStats = (win) => win.evaluate(() => window.desktop.mediaStats())
+const mediaStats = (win) => win.evaluate(() => window.__haiTestBridge.mediaStats())
 
 let app
 try {
@@ -343,10 +343,10 @@ try {
     fs.writeFileSync(leak, Buffer.alloc(4096, 7))
     const before = await mediaStats(win)
     const attempt = await win.evaluate(async ([p, ws]) => {
-      const url = await window.desktop.mediaUrl({ path: p, workspace: ws })
-      const probe = await window.desktop.mediaProbe({ path: p, workspace: ws })
+      const url = await window.__haiTestBridge.mediaUrl({ path: p, workspace: ws })
+      const probe = await window.__haiTestBridge.mediaProbe({ path: p, workspace: ws })
       // 再试一次评审原文的 `workspace=/Users`：走 probe（它先查清单，理由最直白）
-      const root = await window.desktop.mediaProbe({ path: '/Users/whatever.mp4', workspace: '/Users' })
+      const root = await window.__haiTestBridge.mediaProbe({ path: '/Users/whatever.mp4', workspace: '/Users' })
       return { url, probe, root }
     }, [leak, leakDir])
     // 计数要在「直连协议」之前取：IPC 被拒的三次一次都不该走到 protocol.handle

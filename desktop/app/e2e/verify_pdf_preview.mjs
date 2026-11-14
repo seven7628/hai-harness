@@ -157,7 +157,7 @@ try {
   console.log(`  夹具: ${PDF_NAME}（${(pdfSize / 1024).toFixed(0)} KB）→ ${WS}`)
 
   const api = await win.evaluate(() => {
-    const d = window.desktop
+    const d = window.__haiTestBridge
     return { status: !!d?.embedStatus, open: !!d?.embedOpenTarget, activate: !!d?.embedActivate, close: !!d?.embedCloseTarget }
   })
   if (!api.status || !api.open || !api.activate || !api.close) {
@@ -182,9 +182,9 @@ try {
   })()`)
   // 清掉自举的 about:blank 载体之外的残留（保证「池增长」断言不被遗留视图满足）
   await win.evaluate(async () => {
-    const st = await window.desktop.embedStatus()
+    const st = await window.__haiTestBridge.embedStatus()
     for (const t of st?.targets ?? []) {
-      if (t.url && t.url !== 'about:blank') await window.desktop.embedCloseTarget(t.id)
+      if (t.url && t.url !== 'about:blank') await window.__haiTestBridge.embedCloseTarget(t.id)
     }
   })
   await sleep(400)
@@ -213,7 +213,7 @@ try {
   // —— T2 视图池新增该 PDF ——
   console.log('T2 视图池新增该 PDF（编码 + 会话归属）')
   const t2 = await waitFor(async () => {
-    const st = await win.evaluate(() => window.desktop.embedStatus())
+    const st = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     const t = (st?.targets ?? []).find((x) => String(x.url || '').endsWith('.pdf'))
     return t ? { target: t, st } : null
   }, { label: 'PDF 内嵌视图出现', timeout: 30000 })
@@ -282,7 +282,7 @@ try {
   // —— T4 真渲染（CDP contentType/embed + capturePage 纸张占比）——
   console.log('T4 真渲染：CDP 读 contentType/embed + capturePage「纸张」占比')
   const probe = async (expr) => {
-    const res = await win.evaluate((e) => window.desktop.embedCommand({ method: 'Runtime.evaluate', params: { expression: e, returnByValue: true } }), expr)
+    const res = await win.evaluate((e) => window.__haiTestBridge.embedCommand({ method: 'Runtime.evaluate', params: { expression: e, returnByValue: true } }), expr)
     return res?.result?.result?.value ?? res?.result?.value ?? res?.value ?? null
   }
   const contentType = await probe('document.contentType')
@@ -453,7 +453,7 @@ try {
   await pdfRow.click({ button: 'right' })
   await win.locator('.ctx-menu .ctx-item', { hasText: '关闭右侧所有标签' }).click()
   const t8 = await waitFor(async () => {
-    const st = await win.evaluate(() => window.desktop.embedStatus())
+    const st = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     const urls = (st?.targets ?? []).map((t) => t.url)
     return !urls.includes(htmlUrl) ? urls : null
   }, { label: '右侧标签被批量关闭', timeout: 20000 })
@@ -464,7 +464,7 @@ try {
   console.log('T9 再开一个可视文件 → 两标签并存（不顶掉）')
   await store(`(async () => { await s.openHtmlInBrowser(${JSON.stringify(HTML_NAME)}); return true })()`)
   const t9 = await waitFor(async () => {
-    const st = await win.evaluate(() => window.desktop.embedStatus())
+    const st = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     const urls = (st?.targets ?? []).map((t) => t.url)
     return urls.includes(pdfUrl) && urls.includes(htmlUrl) ? urls : null
   }, { label: 'PDF 与第二个文件并存', timeout: 30000 })
@@ -479,7 +479,7 @@ try {
   if (!closeRow) throw new Error('标签条里找不到 PDF 标签')
   await closeRow.locator('.rtab-close').click()
   const t10 = await waitFor(async () => {
-    const st = await win.evaluate(() => window.desktop.embedStatus())
+    const st = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     const urls = (st?.targets ?? []).map((t) => t.url)
     return !urls.includes(pdfUrl) ? urls : null
   }, { label: 'PDF 视图销毁', timeout: 20000 })
@@ -492,13 +492,13 @@ try {
   console.log('T14 打开「＋」菜单 → 原生视图必须隐藏（否则菜单被画面盖住）')
   await store('(async () => { s.openTab({ kind: "web" }); return true })()')
   await waitFor(async () => {
-    const st = await win.evaluate(() => window.desktop.embedStatus())
+    const st = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     return st?.visible === true ? st : null
   }, { label: '预览可见（前置）', timeout: 20000 })
   check('T14 前置：预览可见（visible=true）', true)
   await win.locator('.rtabs-add').click()
   const t14 = await waitFor(async () => {
-    const st = await win.evaluate(() => window.desktop.embedStatus())
+    const st = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     return st?.visible === false ? st : null
   }, { label: '菜单打开 → 视图隐藏', timeout: 10000 })
   check('T14 菜单打开期间原生视图已隐藏（菜单不会被盖住）', t14.visible === false, JSON.stringify(t14))
@@ -527,7 +527,7 @@ try {
   await win.screenshot({ path: path.join(SHOTS, '04-add-menu.png') }).catch(() => {})
   await win.locator('.rtabs-backdrop').click({ force: true })
   const t14b = await waitFor(async () => {
-    const st = await win.evaluate(() => window.desktop.embedStatus())
+    const st = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     return st?.visible === true ? st : null
   }, { label: '菜单关闭 → 视图恢复', timeout: 10000 })
   check('T14 菜单关闭后视图恢复显示', t14b.visible === true, JSON.stringify(t14b))
@@ -543,9 +543,9 @@ try {
   await sleep(300)
   // 清掉所有真实页面（只留 about:blank 自举载体）—— 与用户现场一致
   await win.evaluate(async () => {
-    const st = await window.desktop.embedStatus()
+    const st = await window.__haiTestBridge.embedStatus()
     for (const t of st?.targets ?? []) {
-      if (t.url && t.url !== 'about:blank') await window.desktop.embedCloseTarget(t.id)
+      if (t.url && t.url !== 'about:blank') await window.__haiTestBridge.embedCloseTarget(t.id)
     }
   })
   await sleep(800)
@@ -558,7 +558,7 @@ try {
   })()`)
   await sleep(800)
   const t15Pre = await win.evaluate(async () => {
-    const st = await window.desktop.embedStatus()
+    const st = await window.__haiTestBridge.embedStatus()
     return { pool: (st?.targets ?? []).map((t) => t.url) }
   })
   check('T15 前置：视图池只剩 about:blank 自举载体（＝用户报障时的现场）',
@@ -596,7 +596,7 @@ try {
   //      收口见 electron/embed.ts 的 alignEntryViewport（激活/显示路径各对齐一次）。
   console.log('T16 收起右栏不得缩视图 + 切回标签必须自愈（排版视口 = 容器）')
   const viewportOf = async (urlHint) => {
-    const pool = await win.evaluate(() => window.desktop.embedStatus())
+    const pool = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     const vis = urlHint
       ? (pool?.targets ?? []).find((x) => x.url === urlHint)
       : (pool?.targets ?? []).find((x) => x.visible && x.url && x.url !== 'about:blank')
@@ -644,7 +644,7 @@ try {
   // 也不会触发 ResizeObserver → 旧实现下这页会一直按 80px 排版（用户点标签、刷新都不回来）。
   await store(`(async () => { s.openFile(${JSON.stringify(PDF_NAME)}, undefined, 'source'); return true })()`)
   const pdfShown = await waitFor(async () => {
-    const pool = await win.evaluate(() => window.desktop.embedStatus())
+    const pool = await win.evaluate(() => window.__haiTestBridge.embedStatus())
     return (pool?.targets ?? []).some((x) => String(x.url).endsWith('.pdf')) ? pool : null
   }, { label: '第二个 web 标签（PDF）就绪', timeout: 30000 })
   void pdfShown
@@ -652,7 +652,7 @@ try {
   await htmlChip.click()
   await sleep(1200)
   // 把「显示中那一页」（html 预览）的排版视口设成 80×80 —— 用户现场就是它被这么留下的
-  await win.evaluate(() => window.desktop.embedCommand({
+  await win.evaluate(() => window.__haiTestBridge.embedCommand({
     method: 'Emulation.setDeviceMetricsOverride',
     params: { width: 80, height: 80, deviceScaleFactor: 1, mobile: false },
   })).catch(() => {})

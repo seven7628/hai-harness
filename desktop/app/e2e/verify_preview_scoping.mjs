@@ -27,6 +27,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startDevRenderer, waitHostBridge } from './_dev_renderer.mjs'
 
 const APP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const REPO = path.resolve(APP, '../..')
@@ -104,13 +105,17 @@ const toFileUrl = (p) => 'file://' + p.split('/').map(encodeURIComponent).join('
 
 async function main() {
   let app = null
+  let dev = null
   try {
     console.log(`[scoping] HOME=${HOME}\n[scoping] WS=${WS}`)
+    // L0（D6）之后生产档没有可读的 api（preload 一次性交接 + contextBridge 属性不可写），
+    // 而本探针要直接驱动 embed* 这类 IPC → 走 dev 渲染层（主进程/桥仍是真产物）。
+    dev = await startDevRenderer({ port: Number(process.env.SCOPING_E2E_PORT || 5265) })
     app = await _electron.launch({
       executablePath: ELECTRON,
       args: ['.'],
       cwd: APP,
-      env: { ...process.env, HOME, HAI_DATA_DIR: HOME },
+      env: { ...process.env, HOME, HAI_DATA_DIR: HOME, VITE_DEV_SERVER_URL: dev.url },
     })
     const win = await app.firstWindow()
     win.on('console', (m) => { if (m.type() === 'error' && !/favicon/.test(m.text())) console.log('[renderer-err]', m.text()) })
@@ -119,20 +124,21 @@ async function main() {
     await win.evaluate(([ws]) => { localStorage.setItem('go-code.projects', JSON.stringify({ paths: [ws], active: ws })) }, [WS])
     await win.reload()
     await waitFor(() => win.locator('button', { hasText: '设置' }).first().isVisible(), { label: '主界面就绪', timeout: 60000 })
+    await waitHostBridge(win) // 宿主已交接 → __haiTestBridge 就绪（见 e2e/_dev_renderer.mjs）
 
     // —— A1 前置硬检查：渲染层可见面必须有 embedSetSession ——
     // 不用 skip：它不存在正是本脚本要暴露的事实（TDD 先红）。skip 会把「没实现」伪装成「通过」。
-    const setSessionType = await win.evaluate(() => typeof window.desktop?.embedSetSession)
+    const setSessionType = await win.evaluate(() => typeof window.__haiTestBridge?.embedSetSession)
     if (setSessionType !== 'function') {
-      throw new Error(`embedSetSession 不存在 —— R0 未实现（window.desktop.embedSetSession 的 typeof = ${JSON.stringify(setSessionType)}）`)
+      throw new Error(`embedSetSession 不存在 —— R0 未实现（window.__haiTestBridge.embedSetSession 的 typeof = ${JSON.stringify(setSessionType)}）`)
     }
-    ok('A1 window.desktop.embedSetSession 已接线（typeof function）')
+    ok('A1 window.__haiTestBridge.embedSetSession 已接线（typeof function）')
 
     // 等内嵌链路就绪：store 自举在启动期会 embedShow + embedHide 各一次（视图零常驻），
     // 等它跑完再断言，避免「自举把面板全局可见位翻 false」与断言竞态。
     // 非致命：即便等不到（bridge 异常），下面的显式 embedShow 也会建出视图，断言依然成立。
     try {
-      await waitFor(async () => !!(await win.evaluate(() => window.desktop.embedStatus()))?.ready, { label: '内嵌视图池就绪', timeout: 60000 })
+      await waitFor(async () => !!(await win.evaluate(() => window.__haiTestBridge.embedStatus()))?.ready, { label: '内嵌视图池就绪', timeout: 60000 })
       await sleep(1500)
     } catch (e) {
       console.log(`  ⚠ 视图池就绪等待超时（继续，由显式 embedShow 兜底）：${e.message}`)
@@ -143,9 +149,9 @@ async function main() {
     //  - openAndId：用「打开前后 targets 差集」定位新视图 id，不依赖实现把 id 放在响应的哪个字段
     await win.evaluate(() => {
       window.__sc = {
-        showPanel: () => window.desktop.embedShow({}),
+        showPanel: () => window.__haiTestBridge.embedShow({}),
         snap: async () => {
-          const st = await window.desktop.embedStatus()
+          const st = await window.__haiTestBridge.embedStatus()
           return {
             activeId: st?.activeId ?? null,
             panelVisible: !!st?.visible,
@@ -156,9 +162,9 @@ async function main() {
         },
         target: async (id) => (await window.__sc.snap()).targets.find((t) => t.id === id) ?? null,
         openAndId: async (url, opts) => {
-          const before = new Set(((await window.desktop.embedStatus())?.targets ?? []).map((t) => t.id))
-          const r = await window.desktop.embedOpenTarget(url, opts)
-          const fresh = ((await window.desktop.embedStatus())?.targets ?? []).filter((t) => !before.has(t.id))
+          const before = new Set(((await window.__haiTestBridge.embedStatus())?.targets ?? []).map((t) => t.id))
+          const r = await window.__haiTestBridge.embedOpenTarget(url, opts)
+          const fresh = ((await window.__haiTestBridge.embedStatus())?.targets ?? []).filter((t) => !before.has(t.id))
           return { ok: !!r?.ok, error: r?.error ?? '', id: fresh[0]?.id ?? '', state: r?.state ?? null }
         },
       }
@@ -181,7 +187,7 @@ async function main() {
 
     // —— A2 开 A（sid=S-A）：视图带会话归属 + 当前会话内显示 ——
     const openA = await win.evaluate(async ([url]) => {
-      await window.desktop.embedSetSession('S-A') // 真实流程：用户当前就在 S-A 会话
+      await window.__haiTestBridge.embedSetSession('S-A') // 真实流程：用户当前就在 S-A 会话
       await window.__sc.showPanel()              // 真实流程：右栏网页面板已打开
       const r = await window.__sc.openAndId(url, { sid: 'S-A', activate: true })
       await new Promise((res) => setTimeout(res, 700)) // 等 file:// 加载出 url/title
@@ -195,7 +201,7 @@ async function main() {
 
     // —— A3/A4 切到 S-B：真隔离 + 保活 ——
     const snapB = await win.evaluate(async () => {
-      await window.desktop.embedSetSession('S-B') // 切到另一个会话（此刻本会话还没有任何视图）
+      await window.__haiTestBridge.embedSetSession('S-B') // 切到另一个会话（此刻本会话还没有任何视图）
       await window.__sc.showPanel()
       return await window.__sc.snap()
     })
@@ -205,13 +211,13 @@ async function main() {
     assert(tA2?.visible === false, `A3 切到 S-B 后 S-A 的视图必须真的不显示（Electron 侧隔离，不是前端过滤）：visible 期望 false，实际 ${JSON.stringify(tA2?.visible)}（activeId=${JSON.stringify(snapB.activeId)}）`)
 
     // —— A5 切回 S-A：恢复显示 ——
-    await win.evaluate(() => window.desktop.embedSetSession('S-A'))
+    await win.evaluate(() => window.__haiTestBridge.embedSetSession('S-A'))
     const tA3 = await readTarget(openA.id, true)
     assert(tA3?.visible === true, `A5 切回 S-A 应恢复显示（visible 期望 true，实际 ${JSON.stringify(tA3?.visible)}，target=${JSON.stringify(tA3)}）`)
 
     // —— A6 两会话并存：各会话只看自己的 ——
     const openB = await win.evaluate(async ([url]) => {
-      await window.desktop.embedSetSession('S-B')
+      await window.__haiTestBridge.embedSetSession('S-B')
       await window.__sc.showPanel()
       const r = await window.__sc.openAndId(url, { sid: 'S-B', activate: true })
       await new Promise((res) => setTimeout(res, 700))
@@ -244,10 +250,10 @@ async function main() {
 
     // —— A8 跨会话激活拒绝 ——
     const cross = await win.evaluate(async ([idA]) => {
-      await window.desktop.embedSetSession('S-B')
+      await window.__haiTestBridge.embedSetSession('S-B')
       await window.__sc.showPanel()
       const before = (await window.__sc.snap()).activeId
-      const r = await window.desktop.embedActivate(idA)
+      const r = await window.__haiTestBridge.embedActivate(idA)
       await window.__sc.showPanel()
       const after = (await window.__sc.snap()).activeId
       return { before, after, ok: !!r?.ok }
@@ -264,7 +270,7 @@ async function main() {
     for (const [label, id] of [['A', openA.id], ['B', openB.id], ['C', openC.r.id]]) {
       const r = await win.evaluate(async ([tid]) => {
         const before = await window.__sc.snap()
-        const res = await window.desktop.embedCloseTarget(tid)
+        const res = await window.__haiTestBridge.embedCloseTarget(tid)
         const after = await window.__sc.snap()
         return { ok: !!res?.ok, error: res?.error ?? '', n0: before.targets.length, n1: after.targets.length, ids: after.targets.map((t) => t.id), sleeping: after.targets.filter((t) => t.sleeping).map((t) => t.id) }
       }, [id])
@@ -295,10 +301,10 @@ async function main() {
       const victim = sleeping[0] ?? ''
       const victimTarget = st.targets.find((t) => t.id === victim) ?? null
       // 关掉被休眠的那条 → 真删除
-      const closed = await window.desktop.embedCloseTarget(victim)
+      const closed = await window.__haiTestBridge.embedCloseTarget(victim)
       const after = await window.__sc.snap()
       // 清理：关掉本次新建的其余视图（不留满池给 A10/A11）
-      for (const id of created) if (id !== victim) await window.desktop.embedCloseTarget(id)
+      for (const id of created) if (id !== victim) await window.__haiTestBridge.embedCloseTarget(id)
       const cleaned = await window.__sc.snap()
       return {
         allOk, created, sleeping, victim,
@@ -326,27 +332,27 @@ async function main() {
       const open = (url, opts) => window.__sc.openAndId(url, opts)
       const panel = () => window.__sc.showPanel()
       // S-A：用户显式看过 P1（有显式视图的会话，供「切走」这一半）
-      await window.desktop.embedSetSession('S-A')
+      await window.__haiTestBridge.embedSetSession('S-A')
       await panel()
       const p1 = await open(u1, { sid: 'S-A', activate: true })
       // S-B：用户显式看过 P2 → Agent 在后台开 P3（activate:false，不得参与挑选）
-      await window.desktop.embedSetSession('S-B')
+      await window.__haiTestBridge.embedSetSession('S-B')
       await panel()
       const p2 = await open(u2, { sid: 'S-B', activate: true })
       const p3 = await open(u3, { sid: 'S-B', activate: false })
       const afterBg = (await window.__sc.snap()).activeId
       // 切走 → 切回 S-B：必须回到用户看的 P2，而不是 Agent 刚开的 P3
-      await window.desktop.embedSetSession('S-A')
-      await window.desktop.embedSetSession('S-B')
+      await window.__haiTestBridge.embedSetSession('S-A')
+      await window.__haiTestBridge.embedSetSession('S-B')
       await panel()
       const backB = (await window.__sc.snap()).activeId
       // S-C：只有后台产出（两个）、没有任何「显式看过」→ 走第二级（最近创建的）
-      await window.desktop.embedSetSession('S-C')
+      await window.__haiTestBridge.embedSetSession('S-C')
       await panel()
       const q1 = await open(u4, { sid: 'S-C', activate: false })
       const q2 = await open(u5, { sid: 'S-C', activate: false })
-      await window.desktop.embedSetSession('S-A')
-      await window.desktop.embedSetSession('S-C')
+      await window.__haiTestBridge.embedSetSession('S-A')
+      await window.__haiTestBridge.embedSetSession('S-C')
       await panel()
       const backC = (await window.__sc.snap()).activeId
       return { p1: p1.id, p2: p2.id, p3: p3.id, q1: q1.id, q2: q2.id, afterBg, backB, backC }
@@ -356,6 +362,7 @@ async function main() {
     assert(pick.backC === pick.q2, `A11 本会话只有后台产出时应挑最近创建的 ${pick.q2}（不能空白、也不能挑更早的 ${pick.q1}；实际 activeId=${JSON.stringify(pick.backC)}）`)
   } finally {
     if (app) await app.close().catch(() => { /* 已退出忽略 */ })
+    if (dev) dev.stop()
     fs.rmSync(HOME, { recursive: true, force: true })
     fs.rmSync(WS, { recursive: true, force: true })
   }

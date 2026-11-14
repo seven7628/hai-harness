@@ -173,7 +173,7 @@ function expectedMarkerOf(url) {
 // 单向推送（Go 侧据此 RemoveTarget），渲染层看不到；「命令打到休眠条目」也只有在协议层才验得
 // 出来（embedCommand 只作用激活视图）。故 e2e 直连它。
 async function connectDbgProxy(win) {
-  const proxy = await win.evaluate(() => window.desktop.embedDebuggerProxy())
+  const proxy = await win.evaluate(() => window.__haiTestBridge.embedDebuggerProxy())
   const port = Number(String(proxy?.endpoint ?? '').split(':').pop())
   if (!proxy?.ok || !port) return null
   const sock = net.connect({ host: '127.0.0.1', port })
@@ -242,7 +242,7 @@ try {
   await waitFor(() => win.locator('button', { hasText: '设置' }).first().isVisible(), { label: '主界面就绪', timeout: 60000 })
 
   const api = await win.evaluate(() => {
-    const d = window.desktop
+    const d = window.__haiTestBridge
     return { status: !!d?.embedStatus, open: !!d?.embedOpenTarget, activate: !!d?.embedActivate, cmd: !!d?.embedCommand }
   })
   if (!api.status || !api.open || !api.activate || !api.cmd) {
@@ -256,7 +256,7 @@ try {
   await win.evaluate(() => {
     window.__r2 = {
       async snap() {
-        const st = await window.desktop.embedStatus()
+        const st = await window.__haiTestBridge.embedStatus()
         // sleeping/restoring：阶段 3 的休眠态（视图池 LRU 驱逐后条目仍在 targets 里，见
         // docs/RIGHT_PANEL_TABS_PLAN.md §11.4）。n = 条目总数（含休眠），live = 活渲染进程数
         //（上限只管 live —— 休眠不占渲染进程，这正是「上限可以放宽」的前提）。
@@ -267,7 +267,7 @@ try {
       // {result:{result:{value}}} / {result:{value}} / {value}，全试一遍（既有写法，勿改）。
       async marker() {
         for (let i = 0; i < 15; i++) {
-          const res = await window.desktop.embedCommand({
+          const res = await window.__haiTestBridge.embedCommand({
             method: 'Runtime.evaluate',
             params: { expression: 'document.getElementById("marker")?.textContent ?? ""', returnByValue: true },
           })
@@ -284,7 +284,7 @@ try {
         const end = Date.now() + ms
         let last = ''
         for (;;) {
-          const res = await window.desktop.embedCommand({
+          const res = await window.__haiTestBridge.embedCommand({
             method: 'Runtime.evaluate',
             params: { expression: 'document.getElementById("marker")?.textContent ?? ""', returnByValue: true },
           })
@@ -351,7 +351,7 @@ try {
   // —— T1 对照组：openEmbedTarget 两次 → 池累加 ——
   console.log('T1 openEmbedTarget 两次（对照组：池本身能并存）')
   const t1 = await win.evaluate(async ([a, b]) => {
-    const d = window.desktop
+    const d = window.__haiTestBridge
     const n0 = (await window.__r2.snap()).n
     await d.embedOpenTarget(a)
     await new Promise((r) => setTimeout(r, 900))
@@ -369,9 +369,9 @@ try {
   // T1 的残留必须先清掉：它建出的正是 preview-a / preview-b —— 留着会让 T2「A 仍在池中」的
   // 断言被 T1 的遗留视图满足（假阳性，断言空转）。清空后还显式断言池里没有 file://（前提检查）。
   await win.evaluate(async () => {
-    const st = await window.desktop.embedStatus()
+    const st = await window.__haiTestBridge.embedStatus()
     for (const t of st?.targets ?? []) {
-      if (t.url && t.url !== 'about:blank') await window.desktop.embedCloseTarget(t.id)
+      if (t.url && t.url !== 'about:blank') await window.__haiTestBridge.embedCloseTarget(t.id)
     }
   })
   await sleep(500)
@@ -490,7 +490,7 @@ try {
   // T3c 自清理：关掉本用例新建并激活的标签。T4 的「池上限」用例需要**可用池位** ——
   // 泄漏一个标签会让它整段空转（实测：池被填满 → 9 次开页全失败 → okRes 为空 → 假红）。
   const t3cClean = await win.evaluate(async ([id]) => {
-    await window.desktop.embedCloseTarget(id)
+    await window.__haiTestBridge.embedCloseTarget(id)
     const s = await window.__r2.snap()
     return { n: s.n, activeId: s.activeId }
   }, [t3c.newIds[0]])
@@ -507,7 +507,7 @@ try {
   const setSession = (sid) => win.evaluate(async ([s]) => {
     const m = await import('/src/store/useAppStore.ts')
     m.useAppStore.setState({ activeSessionId: s })
-    await window.desktop.embedSetSession(s) // 真应用里由 App.tsx 的 effect 做同一件事
+    await window.__haiTestBridge.embedSetSession(s) // 真应用里由 App.tsx 的 effect 做同一件事
     return m.useAppStore.getState().activeSessionId
   }, [sid])
   const SID_OTHER = 'S-E2E-OTHER'
@@ -568,7 +568,7 @@ try {
   console.log('T4 视图池上限（MAX_EMBED_VIEWS=12）：超限 LRU 休眠，不抛错')
   // 用真实的 file://：不存在的路径会让视图停在错误页，干扰「池是否增长」的观测。
   const t4 = await win.evaluate(async ([urls]) => {
-    const d = window.desktop
+    const d = window.__haiTestBridge
     const before = await window.__r2.snap() // 起始池快照（口径与起始基数无关）
     const results = [] // { ok, error, n, live, activeId }：每次调用后的池大小
     const seenIds = new Set(before.targets.map((t) => t.id))
@@ -657,8 +657,8 @@ try {
   const victimMarker = expectedMarkerOf(victim?.url ?? '')
   const t4b = await win.evaluate(async ([id, sid, want]) => {
     const before = await window.__r2.snap()
-    if (sid) await window.desktop.embedSetSession(sid)
-    const r = await window.desktop.embedActivate(id) // 用户点标签 = embedActivate
+    if (sid) await window.__haiTestBridge.embedSetSession(sid)
+    const r = await window.__haiTestBridge.embedActivate(id) // 用户点标签 = embedActivate
     await new Promise((res) => setTimeout(res, 1500))
     const after = await window.__r2.snap()
     const me = after.targets.find((t) => t.id === id) ?? null
@@ -713,19 +713,19 @@ try {
     const m = await import('/src/store/useAppStore.ts')
     const S = 'S-E2E-T7GUARD'
     m.useAppStore.setState({ activeSessionId: S })
-    await window.desktop.embedSetSession(S)
+    await window.__haiTestBridge.embedSetSession(S)
     // 清空真实标签（**保留**自举 about:blank 视图：它是 Go 侧默认 target 的载体）。
     // 过滤条件是 `!== 'about:blank'`（而不是 `t.url && ...`）：URL 还没提交的活条目也要关掉 ——
     // 否则它会以「用户看过」的身份留在池里，成为下面唯一可驱逐的对象（断言就变噪声了）。
     for (const t of (await window.__r2.snap()).targets) {
-      if (t.url !== 'about:blank') await window.desktop.embedCloseTarget(t.id)
+      if (t.url !== 'about:blank') await window.__haiTestBridge.embedCloseTarget(t.id)
     }
     const sleepBefore = (await window.__r2.snap()).targets.filter((t) => t.sleeping).length
     let seen = new Set((await window.__r2.snap()).targets.map((t) => t.id))
     const opened = []
     let failedAt = -1
     for (let i = 0; i < urls.length; i++) {
-      const r = await window.desktop.embedOpenTarget(urls[i], { sid: S, activate: false }) // 后台：lastUsed 恒 0
+      const r = await window.__haiTestBridge.embedOpenTarget(urls[i], { sid: S, activate: false }) // 后台：lastUsed 恒 0
       const st = await window.__r2.snap()
       const fresh = st.targets.map((t) => t.id).filter((id) => !seen.has(id))
       for (const id of fresh) seen.add(id)
@@ -759,7 +759,7 @@ try {
     t7b.afterLive === t7b.live && t7b.afterSleeping === t7b.sleeping, JSON.stringify(t7b))
   // 清理：关掉这批 guard 视图（否则后续用例也会撞上「不可驱逐」的墙 —— 测试卫生）
   const t7c = await win.evaluate(async ([ids]) => {
-    for (const id of ids) await window.desktop.embedCloseTarget(id)
+    for (const id of ids) await window.__haiTestBridge.embedCloseTarget(id)
     const st = await window.__r2.snap()
     return { live: st.live, left: st.targets.filter((t) => t.id && ids.includes(t.id)).length }
   }, [t7b.ids])
@@ -780,7 +780,7 @@ try {
   } else {
     const t8 = await win.evaluate(async ([u]) => {
       const before = new Set((await window.__r2.snap()).targets.map((t) => t.id))
-      const r = await window.desktop.embedOpenTarget(u)
+      const r = await window.__haiTestBridge.embedOpenTarget(u)
       const st = await window.__r2.snap()
       const fresh = st.targets.map((t) => t.id).filter((id) => !before.has(id))
       return { ok: !!r?.ok, id: fresh[0] ?? '', url: u }
@@ -797,7 +797,7 @@ try {
       return { n: pages.length, urls: pages.map((p) => p.url), has: pages.some((p) => p.url === url) }
     }, [t8.url])
     const from = dbg.lines.length
-    await win.evaluate(async ([id]) => { await window.desktop.embedCloseTarget(id) }, [t8.id])
+    await win.evaluate(async ([id]) => { await window.__haiTestBridge.embedCloseTarget(id) }, [t8.id])
     const destroyed = await dbg.waitLine((l) => l.type === 'destroyed' && l.targetId === t8.id, { from })
     check('T8 关闭后主进程广播 destroyed（Go 侧据此 RemoveTarget：页表不再有幽灵页）',
       !!destroyed, `lines=${JSON.stringify(dbg.lines.slice(from).slice(0, 6))}`)
@@ -809,7 +809,7 @@ try {
       stGone.stillListed === false, JSON.stringify(stGone))
     // 幂等：重复关闭同一条目不得再广播
     const from2 = dbg.lines.length
-    await win.evaluate(async ([id]) => { await window.desktop.embedCloseTarget(id) }, [t8.id])
+    await win.evaluate(async ([id]) => { await window.__haiTestBridge.embedCloseTarget(id) }, [t8.id])
     await sleep(700)
     const dup = dbg.lines.slice(from2).filter((l) => l.type === 'destroyed' && l.targetId === t8.id)
     check('T8 幂等：重复关闭同一条目**不重复广播** destroyed（Go 侧不会被重复触发）',
@@ -842,17 +842,17 @@ try {
       const SBUSY = 'S-E2E-T9BUSY'
       const open = async (url, sid) => {
         const before = new Set((await window.__r2.snap()).targets.map((t) => t.id))
-        const r = await window.desktop.embedOpenTarget(url, { sid, activate: true })
+        const r = await window.__haiTestBridge.embedOpenTarget(url, { sid, activate: true })
         const st = await window.__r2.snap()
         return { ok: !!r?.ok, id: st.targets.map((t) => t.id).filter((id) => !before.has(id))[0] ?? '' }
       }
       // 清池（保留自举视图：Go 侧默认 target 的载体）。条件用 `!== 'about:blank'`：URL 未提交的
       // 活条目也要关（否则它会以「用户看过」的身份留下来，成为唯一可驱逐对象 → 噪声）。
       for (const t of (await window.__r2.snap()).targets) {
-        if (t.url !== 'about:blank') await window.desktop.embedCloseTarget(t.id)
+        if (t.url !== 'about:blank') await window.__haiTestBridge.embedCloseTarget(t.id)
       }
       m.useAppStore.setState({ activeSessionId: S })
-      await window.desktop.embedSetSession(S)
+      await window.__haiTestBridge.embedSetSession(S)
       const a = await open(u0, S) // 最旧
       const b = await open(u1, S) // 次旧
       const c = await open(u2, S) // 第三旧（当前激活）
@@ -880,7 +880,7 @@ try {
       const SBUSY = 'S-E2E-T9BUSY'
       const open = async (url) => {
         const before = new Set((await window.__r2.snap()).targets.map((t) => t.id))
-        const r = await window.desktop.embedOpenTarget(url, { sid: SBUSY, activate: true })
+        const r = await window.__haiTestBridge.embedOpenTarget(url, { sid: SBUSY, activate: true })
         const st = await window.__r2.snap()
         return { ok: !!r?.ok, id: st.targets.map((t) => t.id).filter((id) => !before.has(id))[0] ?? '' }
       }
@@ -943,7 +943,7 @@ try {
       })
       await new Promise((r) => setTimeout(r, 300)) // 等订阅把「无运行中会话」推给主进程
       for (const t of (await window.__r2.snap()).targets) {
-        if (t.url !== 'about:blank') await window.desktop.embedCloseTarget(t.id)
+        if (t.url !== 'about:blank') await window.__haiTestBridge.embedCloseTarget(t.id)
       }
       const st = await window.__r2.snap()
       return { live: st.live, busy: [...m.useAppStore.getState().busySids] }
@@ -969,8 +969,8 @@ try {
   const t6 = await win.evaluate(async ([u]) => {
     const m = await import('/src/store/useAppStore.ts')
     // 腾出池位（T4 已把池填到上限 8）
-    const ids = ((await window.desktop.embedStatus())?.targets ?? []).map((t) => t.id)
-    for (const id of ids.slice(1, 3)) await window.desktop.embedCloseTarget(id)
+    const ids = ((await window.__haiTestBridge.embedStatus())?.targets ?? []).map((t) => t.id)
+    for (const id of ids.slice(1, 3)) await window.__haiTestBridge.embedCloseTarget(id)
     // 全新会话 + 复位到「面板收起、不在 web tab、左栏展开」→ 早退守卫不成立
     const S = 'S-E2E-T6'
     m.useAppStore.setState({
@@ -978,7 +978,7 @@ try {
       // 面板停在链路（激活标签 = activity）；R11b 起没有可直写的面板字段了
       tabsByScope: { [S]: { tabs: [{ id: 'act0', kind: 'activity' }], activeId: 'act0', closed: [] } },
     })
-    await window.desktop.embedSetSession(S)
+    await window.__haiTestBridge.embedSetSession(S)
     const before = await window.__r2.panel()
     await window.__r2.call('openInBrowserTab', [u, { activate: false }])
     await new Promise((r) => setTimeout(r, 2000)) // 等 file:// 加载出真实 URL → 主进程推 embed-nav
@@ -998,9 +998,9 @@ try {
   console.log('T11 同一 file:// 文件预览两次 → 池不增长 + 内容确实刷新（同一个标签）')
   // 先清池（只留自举视图）：让「池不增长」与「file:// 视图恰好 1 个」不被前面用例的残留满足。
   await win.evaluate(async () => {
-    const st = await window.desktop.embedStatus()
+    const st = await window.__haiTestBridge.embedStatus()
     for (const t of st?.targets ?? []) {
-      if (t.url && t.url !== 'about:blank') await window.desktop.embedCloseTarget(t.id)
+      if (t.url && t.url !== 'about:blank') await window.__haiTestBridge.embedCloseTarget(t.id)
     }
   })
   await sleep(500)
@@ -1071,7 +1071,7 @@ try {
     const after = await window.__r2.snap()
     const p1 = await window.__r2.panel()
     // 最后切回被测标签读内容（embedCommand 只作用激活视图）—— 刷新没发生的话这里读到的是 marker B
-    await window.desktop.embedActivate(bgId)
+    await window.__haiTestBridge.embedActivate(bgId)
     const marker = await window.__r2.markerWait('PREVIEW-T11-C')
     return {
       n0: before.n, n1: after.n, activeBefore: before.activeId, activeAfter: after.activeId,
@@ -1105,13 +1105,13 @@ try {
     const m = await import('/src/store/useAppStore.ts')
     const S = 'S-E2E-T12' // 独立会话：不影响前面用例的会话，也不被它们影响
     m.useAppStore.setState({ activeSessionId: S })
-    await window.desktop.embedSetSession(S)
+    await window.__haiTestBridge.embedSetSession(S)
     const before = (await window.__r2.snap()).n
     const srcPath = 'e2e-src-shared'
-    const r1 = await window.desktop.embedOpenTarget(u1, { sid: S, srcPath })
+    const r1 = await window.__haiTestBridge.embedOpenTarget(u1, { sid: S, srcPath })
     await new Promise((r) => setTimeout(r, 900))
     const n1 = (await window.__r2.snap()).n
-    const r2 = await window.desktop.embedOpenTarget(u2, { sid: S, srcPath })
+    const r2 = await window.__haiTestBridge.embedOpenTarget(u2, { sid: S, srcPath })
     await new Promise((r) => setTimeout(r, 900))
     const st = await window.__r2.snap()
     return {

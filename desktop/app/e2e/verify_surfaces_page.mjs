@@ -1,6 +1,6 @@
 // verify_surfaces_page.mjs —— 设置 →「面板插件」页（PR-14b）。
 //
-// 探针只替**一条边界**：`window.desktop` 的四个 surface 方法（00-conventions §4.7）。
+// 探针只替**一条边界**：fake host api 的四个 surface 方法（00-conventions §4.7）。
 // 真代码路径全部保留：`SurfacesPage` 组件本体、`useT`（i18n 真表）、`ConfirmModal`、
 // `surfaces/manage.ts` 的 reason 映射、以及「动作后重拉 index + audit」的刷新逻辑。
 //
@@ -41,7 +41,7 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
   + '<body><div id="root" style="height:100vh"></div>'
   + '<script type="module" src="./main.tsx"></script></body></html>')
 
-// 假 window.desktop 的四条方法，语义按 bridge 的真实语义写：
+// 假 host api 的四条方法，语义按 bridge 的真实语义写：
 //   · surfaceSetEnabled 真的翻那一份 index（页面 refresh 之后必须看到新值，否则 T2 假绿）；
 //   · surfaceRemove 真的把条目去掉（T3 数行数靠它）；
 //   · surfaceAudit 原样回 lines（坏行由调用方注入，页面自己不许炸）；
@@ -118,7 +118,7 @@ const stub = {
   items: () => items.map((i) => ({ id: i.id, enabled: i.enabled })),
 }
 
-// 动态 import：window.desktop 必须先于组件模块求值就位（i18n → store 在模块加载期
+// 动态 import：fake 必须先于组件模块求值就位（i18n → store 在模块加载期
 // 就会用 getTransport() 分流；静态 import 会被提升到桩赋值之前，与生产里 preload
 // 先于 bundle 的顺序不一致 —— verify_plugin_loader.mjs 同一段注释）。
 void (async () => {

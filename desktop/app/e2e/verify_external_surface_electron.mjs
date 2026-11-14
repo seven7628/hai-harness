@@ -133,6 +133,24 @@ try {
   await win.reload()
   await waitFor(() => win.locator('button', { hasText: '设置' }).first().isVisible(), { label: '主界面就绪' })
 
+  // ---- T2a：L0（D6 一次性交接）在**生产档真 preload**里成立 ----
+  // 这一段不是可选的装饰：上面 T2 的菜单能出来，正是靠 bridge.surfaceIndex 走通了真 claim
+  // —— 但「菜单出来了」也可能来自别的通路，所以把边界自己钉一遍。
+  console.log('\nT2a 生产档的宿主边界（真 preload + 真 claim）')
+  const boundary = await win.evaluate(() => ({
+    desktopType: typeof window.desktop,
+    hasDesktopKey: Object.prototype.hasOwnProperty.call(window, 'desktop'),
+    claimType: typeof window.__haiClaimHostApi,
+    secondClaim: typeof window.__haiClaimHostApi === 'function' ? window.__haiClaimHostApi() : 'missing',
+    testBridge: typeof window.__haiTestBridge,
+  }))
+  check('claim 函数是 preload 唯一暴露面',
+    boundary.claimType === 'function', JSON.stringify(boundary))
+  check('window.desktop 在生产档不存在（不是隐藏，是没有这个属性）',
+    boundary.desktopType === 'undefined' && boundary.hasDesktopKey === false, JSON.stringify(boundary))
+  check('宿主已交接 → 第二次 claim 返回 null', boundary.secondClaim === null, String(boundary.secondClaim))
+  check('生产档没有 __haiTestBridge（探针口只在非生产构建）', boundary.testBridge === 'undefined', boundary.testBridge)
+
   // 展开右栏：折叠态下 ＋ 在图标条里看不到，点一个标签图标即可展开（与 ego 冒烟同一条路）。
   const activityBtn = win.getByRole('button', { name: '链路', exact: true }).first()
   await waitFor(() => activityBtn.count().then((n) => n > 0), { label: '右栏图标条' })

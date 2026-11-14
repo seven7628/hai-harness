@@ -38,7 +38,7 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
 
 // —— 探针页 ——
 // 与 e2e/verify_preview_renderers.mjs 同一条口径：**真实** store + **真实** RightPanel
-// + 真实 surface 的副作用注册，走 mock transport（不注入 window.desktop）。冻结一份
+// + 真实 surface 的副作用注册，走 mock transport（不注入 fake host api）。冻结一份
 // 「面板长什么样」的复刻件证明不了接线，那正是 04-review F45 的形状。
 const PROBE_MARKER = '<title>html file preview probe</title>'
 const PROBE_DIR = path.join(__dirname, '_htmlfileprobe_run')

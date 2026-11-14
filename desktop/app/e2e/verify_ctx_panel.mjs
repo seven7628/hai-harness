@@ -64,7 +64,7 @@ async function waitPort(port, timeoutMs = 30000) {
 }
 
 // 临时探针页：挂真实 Composer + 真实 index.css（跑完删除）。
-// store 走真实启动路径（start → mock transport，无 window.desktop），再发一轮 mock 对话
+// store 走真实启动路径（start → mock transport，没有宿主桥），再发一轮 mock 对话
 // 让 usage/turns/ctx 锚点都有真实数据（面板的两行缓存命中率按这些数据对账）。
 // 探针目录按 pid 唯一：上一轮若还在收尾（cleanup 删目录），不会删到本轮刚写好的文件
 const PROBE_DIR = path.join(__dirname, `_ctxprobe_run_${process.pid}`)

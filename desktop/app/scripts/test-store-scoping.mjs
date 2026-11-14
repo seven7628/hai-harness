@@ -69,6 +69,10 @@ global.window = {
   clearTimeout: (...a) => clearTimeout(...a),
 }
 
+// L0（D6）：bridge.ts 在模块求值时向 preload 交接一次（宿主私有）。node 里没有 preload，
+// 这里用一次 claim 供货 —— 每个 require 副本 = 一次冷启动，都该拿到当时那份 fake。
+global.window.__haiClaimHostApi = () => global.window.desktop ?? null
+
 // 3) esbuild 打包真实 store 到临时 CJS 后 require（与 test-store-queue.mjs 同策略）
 const dir = mkdtempSync(join(tmpdir(), 'store-scoping-'))
 const outfile = join(dir, 'store-bundle.cjs')

@@ -171,6 +171,29 @@ async function main() {
     const t = m.text()
     if (m.type() === 'error' && !/ERR_NAME_NOT_RESOLVED|Failed to load resource/.test(t)) errs.push(t.slice(0, 200))
   })
+  // L0（D6）：宿主在模块求值时一次性 claim（真应用里由 preload 交出）。探针页用 static import
+  // 拉 src 模块 → 桥在探针代码之前就求值了，所以 fake 只能在这里（页面脚本之前）交出去。
+  // 同一个对象后面各阶段用 Object.assign 补方法（桥持有的是**同一个引用**）。
+  await page.addInitScript(() => {
+    const target = {}
+    const noops = new Map()
+    window.__fake = new Proxy(target, {
+      get(t, k) {
+        if (typeof k === 'symbol') return t[k]
+        if (k in t) return t[k]
+        if (k === 'then' || k === 'toJSON') return undefined
+        if (k === 'embedStatus') return () => Promise.resolve({ ok: true, targets: [] })
+        // 文件内容通道：文本预览（json/md/ts/csv/txt）靠它取字节，缺了会一直停在「正在读取文件…」。
+        if (k === 'fsReadRef') return (req) => Promise.resolve({ ok: true, content: JSON.stringify(req?.path ?? 'x') })
+        if (k === 'fsStat') return () => Promise.resolve({ ok: true, size: 16, isFile: true })
+        if (!noops.has(k)) noops.set(k, () => Promise.resolve({ ok: true }))
+        return noops.get(k)
+      },
+      set(t, k, v) { t[k] = v; return true },
+      deleteProperty(t, k) { delete t[k]; return true },
+    })
+    window.__haiClaimHostApi = () => window.__fake
+  })
   await page.addInitScript((c) => { window.__CASES = c }, {
     single: SINGLE, multi: MULTI, appendDelta: APPEND_DELTA, dup: DUP, trunc: TRUNC, empty: EMPTY, pdf: PDF, xlsx: XLSX,
   })
@@ -340,13 +363,13 @@ async function main() {
     assert((await compactBtns.first().textContent())?.trim() === '预览 PDF', 'PDF 紧凑行主按钮 = 预览 PDF')
 
     // 点击主按钮 → 走内嵌浏览器通道（真实 store action），**不是** openFile 文本预览。
-    // 探针跑在普通 Chrome 里（window.desktop 不存在），故注入一个假 embed API 来驱动
+    // 探针跑在普通 Chrome 里（没有宿主桥），故注入一个假 embed API 来驱动
     // 真实 store 代码路径：只替掉最外层的 IPC 边界，openHtmlInBrowser 的逻辑全真跑。
     await page.evaluate(() => {
       window.__calls = []
       // R2 之后预览走 store.openInBrowserTab：先 embedStatus 查池去重，再 embedOpenTarget **新建标签**。
       // 旧路径（embedShow + embedNavigate）仍保留桩：其它代码路径还会调，缺了会 TypeError。
-      window.desktop = {
+      Object.assign(window.__fake, {
         embedStatus: async () => ({ ok: true, targets: [] }), // 空池 → 无去重命中 → 新建
         // 面板（RightPanel）现在**总是**尝试挂载原生内嵌视图（本地预览不依赖浏览器插件），
         // 于是它会调用 embedHide/embedResize/embedDebuggerProxy/embedCommand —— 部分桩会让
@@ -360,7 +383,7 @@ async function main() {
         embedActivate: async () => ({ ok: true, state: {} }),
         embedShow: async () => ({ ok: true }),
         embedNavigate: async (u) => { window.__calls.push('embedNavigate:' + u); return { ok: true } },
-      }
+      })
       const st = window.__store
       const origOpen = st.getState().openFile
       st.setState({ openFile: (...a) => { window.__calls.push('openFile'); return origOpen(...a) } })
@@ -381,7 +404,7 @@ async function main() {
     // 这是 embed.ts 侧改动（错误上抛）配套的渲染层断言：只上抛、不 toast 等于没修。
     await page.evaluate(() => {
       window.__calls = []
-      window.desktop.embedOpenTarget = async (u) => { window.__calls.push('embedOpenTarget:' + u); return { ok: false, error: 'ERR_FILE_NOT_FOUND (-6)' } }
+      window.__fake.embedOpenTarget = async (u) => { window.__calls.push('embedOpenTarget:' + u); return { ok: false, error: 'ERR_FILE_NOT_FOUND (-6)' } }
       window.__store.setState({ toast: null })
     })
     await mainBtn.click()
@@ -457,11 +480,11 @@ async function main() {
     assert((await legacyBtns.first().textContent())?.trim() === '预览表格', 'xls 主按钮 = 预览表格')
 
     // 点击主按钮 → 走 bridge 转换 + 内嵌浏览器通道，**不是** openFile 文本预览。
-    // 探针跑在普通 Chrome（无 window.desktop）：注入假 watchXlsx + 假 embed API，
+    // 探针跑在普通 Chrome（没有宿主桥）：注入假 watchXlsx + 假 embed API，
     // 只替掉最外层 IPC 边界，store.previewXlsx 的逻辑全真跑。
     await page.evaluate(() => {
       window.__calls = []
-      window.desktop = {
+      Object.assign(window.__fake, {
         watchXlsx: async (req) => {
           window.__calls.push('watchXlsx:' + JSON.stringify(req))
           // bridge 侧产物是临时文件的**绝对路径**（受管运行时 tmp 下）
@@ -482,7 +505,7 @@ async function main() {
         embedActivate: async () => ({ ok: true, state: {} }),
         embedShow: async () => ({ ok: true }),
         embedNavigate: async (u) => { window.__calls.push('embedNavigate:' + u); return { ok: true } },
-      }
+      })
       const st = window.__store
       const origOpen = st.getState().openFile
       st.setState({ openFile: (...a) => { window.__calls.push('openFile'); return origOpen(...a) } })
@@ -504,7 +527,7 @@ async function main() {
     // 失败：bridge 报错 → 必须 toast 出原因（不静默）。
     await page.evaluate(() => {
       window.__calls = []
-      window.desktop.watchXlsx = async () => ({ ok: false, error: 'managed Python runtime unavailable: pip 断网' })
+      window.__fake.watchXlsx = async () => ({ ok: false, error: 'managed Python runtime unavailable: pip 断网' })
       window.__store.setState({ toast: null })
     })
     await mainBtn.click()
@@ -523,11 +546,11 @@ async function main() {
       window.__calls = []
       window.__pending = []
       window.__store.setState({ toast: null, xlsxBusy: undefined })
-      window.desktop.watchXlsx = (req) => new Promise((resolve) => {
+      window.__fake.watchXlsx = (req) => new Promise((resolve) => {
         window.__calls.push('watchXlsx:' + req.path)
         window.__pending.push({ req, resolve })
       })
-      window.desktop.embedOpenTarget = async (u) => { window.__calls.push('embedOpenTarget:' + u); return { ok: true, state: {} } }
+      window.__fake.embedOpenTarget = async (u) => { window.__calls.push('embedOpenTarget:' + u); return { ok: true, state: {} } }
     })
     await mainBtn.click() // A（out/sales.xlsx）挂起
     await page.waitForTimeout(150)

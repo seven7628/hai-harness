@@ -56,9 +56,16 @@ try {
 
   // 「从系统选择」按钮存在 + preload 接线（真实 osascript 对话框需真人点选，此处只验接线）
   const hasPickBtn = await win.locator('button', { hasText: '从系统选择' }).isVisible()
-  const hasPickIpc = await win.evaluate(() => typeof window.desktop?.pickApp === 'function')
+  // L0（D6）之后页面里读不到 preload api（生产构建没有 __haiTestBridge；claim 已被宿主
+  // 一次性领走，且 contextBridge 定义的属性 non-writable/non-configurable）。这条断言本来
+  // 要证的就是「preload → 主进程」这段接线在，所以在**主进程侧**查同一个 IPC 通道：
+  // preload.pickApp → ipcRenderer.invoke('app:pick')（electron/preload.ts:142）。
+  const hasPickIpc = await app.evaluate(({ ipcMain }) => {
+    const map = ipcMain._invokeHandlers
+    return !!(map && typeof map.has === 'function' && map.has('app:pick'))
+  })
   if (!hasPickBtn || !hasPickIpc) throw new Error(`从系统选择接线缺失: btn=${hasPickBtn} ipc=${hasPickIpc}`)
-  console.log('PASS: 「从系统选择」按钮 + window.desktop.pickApp 接线就绪')
+  console.log("PASS: 「从系统选择」按钮 + preload.pickApp → 主进程 app:pick 接线就绪")
 
   // 持久化：reload 后重进设置 → 权限 → 仍存在
   await win.reload()

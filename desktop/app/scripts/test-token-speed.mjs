@@ -108,6 +108,10 @@ global.window = {
 }
 global.document = { documentElement: { classList: { add() {}, remove() {} } } }
 
+// L0（D6）：bridge.ts 在模块求值时向 preload 交接一次（宿主私有）。node 里没有 preload，
+// 这里用 claim 供货 —— 每轮 runTurn 都 require 一个独立副本 = 一次冷启动，都该拿到这份 fake。
+global.window.__haiClaimHostApi = () => global.window.desktop ?? null
+
 let pass = 0
 function ok(label) { pass++; console.log(`  ✅ ${label}`) }
 

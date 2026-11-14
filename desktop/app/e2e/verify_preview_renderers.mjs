@@ -35,7 +35,7 @@ const ok = (m) => { pass++; console.log(`  ✅ ${m}`) }
 const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); ok(m) }
 
 // —— 探针页 ——
-// 走 **mock transport**（不注入 window.desktop）：本探针要的是 file_preview 的样例内容与
+// 走 **mock transport**（不注入 fake host api）：本探针要的是 file_preview 的样例内容与
 // fs:read-image 的固定尺寸图（mock 侧 120×40），这两条都在 mock 里，且与真 bridge 同契约。
 const PROBE_MARKER = '<title>preview renderers probe</title>'
 const PROBE_DIR = path.join(__dirname, '_previewprobe_run')

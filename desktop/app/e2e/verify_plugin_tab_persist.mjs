@@ -90,8 +90,8 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 //     localStorage 恢复出来、但 provider 还没注册」那一瞬的确定性复现（不靠 sleep 赌时序）。
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 // ⚠️ 全部用 await import 而不是顶部 static import：store 在模块求值时就
-// const transport = getTransport() 把实现定死了，而生产里 window.desktop 由 preload **先于**
-// bundle 注入（详见 verify_plugin_loader.mjs 的同一段注释）。
+// const transport = getTransport() 把实现定死了，而 fake 必须在任何 src 模块求值之前就在
+// window 上（L0：桥在模块求值时一次性消费 window.desktop；详见 verify_plugin_loader.mjs 同一段）。
 import '../../src/index.css'
 
 const feeds: Array<(line: string) => void> = []

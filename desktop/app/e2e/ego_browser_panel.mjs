@@ -20,6 +20,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { startDevRenderer, waitHostBridge } from './_dev_renderer.mjs'
 
 const APP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const REPO = path.resolve(APP, '../..')
@@ -59,9 +60,13 @@ function check(label, cond, detail = '') {
 
 // HAI_DATA_DIR：多实例模式（跳过单实例锁）。本机可能正在跑用户的 HAI 实例，
 // 不加这个会被 requestSingleInstanceLock 直接踢掉（表现为 launch 后立刻退出）。
+// L0（D6）之后生产档没有可读的 api（preload 一次性交接，且 contextBridge 定义的属性
+// non-writable/non-configurable —— 页面里既不能二次 claim 也不能包一层旁听）→ 本探针要直接
+// 驱动 embed*，所以走 dev 渲染层：主进程/桥仍是真产物，只有 renderer 由 vite 供源码。
+const dev = await startDevRenderer({ port: Number(process.env.EGO_E2E_PORT || 5264) })
 const app = await _electron.launch({
   executablePath: ELECTRON, args: ['.'], cwd: APP,
-  env: { ...process.env, HOME, HAI_DATA_DIR: HOME },
+  env: { ...process.env, HOME, HAI_DATA_DIR: HOME, VITE_DEV_SERVER_URL: dev.url },
 })
 try {
   const win = await app.firstWindow()
@@ -70,6 +75,7 @@ try {
   await win.evaluate(([ws]) => { localStorage.setItem('go-code.projects', JSON.stringify({ paths: [ws], active: ws })) }, [WS])
   await win.reload()
   await waitFor(() => win.locator('button', { hasText: '设置' }).first().isVisible(), { label: '主界面就绪' })
+  await waitHostBridge(win) // 宿主已交接 → __haiTestBridge 就绪（见 e2e/_dev_renderer.mjs）
 
   // —— T1：引擎读成 ego，且右栏头部显示「ego 模式」而非「未启用」——
   console.log('T1 ego 引擎下右栏头部状态')
@@ -107,7 +113,7 @@ try {
   fs.writeFileSync(htmlPath, '<html><body><h1 id="ego-preview-ok">EGO-PREVIEW-OK</h1></body></html>')
   const loaded = await win.evaluate(async ([p]) => {
     // store 动作经 window 暴露？未暴露则走 preload 的 embedShow+embedNavigate 等价路径
-    const d = window.desktop
+    const d = window.__haiTestBridge
     if (!d?.embedShow || !d?.embedNavigate) return { skipped: 'no embed api' }
     const shown = await d.embedShow({})
     if (!shown?.ok) return { error: shown?.error ?? 'embedShow failed' }
@@ -120,7 +126,7 @@ try {
   // 直连 CDP 读页面 DOM：确认原生视图里真的是我们的 HTML（而非白屏/旧页）。
   // 这是「file:// 能用」的实证——只验 embedNavigate 返回 ok 不足以排除白屏。
   const probe = await win.evaluate(async () => {
-    const d = window.desktop
+    const d = window.__haiTestBridge
     if (!d?.embedDebuggerProxy) return null
     return d.embedDebuggerProxy()
   })
@@ -130,7 +136,7 @@ try {
   let domDetail = ''
   for (let i = 0; i < 20; i++) {
     const r = await win.evaluate(async () => {
-      const d = window.desktop
+      const d = window.__haiTestBridge
       if (!d?.embedCommand) return null
       const res = await d.embedCommand({
         method: 'Runtime.evaluate',
@@ -157,7 +163,7 @@ try {
   // （bridge 热应用）。只发命令不改 settings 会不同步——真实 switchEngine 也是两步。
   console.log('T4 切回 mcp（互斥双向）')
   const switched = await win.evaluate(async () => {
-    const d = window.desktop
+    const d = window.__haiTestBridge
     if (!d?.settingsSet || !d?.command) return null
     const saved = await d.settingsSet({ browser_engine: 'mcp' })
     if (!saved?.ok) return { ok: false, step: 'settingsSet', error: saved?.error }
@@ -178,6 +184,7 @@ try {
   check('切回 mcp 后不再是 ego 模式文案（重读 settings 生效）', after !== 'ego 模式', `实际=${after}`)
 } finally {
   await app.close()
+  dev.stop()
 }
 
 console.log(`\n${fails.length === 0 ? 'ALL PASS' : `FAILED (${fails.length}): ${fails.join('; ')}`}`)

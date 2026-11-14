@@ -120,6 +120,10 @@ global.window = {
 }
 global.document = { documentElement: { classList: { add() {}, remove() {} } } }
 
+// L0（D6）：bridge.ts 在模块求值时向 preload 交接一次（宿主私有）。node 里没有 preload，
+// 这里用一次 claim 供货 —— 每个 require 副本 = 一次冷启动，都该拿到当时那份 fake。
+global.window.__haiClaimHostApi = () => global.window.desktop ?? null
+
 function bootSeed() {
   LS.set('go-code.projects', JSON.stringify({ paths: [F.ws], active: F.ws, lastSession: { path: F.ws, id: 'sA' } }))
 }
