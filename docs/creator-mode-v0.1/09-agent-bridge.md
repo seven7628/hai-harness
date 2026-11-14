@@ -260,7 +260,16 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 | 全局 subAgents | ✅ | ✅（+项目层） | ❌ |
 | 插件自定义工具 | ✅（自己的） | 需用户授权（默认关） | 只能注册自己的，不能覆盖/隐藏别的 |
 
-**denylist（与"加载所有内置工具"的唯一偏差，理由是权限升级）**：`surface_install` / `surface_remove` / `surface_set_enabled`（插件管理权 = 装卸面板）、`session_send` 与 mesh 类（跨会话/跨节点发消息）、`promote_task` / cron 类（后台持久任务）、`git_worktree`（真实仓库操作）、`memory_dream`（写长期记忆）。装配完成后 `buildLoop` 追加的 office/UI/surface 三组注册也要按 `runtimeKind` 过滤（`main.go:6037`）。
+**denylist（与"加载所有内置工具"的唯一偏差，理由是权限升级）**：
+
+| 工具 | 是什么 | 为什么剔除 |
+|---|---|---|
+| `surface_install` / `surface_remove` / `surface_list` | 面板插件的**安装/卸载/清单**（`surfaces_tools.go`；受 `features.surfaceTools` 控制，默认关） | 插件能装卸面板 = 把插件管理权交给插件；prompt injection 可让模型装一个恶意面板或卸掉别的面板。`surface_list` 只是清单，若以后想放行可单独开 |
+| `session_send` / `session_list`（Session Mesh） | 给**其它会话/其它节点**发消息、列会话（受 `mesh.session_enabled` / `remote_enabled` 控制，默认关） | 插件可以往用户的其它会话注入文本（跨会话 prompt injection）或把内容外发到远端节点 |
+| `promote_task` / cron 类 | 把任务提升为后台持久任务 / 定时任务 | 插件能在用户不看着时持续消耗 token 与写盘 |
+| `git_worktree` | 创建/管理 git worktree | 需要真实仓库；插件 home 不是仓库，且这是宿主级仓库操作（用户已明确不需要） |
+
+**保留**：`memory_dream`（用户决定：记忆能力需要；写入仍受既有护栏与审计）。装配完成后 `buildLoop` 追加的 office/UI/surface 三组注册也要按 `runtimeKind` 过滤（`main.go:6037`）。
 
 - 注册点：`newSessionEngine` 装配完成后，按 `pluginToolsFor(runtime)` 注册；项目会话在授权变化时热注册/Hide。
 - 命名：`plugin__<id>__<name>`；冲突（与任何已有工具同名）→ manifest 安装即拒绝。
@@ -346,7 +355,7 @@ P2 完成才有「用户在项目会话里说一句，PDF 面板自己更新」�
 2. **runtime 分支不全**（hooks 走项目分支会读插件 home 的 hooks.json；delete/shutdown/存储根错）→ 新增 §2.3 分流表（7 个点）。
 3. **缺负向守卫**（停用/卸载后 `m.runtime` 会兜底造项目 runtime，把虚拟路径写进 workspaces.json）→ `isPluginHomePath` 在 `m.runtime` / `createOpts` / `workspaceSync|Add` / `knownWorkspace` 四道硬拒绝；"虚拟路径永不进 workspaces.json"是**后端不变式**，不是前端过滤。
 
-其余已吸收：D3 改为"与普通会话一致，切模型会更新全局 active"；工具集加 denylist（surface_*/mesh/cron/promote_task/git_worktree/memory_dream）；agent 事件走独立 IPC、不复用 `onEvent`；plugin_id 由 token 派生；L0 先 spike，且明说"同 realm 下 L0 不是安全边界"；成本 P1 从 3 轮上调到 **5–6 轮**。
+其余已吸收：D3 改为"与普通会话一致，切模型会更新全局 active"；工具集加 denylist（surface_*/mesh/cron/promote_task/git_worktree），`memory_dream` 按用户决定保留；agent 事件走独立 IPC、不复用 `onEvent`；plugin_id 由 token 派生；L0 先 spike，且明说"同 realm 下 L0 不是安全边界"；成本 P1 从 3 轮上调到 **5–6 轮**。
 
 ## 11. Skill 同步大纲（`skills/hai-surface-dev/SKILL.md` 新增一节）
 
