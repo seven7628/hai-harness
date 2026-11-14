@@ -267,7 +267,7 @@ const SessionSkeleton = memo(function SessionSkeleton({
   )
 })
 
-export default function CenterPanel() {
+export default function CenterPanel({ variant = 'desktop' }: { variant?: 'desktop' | 'mobile' } = {}) {
   const t = useT()
   // 子智能体「子会话」：左栏树选中某个子 agent 时，叙述区换成它自己的转录/用量/TODO。
   // 这是**视图切换**而不是新会话（见 AgentSessionView 的注释）—— 顶部会话身份不变。
@@ -279,9 +279,15 @@ export default function CenterPanel() {
   // 用户视线里保持上一帧/空白，比闪一下骨架屏更平顺。
   const skeletonPhase = useAppStore((s) => s.skeleton.phase)
   const showSkeleton = skeletonPhase === 'visible' || skeletonPhase === 'exit'
+  // 手机（P8-02）：整块会话面原样复用，只做两处收窄 ——
+  //   · RecentBar 不渲染：它是「⌘1..5 切换 + 横向标签」的桌面块，手机标题由
+  //     mobile/screens/SessionScreen 的 44px 头部给，两处都显示会顶掉半屏；
+  //   · 外层多一个 center--mobile 类：让 mobile.css 接管单列/贴底/安全区
+  //     （**不复制**任何消息/工具/composer 样式）。
+  const mobile = variant === 'mobile'
   return (
-    <section className="center">
-      <RecentBar />
+    <section className={mobile ? 'center center--mobile' : 'center'} data-variant={variant}>
+      {mobile ? null : <RecentBar />}
       <div className="narrative-wrap">
         {focused ? <AgentSessionView focus={focused} /> : <Narrative />}
         {showSkeleton && <SessionSkeleton label={t('common.loading')} leaving={skeletonPhase === 'exit'} />}
@@ -290,7 +296,7 @@ export default function CenterPanel() {
           照常滚动/选中/切会话，用户可以先翻对话历史、看清 diff 再拍板（用户 2026-09-20 报障）。 */}
       <ApprovalPanel />
       <AskUserQuestionPanel />
-      <Composer />
+      <Composer variant={variant} />
     </section>
   )
 }
