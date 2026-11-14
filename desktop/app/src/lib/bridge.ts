@@ -183,10 +183,21 @@ function takeInjectedProbeApi(): DesktopApi | null {
   const w = window as Window & { desktop?: DesktopApi }
   const injected = w.desktop
   if (!injected) return null
+  // 摘掉：fake 只允许被消费一次，之后页面上不残留 `window.desktop` ——
+  // 探针断言「插件世界里 window.desktop 不存在」时看到的就是真应用看到的那件事。
+  //
+  // **摘不掉**的情况（2026-11-14 实测）：旧版 preload 用
+  // `contextBridge.exposeInMainWorld('desktop', …)` 暴露的 —— contextBridge 的
+  // 属性是**不可配置 + 只读** ⇒ `delete` 在严格模式（ESM）下抛 TypeError。
+  //
+  // ⇒ 这时它**就是宿主 api 本身**（不是探针 fake）⇒ 直接用，但**绝不能赋值**：
+  // 赋值同样抛（"Cannot assign to read only property 'desktop'"），而且
+  // 这个异常发生在 catch 块里 ⇒ **会逃出模块顶层 ⇒ 整个应用起不来**
+  // （2026-11-14 的实报症状）。
   try {
     delete w.desktop
   } catch {
-    w.desktop = undefined
+    return injected // 只读 ⇒ 摘不掉；它就是宿主 api ⇒ 用它，不赋值
   }
   return injected
 }
