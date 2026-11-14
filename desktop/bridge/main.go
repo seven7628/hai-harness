@@ -1395,6 +1395,9 @@ type manager struct {
 	// hubRuntimes Agent Hub 智能体的运行时，key = agentID（方案 §6.1.1）。
 	// 刻意不放进 workspaces：那些遍历是项目语义（workspace_list / reload / MCP 重放）。
 	hubRuntimes map[string]*workspaceRuntime
+	// pluginRuntimes 插件虚拟 Project 的运行时，key = pluginID（09-agent-bridge §4.1）。
+	// 同上：不放进 workspaces —— 一个插件变成一个项目，左栏/清单/workspaces.json 全会跟着错。
+	pluginRuntimes map[string]*workspaceRuntime
 	// hubFS Hub 领域存储（~/.go-code/hub，懒开；见 hubStore）。
 	hubFS *agenthub.FileStore
 	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
@@ -1661,11 +1664,13 @@ type runtimeKind int
 const (
 	runtimeProject  runtimeKind = iota // 现有工作区：项目上下文 + 工具面
 	runtimeHubAgent                    // Agent Hub 智能体：全局层 + 工具面，无项目上下文
+	runtimePlugin                      // 插件虚拟 Project：全局层 + denylist，home 在 plugin-sessions/（09 §4）
 )
 
 type workspaceRuntime struct {
 	kind            runtimeKind // 零值 = runtimeProject（既有构造点不必改）
 	agentID         string      // kind=runtimeHubAgent 时非空
+	pluginID        string      // kind=runtimePlugin 时非空（surface id，也是 plugin-sessions/<id> 的一段）
 	path            string
 	storeDir        string
 	eventsDir       string
@@ -1744,6 +1749,12 @@ func (m *manager) get(wsPath, id string) *bridgeSession {
 		return nil
 	}
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		// 插件虚拟 home 未装配（09 §4.4 第 1 条）：m.runtime 返回 nil 而不是造项目
+		// runtime。按 workspace+session_id 寻址的命令一律判「没有会话」，由 dispatch
+		// 的插件入口决定要不要先装配（绝不在只读寻址里顺手创建）。
+		return nil
+	}
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	return ws.sessions[id]
@@ -1760,6 +1771,9 @@ func (m *manager) interruptAllIn(wsPath string) int {
 		return 0
 	}
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return 0 // 插件 home 未装配：没有内存会话可中断（见 m.get 同款判空）
+	}
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
@@ -1940,6 +1954,18 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	if ws, ok := m.workspaces[path]; ok {
 		return ws
 	}
+	// 插件虚拟 Project 的守卫（09 §4.4 第 1 条）：插件 home **不是**项目工作区。
+	// 命中插件表 → 返回该运行时；未命中 → 返回 nil，绝不往下走项目装配
+	//（那会读 {home}/.go-code 的项目层配置、并把虚拟路径塞进 m.workspaces，
+	//  于是 workspace_list / 配置监听 / MCP 重放全都把一个插件当成一个项目）。
+	// 调用方必须判空 —— 装配入口是 pluginRuntime()，不是这里。
+	if isPluginHomePath(path) {
+		id := pluginIDFromHomePath(path)
+		if id == "" {
+			return nil
+		}
+		return m.pluginRuntimes[id]
+	}
 	// 办公技能随包分发同步（2026-09）：内置技能集合（dev = desktop/vendor/office-skills；
 	// 打包 = Resources/office-skills）下的每个技能子目录 → ~/.agents/skills/<name>
 	//（不存在才复制，逐技能判断：新增技能目录能到达已装用户，改既有技能内容则到不了）。
@@ -2079,6 +2105,13 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	// 明确拒绝，让调用方改走 hubDMSession / hubGroupSession（各自有用户级装配）。
 	if isHubHomePath(wsPath) {
 		return nil, fmt.Errorf("create session: %q 是 Hub 智能体 home，不是项目工作区（Hub 会话请走 hubDMSession/hubGroupSession）", wsPath)
+	}
+	// 负向守卫（09 §4.4 第 1 条）：插件虚拟 home 同样不是项目工作区。
+	// 走这里会造出 kind=runtimeProject 的 runtime（读 {home}/.go-code 项目层、
+	// 混进 m.workspaces、写 workspaces.json）。插件会话的唯一入口是
+	// createPluginSession（装配 runtimePlugin + 全局层 + denylist）。
+	if isPluginHomePath(wsPath) {
+		return nil, fmt.Errorf("%w: %q 是插件虚拟 Project 的 home（会话请走 createPluginSession）", errPluginWorkspace, wsPath)
 	}
 	return m.createIn(m.runtime(wsPath), id, effort, opts)
 }
@@ -2529,6 +2562,29 @@ func (m *manager) dispatch(c command) {
 	}()
 	ws := str(c.Payload, "workspace")
 	sid := str(c.Payload, "session_id")
+	// 插件虚拟 Project 的 dispatch 前置（09 §4.2 / §4.3 / §4.4）。
+	//
+	// 两件事，顺序不能换：
+	//  1. 形状不对 → 拒绝（虚拟 home 反解不出 pluginID 时，任何按 workspace 解析的
+	//     handler 都只能拿到 nil runtime）；
+	//  2. 形状对了 → **显式装配**。m.runtime 按设计只判定不装配（未命中插件表返回 nil，
+	//     绝不回落项目装配），所以「谁先把它装起来」必须有唯一答案：命令入口。
+	//     装配后整条 switch 里所有 m.runtime(ws) 都命中同一个 runtimePlugin，不存在
+	//     nil 解引用，也不会因为某个 handler 顺手 m.runtime 而造出项目 runtime。
+	//
+	// 不做「允许命令白名单」：会话类命令（list/new_session/ask/switch_model/
+	// delete_session/blocks_page/approve/…）都必须能用（09 §4.1「签名不变」），而拒绝
+	// 该拒绝的东西是各自的语义（ask 看启停、delete_workspace 看虚拟路径）。
+	if isPluginHomePath(ws) {
+		if pluginIDFromHomePath(ws) == "" {
+			m.respCode(c, false, "workspace 不是合法的插件虚拟 Project 路径", "plugin_workspace_invalid", nil)
+			return
+		}
+		if _, perr := m.pluginRuntimeForHome(ws); perr != nil {
+			m.respCode(c, false, perr.Error(), "plugin_workspace_invalid", nil)
+			return
+		}
+	}
 	switch c.Type {
 	case CmdUI:
 		// 渲染层自述（快照 / 面板状态）：只有内存写入，没有回执、没有事件（见 ui_state.go）。
@@ -2728,8 +2784,17 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", map[string]any{"workspace": entry, "workspaces": m.workspaceEntries()})
 
+	case CmdPluginProjectsList: // 插件虚拟 Project 清单（surface 注册表 ∪ 有历史会话的插件目录）
+		m.resp(c, true, "", map[string]any{"projects": m.pluginProjectsData()})
+
 	case CmdWorkspaceSync: // 渲染进程首次迁移：把 localStorage 里的项目列表灌进来（只增不减）
-		m.resp(c, true, "", map[string]any{"workspaces": m.workspaceSync(strSlice(c.Payload, "paths"))})
+		// 含插件虚拟路径 → 整批拒绝（09 §4.4 第 2 条；sync 不校验目录，必须显式拦）。
+		list, err := m.workspaceSync(strSlice(c.Payload, "paths"))
+		if err != nil {
+			m.respCode(c, false, err.Error(), "workspace_invalid", map[string]any{"workspaces": list})
+			return
+		}
+		m.resp(c, true, "", map[string]any{"workspaces": list})
 
 	case CmdWorkspacePick: // 手机请求桌面弹目录选择器（结果异步经事件回传）
 		if m.wsPick == nil {
@@ -6961,15 +7026,16 @@ func serve() error {
 	pc := loadProviderConfig()
 	startupLog("A2.loadProviderConfig", pcStart)
 	m := &manager{
-		workspaces:  map[string]*workspaceRuntime{},
-		hubRuntimes: map[string]*workspaceRuntime{},
-		hubMsgDedup: map[string]string{},
-		provCfg:     pc,
-		out:         newOut(os.Stdout),
-		metrics:     NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
-		imPlugin:    implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
-		hub:         session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
-		memPrefs:    newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
+		workspaces:     map[string]*workspaceRuntime{},
+		hubRuntimes:    map[string]*workspaceRuntime{},
+		pluginRuntimes: map[string]*workspaceRuntime{},
+		hubMsgDedup:    map[string]string{},
+		provCfg:        pc,
+		out:            newOut(os.Stdout),
+		metrics:        NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
+		imPlugin:       implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
+		hub:            session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
+		memPrefs:       newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
 	// 会话文件维护清扫（后台）：把「已结束、不会再被写入」的会话文件里
 	// 攒下的 O(N²) 一次性收掉（实测子智能体 journal 13.4GB / 主会话 jsonl 6.8GB）。

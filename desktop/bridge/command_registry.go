@@ -231,6 +231,12 @@ const (
 	CmdWorkspaceSync Command = "workspace_sync"
 	// CmdWorkspaceUpdate 重命名 / 置顶工作区（手机端管理页）。
 	CmdWorkspaceUpdate Command = "workspace_update"
+	// CmdPluginProjectsList 插件虚拟 Project 清单（09-agent-bridge §4.1）。
+	//
+	// 与 workspace_list 分开是刻意的：插件虚拟 Project **不是**工作区（09 §4.4），
+	// 混进同一份清单就等于让「虚拟路径永不进 workspaces.json」这条不变式在读数时失效。
+	// 回执：{ok, projects:[{path, plugin_id, name, icon?, enabled, installed, session_count}]}。
+	CmdPluginProjectsList Command = "plugin_projects_list"
 
 	// —— 手机端接入（见 mobile_server.go）——
 	CmdAnswerQuestion Command = "answer_question"

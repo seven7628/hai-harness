@@ -86,7 +86,10 @@ func TestWorkspaceRegistrySyncIsAddOnly(t *testing.T) {
 	// 桌面 localStorage 的旧清单不含它 → sync 不能把它删掉
 	old := filepath.Join(dir, "desktop-old")
 	mkdir(t, old)
-	list := reg.sync([]string{old, phone})
+	list, serr := reg.sync([]string{old, phone})
+	if serr != nil {
+		t.Fatalf("sync 不该失败: %v", serr)
+	}
 	if len(list) != 2 {
 		t.Fatalf("sync 后应为 2 条（只增不减），得到 %d", len(list))
 	}
@@ -145,7 +148,9 @@ func TestWorkspaceRegistryMutationsRollBackOnSaveFailure(t *testing.T) {
 	if got := reg.list()[0].Title; got != "proj" {
 		t.Fatalf("update rollback failed: title = %q", got)
 	}
-	reg.sync([]string{filepath.Join(dir, "other")})
+	if _, serr := reg.sync([]string{filepath.Join(dir, "other")}); serr != nil {
+		t.Fatalf("sync 不该失败: %v", serr)
+	}
 	if got := len(reg.list()); got != 1 {
 		t.Fatalf("sync rollback failed: entries = %d", got)
 	}
