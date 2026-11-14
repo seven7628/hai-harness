@@ -89,7 +89,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
-  const { setRightExpanded, rightExpanded } = useHostPanels()
+  const { setRightExpanded, rightExpanded, capabilities } = useHostPanels()
   // P4-01 性能 memo 的启动期快照：localStorage['hub.perfMemo']='0' 后重载即关闭。
   // 只读一次（不在每次 render 访问 storage）；支持回滚不需要发版，见 perfFlags.ts。
   const [perfMemo] = useState(() => hubPerfMemoEnabled())
@@ -521,27 +521,33 @@ export default function GroupView({ group }: { group: HubGroup }) {
               <span className="header-menu-sep" />
               <button type="button" role="menuitem" onClick={() => { headerMenu.close(); copyLink() }}>{t('hub.header.link')}</button>
               <button type="button" role="menuitem" onClick={() => { headerMenu.close(); exportMarkdown() }}>{t('hub.header.export')}</button>
-              <span className="header-menu-sep" />
-              {/* 协作模式：三选一（radio）。文案与 GroupEditor 同源（groupMode.ts），
-                  点哪一项就真的把群策略改成哪一项 —— 不是只改显示的假开关。 */}
-              <span className="header-menu-label">协作模式</span>
-              {GROUP_MODES.map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={asGroupMode(group.policy?.mode) === m}
-                  disabled={modeSaving !== null}
-                  title={GROUP_MODE_HINT[m]}
-                  onClick={() => void setGroupMode(m)}
-                >
-                  {modeSaving === m ? `${m} · 保存中…` : m}
-                </button>
-              ))}
-              <span className="header-menu-sep" />
-              <button type="button" role="menuitem" onClick={() => { headerMenu.close(); void editBudget() }}>
-                {t('hub.header.budget').replace('{amount}', (group.policy?.daily_budget_usd ?? 0).toFixed(0))}
-              </button>
+              {/* 协作模式 + 日预算都是 hub_group_update 的字段级 patch。手机不渲染：
+                  该命令不在 mobile_server 的 allowlist 内，点下去只会 403（见 HostCapabilities）。 */}
+              {capabilities.groupAdmin ? (
+                <>
+                  <span className="header-menu-sep" />
+                  {/* 协作模式：三选一（radio）。文案与 GroupEditor 同源（groupMode.ts），
+                      点哪一项就真的把群策略改成哪一项 —— 不是只改显示的假开关。 */}
+                  <span className="header-menu-label">协作模式</span>
+                  {GROUP_MODES.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={asGroupMode(group.policy?.mode) === m}
+                      disabled={modeSaving !== null}
+                      title={GROUP_MODE_HINT[m]}
+                      onClick={() => void setGroupMode(m)}
+                    >
+                      {modeSaving === m ? `${m} · 保存中…` : m}
+                    </button>
+                  ))}
+                  <span className="header-menu-sep" />
+                  <button type="button" role="menuitem" onClick={() => { headerMenu.close(); void editBudget() }}>
+                    {t('hub.header.budget').replace('{amount}', (group.policy?.daily_budget_usd ?? 0).toFixed(0))}
+                  </button>
+                </>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -556,10 +562,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
         stopping={convStopping}
         resetting={resetBusy}
         onStop={() => void stopConversation(group.id)}
-        onReset={() => {
+        // 重置本群限制 = hub_conversation_reset，不在 mobile_server 的 allowlist 内：
+        // 手机不传 onReset（ConversationBar 自己就不渲染那个按钮），不是渲染后静默失败。
+        onReset={capabilities.groupAdmin ? () => {
           setResetBusy(true)
           void resetConversation(group.id).finally(() => setResetBusy(false))
-        }}
+        } : undefined}
       />
 
       <div className="messages" ref={listRef} onScroll={onScroll}>

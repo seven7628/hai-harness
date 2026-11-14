@@ -402,7 +402,9 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
   }
   assert(/const promptGroupId = group\?\.id \?\? ''/.test(src), '群作用域取 group.id，DM 取空串')
   assert(/promptScopeMatches\(prompt, \{ agentId: promptAgentId, groupId: promptGroupId \}\)/.test(src), '只渲染同作用域的预览')
-  assert(/\}, \[promptAgentId, promptGroupId, loadPrompt\]\)/.test(src), '切群（同 agent）也会重新请求')
+  // P8-01b：依赖数组多了 host 能力位（手机不渲染提示词分层、也不发请求）；
+  // 切群/切成员仍必须重新请求 —— 这两个 id 不能从依赖里掉。
+  assert(/\}, \[canPromptPreview, promptAgentId, promptGroupId, loadPrompt\]\)/.test(src), '切群（同 agent）也会重新请求')
 }
 
 // —— 10) store：深链 / 跳转 / 提示词只读缓存 ——

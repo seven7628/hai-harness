@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { getTransport } from '../transport'
+import { getHubTransport } from '../transport/host'
 import { hubCommand } from './api'
 import type {
   HubAgent, HubAlert, HubArtifactPreviewData, HubAttachment, HubConversation, HubDelivery, HubDMInfo, HubGroup, HubGroupPolicy,
@@ -2104,6 +2104,6 @@ export const useHubStore = create<HubState>((set, get) => ({
 
 /** App 启动时订阅一次（离开 Hub 页也要收告警）；返回撤销函数。 */
 export function attachHubEvents(): () => void {
-  const transport = getTransport()
+  const transport = getHubTransport()
   return transport.onEvent((line) => useHubStore.getState().handleEvent(line))
 }

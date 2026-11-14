@@ -8,6 +8,9 @@
 //   3. 样式直接从 dev server 取 `?direct` —— 与应用跑的是同一份 CSS，不存副本。
 //
 // 前置：`VITE_PORT=5180 npm run dev:vite`（与 check-hub-* 系列同一个前置）。
+//
+// 入口会先 `import '../transport/index.ts'`（P8-01b 的 Hub transport seam）：
+// 夹具里的 useHubStore 通过 getHubTransport() 取 mock transport，未注册会直接抛错。
 // 纯工具模块，不自己跑断言；断言留在各 check 脚本里。
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
@@ -20,8 +23,11 @@ export const HUB_DIR = join(APP_DIR, 'src', 'hub')
 // 打包：入口是虚拟文件（调用方给的 contents），resolveDir 固定在 src/hub，
 // 这样 import './TaskResultCard.tsx' 与源码里的相对路径一致。
 export async function bundleHubComponent(contents) {
+  // Hub 的 store/命令只认 transport/host.ts（P8-01b）：夹具必须在包里注册一次，
+  // 否则 getHubTransport() 抛「未注册」（刻意不退回 mock）。桌面走同一份注册代码。
+  const entry = `import '../transport/index.ts'\n${contents}`
   const result = await build({
-    stdin: { contents, resolveDir: HUB_DIR, sourcefile: 'hub-harness-entry.tsx', loader: 'tsx' },
+    stdin: { contents: entry, resolveDir: HUB_DIR, sourcefile: 'hub-harness-entry.tsx', loader: 'tsx' },
     bundle: true,
     platform: 'browser',
     format: 'esm', // inline <script type=module>：IIFE 不允许 import.meta（mock.ts 用了它）

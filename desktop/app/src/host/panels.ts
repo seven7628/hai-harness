@@ -26,11 +26,48 @@ export interface HostPanelsActions {
   openProjectSession(workspace: string, sessionId: string): void
   closeHub(): void
   setActiveSession(id: string, projectPath?: string): void
+  /** 打开工作区文件（Markdown 里的相对链接）。 */
+  openFile(path: string): void
+  /** 在右侧浏览器页签打开一段 HTML（HTML 代码块的「打开」）。 */
+  openHtmlContentInBrowser(html: string): void
+  /** Markdown 内嵌 widget 的 postMessage 回复（只在 shape 校验通过后调用）。 */
+  receiveWidgetReply(text: string, id: string): void
+}
+
+/**
+ * 宿主能力开关（P8-01b）：**手机 bridge 的 allowlist 决定**哪些写操作在手机上不存在。
+ *
+ * 为什么要有这一层：desktop/bridge/mobile_server.go 的 mobileAllowedCommands 默认拒绝，
+ * 群组 CRUD/协作模式/重置限制、智能体 CRUD、任务产物预览、提示词分层预览都**不在**名单里。
+ * 手机壳复用桌面组件时，这些入口若照原样渲染，点下去就是 403 —— 比没有按钮更糟
+ *（用户以为保存了，其实被拒）。所以由宿主声明能力，组件只渲染「点得动」的入口。
+ *
+ * 桌面（以及没有 provider 的组件测试/夹具）全部为 true —— 行为零变化。
+ */
+export interface HostCapabilities {
+  /** 群组写操作：新建/编辑群、协作模式、日预算、重置本群限制（hub_group_create/edit/update/conversation_reset）。 */
+  groupAdmin: boolean
+  /** 智能体编辑器弹层（AgentEditor：hub_agent_create/update/delete/memory/versions/rollback）。 */
+  agentEditor: boolean
+  /** 任务产物预览（hub_task_artifact_preview，只读）。 */
+  artifactPreview: boolean
+  /** 提示词分层预览（hub_agent_prompt_preview，只读）。 */
+  promptPreview: boolean
+}
+
+/** 桌面能力全开（默认值）：组件被单独渲染时与改造前完全一致。 */
+export const DESKTOP_CAPABILITIES: HostCapabilities = {
+  groupAdmin: true,
+  agentEditor: true,
+  artifactPreview: true,
+  promptPreview: true,
 }
 
 export interface HostPanels extends HostPanelsActions {
   /** 右栏是否展开（桌面 = 三栏布局的右栏；手机 = 详情抽屉，P8-01b 接）。 */
   rightExpanded: boolean
+  /** 宿主能力（手机按 mobile_server allowlist 收窄，见 HostCapabilities）。 */
+  capabilities: HostCapabilities
 }
 
 const NOOP_ACTIONS: HostPanelsActions = {
@@ -39,19 +76,43 @@ const NOOP_ACTIONS: HostPanelsActions = {
   openProjectSession: () => {},
   closeHub: () => {},
   setActiveSession: () => {},
+  openFile: () => {},
+  openHtmlContentInBrowser: () => {},
+  receiveWidgetReply: () => {},
 }
 
 export const HostPanelsActionsContext = createContext<HostPanelsActions>(NOOP_ACTIONS)
 export const HostPanelsLayoutContext = createContext(false)
+export const HostCapabilitiesContext = createContext<HostCapabilities>(DESKTOP_CAPABILITIES)
+
+/**
+ * 当前工作区根（Markdown 相对图片/链接的兜底锚点）。
+ *
+ * 为什么不放进 actions：它是**值**不是动作，桌面每次切工作区都会变 —— 混进动作 context
+ * 会让每条 MessageBubble 跟着重渲染。没有 provider 时是空串：相对路径解析不出来就
+ * 退回原样，不会把路径拼到某个猜出来的目录上。
+ */
+export const HostWorkspaceContext = createContext('')
 
 /** 只取动作的组件用它：布局变化不触发重渲染（MessageBubble/HubAttachments/HubInlineNeeds）。 */
 export function useHostPanelsActions(): HostPanelsActions {
   return useContext(HostPanelsActionsContext)
 }
 
+/** Markdown 渲染用：当前工作区根（空串 = 不知道，相对资源不解析）。 */
+export function useHostWorkspace(): string {
+  return useContext(HostWorkspaceContext)
+}
+
+/** 只读能力的组件用它（HubSidebar/TaskArtifacts/ContextPanel：不订阅右栏开合）。 */
+export function useHostCapabilities(): HostCapabilities {
+  return useContext(HostCapabilitiesContext)
+}
+
 /** 同时要布局与动作的组件用它（GroupView/HubSurface/HubInspector）。 */
 export function useHostPanels(): HostPanels {
   const actions = useHostPanelsActions()
   const rightExpanded = useContext(HostPanelsLayoutContext)
-  return { ...actions, rightExpanded }
+  const capabilities = useContext(HostCapabilitiesContext)
+  return { ...actions, rightExpanded, capabilities }
 }

@@ -9,7 +9,7 @@
 // 不做 modelSupportsImage 门控：Hub 里的模型由用户各自配置，能力不齐；真发不出去
 // 时后端会回错误，交给 error/notice 显示，比在采集端猜模型更诚实。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getTransport } from '../transport'
+import { getHubTransport } from '../transport/host'
 import { MAX_HUB_ATTACHMENTS, MAX_HUB_IMAGE_BYTES, attachmentFingerprint, imagesBytes } from './attachments'
 import { acceptImages, dataUrlBytes, fmtBytes } from '../lib/imageAttach'
 import { useHubStore } from './useHubStore'
@@ -121,7 +121,7 @@ export function useHubAttachments(): HubAttachments {
       return Promise.resolve()
     }
     // size 可选：stat 拿不到就留空（条带显示 —，不假造 0B）；失败不影响引用本身。
-    const transport = getTransport()
+    const transport = getHubTransport()
     return Promise.all(next.map(async (a) => {
       try {
         const r = await transport.fsStat(a.path ?? '')
@@ -142,7 +142,7 @@ export function useHubAttachments(): HubAttachments {
   const pickFiles = useCallback(async (): Promise<void> => {
     let picked: string[]
     try {
-      picked = await getTransport().pickFsFiles()
+      picked = await getHubTransport().pickFsFiles()
     } catch (e) {
       setNotice(`选择文件失败：${e instanceof Error ? e.message : String(e)}`)
       return
@@ -172,7 +172,7 @@ export function useHubAttachments(): HubAttachments {
     const others = dropped.filter((f) => !f.type.startsWith('image/'))
     if (imgs.length > 0) void addImageFiles(imgs)
     if (others.length === 0) return
-    const transport = getTransport()
+    const transport = getHubTransport()
     const paths: string[] = []
     let noPath = 0
     for (const f of others) {
