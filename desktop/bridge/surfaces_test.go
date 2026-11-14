@@ -12,6 +12,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -395,6 +396,173 @@ func TestSurfaceInstallRejectsBadManifests(t *testing.T) {
 			}
 			noStagingLeftovers(t, root)
 		})
+	}
+}
+
+// ---- 入口声明 entries（R16 / D-2 · D-3）----
+//
+// 两条不变式（与 §4.7「生产入口」一起读）：
+//  1. **校验先于写盘**：五类非法 entries 一律 `rejected`，index **逐字节**不变、不留半个目录；
+//  2. **合法 entries 原样可读**：装完之后从 `List` + `Manifest` 走一遍，渲染层拿到的必须
+//     就是 manifest 里写的那三项（id / title / icon / order 一个不丢、顺序不动）。
+//
+// 为什么单开一个测试而不是塞进 TestSurfaceInstallRejectsBadManifests：那一组测的是
+// 「manifest 的既有四字段」（id/version/entry/icon），entries 是**新的一张表**，五条规则
+// 各自可独立变红 —— 混进去会让「哪一条坏了」只能靠 reason 猜。
+func TestSurfaceEntriesRejectedBeforeWrite(t *testing.T) {
+	entry := func(id, title, icon string, order int) map[string]any {
+		m := map[string]any{"id": id, "title": title, "order": order}
+		if icon != "" {
+			m["icon"] = icon
+		}
+		return m
+	}
+	// 21 项：前 20 项都合法（每一项单独都能过），第 21 项让「超上限」成为唯一失败原因。
+	tooMany := make([]any, 0, 21)
+	for i := 0; i < 21; i++ {
+		tooMany = append(tooMany, entry(fmt.Sprintf("page-%02d", i), fmt.Sprintf("页 %d", i), "", i*10))
+	}
+
+	cases := []struct {
+		name   string
+		items  []any
+		reason string // reason 里必须出现的子串
+	}{
+		{
+			name:   "重复 id",
+			items:  []any{entry("overview", "总览", "", 10), entry("overview", "课表", "", 20)},
+			reason: "id 重复",
+		},
+		{
+			name:   "21 项（超 20 上限）",
+			items:  tooMany,
+			reason: "超过 20 项",
+		},
+		{
+			name:   "id 非法（大写 + 空格）",
+			items:  []any{entry("Overview", "总览", "", 10)},
+			reason: "id 不合法",
+		},
+		{
+			// title 按 rune 判：65 个汉字 = 195 字节。若按字节判，这条会在 22 个字时就红，
+			// 而 64 个汉字的标题本该合法（见下一条断言）。
+			name:   "title 超 64 字符",
+			items:  []any{entry("overview", strings.Repeat("看", 65), "", 10)},
+			reason: "title 过长",
+		},
+		{
+			name:   "icon 逃逸 ../x.svg",
+			items:  []any{entry("overview", "总览", "../x.svg", 10)},
+			reason: "icon",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st, root := testSurfaceStore(t)
+			// 基线：先装一个合法插件，让「index 一字节没变」有真内容可比。
+			okSrc := surfaceFixture(t, "baseline", "1.0.0", "export default () => null\n")
+			if r := st.Install(okSrc, true); r.Status != surfaceApplied {
+				t.Fatalf("基线安装失败: %+v", r)
+			}
+			before := readBytes(t, filepath.Join(root, "index.json"))
+			beforeEntries, _ := os.ReadDir(root)
+
+			bad := surfaceFixture(t, "entry-bad", "1.0.0", "export default () => null\n",
+				withManifest(func(m map[string]any) { m["entries"] = c.items }))
+			rec := st.Install(bad, true)
+			if rec.Status != surfaceRejected {
+				t.Fatalf("status = %q，want %q（reason=%q）", rec.Status, surfaceRejected, rec.Reason)
+			}
+			if !strings.Contains(rec.Reason, c.reason) {
+				t.Fatalf("reason = %q，必须包含 %q（可读、指向具体问题）", rec.Reason, c.reason)
+			}
+			// 五连里每一条都必须先于**任何**写盘动作：index 逐字节不变 + 没有 <id> 目录。
+			if after := readBytes(t, filepath.Join(root, "index.json")); string(before) != string(after) {
+				t.Fatalf("校验失败却改了 index：\nbefore=%s\nafter=%s", before, after)
+			}
+			notExist(t, filepath.Join(root, "entry-bad"))
+			afterEntries, _ := os.ReadDir(root)
+			for _, e := range afterEntries {
+				found := false
+				for _, b := range beforeEntries {
+					if b.Name() == e.Name() {
+						found = true
+						break
+					}
+				}
+				if !found && e.Name() != "audit.jsonl" {
+					t.Fatalf("校验失败后多出了 %q（不许留半个目录/暂存目录）", e.Name())
+				}
+			}
+			noStagingLeftovers(t, root)
+		})
+	}
+}
+
+// TestSurfaceEntriesRoundTrip 合法 entries 装完 → 从生产读侧（List + Manifest）原样拿回。
+//
+// 顺带钉住两条**不该失败**的边界（D-3）：
+//
+//	· entries 缺省 / 空数组 = 合法（宿主给默认入口，不是「没入口」）；
+//	· 单个 entry 的 icon 指向一个**不存在**的文件 = 合法（渲染层用 kind 图标兜底）。
+//	  它与「icon 逃逸」的差别是安全 vs 体验：前者读不到只是少个图标，后者是任意文件读取。
+func TestSurfaceEntriesRoundTrip(t *testing.T) {
+	st, _ := testSurfaceStore(t)
+	want := []surfaceEntryDecl{
+		{ID: "overview", Title: "总览", Order: 10},
+		{ID: "schedule", Title: "课表", Icon: "calendar.svg", Order: 20}, // 不存在也合法
+		{ID: "resources", Title: "课程资源", Order: 30},
+	}
+	raw := make([]any, 0, len(want))
+	for _, e := range want {
+		m := map[string]any{"id": e.ID, "title": e.Title, "order": e.Order}
+		if e.Icon != "" {
+			m["icon"] = e.Icon
+		}
+		raw = append(raw, m)
+	}
+	src := surfaceFixture(t, "course-manager", "1.0.0", "export default () => null\n",
+		withManifest(func(m map[string]any) { m["entries"] = raw }))
+	if r := st.Install(src, true); r.Status != surfaceApplied {
+		t.Fatalf("合法 entries 装不上: %+v", r)
+	}
+
+	list := st.List(false)
+	if list.Status != surfaceApplied || len(list.Items) != 1 || list.Items[0].ID != "course-manager" {
+		t.Fatalf("List = %+v，want 只有 course-manager", list)
+	}
+	mf, err := st.Manifest("course-manager")
+	if err != nil {
+		t.Fatalf("Manifest: %v", err)
+	}
+	if len(mf.Entries) != len(want) {
+		t.Fatalf("entries 条数 = %d，want %d（%+v）", len(mf.Entries), len(want), mf.Entries)
+	}
+	for i, w := range want {
+		if got := mf.Entries[i]; got != w {
+			t.Fatalf("entries[%d] = %+v，want %+v（顺序与字段都必须原样）", i, got, w)
+		}
+	}
+
+	// 零入口：缺省（不给 entries 字段）与空数组都合法。
+	zero := surfaceFixture(t, "plain-panel", "1.0.0", "export default () => null\n")
+	if r := st.Install(zero, true); r.Status != surfaceApplied {
+		t.Fatalf("缺省 entries 装不上: %+v", r)
+	}
+	empty := surfaceFixture(t, "empty-panel", "1.0.0", "export default () => null\n",
+		withManifest(func(m map[string]any) { m["entries"] = []any{} }))
+	if r := st.Install(empty, true); r.Status != surfaceApplied {
+		t.Fatalf("空 entries 数组装不上: %+v", r)
+	}
+	for _, id := range []string{"plain-panel", "empty-panel"} {
+		mf, err := st.Manifest(id)
+		if err != nil {
+			t.Fatalf("Manifest(%s): %v", id, err)
+		}
+		if len(mf.Entries) != 0 {
+			t.Fatalf("%s 的 entries = %+v，want 空（宿主给默认入口）", id, mf.Entries)
+		}
 	}
 }
 
