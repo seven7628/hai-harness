@@ -107,6 +107,16 @@ surfaces.register({ kind: 'plugin:hello', group: 'plugin', title: (tab) => title
   Never ship a plugin that "loads fine but shows nothing anywhere" — that is the one state the
   entrance contract forbids.
 - **Routing inside a page** (list → detail → form) is yours; do not open a new entry id per row.
+  If a row genuinely needs **its own tab**, put the distinguishing value in `params` (for example
+  `params: { entry: 'resources', fileId: 42 }`): the host's default tab identity is
+  `entry + the rest of params` (key-order insensitive), so different values = different tabs and the
+  same values = the same tab. Declare `dedupeKey: (tab) => String(tab.params?.courseId)` on your
+  provider when a *coarser* key is right (e.g. one tab per course, ignoring `fileId`); it must be a
+  pure function of `params`.
+- **The tab title of a declared entry is host-owned**: it comes from `entries[].title` so the menu
+  and the tab bar agree. `title()` on the provider is what the host uses for the **default** entry
+  (zero `entries`) and for tabs your plugin opens itself (`host.openTab`) — do not fight it for
+  declared entries.
 - Disabling or uninstalling the plugin removes all entrances immediately; tabs already open turn
   into tombstones (the host does that — do not try to close them from the plugin).
 
