@@ -124,6 +124,8 @@ node_modules/
 /dist/
 desktop/app/dist/
 desktop/app/dist-mobile/
+# mobile:embed 写 zip 的临时文件（rename 前）
+desktop/bridge/mobile_web.zip.tmp-*
 desktop/app/dist-electron/
 desktop/app/release/
 # 构建目录，但应用图标是发布必需资产——显式放行这几个
