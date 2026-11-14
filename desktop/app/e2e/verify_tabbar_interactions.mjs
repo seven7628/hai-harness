@@ -39,7 +39,7 @@ const PROBE_DIR = path.join(__dirname, '_tabbarprobe_run')
 const PROBE_MARKER = '<title>tabbar-interactions probe</title>'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_tabbarprobe_run/index.html`
 
-// 探针页：真 store + 真 RightPanel + **mock transport**（src/transport/mock.ts：无 window.desktop
+// 探针页：真 store + 真 RightPanel + **mock transport**（src/transport/mock.ts：没有宿主桥
 // 时 getTransport() 自动选它）。这里刻意不造假的 file_preview 响应：文件标签的内容由生产代码
 // 自己的 mock 通道给，探针只负责把标签集摆到要测的形态。
 // `#probe-input` 是**测试脚手架**（不是被测能力）：用来验证「输入框聚焦时 ⌃⇥ 仍然生效」。

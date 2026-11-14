@@ -8,7 +8,7 @@
 //   1. **import() 真的跑了**：panel.js 在模块顶层写 `globalThis.__pluginRuns.demo++`，
 //      断言它 ≥1。只断言「provider 存在」证明不了模块被求值（那也可能是假的 provider）。
 //   2. **loader 从生产入口被启动**：`useAppStore.getState().start()` → startPluginLoader，
-//      索引来自 `window.desktop.surfaceIndex`（探针只替这个 IPC 边界）。探针不自己调
+//      索引来自 `bridge.surfaceIndex`（探针只替这个 IPC 边界）。探针不自己调
 //      syncPlugins —— 那会把「store → loader」的接线（最容易漏的一段）测成不存在。
 //   3. **UI 是真的渲染**：真 RightPanel + 真注册表，断言 DOM（面板内容 / 墓碑 / 图标 URL），
 //      而不是读注册表里的字符串。
@@ -139,8 +139,9 @@ fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 // 探针页：真 store + 真 RightPanel + 真注册表 + 真插件加载器。
 //
 // ⚠️ 全部用 await import 而不是顶部 static import：store 在模块求值时就
-// const transport = getTransport() 把实现定死了，而生产里 window.desktop 由 preload
-// **先于** bundle 注入。static import 会被 hoist 到赋值之前，探针就会静默跑在 mock
+// const transport = getTransport() 把实现定死了，而 fake **必须**在任何 src 模块求值之前
+// 就在 window 上（L0：桥在模块求值时一次性消费 window.desktop）。static import 会被 hoist
+// 到赋值之前，探针就会静默跑在 mock
 // transport 上（PR-12 踩过同一条，注释照抄）。
 import '../../src/index.css'
 
@@ -232,7 +233,7 @@ w.__probe = {
     enable: (k: string) => health.enableSurface(k as never),
   },
   // T15 专用：直接调**生产入口** syncPlugins 演「不权威 index」那一档。
-  // store 的 start() 只能走权威那条（探针的 window.desktop.surfaceIndex 是真的），
+  // store 的 start() 只能走权威那条（探针注入的 surfaceIndex 是真的），
   // 而这一档要证的恰恰是「拿不到权威 index 时什么都不许动」。
   sync: (items: unknown[], authoritative: boolean | 'default') =>
     authoritative === 'default'

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 客户端级 E2E：统一异步任务（promote 长工具 → 精确停止 → interrupted 终态收敛）。
 //
-// 驱动**浏览器 mock transport**（无 window.desktop → src/transport/mock.ts 事件流），
+// 驱动**浏览器 mock transport**（没有宿主桥 → src/transport/mock.ts 事件流），
 // 覆盖三件事：
 //   1. 长工具（bash sleep，tooltask-1）运行中 → 工具行「后台」按钮 promote；
 //   2. promoted 后工具行/右侧任务栏出现「停止」按钮 → 按 taskId 精确中断

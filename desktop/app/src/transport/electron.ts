@@ -1,8 +1,9 @@
 import type { Transport, ExternalSkillsStatus, ExternalSkillsImportResult, FsImageResult, OAuthStatus, OfficeKitStatus } from './types'
+import { bridge } from '../lib/bridge'
 
 // Electron 真实 transport：走 preload 暴露的 IPC → 主进程 → Go bridge stdio
 export function electronTransport(): Transport {
-  const d = window.desktop! // 仅当 window.desktop 存在时被调用（getTransport 分流）
+  const d = bridge! // 仅在存在宿主桥时被调用（getTransport 分流）
   return {
     start: () => d.startBridge(), // 幂等启动；workspace 随命令 payload 注入
     pickWorkspace: () => d.pickWorkspace(),

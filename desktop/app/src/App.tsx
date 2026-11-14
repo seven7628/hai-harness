@@ -60,6 +60,7 @@ const hubRightMaxSize = (): number | '80%' => {
   return Math.max(RIGHT_PANEL_MIN_W, cap)
 }
 import { useRailTips } from './lib/railTips'
+import { bridge } from './lib/bridge'
 
 export default function App() {
   const inSkills = useAppStore((s) => s.inSkills)
@@ -103,7 +104,7 @@ export default function App() {
   // TEMP-STARTUP 打点单独一次（挂载时）：它与"主题/皮肤"无关，
   // 混在同一条 effect 里会让用户切一次皮肤就往启动时间轴里多写一条 app-mounted。
   useEffect(() => {
-    if (window.desktop) void window.desktop.startupMark('app-mounted')
+    if (bridge) void bridge.startupMark('app-mounted')
   }, [])
   // 办公组件状态（R08d）：预览面板横幅与设置页共用这一份；启动查一次，之后只在用户
   // 点「重新探测」时刷新（安装/卸载发生在 app 之外，自动轮询没有意义）。
@@ -120,7 +121,7 @@ export default function App() {
     applyNarrativeSkin(narrativeSkin)
     applyNarrativeDensity(narrativeDensity)
     applyAppearance(appearance) // 必须在 applyTheme 之后：它读的是解析后的 data-theme
-    if (window.desktop) void window.desktop.applyTheme(theme)
+    if (bridge) void bridge.applyTheme(theme)
   }, [theme, narrativeSkin, narrativeDensity, appearance])
 
   // 折叠图标条 tooltip 定位（fixed，避开图标条 overflow 裁剪；左右 rail 共用一次委托）
@@ -131,7 +132,7 @@ export default function App() {
   // 在 store 里逐处调用会漏；订阅 activeSessionId 一处覆盖全部。
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   useEffect(() => {
-    void window.desktop?.embedSetSession?.(activeSessionId ?? '')
+    void bridge?.embedSetSession?.(activeSessionId ?? '')
   }, [activeSessionId])
 
   // 全局快捷键：⌘B 左栏 / ⌘\ 右栏（对齐设置面板的宣告）；⌘1..5 切换最近打开的会话

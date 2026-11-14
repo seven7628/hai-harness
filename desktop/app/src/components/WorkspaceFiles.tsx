@@ -24,6 +24,7 @@ import {
   SearchIcon,
   TrashIcon,
 } from './icons'
+import { bridge } from '../lib/bridge'
 
 // 工作区文件浏览（左栏「查看文件」模式）：目录懒展开 + 点击文件在右侧文件栏展示。
 //
@@ -666,7 +667,7 @@ export default function WorkspaceFiles({ onBack }: { onBack: () => void }) {
     const files = Array.from(e.dataTransfer?.files ?? [])
     const out: string[] = []
     for (const f of files) {
-      const p = window.desktop?.getPathForFile?.(f)
+      const p = bridge?.getPathForFile?.(f)
       // 浏览器 mock 没有 preload：退化成与 mock transport 同口径的假路径，
       // 这样左栏的导入交互在浏览器里也能完整走通（真实磁盘路径只存在于桌面端）。
       if (p) out.push(p)
@@ -968,11 +969,11 @@ export default function WorkspaceFiles({ onBack }: { onBack: () => void }) {
 
   const reveal = async (p: string) => {
     setMenu(null)
-    if (!window.desktop?.showItemInFolder) {
+    if (!bridge?.showItemInFolder) {
       showToast(t('files.revealUnsupported'), 'error')
       return
     }
-    await window.desktop.showItemInFolder(p)
+    await bridge.showItemInFolder(p)
   }
 
   const copyPath = async (p: string) => {

@@ -128,6 +128,9 @@ console.log('  → 结论：%s', st().activeSessionId === undefined && (st().ske
 
 // ===== D：发送失败（bridge 未运行）被静默吞掉 =====
 boot()
+// L0（D6）：bridge 在模块求值时消费 window.desktop；node 里没有 preload，用 claim 供货
+// （否则真正的 desktop 被消费掉后，下面这行读到的就是 undefined）。
+global.window.__haiClaimHostApi = () => global.window.desktop ?? null
 const realCommand = global.window.desktop.command
 global.window.desktop.command = async () => ({ ok: false, error: 'bridge 未运行' })
 const beforeErr = st().bridgeError

@@ -5,6 +5,7 @@ import { isCsvPath } from '../lib/csv'
 import { BROWSER_EXTS, PDF_EXTS, XLSX_EXTS, DOCX_EXTS, PPTX_EXTS, extOf } from '../lib/visualFile'
 import { fileTypeOf } from '../lib/palette'
 import { useT } from '../i18n'
+import { bridge } from '../lib/bridge'
 
 // ArtifactCard 本轮产出汇总卡片（AgentEnd.Artifacts）——样式选型 C：
 //   hero（首个产出：大图标磁贴 + 大字文件名 + 常显主按钮）
@@ -127,7 +128,7 @@ function ArtifactActions({ a, abs, compact = false }: { a: ArtifactItem; abs: st
   // PDF 用得上它：内嵌 viewer 只能看，Skim/Preview 的批注、导出等外部能力给不了，
   // 所以主按钮改成预览后系统打开必须仍可达。
   const openDefault = useCallback(async () => {
-    const d = window.desktop
+    const d = bridge
     if (!d?.openPath) {
       showToast(t('art.unsupported'), 'error')
       return
@@ -221,7 +222,7 @@ function ArtifactActions({ a, abs, compact = false }: { a: ArtifactItem; abs: st
   }, [ext, a.name, a.path, openFile, openHtmlInBrowser, openDefault, previewByExt, t])
 
   const reveal = async () => {
-    const d = window.desktop
+    const d = bridge
     if (!d?.showItemInFolder) {
       showToast(t('art.unsupported'), 'error')
       return
@@ -435,7 +436,7 @@ export const ArtifactCard = memo(function ArtifactCard({ items, truncated }: { i
 
 // revealAll 批量在 Finder 中显示（逐个调用；系统会依次高亮/打开各目录）。
 async function revealAll(items: ArtifactItem[], ws: string | undefined, unsupported: string, toast: (m: string, kind?: 'ok' | 'error') => void) {
-  const d = window.desktop
+  const d = bridge
   if (!d?.showItemInFolder) {
     toast(unsupported, 'error')
     return

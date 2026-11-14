@@ -21,6 +21,7 @@ import { PreviewHost } from '../surfaces/preview/PreviewHost'
 import { useCodeHtml } from '../surfaces/preview/useCodeHtml'
 import { fileRefOf } from '../surfaces/preview/registry'
 import { preloadRenderers } from '../surfaces/preview/loader'
+import { bridge } from '../lib/bridge'
 
 // Markdown 文件判定（「最终文件」视图据此提供预览/纯文本双模式）：
 // .md / .markdown / .mdx（MDX 也走同一套渲染 —— 它的 JSX 部分会按 HTML 处理，
@@ -283,7 +284,7 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
   }
   // 「用默认程序打开」：与 ArtifactCard.openDefault 同实现（绝对化由 electron 侧兜底校验）。
   const openDefault = async (p: string) => {
-    const d = window.desktop
+    const d = bridge
     if (!d?.openPath) { showToast(t('art.unsupported'), 'error'); return }
     const abs = p.startsWith('/') ? p : workspace ? `${workspace}/${p}` : p
     const r = await d.openPath(abs)
@@ -731,5 +732,4 @@ export function FilePreviewTab({ tab }: { tab: FileTabInstance }) {
 // 「标签上该写什么」此前是 `title || url`，PDF 恰好暴露了它的缺陷：Chromium 的 PDF 页
 // title 常常是空的 → 退化成整条百分号编码的长 URL（`file:///Users/…/%E4%B8%AD%E6%96%87…`），
 // 用户完全认不出来是哪个文件。改为按 URL 形态分派（见 tabLabel）。
-
 

@@ -5,9 +5,9 @@
 //       00-conventions §4.7（测试必须走生产入口）。
 //
 // §4.7 的三个「容易测成别的东西」的点，这个脚本按口径钉住：
-//   · **真的从 IPC 边界发**：探针只替 `window.desktop`（command/onEvent/settingsGet），
+//   · **真的从 IPC 边界发**：探针只替 preload 的 IPC 边界（command/onEvent/settingsGet），
 //     store 的 start() → startUISnapshot → transport.send 全是真的；断言读的是
-//     `window.desktop.command` 收到的信封，不是测试里另造的一条发送函数。
+//     `window.__haiTestBridge.command` 收到的信封，不是测试里另造的一条发送函数。
 //   · **真的注册表**：探针 page 与 src/main.tsx 一样 `import '../../src/surfaces/builtin'`，
 //     T0 用 `listSurfaces()` 当场戳穿「注册没生效、测的是兜底」（04 F45）。
 //   · **真的 store 动作**：开标签/切标签/禁用面板全部走 store 与 health 的公开函数；
@@ -52,7 +52,7 @@ const TITLE_MAX = 200
 const SNAPSHOT_MAX_BYTES = 256 * 1024
 
 // —— 探针页 ——
-// 真 store + 真 RightPanel。`window.desktop` 只提供 IPC 边界（command/onEvent/settingsGet），
+// 真 store + 真 RightPanel。注入的 fake 只提供 IPC 边界（command/onEvent/settingsGet），
 // 其余方法用 Proxy 兜成异步空操作：真组件（RightPanel 的原生视图 effect）会调用
 // embed* 等方法，缺一个就会在 effect 里抛错并把整棵 React 树卸载（PR-10 实测过）。
 fs.mkdirSync(PROBE_DIR, { recursive: true })
@@ -67,8 +67,8 @@ fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 //
 // ⚠️ 这里**全部**用 await import 而不是顶部 static import，顺序是断言的前提：
 // store 在模块求值时就 \`const transport = getTransport()\` 把实现定死了，而生产里
-// window.desktop 由 preload **先于** bundle 注入。static import 会被 hoist 到赋值之前，
-// 探针就会静默跑在 mock transport 上 —— 症状是 window.desktop.command 一条都没收到，
+// fake 必须在任何 src 模块求值之前就位（L0：桥在模块求值时消费 window.desktop）。static import 会被 hoist 到赋值之前，
+// 探针就会静默跑在 mock transport 上 —— 症状是 window.__haiTestBridge.command 一条都没收到，
 // 看起来像「快照没实现」（PR-12 实测踩过，这条注释是为下一个踩的人留的）。
 import '../../src/index.css'
 
@@ -78,7 +78,7 @@ const feeds: Array<(line: string) => void> = []
 let bootSettings: unknown = null
 const mountAt = performance.now()
 
-// IPC 边界替身：**只**替 window.desktop（生产 electronTransport 走 d.command / d.onEvent）。
+// IPC 边界替身（L0：注入 window.desktop，桥在模块求值时消费掉并挂到 __haiTestBridge）。
 // 其余方法用 Proxy 兜成异步空操作：RightPanel 的原生视图 effect 会调用 embed*，
 // 缺一个就会在 effect 里抛错并把整棵 React 树卸载（PR-10 实测过）。
 const stub: Record<string, unknown> = {

@@ -125,7 +125,8 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 //   · 设置页挂在第二个 root 上：它和右栏是同一棵树里的两块 UI，共用同一个 store。
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 // ⚠️ 全部用 await import：store 在模块求值时就 const transport = getTransport() 把实现定死了，
-// 而生产里 window.desktop 由 preload **先于** bundle 注入（见 verify_plugin_loader.mjs 同一段）。
+// 所以 fake 必须在 await import 之前摆好（L0 起注入 window.desktop，桥在模块求值时消费掉它；
+// 见 verify_plugin_loader.mjs 的同一段）。
 import '../../src/index.css'
 
 const feeds: Array<(line: string) => void> = []

@@ -24,6 +24,7 @@ import type { PreviewViewHandle } from '../../../lib/previewEmbed'
 import { useAppStore } from '../../../store/useAppStore'
 import { useDomOverlayOpen, useUiModalOpen } from '../../../lib/uiOverlay'
 import type { PreviewProps } from '../types'
+import { bridge } from '../../../lib/bridge'
 
 type Phase = 'attaching' | 'ready' | 'error'
 
@@ -97,7 +98,7 @@ export default function PdfPreview({ file, onUnavailable }: PreviewProps) {
     if (phase !== 'ready') return
     const h = handleRef.current
     if (!h) return
-    if (blocked) { setPreviewEmbedActive(false); void window.desktop?.embedHide?.(); return }
+    if (blocked) { setPreviewEmbedActive(false); void bridge?.embedHide?.(); return }
     setPreviewEmbedActive(true)
     void showPreviewView(h, embedRectOf(hostRef.current))
     // eslint-disable-next-line react-hooks/exhaustive-deps

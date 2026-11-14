@@ -50,7 +50,7 @@ const LS_TABS = 'go-code.sessionTabs'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_tabsprobe_run/index.html`
 const PROBE_MARKER = '<title>session-tabs probe</title>'
 
-// 探针页：真实 store + 真实 RightPanel + **假内嵌视图池**（window.desktop 的 embed 通路）。
+// 探针页：真实 store + 真实 RightPanel + **假内嵌视图池**（注入的 fake 的 embed 通路）。
 // 注入点必须在 store 模块加载之前（subscribeEmbedEvents 只在模块初始化时订阅一次）→ 内联
 // script（经典脚本先于 module 脚本执行），与 verify_auto_open_visual.mjs 同一写法。
 // 关键：假池的 id 序号在每次 reload 后**从 t1 重来**（与主进程 't'+自增序号同语义）——
@@ -381,7 +381,7 @@ try {
   // —— P9：原生宿主判定归 provider（R11c 的 nativeHost 能力位）——
   //
   // 为什么这条必须在这里（浏览器探针）而不是 pdf 探针：判定点的真身是「RightPanel 会不会
-  // 把原生视图 hide 掉」，而**不**依赖 Electron —— 闸门的唯一副作用是 window.desktop.embedHide，
+  // 把原生视图 hide 掉」，而**不**依赖 Electron —— 闸门的唯一副作用是 fake 的 embedHide，
   // 假池已经能数它。pdf / container 两个探针要真 Electron + 真夹具（不进默认链），
   // 这条进默认链才有回归保护。
   //

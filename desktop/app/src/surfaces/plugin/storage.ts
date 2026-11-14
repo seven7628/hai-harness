@@ -151,7 +151,7 @@ export function writeKnownIds(ids: string[]): void {
  *
  * 四条必须守住的语义（任意一条破了都会误删用户数据）：
  *  0. **authoritative=false → 既不清理也不写记录**（缺省就是这个）。`syncOnce` 的 index 来自
- *     `window.desktop.surfaceIndex`，而浏览器版（vite 直开、没有 preload）那条路回的是
+ *     `bridge.surfaceIndex`，而浏览器版（vite 直开、没有 preload）那条路回的是
  *     硬编码的 `{items:[]}` —— 把「拿不到 index」读成「一个插件都没装」，一次网页会话就能
  *     把**全部**插件数据清空。所以「这份 index 算不算数」必须由调用方显式声明，绝不靠
  *     `items` 非空去猜：卸载最后一个插件时 index 恰好是空的，那一次**必须**能清。

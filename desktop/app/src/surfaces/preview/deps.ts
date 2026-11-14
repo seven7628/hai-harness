@@ -5,15 +5,16 @@
 // 决定 Host 走 unavailable）与用户看到的理由文案。分散到渲染器里各写一遍，就会出现
 // 「docx 说自己缺 Python、pptx 说自己缺通道」这种同一根因两种说法。
 //
-// 判据取**能力面**而不是「有没有 window.desktop」：
+// 判据取**能力面**而不是「有没有宿主桥」：
 //   · conversion → transport 上真有 watchDocx/watchPptx/watchXlsx 三个方法（浏览器 mock
 //     三个都有但恒返回失败，那种情况由渲染器自己的失败分支如实上报，不在这里假装可用）；
 //   · embed      → preload 真有 embedOpenTarget + embedShow（WebContentsView 那条原生通道）。
 // 这样「老版本桌面端缺某个 IPC」也能落到写明原因的位置，而不是白屏。
+import { bridge } from '../../lib/bridge'
 import { setDependencyStatus } from './registry'
 import type { PreviewDependency } from './types'
 
-/** window.desktop 的最小子集（只取判定要用的字段，避免这里 import 整份 global.d.ts）。 */
+/** 宿主桥的最小子集（只取判定要用的字段，避免这里 import 整份 DesktopApi）。 */
 interface DesktopLike {
   watchDocx?: unknown
   watchPptx?: unknown
@@ -42,11 +43,11 @@ const REASONS: Record<PreviewDependency, string> = {
 /**
  * 探测并写入依赖状态。幂等、纯读环境，可在任意线程/时机调用。
  *
- * 传 `desktop` 只为测试与探针（默认取 window.desktop 的快照）——判断完不保留引用，
+ * 传 `desktop` 只为测试与探针（默认取模块私有桥 src/lib/bridge.ts 的快照）——判断完不保留引用，
  * 环境变了再调一次即可。
  */
 export function detectPreviewDeps(
-  desktop: DesktopLike | undefined = (globalThis as { window?: { desktop?: DesktopLike } }).window?.desktop,
+  desktop: DesktopLike | undefined = bridge ?? undefined,
 ): void {
   const conversion = !!desktop && isFn(desktop.watchDocx) && isFn(desktop.watchPptx) && isFn(desktop.watchXlsx)
   const embed = !!desktop && isFn(desktop.embedOpenTarget) && isFn(desktop.embedShow)

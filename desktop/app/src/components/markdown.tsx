@@ -22,6 +22,7 @@ import { useSkin } from '../lib/useSkin'
 import { t as tStatic, useLang, useT } from '../i18n'
 import { splitStreamingMarkdown } from '../lib/mdSplit'
 import { hastToElements, makeKey, parseMarkdown } from '../lib/mdPipeline'
+import { bridge } from '../lib/bridge'
 
 // 沙箱 UI 回复协议的校验常量 —— 与 vendor/visual-skills/visual-ui/references/reply-protocol.md
 // 的「Receiving」一节逐条对应。改这里必须同步改协议文档，反之亦然：
@@ -882,8 +883,8 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
   if (rt) {
     const revealLabel = path ? t('md.htmlReveal') : t('md.htmlOpenBrowserBtn')
     const onReveal = () => {
-      if (path && window.desktop?.showItemInFolder) {
-        void window.desktop.showItemInFolder(path)
+      if (path && bridge?.showItemInFolder) {
+        void bridge.showItemInFolder(path)
         return
       }
       openInBrowser()

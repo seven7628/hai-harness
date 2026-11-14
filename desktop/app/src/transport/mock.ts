@@ -2429,7 +2429,7 @@ class MockTransport implements Transport {
   }
 
   // 浏览器 mock 无真实路径：给可读的假路径（覆盖「文档附件」全链路 UI）。
-  // 空串语义（非磁盘文件）在 mock 下无法复现，浏览器 e2e 需要时注入 window.desktop。
+  // 空串语义（非磁盘文件）在 mock 下无法复现，浏览器 e2e 需要时注入 fake host api。
   getPathForFile(file: File): string {
     return '/mock/' + (file.name || 'file')
   }
@@ -2473,19 +2473,19 @@ class MockTransport implements Transport {
   }
 
   // xlsx 工作簿预览（mock）：不真转（无 Python/浏览器渲染），直接给一个失败结果并说明
-  // 原因 —— 比「假成功 + 打不开的白面板」更诚实；e2e 需要成功路径时注入 window.desktop.watchXlsx。
+  // 原因 —— 比「假成功 + 打不开的白面板」更诚实；e2e 需要成功路径时注入 fake 的 watchXlsx。
   async watchXlsx(): Promise<{ ok: boolean; html_path?: string; error?: string }> {
     return { ok: false, error: '浏览器预览模式不支持 xlsx 转换（需桌面端受管运行时）' }
   }
 
   // docx 文档预览（mock）：同上 —— 不真转，直接给失败结果并说明原因，比「假成功 +
-  // 打不开的白面板」更诚实；e2e 需要成功路径时注入 window.desktop.watchDocx。
+  // 打不开的白面板」更诚实；e2e 需要成功路径时注入 fake 的 watchDocx。
   async watchDocx(): Promise<{ ok: boolean; html_path?: string; error?: string }> {
     return { ok: false, error: '浏览器预览模式不支持 docx 转换（需桌面端受管运行时）' }
   }
 
   // pptx 演示文稿预览（mock）：同上 —— 不真转，直接给失败结果并说明原因；e2e 需要成功
-  // 路径时注入 window.desktop.watchPptx。
+  // 路径时注入 fake 的 watchPptx。
   async watchPptx(): Promise<{ ok: boolean; html_path?: string; error?: string }> {
     return { ok: false, error: '浏览器预览模式不支持 pptx 转换（需桌面端受管运行时）' }
   }

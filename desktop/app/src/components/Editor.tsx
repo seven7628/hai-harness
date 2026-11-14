@@ -51,7 +51,7 @@ export function Editor({ tab }: { tab: FileTabInstance }) {
   const prevStatus = useRef(doc?.status)
 
   // 退出询问的绑定在这里补一次（幂等）：脏文档只能由编辑器产生，所以「有东西要保护」
-  // 的时刻一定已经绑定；模块加载时 window.desktop 未就位的环境（L1/探针）也能接上。
+  // 的时刻一定已经绑定；模块加载时没有宿主桥的环境（L1/探针）也能接上。
   useEffect(() => { bindQuitRequest() }, [])
 
   // 进入编辑 = 发一次 file_open。**判据是「这个标签是否已经有同路径的文档」而不是挂载次数**：

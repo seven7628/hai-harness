@@ -23,6 +23,7 @@ import { useDomOverlayOpen, useUiModalOpen } from '../lib/uiOverlay'
 import { useAppStore } from '../store/useAppStore'
 import type { WebTabInstance } from '../store/useAppStore'
 import type { SurfaceRenderContext } from '../surfaces/types'
+import { bridge } from '../lib/bridge'
 
 // embedRectOf 已提到 lib/embedRect.ts（R08b：pdf 预览面板也要驱动同一个原生视图）。
 // 那段注释解释了为什么「量不到」必须返回 undefined 而不是钳成 80×80 —— 看它，别在这里重写。
@@ -184,10 +185,10 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
     // 判据用 document.getAnimations() 找「作用于 el 或其子树」的运行中动画：比只监听
     // animationend 稳 —— ResizeObserver 的回调可能落在动画中间，而动画早已开始（事件错过）。
     const applyRect = (r0: { x: number; y: number; width: number; height: number }) => {
-      if (window.desktop?.embedResize) void window.desktop.embedResize(r0)
+      if (bridge?.embedResize) void bridge.embedResize(r0)
       // M6：视口对齐（渲染层兜底，免重启）——上游可能按默认 1280x720 仿真导致截断，
       // 强制对齐真实容器尺寸；主进程侧同名劫持（embed.ts）重启后接管。
-      void window.desktop
+      void bridge
         ?.embedCommand({ method: 'Emulation.setDeviceMetricsOverride', params: { width: r0.width, height: r0.height, deviceScaleFactor: 1, mobile: false } })
         .catch(() => {})
     }
@@ -229,10 +230,10 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
         // 建连（创建 native 视图 + debugger 代理 + attach）；显示与否由 panelVisible
         // （右栏展开）决定——右栏收起时建连即 hide，杜绝「刷新后右栏收起、视图仍浮在
         // 最上层挡住主页面」的竞态（此前建连无条件 show，可见性 effect 兜不住异步时序）。
-        const shown = await window.desktop?.embedShow({ rect: rect() })
+        const shown = await bridge?.embedShow({ rect: rect() })
         if (!shown?.ok) throw new Error(shown?.error || t('rp.browser.embedCreateFailed'))
-        if (!panelVisible) void window.desktop?.embedHide() // 右栏收起：建连不显示
-        const proxy = await window.desktop?.embedDebuggerProxy()
+        if (!panelVisible) void bridge?.embedHide() // 右栏收起：建连不显示
+        const proxy = await bridge?.embedDebuggerProxy()
         if (!proxy?.ok || !proxy.endpoint) throw new Error(proxy?.error || t('rp.browser.proxyFailed'))
         attachEmbedView(proxy.endpoint)
         setEmbedError('')
@@ -242,17 +243,17 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
           ro.observe(el)
         }
         // 空闲（当前无页面）→ 隐藏 native 视图露出占位；有页面交给 hasPages effect 显示
-        if (!hasPagesRef.current) await window.desktop?.embedHide()
+        if (!hasPagesRef.current) await bridge?.embedHide()
       } catch (e) {
         setEmbedError(e instanceof Error ? e.message : String(e))
-        void window.desktop?.embedHide() // 回退态不残留半就绪视图
+        void bridge?.embedHide() // 回退态不残留半就绪视图
       }
     })()
     return () => {
       animRoot.removeEventListener('animationend', sync)
       animRoot.removeEventListener('animationstart', sync)
       ro?.disconnect()
-      if (window.desktop?.embedHide) void window.desktop.embedHide()
+      if (bridge?.embedHide) void bridge.embedHide()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nativeViewMode, retryNonce, panelVisible])
@@ -271,8 +272,8 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
     const rect = embedRectOf(el)
     // 量不到 → 只有两条合法归宿：有覆盖层/无页面时本就该 hide；否则**不下发 show**
     //（把视图交给上一次的 bounds，绝不拿假的 80×80 去缩视图 —— 见 embedRectOf）。
-    if (uiModalOpen || menuOpen || domOverlayOpen || !hasPages || !rect) void window.desktop?.embedHide()
-    else void window.desktop?.embedShow({ rect })
+    if (uiModalOpen || menuOpen || domOverlayOpen || !hasPages || !rect) void bridge?.embedHide()
+    else void bridge?.embedShow({ rect })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nativeViewMode, hasPages, uiModalOpen, menuOpen, domOverlayOpen])
 
@@ -305,7 +306,7 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
   // M5：地址栏回车 → 直接驱动内嵌视图（不经 AI/插件，用户自由导航）
   const go = () => {
     const u = urlInput.trim()
-    if (u) void window.desktop?.embedNavigate(u)
+    if (u) void bridge?.embedNavigate(u)
   }
 
   return (
@@ -337,9 +338,9 @@ export function WebTab({ tab }: SurfaceRenderContext<WebTabInstance>) {
           {nativeViewMode && !toolbarHidden && !isPreviewUrl && (
             <div className="browser-toolbar">
               <button className="bt-nav" onClick={() => onToggleTabs?.()} aria-label={t('rp.browser.hideTabs')} title={t('rp.browser.hideTabs')}>▴</button>
-              <button className="bt-nav" disabled={!nav?.canGoBack} onClick={() => void window.desktop?.embedBack()} aria-label={t('browser.nav.back')} title={t('browser.nav.back')}>←</button>
-              <button className="bt-nav" disabled={!nav?.canGoForward} onClick={() => void window.desktop?.embedForward()} aria-label={t('browser.nav.forward')} title={t('browser.nav.forward')}>→</button>
-              <button className="bt-nav" onClick={() => void window.desktop?.embedReload()} aria-label={t('browser.nav.reload')} title={t('browser.nav.reload')}>⟳</button>
+              <button className="bt-nav" disabled={!nav?.canGoBack} onClick={() => void bridge?.embedBack()} aria-label={t('browser.nav.back')} title={t('browser.nav.back')}>←</button>
+              <button className="bt-nav" disabled={!nav?.canGoForward} onClick={() => void bridge?.embedForward()} aria-label={t('browser.nav.forward')} title={t('browser.nav.forward')}>→</button>
+              <button className="bt-nav" onClick={() => void bridge?.embedReload()} aria-label={t('browser.nav.reload')} title={t('browser.nav.reload')}>⟳</button>
               <input
                 ref={urlRef}
                 className="bt-url mono"

@@ -79,7 +79,7 @@ test('web 与 file 同属 content 组，按 order 排在 file 之后；git 仍�
 })
 
 // —— 元数据委派的**行为等价**证明 ——
-// 为什么需要这一段：截图对比跑在纯 Chrome 里（没有 window.desktop → embedNav 为 undefined），
+// 为什么需要这一段：截图对比跑在纯 Chrome 里（没有宿主桥 → embedNav 为 undefined），
 // 只覆盖得到「退化用 tab.url」那条路径；「活标签靠 viewId 反查 embedNav.targets」这条真实浏览时
 // 每天走的路径，截图证明不了。故拿迁移前 RightPanel 的原逻辑当**一次性对照基准**
 //（下面的 old* 是迁移那一刻的逐字副本，别改它 —— 它的价值就在于停在那一刻）。

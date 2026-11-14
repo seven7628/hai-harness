@@ -311,7 +311,7 @@ try {
     check(s.state === 'ready', `data-pdf-state=ready（实得 ${s.state}）`)
     // 视图池里真的有一条属于这个 pdf、且是激活/可见态（导航要时间 → 等它落定）
     const poolState = await waitFor(() => win.evaluate(async ([abs, url]) => {
-      const st = await window.desktop.embedStatus() // 注意：preload 侧是 ipcRenderer.invoke → Promise
+      const st = await window.__haiTestBridge.embedStatus() // 注意：preload 侧是 ipcRenderer.invoke → Promise
       const t = (st?.targets ?? []).find((x) => x.srcPath === abs)
       if (!t) return null
       if (t.url !== url || t.loading) return null
@@ -326,7 +326,7 @@ try {
     check(viewDom.view === poolState?.id, `面板挂的就是这条视图（data-pdf-view=${viewDom.view}）`, JSON.stringify(viewDom))
     // CDP 读**激活视图**：它真的是 PDF 文档 + 插件铺满
     const probe = async (expr) => {
-      const res = await win.evaluate((e) => window.desktop.embedCommand({ method: 'Runtime.evaluate', params: { expression: e, returnByValue: true } }), expr)
+      const res = await win.evaluate((e) => window.__haiTestBridge.embedCommand({ method: 'Runtime.evaluate', params: { expression: e, returnByValue: true } }), expr)
       return res?.result?.result?.value ?? res?.result?.value ?? res?.value ?? null
     }
     const contentType = await waitFor(async () => {

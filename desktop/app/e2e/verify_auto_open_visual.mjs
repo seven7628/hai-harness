@@ -57,10 +57,10 @@ const PROBE_MARKER = '<title>auto-open probe</title>'
 
 // 探针页：真实 store（含 start() 建链）+ 真实 RightPanel（验证「切到文件栏」是真的切了）。
 //
-// 阶段 4 起探针还注入一个**假的内嵌视图池**（window.desktop.embed*）与一个可驱动的 nav 事件
+// 阶段 4 起探针还注入一个**假的内嵌视图池**（fake host api 的 embed*）与一个可驱动的 nav 事件
 // 回调 —— 本阶段的三档规则里有两条（AI 操作浏览器 / 后台产出）只有在真跑 onEmbedNav 的
 // 收口逻辑时才验得到。注入点必须在 **store 模块加载之前**（subscribeEmbedEvents 只在模块
-// 初始化时订阅一次；模块加载时 window.desktop 缺失 → 永不订阅，nav 断言会静默空转），
+// 初始化时订阅一次；模块加载时没有宿主桥 → 永不订阅，nav 断言会静默空转），
 // 故放在 index.html 的**内联 script**（经典脚本，先于 module 脚本执行）。
 const PROBE_DIR = path.join(__dirname, '_autoprobe_run')
 fs.mkdirSync(PROBE_DIR, { recursive: true })
@@ -72,8 +72,8 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 // rememberPreviewView 用**打开前后的池快照差集**算出（不依赖实现把 id 放在响应哪个字段）。
 // 池不记账的话差集恒空 → 未读点断言永远绿 = 空转。
 //
-// 为什么整个 window.desktop 用 Proxy 兜底：注入 window.desktop 会让 store 选**真实
-// electron transport**（src/transport/electron.ts 按 window.desktop 存在与否分流），
+// 为什么整个 fake 用 Proxy 兜底：注入 fake（= L0 之前注入 window.desktop）会让 store 选**真实
+// electron transport**（src/transport/index.ts 按宿主桥是否存在分流），
 // 而真实 transport 会调几十个 preload API —— 缺一个就是 "d.xxx is not a function"
 // 把断言打成 TypeError（实测）。Proxy 只替最外层：**被测的 embed 通路逐个显式实现**
 //（逻辑全真跑），其余 API 一律返回 { ok: true } 的惰性桩（probe 不验那些）。

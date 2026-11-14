@@ -23,6 +23,7 @@ import { copyText } from '../lib/clipboard'
 import { useLang, useT } from '../i18n'
 import TodoPanel from './TodoPanel'
 import { useFocusTodos } from './useFocusTodos'
+import { bridge } from '../lib/bridge'
 
 // Tab 分两段：主段 = 会话工作流核心（链路 · 变更）；辅段 = 预览工具（文件 · 网页）。
 // 这里**没有**「任务」tab（2026-10 用户拍板退役）：子智能体/异步 Bash 就是另一个会话，
@@ -342,7 +343,7 @@ export default function RightPanel() {
   // 标签的页面（不是激活视图：右键的标签可能不是当前激活的那个）。
   const ctxRefresh = () => {
     if (ctxTab?.kind === 'web') {
-      if (ctxTab.viewId) void window.desktop?.embedReloadTarget?.(ctxTab.viewId)
+      if (ctxTab.viewId) void bridge?.embedReloadTarget?.(ctxTab.viewId)
       else if (ctxTab.pageId != null) fetchBrowserShot(ctxTab.pageId)
     }
     setCtx(null)
@@ -358,8 +359,8 @@ export default function RightPanel() {
   // 重开 = 重开栈栈顶（store.reopenTab 不传 id 时就是这个语义）；栈空时菜单项 disabled。
   const ctxReopen = () => { reopenTab(); setCtx(null) }
   const ctxCopyPath = async () => { if (ctxPath) await copyText(ctxPath); setCtx(null) }
-  const ctxReveal = async () => { if (ctxPath) await window.desktop?.showItemInFolder?.(ctxPath); setCtx(null) }
-  const ctxOpenDefault = async () => { if (ctxPath) await window.desktop?.openPath?.(ctxPath); setCtx(null) }
+  const ctxReveal = async () => { if (ctxPath) await bridge?.showItemInFolder?.(ctxPath); setCtx(null) }
+  const ctxOpenDefault = async () => { if (ctxPath) await bridge?.openPath?.(ctxPath); setCtx(null) }
   useEffect(() => {
     if (!ctx) return
     const onDown = (e: MouseEvent) => {
@@ -406,7 +407,7 @@ export default function RightPanel() {
     const s = useAppStore.getState()
     const tab = activeTabOf(s)
     const nativeHost = !!tab && (getSurface(tab.kind)?.nativeHost?.(tab, s) ?? false)
-    if (!(rightExpanded && nativeHost)) void window.desktop?.embedHide()
+    if (!(rightExpanded && nativeHost)) void bridge?.embedHide()
   }, [embeddedPresentation, rightExpanded, activeTab?.kind, previewEmbedActive])
 
   // 标签集收敛：这条 effect 现在只做两件事 —— 「该 scope 还没有标签集时建默认集」和「清恢复

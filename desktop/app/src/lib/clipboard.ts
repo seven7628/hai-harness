@@ -1,3 +1,5 @@
+import { bridge } from '../lib/bridge'
+
 // 复制文本到系统剪贴板（全应用统一入口：Markdown 代码块 / artifacts 路径 / 设置页连接串）。
 //
 // 为什么需要这一层（2026-09-15 实测教训，别再退回裸 navigator.clipboard）：
@@ -9,7 +11,7 @@
 // 报的「点复制一直报错」：报错是真失败，系统剪贴板并未写入。权限名属于 Electron 内部行为，
 // 会随版本变化，因此这里不赌它：
 //   ① 先走浏览器 Clipboard API（Web 标准路径，非 Electron 环境同样可用）
-//   ② 失败则回退主进程 clipboard 模块（`window.desktop.clipboardWrite`）—— 不受 renderer
+//   ② 失败则回退主进程 clipboard 模块（`bridge.clipboardWrite`）—— 不受 renderer
 //      权限体系约束，是同一端能力的稳定入口
 //   ③ 两条都失败才返回 false，由调用方给出可见反馈（不静默）
 //
@@ -22,7 +24,7 @@ export async function copyText(text: string): Promise<boolean> {
     /* 权限被拒 / 非安全上下文 / 无 Clipboard API：回退主进程 */
   }
   try {
-    const r = await window.desktop?.clipboardWrite?.(text)
+    const r = await bridge?.clipboardWrite?.(text)
     return Boolean(r?.ok)
   } catch {
     return false

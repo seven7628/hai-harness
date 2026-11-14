@@ -80,7 +80,7 @@ function Probe() {
   const [broken, setBroken] = useState(false)
   useEffect(() => {
     ;(window as unknown as { __breakChannel: () => void }).__breakChannel = () => {
-      getTransport().fsReadImage = () => Promise.reject(new TypeError('window.desktop.fsReadImage is not a function'))
+      getTransport().fsReadImage = () => Promise.reject(new TypeError('window.__haiTestBridge.fsReadImage is not a function'))
       setBroken(true)
     }
   }, [])

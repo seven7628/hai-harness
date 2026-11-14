@@ -31,6 +31,7 @@ import { useAppStore } from '../store/useAppStore'
 import type { TabSpec } from '../store/useAppStore'
 import { entryItemsOf } from '../surfaces/plugin/entries'
 import { clearPluginData } from '../surfaces/plugin/storage'
+import { bridge } from '../lib/bridge'
 
 /**
  * 宿主允许插件调用的只读命令（**展示用副本**）。
@@ -90,7 +91,7 @@ export default function SurfacesPage() {
   // fetchIndex 拉一次索引。读失败**不清空**已有列表（一次 IPC 抖动不该等于「插件都没了」），
   // 而是留一行页级错误 —— 与 loader 对「读索引失败保持现状」的口径一致。
   const fetchIndex = useCallback(async (): Promise<SurfaceIndex | null> => {
-    const d = window.desktop
+    const d = bridge
     if (!d?.surfaceIndex) return { version: 1, items: [] } // 浏览器/mock 档：空列表而不是崩溃
     try {
       return await d.surfaceIndex()
@@ -101,7 +102,7 @@ export default function SurfacesPage() {
   }, [setRowError])
 
   const fetchAudit = useCallback(async (): Promise<SurfaceAuditLine[] | null> => {
-    const d = window.desktop
+    const d = bridge
     if (!d?.surfaceAudit) return []
     try {
       const r = await d.surfaceAudit(AUDIT_LIMIT)
@@ -189,7 +190,7 @@ export default function SurfacesPage() {
       setBusyId(id)
       setRowError(id, '')
       try {
-        const r = await window.desktop?.surfaceRemove?.(id)
+        const r = await bridge?.surfaceRemove?.(id)
         if (!r?.ok) {
           setRowError(id, surfaceReasonText(tRef.current, r?.reason))
           return

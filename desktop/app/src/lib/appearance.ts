@@ -9,6 +9,7 @@
 // 副作用都在 applyAppearance() 一处，React 侧只读（useAppearance）。
 
 import { useSyncExternalStore } from 'react'
+import { bridge } from '../lib/bridge'
 
 const LS_KEY = 'go-code.appearance'
 
@@ -291,9 +292,9 @@ export function applyAppearance(pref: Appearance = current): void {
   // 开发中极易出现「preload 已新版（有 setUiZoom）、main 还是旧产物（没注册 ui:set-zoom）」的错配，
   // 此时 invoke 会 reject（`No handler registered for 'ui:set-zoom'`）：既在控制台冒未捕获错误，
   // 缩放也整个失效（用户 2026-09-21 报的就是这个）。退回 CSS 路径至少让设置可用。
-  if (window.desktop?.setUiZoom) {
+  if (bridge?.setUiZoom) {
     root.style.setProperty('--ui-scale', '1') // 原生缩放生效时 CSS 退化路径必须关掉（否则双重缩放）
-    window.desktop.setUiZoom(pref.scale)
+    bridge.setUiZoom(pref.scale)
       .then((r) => { if (!r?.ok) root.style.setProperty('--ui-scale', String(pref.scale)) })
       .catch(() => root.style.setProperty('--ui-scale', String(pref.scale)))
   } else {
