@@ -73,6 +73,10 @@ import RightPanel from '../../src/components/RightPanel'
 import '../../src/surfaces/builtin'
 import { getSurface, listSurfaces, registerSurface, unregisterSurface } from '../../src/surfaces/registry'
 import { useAppStore } from '../../src/store/useAppStore'
+// 语言 seam（P8-01b）：i18n 的 useT 只认 HostLangProvider，不再自己读 store。
+// 生产里 src/main.tsx 的根就是它；探针必须同构，否则 T8 的 en 断言测的是「没有 provider
+// 时的默认 zh」，红得没有信息量（main 的 P8-01b 合并后本探针就这么红过）。
+import { HostLangProvider } from '../../src/host/lang'
 import '../../src/index.css'
 
 // health 用**动态** import：红阶段它还不存在（模块 404 → import() 拒绝 → health 保持 null），
@@ -162,7 +166,11 @@ w.__probe = {
 }
 void useAppStore.getState().start('/mock/proj-auth')
 
-createRoot(document.getElementById('root')!).render(<RightPanel />)
+function ProbeRoot() {
+  const lang = useAppStore((s) => s.settings.lang)
+  return <HostLangProvider lang={lang}><RightPanel /></HostLangProvider>
+}
+createRoot(document.getElementById('root')!).render(<ProbeRoot />)
 `)
 fs.writeFileSync(path.join(PROBE_DIR, 'vite.config.mts'), `
 import { defineConfig } from 'vite'
