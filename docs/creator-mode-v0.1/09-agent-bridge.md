@@ -4,7 +4,7 @@
 > 决策人：用户（三条已拍板，见 §0）
 > 前置：R17a/R17b 已合并；`window.desktop` 收窄（L0）是 P1 的硬前置
 
-## 0. 已拍板的三条
+## 0. 已拍板的决定（2026-11-14）
 
 1. **插件任务会话必须进左栏会话树**：以**虚拟 Project** 的形态出现（每插件一个）——不绑真实项目、不是智能体/群组，Session 仍是普通 Session。
 2. **引用到会话只插草稿**，发送永远由用户按；「自动发送」留到以后，V1 不做。
@@ -36,8 +36,9 @@
 
 ### 1.3 现有会话命令的约束
 
-`new_session` 要求 `workspace` 非空（`main.go:2843`）；`ask` / `interrupt` / `approve` 等会话命令都按 workspace 解析 runtime。第三种形态因此必须在**命令解析层**增加 `plugin_id` 这一路，而不是伪造一个项目路径。
+`new_session` 要求 `workspace` 非空（`main.go:2843`）；`ask` / `interrupt` / `approve` / `switch_model` 等会话命令都按 workspace 解析 runtime。
 
+**关键事实（评审实测，推翻了"命令零改造"的初稿）**：renderer 只有一个全局 `state.workspace`，`send()` 会把它注入**每一条**命令（`useAppStore.ts:3974`、`4024`）。插件会话的归属路径与当前 `state.workspace` 不同，若不补「会话 → 归属路径」这一层，`switch_model` / `ask` / `approve` 在插件会话上会直接 `session_not_found`（`main.go:3389`）。因此 §2.4 引入 `sessionOwner[sid]`，`send()` 优先取它 —— **命令签名不变，但前端要加一个状态**。
 ## 2. 虚拟 Project：每个插件一个
 
 ### 2.1 定义
@@ -50,46 +51,70 @@
   sessions: [ ... ] }                            // 普通 Session
 ```
 
-- 它下面的 Session 就是**普通 Session**：`new_session` / `list` / `ask` / `interrupt` / `approve` / `switch_model` 全部沿用，`workspace` 传虚拟路径即可 —— **不加 `plugin_id` 二选一**。
+- 它下面的 Session 就是**普通 Session**：`new_session` / `list` / `ask` / `interrupt` / `approve` / `switch_model` 签名全部沿用，`workspace` 传虚拟路径 —— **不加 `plugin_id` 二选一**；但前端要通过 `sessionOwner` 把这个路径注入命令（见 §2.4，评审指出的 blocker）。
 - 运行时：新增 `runtimePlugin`（`runtimeKind` 第三值），装配在 `m.pluginRuntimes[path]`，**不进 `m.workspaces`**；`m.runtime(path)` 先查插件表再走项目表。这样 `workspace_list` / reload / MCP 重放 / cron / git 检测这些遍历 `m.workspaces` 的路径天然看不到它。
 - 存储：`~/.go-code/plugin-sessions/<id>/{home,sessions,events}`（0700）。`home` 是 bash/file 工具的根，卸载不删（D1）。
 - 工具面：照 `runtimeHubAgent` 装配**全局层**（内置 + 用户级 MCP + 全局技能/子代理），**不叠项目层**（虚拟路径没有 `.mcp.json`、没有项目技能）；再叠加该插件自己的工具。
-- 模型：Session 自带既有 `switch_model`，用户自由切换 Provider/Model（D3），插件不能指定。
+- 模型：Session 自带既有 `switch_model`；用户在会话窗口切换 Provider/Model，**行为与普通项目会话完全一致**（D3；现有实现会更新全局 active，见 §9）。插件不能指定。
 
 ### 2.2 与真实 Project / 第三种 Session 的区别
 
 | | 真实 Project | 第三种 Session（旧方案） | **虚拟 Project（选定）** |
 |---|---|---|---|
 | 用户是否要创建 | 要 | 不要 | **不要**（装插件即出现） |
-| Session 命令 | 原生 | 需加 `plugin_id` 解析 | **原生**（`workspace`=虚拟路径） |
+| Session 命令 | 原生 | 需加 `plugin_id` 解析 | **签名原生**（`workspace`=虚拟路径，靠 owner 注入） |
 | 左栏 | 项目分组 | 新分组类型 | **项目分组的变体**（插件徽标） |
 | 文件工具根 | 用户项目 | 插件 home | **插件 home** |
 | 工具面 | 内置+项目层 | 内置+全局层 | **内置+全局层** |
 | 进 workspace_list / 选择器 | 是 | 否 | **否**（`virtual` 过滤） |
 | 卸载后 | 目录还在 | 另建 orphan 分组 | **orphan 插件分组**（虚拟 Project 还在，只读） |
 
-### 2.3 生命周期
+### 2.3 生命周期与 runtime 分支
 
 - 首次出现：插件安装并启用后，`plugin_projects_list` 返回一个虚拟 Project（无需用户操作）。
 - 会话创建：`agent.run` 不带 `session_id` → 新建一条**随机 id** 的普通会话（D4）；带 → 复用。插件想复用就把 id 存自己的 localStorage。
-- 插件停用（enabled=false）：虚拟 Project 仍显示、会话可读；`ask` 拒绝 `denied`（runtime 不装配）。
+- 插件停用（enabled=false）：虚拟 Project 仍显示、会话可读；`ask` 在 **dispatch 前置**拒绝 `denied`（此时 runtime 未装配）。
 - 插件卸载：停止 runtime、取消运行中的 run；虚拟 Project 保留为「已卸载插件」分组，会话只读、可手动删（`plugin_session_delete`）。
 - 插件升级：runtime 重启；虚拟路径与会话不变。
 
-### 2.4 左栏与前端状态
+**`runtimePlugin` 必须逐点分流（评审指出 hub 的安全性分散在 6 个 `kind ==` 判定里，只写"照 hub 装配"不够）**：
 
-- `projects` 里增加 `virtual?: 'plugin'` + `pluginId` + `pluginName`；插件分组带插件图标与「插件」徽标。
-- 必须过滤虚拟 Project 的路径（逐条核过）：
-  - `syncWorkspacesToBridge`（**绝不能写进 workspaces.json**）；
-  - workspace 选择器 / 最近项目 / 置顶；
-  - `loadWsGit` / git 历史 / 文件树刷新（虚拟根不是仓库）；
-  - 项目层 MCP/技能的状态展示。
-- 启动：`plugin_projects_list` 拉虚拟 Project 与其 sessions；普通 `list` 仍只跑真实工作区。
-- 事件：`plugin_projects_changed`（安装/卸载/启用/停用）→ 前端刷新分组；会话增删走既有 `list` 响应。
+| 位置 | runtimePlugin 的行为 | 漏掉的后果 |
+|---|---|---|
+| `createIn` hooks（`main.go:2314`） | 走 `hooksOptionUser`（与 hub 同规） | 读插件 home 的 `.go-code/hooks.json` → 插件写 hooks、宿主执行命令 |
+| `sessionRecordKey()`（`hub_session.go:38`） | `plugin-<id>`（不跟路径） | 目录迁移/改 id 后历史会话"丢失" |
+| `newSessionEngine` 的 sessions root（`main.go:5877`、`4708`、`codemode.go:232`） | 由 runtime 提供 `sessionsRoot`，不再 `wsSessionsDir(workspace)` | 子 agent journal / codemode store 落到错误目录，`delete_session` 删一半 |
+| `deleteSession`（`main.go:4634`） | 用 `resolveRuntime` + `ws.storeDir/eventsDir` | 停不掉运行中的 run、删错目录、会话"删不掉" |
+| `shutdownWorkspace/All`、`deleteWorkspace` | 遍历含插件 runtime | 插件 runtime 不优雅关闭 |
+| mesh 注册（`main.go:2452`）、hub 队列泵（`1009`）、`autoEnablePlugins`（`2107`） | **跳过** | 插件会话进 mesh、被当项目泵队列 |
+| `m.runtime(path)` 未命中插件表 | 若 `isPluginHomePath(path)` → 返回 nil，**绝不**走项目装配 | 造出项目 runtime、把虚拟路径写进 `m.workspaces`、`m.get` nil 解引用 |
+
+### 2.4 会话归属路径（owner path）与前端过滤
+
+**owner path 是 D2 成立的前提**：
+
+- store 增加 `sessionOwner: Record<sid, ownerPath>`；来源：`plugin_projects_list` 水合、`new_session` 回执里新增的 `workspace`（虚拟路径）、`list` 响应按 project 回填。
+- `send()` 的 workspace 取值改为：`payload.workspace || sessionOwner[sid] || state.workspace`（`useAppStore.ts:3974`）；`pending`/prefs/响应校验同样用 owner。
+- `setActiveWorkspace` **不用于**虚拟 Project；打开插件会话走 `openSession(sid, {ownerPath})`，只切 `activeSessionId` 与 owner，不触发 git/skills/browser/resetView 副作用。
+- 新建插件会话：左栏插件分组「新建会话」→ `new_session { workspace: 虚拟路径 }`。
+
+**过滤清单（评审实测 11+ 处；后端不变式见 §2.3，前端只做展示过滤）**：
+
+1. `workspaces.json` 持久化（`syncWorkspacesToBridge` / `persistProjects` 的 `LS_PROJECTS.paths`）；
+2. 启动水合 `for (p of projects) send({type:'list'})` —— 虚拟 Project 走 `plugin_projects_list`；
+3. workspace 选择器 / 最近项目 / 置顶；
+4. `setActiveWorkspace` 的 `workspace_add`、skills、git、browser、`resetView`；
+5. `loadWsGit` / git 历史 / 文件树刷新；
+6. 左栏 per-project 菜单：pin、files、新会话、删除工作区；
+7. `resolveActiveOwner(sid, ws)` → 虚拟路径的 owner 注入（hooks 信任 / IM 路由 / 插件启停）；
+8. 项目层 MCP/技能状态展示；
+9. 手机端：`mobileAllowedCommands` 加 `plugin_projects_list`，并明确 `switch_model` 在手机上原本就不支持（`MOBILE_UNSUPPORTED_COMMANDS`）；
+10. 后端 hub：`ListWorkspaces` / `knownWorkspace` 拒绝虚拟路径；
+11. `workspaceSync` / `workspaceAdd` 入口拒绝（`workspace_registry.sync` 不校验目录，必须显式拦）。
 
 ### 2.5 插件侧看到的身份
 
-插件只知道自己收到的 `session_id` / `run_id`，不知道虚拟路径，也不能选择真实项目；虚拟路径由 bridge 根据 token 里的 `plugin_id` 内部映射。
+插件只知道自己收到的 `session_id` / `run_id`，不知道虚拟路径，也不能选择真实项目；虚拟路径由 main 从 **token 派生**的 `plugin_id` 注入（payload 里**没有** `plugin_id`，见 §4.2），bridge 只信任 main 注入的值。
 ## 3. 能力面（插件看到的）
 
 ### 3.1 HostApi 新增
@@ -146,19 +171,21 @@ host.tools = {
 ```
 插件(renderer) --host.agent.run--> loader(闭包持 token) --IPC surface:agent--> main
    --stdio command surface_agent_run--> bridge
-bridge --event surface_agent_event--> main --webContents.send--> loader --路由 runId--> 插件
+bridge --event surface_agent_event--> main --独立 IPC surface:agent-event--> loader --路由 runId--> 插件
 ```
 
-- token：main 在**插件加载前**签发（`surface:tokens`），loader 捕获真实 `window.desktop` 后把全局对象收窄（L0）；插件拿不到 token。
-- 所有 bridge→插件的 agent 事件只带 `{run_id, session_id, seq, type, data}`；loader 按 run 归属路由，插件看不到别人的。
+- **身份只来自 token**：main 在插件加载前签发 per-plugin token（`surface:tokens`），loader 闭包持有；`surface_agent_*` 的 payload **不带 `plugin_id`**，main 校验 token 后注入 `plugin_id`。防跨插件冒充（评审 #8）。
+- **独立通道**：agent 事件与工具调用走 `webContents.send('surface:agent-event' | 'surface:tool-call')` → preload 暴露 `onSurfaceAgentEvent` / `onSurfaceToolCall`。**不复用** `onEvent`（它广播全部 bridge 事件，任何持有者能看到所有项目/Hub/IM 消息）。`plugin_projects_changed` 走既有 `ui` op。
+- 所有 bridge→插件的 agent 事件只带 `{run_id, session_id, seq, type, data}`；loader 按 run 归属路由。
+- **与 transcript 的关系**：同一 run 的文本既会产生会话视图的 `content_chunk`（权威，进 record/checkpoint），也会产生给插件的 `delta`（派生，不落盘）。`delta` 只是同一流的副本，run 结束以会话 transcript 为准；取消时两边一起停。
 
 ### 4.2 命令（renderer → bridge）
 
 | 命令 | 载荷 | 回执 |
 |---|---|---|
-| `surface_agent_session` | `{plugin_id, title?}` | `{ok, session_id}`（随机 id） |
-| `surface_agent_run` | `{plugin_id, run_id, session_id?, input, instructions?, schema?, tools:"global"\|"none"}` | `{ok, run_id, session_id}`（`session_id` 缺省 = 新建；立即回，流式走事件） |
-| `surface_agent_cancel` | `{plugin_id, run_id}` | `{ok}` |
+| `surface_agent_session` | `{title?}`（plugin_id 由 main 注入） | `{ok, session_id}`（随机 id） |
+| `surface_agent_run` | `{run_id, session_id?, input, instructions?, schema?, tools:"global"\|"none"}` | `{ok, run_id, session_id}`（`session_id` 缺省 = 新建；立即回，流式走事件） |
+| `surface_agent_cancel` | `{run_id}` | `{ok}` |
 | `surface_tool_result` | `{call_id, ok, result?, error?}` | `{ok}` |
 | `plugin_projects_list` | `{}` | `{projects:[{plugin_id,name,enabled,virtual:true,sessions:[...]}]}` |
 | `plugin_session_open` | `{plugin_id, id?, create?}` | 与 `new_session` 同形（内部用虚拟路径） |
@@ -228,14 +255,16 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 
 | 来源 | 插件会话 | 项目会话 | 插件可否修改 |
 |---|---|---|---|
-| 内置（file/bash/todo/subagent/run_python） | ✅ | ✅ | ❌ |
+| 内置（file/bash/todo/run_python/ask_user…） | ✅（见下方 denylist） | ✅ | ❌ |
 | 全局 MCP | ✅ | ✅（+项目层） | ❌ |
 | 全局 subAgents | ✅ | ✅（+项目层） | ❌ |
 | 插件自定义工具 | ✅（自己的） | 需用户授权（默认关） | 只能注册自己的，不能覆盖/隐藏别的 |
 
+**denylist（与"加载所有内置工具"的唯一偏差，理由是权限升级）**：`surface_install` / `surface_remove` / `surface_set_enabled`（插件管理权 = 装卸面板）、`session_send` 与 mesh 类（跨会话/跨节点发消息）、`promote_task` / cron 类（后台持久任务）、`git_worktree`（真实仓库操作）、`memory_dream`（写长期记忆）。装配完成后 `buildLoop` 追加的 office/UI/surface 三组注册也要按 `runtimeKind` 过滤（`main.go:6037`）。
+
 - 注册点：`newSessionEngine` 装配完成后，按 `pluginToolsFor(runtime)` 注册；项目会话在授权变化时热注册/Hide。
 - 命名：`plugin__<id>__<name>`；冲突（与任何已有工具同名）→ manifest 安装即拒绝。
-- 子 agent 继承主引擎 → 插件工具对子 agent 也可用（与现有“继承全部工具”一致）。
+- 子 agent 继承主引擎 → 插件工具对子 agent 也可用（与现有"继承全部工具"一致）。
 - 插件工具**不能**：修改工具集、注册 MCP server、定义 subagent、读取其它工具的 schema/结果。
 
 ## 6. 错误码
@@ -255,18 +284,22 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 
 ## 7. 安全与配额
 
-- **L0 前置**：插件加载前收窄 `window.desktop`（当前 91 个方法，含 `providerKey` / `fsTrash` / 通用 `command`）；插件只能拿 host API。未完成 L0 之前不开 `agent` 能力。
-- **token**：per-plugin capability token，loader 闭包持有；main 校验 token ↔ plugin_id。
+- **L0 前置，但先做 spike**：`contextBridge.exposeInMainWorld` 注入的 `desktop` 是否可被覆写/删除，尚未验证；先跑 10 行探针看属性描述符。
+  - 可覆写 → loader 捕获真对象到模块作用域，再把 `window.desktop` 换成收窄视图；
+  - 不可覆写 → 改为 preload 只暴露收窄对象（宿主代码另走一条内部 IPC），或把插件放进 sandboxed iframe（真正的隔离，成本另算）。
+- **诚实边界**：插件是 `import()` 进宿主**同一 realm** 的，能读同源 `localStorage`（项目路径、会话标题、prefs）、能改宿主全局。L0 是**降低误用**，不是安全边界；真正的边界只有隔离（iframe / 独立 world / 独立 WebContents）。
+- **L0 必删清单**：`onEvent`（广播所有 bridge 事件）、`command`（任意桥命令）、`providerKey` / `providerCopyKey`、全部 `fs*`、`settingsGet/Set`、`oauth*`、`startBridge/stopBridge`、`pick*`、`openPath` / `showItemInFolder`。插件只留 host API。
+- **token**：per-plugin capability token，loader 闭包持有；main 校验 token ↔ plugin_id；payload 不带 plugin_id（§4.1）。
 - **不可信输入**：插件文本以用户消息 + 来源标注进入；不拼 system prompt；schema 校验后再交给插件。
 - **额度**（V1 默认，可在设置页调）：并发 run 1/插件；20 run/小时；input ≤32 KiB；instructions ≤8 KiB；schema ≤16 KiB；单 run ≤10 min；工具结果 ≤64 KiB；取消即停。
 - **可见性**：每次 run 在左栏产生/复用一条插件会话，用户能看到完整 prompt、工具调用、用量，随时停止。
 - **审计**：`surfaces/audit.jsonl` 追加 `{id, action:"agent_run"|"tool_call"|"quote", ts, ok, session?, run?, tool?, bytes?, reason?}`；写失败不影响主流程。
-- **不做**：插件读用户其它会话、插件代点审批、插件指定 provider/模型/密钥、插件自动发送引用、插件修改全局工具集。
+- **不做**：插件读用户其它会话、插件代点审批、插件指定 provider/模型/密钥、插件自动发送引用、插件修改全局工具集、**插件装卸插件**。
 
 ## 8. UI 变更清单
 
 1. 左栏：插件会话分组（§2.4）。
-2. 会话视图：插件徽标；顶部 Provider/Model 选择器与普通会话完全一致（按会话独立）；空态说明「该会话由插件创建，使用全局工具集与当前模型」。
+2. 会话视图：插件徽标；顶部 Provider/Model 选择器与普通会话完全一致（现有 `switch_model` 会更新全局 active，不承诺按会话隔离）；空态说明「该会话由插件创建，使用全局工具集与当前模型」。
 3. 设置页插件行：能力开关（agent.run / quote / tools）、当前会话数、审计入口。
 4. 安装页/回执：能力摘要（自然语言），安装前可见。
 5. 插件面板：`host.agent` / `host.composer` 的示例（SKILL 提供）。
@@ -275,21 +308,21 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 ## 9. 决策记录
 
 - **D1（已定）卸载后的插件会话**：**保留**，左栏「已卸载插件」分组，只读 + 手动删除（`plugin_session_delete`）。
-- **D2（已定）虚拟 Project**：每插件一个虚拟 Project，Session/命令/左栏全部复用，但不绑真实项目、不进 workspace_list、文件工具根在插件 home。比「第三种 Session」省掉命令解析改造，比「真实 Project」少掉爆炸半径与使用门槛。
-- **D3（已定）模型**：建会话时继承全局 active；用户在会话窗口自由切换 Provider/Model（既有 `switch_model`，按会话独立，不改全局）；插件不能指定。
+- **D2（已定）虚拟 Project**：每插件一个虚拟 Project，Session 签名不变、左栏复用项目行；但不绑真实项目、不进 workspace_list、文件工具根在插件 home。**代价不是零**：前端要加 owner path（否则 `switch_model/ask` 全 `session_not_found`）、后端要补 6 处 runtime 分支与 4 道负向守卫、前端 11 处过滤。
+- **D3（已定）模型**：建会话时继承全局 active；用户在会话窗口自由切换 Provider/Model。**与普通项目会话完全一致：现有 `switch_model` 会更新全局 active**（`main.go:3426-3444`）；若要像 Hub 那样"只影响本条会话"，需另开一轮加 `isHub` 同款豁免。插件不能指定。
 - **D4（已定）随机会话 ID**：不做 `session_key` 映射；插件可新建，也可复用自己记住的 id。
 
 ### D2 备选方案的成本对比（存档）
 
 | | 虚拟 Project（选定） | 真实 Project | 第三种 Session |
 |---|---|---|---|
-| Session 命令 | 原生 | 原生 | 需加 `plugin_id` 二选一 |
+| Session 命令 | 签名不变，但前端要加 `sessionOwner[sid]`（N 处过滤） | 原生 | 需加 `plugin_id` 二选一 |
 | 左栏 | 项目分组变体 | 项目分组 | 新分组类型 |
 | 文件工具根 | 插件 home（沙盒） | **用户项目目录** | 插件 home |
 | 工具面 | 内置+全局层 | 内置+项目层（随项目漂移） | 内置+全局层 |
 | 使用门槛 | 装完即用 | 必须先建 Project | 装完即用 |
 | 卸载/清理 | orphan 分组 | 混在项目里 | orphan 分组 |
-| 主要成本 | 过滤虚拟路径（6 处遍历） | 零改造 | 命令解析 + 新 runtime |
+| 主要成本 | runtime 6 处分支 + owner path + 11 处过滤 | 零改造 | 命令解析 + 新 runtime |
 
 **折中（V2，不阻塞）**：虚拟 Project 默认无真实项目；`agent.run({ workspace })` 显式申请一次项目上下文，宿主弹确认「插件 X 想读取项目 Y」，同意后才把文件工具根切过去。
 
@@ -297,13 +330,23 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 
 | 阶段 | 内容 | 估 |
 |---|---|---|
-| **L0** | `window.desktop` 收窄 + token + 探针（插件拿不到 providerKey/fs/command） | 1–2 轮 |
-| **P1** | `runtimePlugin` + 虚拟 Project（左栏/列表/过滤 6 处）+ `agent.run`（流式/schema/配额/审计）+ `composer.quote` | 3 轮 |
+| **L0** | 先 spike（属性可覆写？）+ `window.desktop` 收窄/token/独立 IPC + 探针；不可覆写则改 preload 收窄或 iframe | 1–2 轮（spike 决定上界） |
+| **P1** | `runtimePlugin` + 6 处分支/4 道守卫 + `sessionOwner` + 11 处过滤 + `agent.run` + `composer.quote` | **5–6 轮** |
 | **P2** | manifest `tools[]` + 代理工具 + 工具调用协议 + 审批 + 项目会话授权 | 2–3 轮 |
 | **P3** | 当前会话只读订阅 / 通用 channel（可选） | 2 轮 |
 
 P1 完成即可跑通 PDF 阅读器：选中 → 引用草稿；选中 → 翻译（run → 流式渲染回面板）。
 P2 完成才有「用户在项目会话里说一句，PDF 面板自己更新」。
+
+## 12. 评审吸收（2026-11-14，独立子智能体）
+
+评审结论 **revise**，三条 blocker 已并入本版：
+
+1. **命令拿不到虚拟路径**（renderer 只有一个 `state.workspace`）→ 新增 §2.4 owner path（`sessionOwner[sid]` + `send()` 优先取 + prefs/响应/owner 注入同源）。
+2. **runtime 分支不全**（hooks 走项目分支会读插件 home 的 hooks.json；delete/shutdown/存储根错）→ 新增 §2.3 分流表（7 个点）。
+3. **缺负向守卫**（停用/卸载后 `m.runtime` 会兜底造项目 runtime，把虚拟路径写进 workspaces.json）→ `isPluginHomePath` 在 `m.runtime` / `createOpts` / `workspaceSync|Add` / `knownWorkspace` 四道硬拒绝；"虚拟路径永不进 workspaces.json"是**后端不变式**，不是前端过滤。
+
+其余已吸收：D3 改为"与普通会话一致，切模型会更新全局 active"；工具集加 denylist（surface_*/mesh/cron/promote_task/git_worktree/memory_dream）；agent 事件走独立 IPC、不复用 `onEvent`；plugin_id 由 token 派生；L0 先 spike，且明说"同 realm 下 L0 不是安全边界"；成本 P1 从 3 轮上调到 **5–6 轮**。
 
 ## 11. Skill 同步大纲（`skills/hai-surface-dev/SKILL.md` 新增一节）
 
