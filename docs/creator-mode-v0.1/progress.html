@@ -205,7 +205,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 17:30",
+    "updated": "2026-11-13 21:20",
     "current": "R16"
   },
   "rounds": [
@@ -1116,19 +1116,24 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     },
     {
       "id": "R16",
-      "pr": "（缓冲）",
-      "title": "修复与打磨",
-      "type": "缓冲",
+      "pr": "PR-16",
+      "title": "入口闭环：manifest entries + 三处宿主入口",
+      "type": "能力",
       "est": 2.0,
-      "deps": [],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "deps": ["R14", "R14b", "R14c"],
+      "status": "done",
+      "commit": "R16-entries",
+      "review": "决策记录 D-1/D-2/D-3 落地：manifest.entries 在 Go 侧校验先于写盘（五连 → rejected + index 逐字节不变）；渲染层从 surface:index 读 manifest（index.json schema 不动）→ 入口快照 → 三处宿主入口（＋ 菜单分组「面板插件」/ 空态能力面板 / 设置页「打开」）；plugin 标签身份补上 params.entry，一个入口一个标签。门禁：go vet / TestSurface / tsc / eslint（0 error 59 warning）/ vite build / test:surface-index 4 / verify_plugin_entries 51（新）/ surfaces_page 51 / plugin_loader 50 / plugin_tab_persist 33 / tabbar 89 / surface-boundary 82 / session-tabs 38 全绿；变异 5 条各自必红",
       "perf": [],
       "acc": [
-        "按实际缺陷定"
+        "A. Go：surfaceManifest.Entries + validateSurfaceEntries/validateSurfaceEntryIcon（≤20 / id 唯一合法 / title ≤64 rune / icon 三闸，缺失不阻塞）",
+        "B. 渲染层：electron/surface-index.ts 读 entries + name；surfaces/plugin/entries.ts 快照（唯一写者 = loader）",
+        "C. 三处入口：＋ 菜单「面板插件」分组、空态能力面板、设置页每行「打开」+ 入口提示；启用/停用即时生效",
+        "D. 标签身份 = (kind, params.entry)：同插件多入口并存；标题对已声明 entry 取 manifest，墓碑也保留名字",
+        "E. 模板 templates/surface 三个 entries + panel.js 按 params.entry 分发；SKILL.md 补「Multiple entrances」",
+        "F. 测试：Go 五连 + 往返；读侧 node --test 4 条；e2e verify_plugin_entries 51 项（端口 5231，含零入口默认入口、reload、禁用墓碑）"
       ],
-      "rollback": "—"
+      "rollback": "入口只依赖 manifest.entries + 索引 IPC 两个字段；回滚后插件仍能注册 provider（只是人类打不开），index.json 不受影响"
     }
   ],
   "perf": [

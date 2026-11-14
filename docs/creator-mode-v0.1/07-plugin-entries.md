@@ -74,6 +74,70 @@
 7. **零 entries 的插件**装完后也必然有一个默认入口（不是「加载成功但看不见」）；
 8. 全程 `pageerror = 0`；变异至少覆盖：入口不按 enabled 过滤、点入口不传 `params.entry`、标题不取 manifest —— 各自必须红。
 
+## R16 落地记录（入口闭环）
+
+> 一句话：manifest 声明入口 → Go 在**写盘前**校验 → 渲染层从 `surface:index` 读 manifest →
+> 宿主画三处入口 → `openTab({kind, params:{entry}})` 打开**一个 entry 一个标签**。
+
+**A. manifest 与校验（Go）**
+
+- `desktop/bridge/surfaces.go:133` `surfaceManifest.Entries []surfaceEntryDecl`（`{id,title,icon,order}`，形状见 `:139`）。
+- 校验在 `validateSurfaceSource` 里、**hash 与拷贝之前**：`desktop/bridge/surfaces.go:706`；
+  规则在 `:761` `validateSurfaceEntries`（≤20 项 / id 匹配插件 id 正则且唯一 / title 非空 ≤64 **字符**（rune）/ icon 走路径纪律），
+  图标的路径纪律在 `:799` `validateSurfaceEntryIcon`（绝对路径 / `..` / 反斜杠 / 软链逃逸 = 拒绝；
+  **文件缺失 = 合法**，渲染层用 kind 图标兜底）。任何一条不过 = `rejected`，index 一字节不动。
+- **index.json 的 schema 不动**：entries 是 manifest 字段，读的时候顺带取（下一条）。
+
+**B. 渲染层：索引 → 快照 → 三处入口**
+
+- 索引读取：`desktop/app/electron/surface-index.ts:40`（`SurfaceEntryDecl`）、`:127` `parseEntries`（防御性：坏项丢自己，icon 坏只丢图标）、
+  `:150` `displayName`（zh → en → 任意非空），`:217` 写进 `SurfaceIndexItem.entries`。
+- 入口快照：`desktop/app/src/surfaces/plugin/entries.ts:128` `setSurfaceEntryIndex`（**唯一写者**是 loader 的 `syncOnce`，
+  `desktop/app/src/surfaces/plugin/loader.ts:338`）；`:149` `listPluginEntries`；`:67` `entryItemsOf`（零 entries → 一个默认入口，
+  id = `default`，标题 name → id）；`:99` `groupEntryItems`（三处共用一份分组口径）。
+- 入口 1（右栏 ＋ 菜单）：`desktop/app/src/components/RightPanel.tsx:655`（分组「面板插件」+ 多插件时插件名小标），
+  打开动作 `:238` `openPluginEntry`。
+- 入口 2（空态能力面板）：`RightPanel.tsx:772`（`tabs.length === 0` 那块，与 ＋ 菜单同一份数据）。
+- 入口 3（设置页）：`desktop/app/src/components/SurfacesPage.tsx:56` `onOpen`（第一个 entry）、`:244` 「打开」按钮、
+  `:290` 每行的提示「入口在右栏 ＋ → 面板插件」。
+- 标签标题：`RightPanel.tsx:434` —— **已声明**的 entry 用 manifest 的 title（菜单与标签同名）；
+  默认入口与插件自己 `openTab` 的标签仍归 provider.title。
+- 标签身份：`desktop/app/src/store/useAppStore.ts:1494` / `:1504` `pluginEntryOf` —— plugin 的身份 = `(kind, params.entry)`，
+  所以「课表」和「资源」是**两个标签**（同 kind），点第二个不会把第一个换掉。
+- 图标：`desktop/app/src/surfaces/PluginEntryIcon.tsx`（entry.icon → `pluginAssetUrl`（`loader.ts:109`，与入口模块同一条 base），
+  读不到退回 kind 图标）。
+
+**C. 模板与技能**
+
+- `templates/surface/surface.json`：3 个 entries（总览 10 / 课表 20 / 资源 30）。
+- `templates/surface/panel.js`：一个 render 入口按 `tab.params.entry` 分发三页（零依赖、无 JSX）；
+  没有 params 时落回总览 —— 老标签与「按 kind 直接打开」都不会空白。
+- `skills/hai-surface-dev/SKILL.md`：「Multiple entrances (`entries`)」一节（怎么写、`params` 怎么读、入口在哪三处、
+  零入口的默认入口语义、内部路由归插件）。
+
+**D. 测试与变异**
+
+- Go：`desktop/bridge/surfaces_test.go` 的 `TestSurfaceEntriesRejectedBeforeWrite`（五连：重复 id / 21 项 / 非法 id /
+  title 超 64 / icon 逃逸 → `rejected` + index 逐字节不变 + 无 `<id>` 目录 + 无暂存目录）、
+  `TestSurfaceEntriesRoundTrip`（合法 entries 经 `List` + `Manifest` 原样拿回；缺省 / 空数组 / 图标缺失都合法）。
+- 读侧单测：`desktop/app/electron/surface-index.test.ts`（IPC 被探针整条替掉，这一层没有别的覆盖）。
+- e2e：`desktop/app/e2e/verify_plugin_entries.mjs`（端口 5231，`_serve.mjs` 端口归属自检，51 项）。
+- 变异（真跑 + FAIL + 复原，详见本轮报告）：入口不按 enabled 过滤 / 点入口不传 `params.entry` /
+  标题不取 manifest（用 id）/ 零 entries 不给默认入口 / 设置页「打开」取最后一个 entry —— 各自必红。
+
+**门禁（2026-11-13 全绿）**：`go vet ./...`、`go test ./desktop/bridge -run TestSurface`、
+`tsc --noEmit`、`eslint src`（0 error / 59 warning）、`vite build`、`test:surface-index`（4）、
+`verify_plugin_entries`（51）、`verify_surfaces_page`（51）、`verify_plugin_loader`（50）、
+`verify_plugin_tab_persist`（33）、`e2e:tabbar`（89）、`e2e:surface-boundary`（82）、`e2e:session-tabs`（38）。
+
+**本轮裁决（写在实现里，改动前先读）**
+
+- 多插件分组：一个分组「面板插件」；**多于一个** enabled 插件时，组内每个插件一行名字小标（单插件不画 —— 少一行噪声）。
+- 默认入口标题兜底：`manifest.name.zh` → `name.en` → `name` 里任意非空值 → 插件 id；默认入口的 `params.entry` 固定 `default`。
+- 设置页文案：「打开」+「入口在右栏 ＋ → 面板插件」；停用后按钮置灰、提示换成「启用后入口才会回到右栏」。
+- 已知偏差：模板 id 仍是 `cost-board`（`verify_plugin_loader` T10 按这个 id 断言真模板渲染，改名会打红既有门禁），
+  三个 entry 的标题按本轮任务取「总览/课表/资源」，D-2 里的 `course-manager` 例子只示意形状。
+
 ## 明确不做（V0.1）
 
 - 通用存储 API、文件读写、网络白名单；
