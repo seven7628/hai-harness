@@ -19,6 +19,8 @@
 | D7 | 引用 | 只插草稿，绝不自动发送 |
 | D8 | 工具面 | 内置 + 全局 MCP + 全局 subAgents；**denylist** 见 §7；允许 `memory_dream`；插件只能**新增**自己的工具，不能改既有集合 |
 | D9 | Agent 事件 | 独立 IPC 通道，按插件/run 过滤；不复用全局 `onEvent` |
+| D10 | 插件工具范围 | **只在它自己的虚拟 Project/会话内生效**；不注册到任何真实 Project 会话，也不跨插件 |
+| D11 | 旧只读命令 | `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect` **全部禁用**（防碰 Project）；surface 相关命令/工具全禁 |
 
 ---
 
@@ -27,7 +29,7 @@
 ### 目标
 1. 插件面板能发起 Agent 任务（翻译、总结、查询），流式拿结果并渲染回自己的面板。
 2. 插件能把选中文本放进当前会话草稿（用户手动发送）。
-3. 插件能向 Agent 注册工具，让用户在任意会话里让 Agent 调用它（默认仅插件会话，项目会话需授权）。
+3. 插件能向 Agent 注册工具，让 Agent 在**该插件自己的虚拟 Project/会话**里调用它（D10：不进真实 Project 会话）。
 4. 插件会话出现在左栏，用户可查看、停止、切换模型，与普通会话同构。
 5. 上述能力都建立在「插件只能做声明过的事」之上，而不是「装插件 = 交出整个应用」。
 
@@ -196,9 +198,10 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 | `composer.quote` | `{ text, source? }` | `{ok, reason?}` | 只插草稿 |
 | `ui.open_tab` | `{ kind, params? }` | `{ok}` | 只能开自己的 kind |
 | `ui.toast` | `{ message }` | `{ok}` | 一行提示 |
-| `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect` | 各自既有载荷 | 既有回执 | 保留的只读命令（兼容现有插件） |
 
 未在 manifest `commands[]` 声明 → `not_declared`；声明了但不在宿主表 → `denied`。
+
+**旧只读命令（`workspace_list` / `session_list` / `git_snapshot` / `ui_inspect`）已移除**（D11）：它们能读到真实项目/会话元数据，与「插件不碰 Project」冲突。manifest 里声明这些名字 → 安装时按未知命令拒绝（给出明确 reason），运行时即使绕过也 `denied` 并审计。P1 同步更新模板与 SKILL。
 
 ### 5.2 `onEvent` 清单
 
@@ -315,7 +318,7 @@ host.onEvent('tool.call', async (ev) => {
 
 ### 7.1 允许（插件会话）
 
-内置 file / bash / edit / glob / grep / run_python / todo / ask_user / agent_spawn 系列 / codemode / office / artifact_read / **memory_dream**；全局 MCP；全局 subAgents；插件自己的工具。
+内置 file / bash / edit / glob / grep / run_python / todo / ask_user / agent_spawn 系列 / codemode / office / artifact_read / **memory_dream**；全局 MCP；全局 subAgents；插件自己的工具。**所有这些只在插件自己的虚拟 Project 内可用**（D10）。
 
 ### 7.2 denylist（能操作宿主/其它会话/其它插件的一律不给）
 
@@ -323,12 +326,13 @@ host.onEvent('tool.call', async (ev) => {
 |---|---|---|
 | `surface_install` / `surface_remove` / `surface_list` | 面板插件安装/卸载/清单 | 插件能装卸插件 = 权限升级；prompt injection 可装恶意面板 |
 | `session_send` / `session_list` | Session Mesh：给其它会话/节点发消息 | 跨会话注入、内容外发 |
-| `workspace_create` / `workspace_list`? | 创建/列出真实工作区 | 插件不该操作项目清单（`workspace_list` 保留为 command 的只读版本，不给工具） |
+| `workspace_create` | 创建真实工作区 | 插件能批量建项目污染 `workspaces.json` |
 | `session_create` / `assign_task` / `handoff` / `handoff_ack` / `group_*` / `task_*` / `agent_status` | Hub 多智能体/任务板 | 插件不该编排 Hub、改写任务状态 |
 | `promote_task` / cron 类 | 后台持久/定时任务 | 用户不看着时持续消耗 token 与写盘 |
 | `git_worktree` | 真实仓库操作 | 插件 home 不是仓库；用户明确不需要 |
+| `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect` | 旧只读命令（已从 command 表移除） | 能读真实项目/会话元数据，与「不碰 Project」冲突（D11） |
 
-> `workspace_create` 若保留在插件会话，插件可批量建项目污染 `workspaces.json`；按"能操作宿主"剔除。只读的 `workspace_list` 走 `host.command`（既有只读命令），不作为工具。
+> `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect` 既不是工具、也从 command 表移除（D11）——它们能读真实项目/会话元数据。
 
 ### 7.3 插件工具
 
@@ -336,7 +340,7 @@ host.onEvent('tool.call', async (ev) => {
 - 冲突（与任何已有工具同名）→ 安装即拒绝。
 - 调用走 `tool.call` / `tool.result`；插件侧无 register API。
 - 子 agent 继承主引擎 → 插件工具对子 agent 可用。
-- 默认只在**插件会话**可用；项目会话需用户在设置页授权（默认关）。
+- **只在插件自己的虚拟 Project/会话内注册**（D10）：不进入任何真实 Project 会话，不跨插件；没有"授权到项目会话"这个开关。
 - 插件工具不能修改工具集、注册 MCP、定义 subagent、读别的工具的 schema/结果。
 
 ---
@@ -403,22 +407,23 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 ### P1（5–6 轮）
 - Go：`runtimePlugin` + 7 点分流 + 4 道负向守卫 + `plugin_projects_list` + `plugin_session_open/delete` + `agent.session/run/cancel` + 配额/审计。
 - Renderer：`sessionOwner` + 11 处过滤 + 左栏插件分组 + loader 的 `command/onEvent` + `composer.quote`。
+- 模板/SKILL：移除旧只读命令示例；manifest 校验拒绝已移除的命令名。
 - 测试：会话归属、模型切换、卸载保留、跨插件拒绝、quota。
 
 ### P2（2–3 轮）
-- manifest `tools[]` + 代理工具 + `tool.call/result` + 审批 + 项目会话授权 + denylist 断言。
+- manifest `tools[]` + 代理工具 + `tool.call/result` + 审批 + denylist 断言（工具只在插件自身会话注册，D10）。
 
 ### P3（可选，2 轮）
 - 当前会话只读订阅；通用 channel；iframe 隔离预研。
 
 **P1 完成**即可跑通 PDF 阅读器：引用草稿 + 翻译流式回面板。
-**P2 完成**才有「用户在项目会话里说一句，PDF 面板自己更新」。
+**P2 完成**才有「在插件自己的会话里让 Agent 调插件工具（如 PDF 面板自己更新）」；真实 Project 会话永远不加载插件工具（D10）。
 
 ---
 
 ## 11. Skill 同步（`skills/hai-surface-dev/SKILL.md` 新增一节）
 
-1. 两个口子：`command` / `onEvent`；一张「什么时候用哪个」表。
+1. 两个口子：`command` / `onEvent`；一张「什么时候用哪个」表；**旧只读命令已移除**（D11）。
 2. manifest 声明示例 + 安装页会展示什么。
 3. `agent.run` recipe：新建/复用 `session_id`、schema、`agent.delta/done/error`、取消；id 存插件自己的 localStorage。
 4. `tool.call` / `tool.result` recipe：manifest 对齐、`read_only`、`requires_panel`、超时、结果上限。
@@ -434,7 +439,8 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 |---|---|---|
 | 同 realm 残留（localStorage / 全局篡改） | 已知 | V2 iframe/独立 WebContents；V1 明说不构成安全边界 |
 | dev HMR 二次 claim | 页面 reload 会重跑 preload；模块热替换极端场景可能拿不到 | dev 用注入 fake；生产以门禁为准 |
-| 插件工具在项目会话 | 默认关 | 设置页显式授权后开 |
+| 插件工具误入项目会话 | 设计上不存在（D10） | 装配点只对 `runtimePlugin` 注册；门禁断言项目会话看不到 `plugin__*` |
+| 旧插件使用已移除的只读命令 | 会 `not_declared` / 安装拒绝 | P1 更新模板与 SKILL；安装回执给出明确 reason |
 | `surface_list` 是否放行 | 暂禁 | 若需要只读清单，单独评审 |
 | 工具 denylist 随版本漂移 | 新工具默认拒绝（白名单式装配） | 装配时用 allowlist，新增工具需显式放行 |
 
