@@ -8,10 +8,11 @@
 //
 // 墓碑（unavailable）与崩溃卡放在同一个文件：两者都是「内容区的占位」，视觉与文案同源，
 // 分成两个文件只会让「禁用后到底渲染哪个」变成两处判断。
-import { Component } from 'react'
+import { Component, useState } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
 import { useT } from '../i18n'
 import { AUTO_DISABLE_AFTER, disableSurface, enableSurface, recordMountFailure, recordMountSuccess } from './health'
+import { pluginIDOf, setSurfaceEnabled, surfaceReasonText } from './manage'
 import type { SurfaceKind } from './types'
 
 /** 墓碑原因：disabled = 被禁用（自动或手动）；missing = 插件 provider 没注册（插件缺失）。 */
@@ -46,7 +47,15 @@ function CrashCard({ kind, title, err, onRetry, onDisable }: {
 
 /**
  * 面板占位（墓碑）：provider 缺失或被禁用时**不渲染 provider**，只说明原因并给两个动作。
- * 「重新启用」走 enableSurface（同一份禁用集），「移除标签」走调用方的 closeTabNow。
+ * 「移除标签」走调用方的 closeTabNow。
+ *
+ * 「重新启用」有两条路（PR-14b），按 kind 分：
+ *   · 内置 kind：只清 health 的本地禁用集（enableSurface）—— 它没有磁盘上的启用位；
+ *   · `plugin:<id>`：**先**让桥把 index 里的 enabled 翻回 true（surfaceSetEnabled），
+ *     **再**清本地禁用集。顺序不能反：index 还写着 false 时 loader 不会注册 provider，
+ *     本地先清掉只会得到一个「灰着但点了没反应」的墓碑 —— 而桥写成功会推
+ *     surfaces_changed，loader 下一轮就把 provider 注册回来，标签自己复活。
+ *     失败（unknown_id / bad_request / error）就在墓碑里说一句，不弹 alert。
  */
 export function SurfaceTombstone({ kind, title, reason, auto, onRemove }: {
   kind: SurfaceKind
@@ -57,21 +66,45 @@ export function SurfaceTombstone({ kind, title, reason, auto, onRemove }: {
   onRemove: () => void
 }) {
   const t = useT()
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
   const why = reason === 'missing'
     ? t('rp.surface.missing')
     : (auto ? t('rp.surface.autoDisabled') : t('rp.surface.manualDisabled')).replace('{n}', String(AUTO_DISABLE_AFTER))
+  const enable = async () => {
+    const pluginId = pluginIDOf(kind)
+    setErr('')
+    // 没有 IPC 时（浏览器里 npm run dev / 老 preload）退回 PR-10 的行为：这时本地禁用集
+    // 是**唯一**能解的那一份，拿它去要求磁盘那一份等于让按钮永久失效。
+    if (!pluginId || !window.desktop?.surfaceSetEnabled) {
+      enableSurface(kind) // 内置 kind：与 PR-10 一样，只有本地禁用集
+      return
+    }
+    setBusy(true)
+    try {
+      const r = await setSurfaceEnabled(pluginId, true)
+      if (!r.ok) {
+        setErr(surfaceReasonText(t, r.reason))
+        return
+      }
+      enableSurface(kind) // index 已同意 → 再清本地禁用集（顺序见文件头的注释）
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <div className={`surface-tombstone ${reason}`} data-kind={kind} data-reason={reason} role="status">
       <div className="surface-tombstone-title">{title}</div>
       <div className="surface-tombstone-why">{why}</div>
       <div className="surface-tombstone-actions">
         {reason === 'disabled' && (
-          <button className="surface-tombstone-enable" onClick={() => enableSurface(kind)}>
+          <button className="surface-tombstone-enable" disabled={busy} onClick={() => void enable()}>
             {t('rp.surface.enable')}
           </button>
         )}
         <button className="surface-tombstone-remove" onClick={onRemove}>{t('rp.surface.removeTab')}</button>
       </div>
+      {err && <div className="surface-tombstone-why" data-tombstone-error>{err}</div>}
     </div>
   )
 }
