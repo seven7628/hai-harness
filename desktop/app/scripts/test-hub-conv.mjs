@@ -306,6 +306,25 @@ const eq = (got, want, m) => {
   eq(waiting.segments.find((s) => s.key === 'chain').tone, 'warn', '深度到限标黄')
   eq(waiting.segments.find((s) => s.key === 'queue').tone, '', '队列为空不标黄')
   assert(waiting.segments.some((s) => s.key === 'terminal' && s.text === '队列已排空，等你继续'), '终态段')
+  eq(waiting.canStop, false, '队列为空 → 没东西可停（waiting_human 不算 active）')
+
+  // —— P7-04：waiting_human + 队列非空（429 退避/目标忙）不能再说「队列已排空」 ——
+  eq(conv.conversationTerminalText({ status: 'waiting_human', queue_len: 0 }), '队列已排空，等你继续',
+    'P7-04：队列真的空了才说「已排空」')
+  eq(conv.conversationTerminalText({ status: 'waiting_human', queue_len: 3 }), '队列继续中（3 条待投递）',
+    'P7-04：队列还有 3 条 → 队列继续中（不能谎报排空）')
+  eq(conv.conversationCanStop({ status: 'waiting_human', queue_len: 3 }, false), true,
+    'P7-04：waiting_human + 队列非空 → 确实有东西可停')
+  eq(conv.conversationCanStop({ status: 'waiting_human', queue_len: 0 }, false), false,
+    'P7-04：waiting_human + 队列为空 → 不可停')
+  eq(conv.conversationCanStop({ status: 'stopped', queue_len: 3 }, false), false, 'stopped 一律不可停（即使队列非空）')
+  const waitingQueued = conv.conversationBarModel({
+    conversation: { status: 'waiting_human', queue_len: 2, pair_limit: 10 }, now,
+  })
+  eq(waitingQueued.segments.find((s) => s.key === 'terminal').text, '队列继续中（2 条待投递）',
+    'P7-04：状态条终态段说队列继续中')
+  eq(waitingQueued.segments.find((s) => s.key === 'queue').tone, 'warn', '队列非空 → 队列段标黄')
+  eq(waitingQueued.canStop, true, 'P7-04：状态条上停止按钮可用')
 
   // —— 失败投递：段标红 + 一句话原因（未知码也读得懂） ——
   const failed = conv.conversationBarModel({

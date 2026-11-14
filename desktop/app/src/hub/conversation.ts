@@ -142,7 +142,13 @@ export function conversationTerminalText(conv?: HubConversation | null): string 
     // 兜底不提轮数：生产不设轮次上限，命中的只会是深度/同对/同内容等护栏。
     return '自动对话已达上限，等你继续'
   }
-  if (conv.status === 'waiting_human') return '队列已排空，等你继续'
+  if (conv.status === 'waiting_human') {
+    // P7-04：队列里还有东西（429 退避 / 目标忙）时不能说「队列已排空」—— 那会让
+    // 人以为已经没有待投递的唤醒，实际队列还在继续泵。0 条时才保留原文案。
+    const queue = Math.max(0, Math.floor(conv.queue_len ?? 0))
+    if (queue > 0) return `队列继续中（${queue} 条待投递）`
+    return '队列已排空，等你继续'
+  }
   return ''
 }
 
@@ -150,14 +156,16 @@ export function conversationTerminalText(conv?: HubConversation | null): string 
  * 停止按钮是否可用：**确实有东西可停**才允许。
  * - active（流式草稿/成员在跑/已派发或运行中的群任务）优先：工具型长任务
  *   可能没有草稿、也没有 running 的对话视图，任务状态是唯一信号（B7）；
- * - 否则只有 running/exhausted 且队列里还有 wake 才可停；
+ * - 否则 running/waiting_human/exhausted 且队列里还有 wake 才可停
+ *   （waiting_human + 队列非空 = 429 退避/目标忙，队列还在继续泵，确实有东西可停）；
  * - stopped 一律禁用；idle 没有 active 时也禁用。
  */
 export function conversationCanStop(conv: HubConversation | null | undefined, active: boolean): boolean {
   if (conv?.status === 'stopped') return false
   if (active === true) return true
   if (!conv) return false
-  if (conv.status !== 'running' && conv.status !== 'exhausted') return false
+  const status = conv.status
+  if (status !== 'running' && status !== 'waiting_human' && status !== 'exhausted') return false
   return (conv.queue_len ?? 0) > 0
 }
 
