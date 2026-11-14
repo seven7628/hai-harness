@@ -12,9 +12,9 @@
 |---|---|
 | `index.html` 的 `<style>` | `desktop/app/src/hub/demo.css`（选择器统一加 `.hub-demo` 作用域，声明未改） |
 | `.chat-header` / `.messages` / `.messages-inner` / `.msg-row` / `.agent-head` / `.agent-text` / `.user-bubble` / `.owner-avatar` / `.event-card` / `.composer` DOM | `ConversationMessage.tsx`、`MessageBubble.tsx`、`TaskResultCard.tsx`、`TaskArtifacts.tsx`、`GroupView.tsx`、`HubSurface.tsx` |
-| `mascot-bots.js` | `desktop/app/src/hub/vendor/mascot-bots.js` 与 `desktop/bridge/mobile_web/mascot-bots.js` |
-| `luna-face.js` | `desktop/app/src/hub/vendor/luna-face.js` 与 `desktop/bridge/mobile_web/luna-face.js` |
-| `avatar()` / `groupAvatar()` / 配色规则 / 状态表情 | `lunaAvatar.ts`（桌面）与 `mobile_web/app.js` 的 `hubSigil()`（手机） |
+| `mascot-bots.js` | `desktop/app/src/hub/vendor/mascot-bots.js`（旧 `mobile_web/mascot-bots.js` 已随 P8-03b 退役） |
+| `luna-face.js` | `desktop/app/src/hub/vendor/luna-face.js`（旧 `mobile_web/luna-face.js` 已随 P8-03b 退役） |
+| `avatar()` / `groupAvatar()` / 配色规则 / 状态表情 | `lunaAvatar.ts`（桌面/手机共用 `src/hub/avatar.ts`；旧 `mobile_web/app.js` 的 `hubSigil()` 已随 P8-03b 退役） |
 
 `mascot-bots.js` 唯一的改动：末尾在 CommonJS 导出之外始终写 `globalThis.LUNA_BOTS`，保证 Vite/Rollup 打包后 `luna-face.js` 仍能拿到几何表；几何/眼形/动效未改。
 

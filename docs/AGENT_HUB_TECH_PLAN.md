@@ -2273,8 +2273,8 @@ loopOpts = append(loopOpts, agents.WithMemoryInjection(res.Injection.Text))
   `hub_task_list` / `hub_need_list` / `hub_mark_read` 读写同一份存储；断线重连后重拉
   快照不重复、终态卡仍在；`hub_conversation_stop` 之后队列里的成员不再启动、不再写
   智能体 final（含线上事件顺序断言）。390×844 真实浏览器测量见
-  `desktop/app/scripts/check-mobile-390.mjs`（Playwright Chromium）；iOS Safari 真机
-  本轮**未**验证（显式 defer，见 P4-03d 交付记录）。
+  `check:mobile-hub` / `check:mobile-session`（Playwright Chromium；旧 `check-mobile-390.mjs`
+  已在 P8-03b 随旧页退役）；iOS Safari 真机本轮**未**验证（显式 defer，见 P4-03d 交付记录）。
 - IM 桥（`im_bridge.go`）可以把「群组消息」映射到飞书/微信，但这是 P4；v1 只做桌面。
 - 事件协议保持「未知事件忽略」，所以新增 `hub_*` 不会破坏旧客户端。
 

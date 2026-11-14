@@ -1,3 +1,5 @@
+> **P8-03b 注记（2026-11-13）**：本文中的 `test:mobile-hub` / `test:mobile-390` / `desktop/bridge/mobile_web/*` 是 P4 当时的历史入口；旧手机页已退役，现行手机验收见 `MOBILE-UI-REUSE.md` 的 `test:mobile-static` / `check:mobile-hub` / `check:mobile-session`。
+
 # P4 最终复盘与已知限制
 
 > 状态：P4-05 收口中。P4-01 回滚开关已补齐（`2b44d4e`），待终审 delta。
