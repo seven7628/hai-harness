@@ -90,7 +90,7 @@ Hub 屏幕要求：
 - 会话页直接渲染 `<CenterPanel variant="mobile" />`：`Narrative` / `ApprovalPanel` / `AskUserQuestionPanel` / `Composer` 原样复用；只隐藏 `RecentBar` 与手机不支持的模型/模式/Effort/附件入口。
 - `ask_batch` 加入手机 allowlist（与 `ask` 同一能力：用户消息进会话 inbox），发送走桌面 Composer 的暂存队列整队推送。
 - 首屏 220KB；点「会话」额外 5.8KB；会话页 chunk 649KB 按需加载，仍含桌面 store/mock（复用代价，首屏边界保持 0）。
-- 已知既有缺陷：`Narrative` 一轮内「交卷边界后又来工具」时折叠键会弹回；桌面/手机同一份代码，建议单独 follow-up。
+- 既有缺陷已修（P8-04，`651b012` / merge `57d6d76`）：`Narrative` 交卷边界后又来工具时，settle mark 不再被当前 `items.length` 覆盖，Worked 盒 state key 保持 `turn#1`，点开不再弹回；内容整体替换时仍按 lastId 失效重建。
 
 ## 4. 测试
 
