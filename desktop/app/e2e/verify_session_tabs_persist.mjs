@@ -188,6 +188,8 @@ try {
       rows,
       barVisible: !!document.querySelector('.rtabs'),
       railVisible: !!document.querySelector('.right-rail .rbtn'),
+      // 折叠态下「现在是哪个面板」的唯一 DOM 出口 = rail 上带 .on 的那个按钮
+      railOn: document.querySelector('.right-rail .rbtn.on')?.getAttribute('data-kind') ?? '',
     }
   })
   const stored = () => page.evaluate(([k]) => localStorage.getItem(k), [LS_TABS])
@@ -238,7 +240,10 @@ try {
   check('激活标签恢复（web，不是回落 activity）', after.activeKind === 'web', JSON.stringify({ activeKind: after.activeKind, tab: after.tab }))
   // 与上一条同源（面板 = 激活标签，没有第二份状态可漂移）：保留这一条是为了守住
   // 「P2 恢复出来的面板是 web」这个契约本身，不是重复计数 —— 两者分开读才不会在改判据时一起错。
-  check('恢复后的面板是 web（内容区与标签条一致）', after.tab === 'web', JSON.stringify(after.tab))
+  // 收起态的「面板」只有 rail 看得见 → 顺带钉住 rail 高亮也来自同一个选择器
+  //（R11b 删掉 state 里的副本后，这是 rail 唯一还能错的地方：读了一份自己算的值）。
+  check('恢复后的面板是 web（收起态由 rail 高亮证明）', after.tab === 'web' && after.railOn === 'web',
+    JSON.stringify({ tab: after.tab, railOn: after.railOn, railVisible: after.railVisible }))
   check('**没有**展开右栏（恢复 ≠ 激活）', after.expanded === false, JSON.stringify(after.expanded))
   check('**没有**收起左栏', after.left === true, JSON.stringify(after.left))
   check('重启后视图池为空（恢复不 eager 创建 WebContentsView）', after.pool.length === 0, JSON.stringify(after.pool))

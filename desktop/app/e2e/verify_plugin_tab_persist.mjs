@@ -138,7 +138,7 @@ await import('../../src/surfaces/builtin') // 副作用注册（F45）
 const { getSurface, listSurfaces } = await import('../../src/surfaces/registry')
 const { setPluginBaseUrlForTest } = await import('../../src/surfaces/plugin/loader')
 setPluginBaseUrlForTest((id) => \`/e2e/_plugintabprobe_run/plugins/\${id}\`)
-const { useAppStore } = await import('../../src/store/useAppStore')
+const { useAppStore, selectRightTab } = await import('../../src/store/useAppStore')
 
 useAppStore.setState({ workspace: ${JSON.stringify(WS)} })
 
@@ -183,6 +183,8 @@ const scopeOf = (s: { activeSessionId?: string; workspace?: string }) => s.activ
       kinds: (set?.tabs ?? []).map((t) => t.kind),
       params: Object.fromEntries((set?.tabs ?? []).map((t) => [t.kind, (t as { params?: unknown }).params ?? null])),
       activeKind: (set?.tabs ?? []).find((t) => t.id === set?.activeId)?.kind ?? '',
+      // 面板（产品读的是这个选择器）：plugin 是第五种 kind，选择器不许把它当「未知」而返回空
+      kind: selectRightTab(s) ?? '',
       ids: (set?.tabs ?? []).map((t) => t.id),
     }
   },
@@ -313,7 +315,9 @@ try {
   const t2tab = await tabs()
   check('重启后标签还在（kind 仍是 plugin:demo）', t2tab.kinds.join(',') === ORDER, JSON.stringify(t2tab.kinds))
   check('重启后 params 往返（store 里仍是 {"a":1}）', JSON.stringify(t2tab.params['plugin:demo']) === '{"a":1}', JSON.stringify(t2tab.params))
-  check('激活的仍是它（不是回落到 git/activity）', t2tab.activeKind === 'plugin:demo', JSON.stringify(t2tab.activeKind))
+  check('激活的仍是它（不是回落到 git/activity）',
+    t2tab.activeKind === 'plugin:demo' && t2tab.kind === 'plugin:demo',
+    JSON.stringify({ activeKind: t2tab.activeKind, kind: t2tab.kind }))
   await expand(true)
   const rowTomb = await page.evaluate(() => {
     const el = document.querySelector('.rtab[data-kind="plugin:demo"]')

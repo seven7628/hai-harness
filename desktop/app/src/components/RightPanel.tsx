@@ -452,6 +452,9 @@ export default function RightPanel() {
               : 0
             return (
               <button key={tab.key} className={`rbtn ${activeKind === tab.key ? 'on' : ''}`}
+                // data-kind：折叠态下「现在是哪个面板」唯一的机器可读出口（展开态看标签条的
+                // data-kind）。R11b 删掉 state 里的面板字段后，rail 高亮是选择器唯一的 DOM 证人。
+                data-kind={tab.key}
                 data-tip={tab.label}
                 aria-label={tab.label}
                 onClick={() => {
