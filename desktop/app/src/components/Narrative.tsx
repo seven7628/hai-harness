@@ -9,7 +9,7 @@ import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPin
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, segmentUsage, selectTurns, settleIndexOf, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, rememberSettleMark, runningBody, runWorkBody, segmentUsage, selectTurns, settleIndexOf, settleMarkValid, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
@@ -1337,9 +1337,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        「下标还在、且那一段最后一块仍是同一块」时才算数 —— 轮的内容被整体替换
        （分页 / 重放 / 测试夹具重灌块，同一个 turn key 被复用）就作废。 */
     const settleRec = settledAtRef.current.get(turn.key)
-    const settleAt = settleRec && settleRec.at > 0 && settleRec.at <= turn.items.length && turn.items[settleRec.at - 1]?.id === settleRec.lastId
-      ? settleRec.at
-      : undefined
+    const settleAt = settleMarkValid(settleRec, turn.items) ? settleRec.at : undefined
     if (settleRec && settleAt == null) settledAtRef.current.delete(turn.key)
     const rawLive = turnLive({ isLast: ti === turns.length - 1, turnRunning: sameRun && turn.running, runEnded, sameRun })
     /* 结算过、且**没有新块**时，`live` 再被点亮也不认（渲染层面）。
@@ -1396,8 +1394,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 缺 agent_start 时，`live` 会在运行中途读成 false，把「跑了一半」记成「结算过」，
     // 随后插话 / 续跑的块被切到第二段、整轮凭空多一个盒子（实测 test:transcript 场景 C）。
     if (runEnded && ti === turns.length - 1 && turn.answer && !turn.answer.streaming && !turn.running) {
-      const at = turn.items.length
-      settledAtRef.current.set(turn.key, { at, lastId: turn.items[at - 1]?.id })
+      // 旧边界仍有效就不要往后挪：AgentEnd 之后又来的工具/记录不能把多段缩回一段，
+      // 否则 Worked 盒的 state key 从 turn#1 切回 turn，刚点开的盒子会弹回收起。
+      settledAtRef.current.set(turn.key, rememberSettleMark(settleRec, turn.items))
     }
     const runs = concise && skin === 'runtime' ? turnRuns(turn, settleAt) : []
     const multiRun = runs.length > 1
