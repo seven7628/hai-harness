@@ -23,6 +23,7 @@ const FILES = [
   'src/hub/hub.css',
   'src/hub/HubInlineTodos.css',
   'src/hub/CollapsibleMarkdown.css',
+  'src/mobile/mobile.css',
 ]
 
 let bad = 0
