@@ -1961,7 +1961,7 @@ const previewOwnedViews = new Set<string>()
 // 「Browser Use 接管视界」的语义，用在预览上是误伤）。
 function focusWebTabIfClosed(): void {
   const st = useAppStore.getState()
-  if (st.rightExpanded && st.rightTab === 'web') return
+  if (st.rightExpanded && selectRightTab(st) === 'web') return
   st.focusBrowserForPreview()
 }
 
@@ -2371,7 +2371,7 @@ function subscribeEmbedEvents(): void {
     // 只认「激活 且 面板可见」：仅激活而面板收起（如自动打开时的顺延）不算看过 —— 否则
     // 切会话/后台动作会把未读点悄悄吃掉，用户永远不知道有产出在等他。
     const stv = useAppStore.getState()
-    if (nav.activeId && stv.rightExpanded && stv.rightTab === 'web' && stv.unreadViews.includes(nav.activeId)) {
+    if (nav.activeId && stv.rightExpanded && selectRightTab(stv) === 'web' && stv.unreadViews.includes(nav.activeId)) {
       stv.markPreviewSeen(nav.activeId)
     }
     // —— 内嵌页面 → 面板级 web 标签（阶段 1.5）——
@@ -2769,7 +2769,7 @@ function scheduleGitRefresh(sid: string, history = false): void {
     cur.loadGitSnapshot()
     if (reloadHistory) cur.loadGitHistory()
     // 变更 tab 打开时保持工作区级快照同步（双层一致性；无会话场景由 tab 自身 stale 重拉兜底）
-    if (cur.rightTab === 'git') cur.loadWsGit()
+    if (selectRightTab(cur) === 'git') cur.loadWsGit()
   }, 500)
 }
 // —— 启动水合门控（2026-08-16）：list 水合尚未完成时，首次 ask 只缓冲不自动建会话 ——
@@ -11425,7 +11425,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const next: TabSet = { tabs, activeId: activate ? id : (set0.activeId ?? id), closed: set0.closed }
     // 文件标签的 60% 宽规则（原 setRightTab 内联）：只在「首次进入 / 从折叠态打开」时给，
     // 已在文件标签内手动调宽后不反复重置（L1 的 G1-G4 钉住这三条口径）。
-    const shouldSizeFile = spec.kind === 'file' && (s.rightTab !== 'file' || !s.rightExpanded)
+    const shouldSizeFile = spec.kind === 'file' && (selectRightTab(s) !== 'file' || !s.rightExpanded)
     const sizePatch = shouldSizeFile && typeof window !== 'undefined'
       ? { rightSize: Math.round(window.innerWidth * 0.6) }
       : {}
@@ -11647,7 +11647,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   focusBrowserForUse: (fromSid?: string) => {
     const st = get()
     if (fromSid && fromSid !== st.activeSessionId) return // 别的会话：不展开、不收左栏
-    if (st.rightExpanded && st.rightTab === 'web') return // 要求 2：已打开不重复
+    if (st.rightExpanded && selectRightTab(st) === 'web') return // 要求 2：已打开不重复
     st.focusBrowser() // 要求 1+3：打开或收起后重开
   },
   // §3.1（R2）预览统一入口：所有「预览本地文件」的动作都走这里 → 内嵌浏览器**新建标签**。

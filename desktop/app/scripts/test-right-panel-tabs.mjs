@@ -299,8 +299,14 @@ async function main() {
     eq(st().rightExpanded, true, 'F4 Browser Use → 展开右栏')
     eq(st().leftExpanded, false, 'F5 Browser Use → 收起左栏（「接管视界」语义）')
 
-    // focusBrowserForUse：已打开（展开且在 web）时不重复
-    reset({ activeSessionId: S1, rightExpanded: true, rightTab: 'web', leftExpanded: true })
+    // focusBrowserForUse：已打开（展开且在 web）时不重复。
+    // R11b：「已在 web 标签」现在只能由**标签集**表达（右栏读的是激活标签的 kind，
+    // 旧字段的 seed 只写了一份副本，选择器看不到）。故 seed 一个激活的 web 标签，
+    // 而不是写 rightTab —— 这正是「两份真相」在探针里的样子。
+    reset({
+      activeSessionId: S1, rightExpanded: true, leftExpanded: true,
+      tabsByScope: { [S1]: { tabs: [{ id: 'tw', kind: 'web' }], activeId: 'tw', closed: [] } },
+    })
     st().focusBrowserForUse()
     eq(st().leftExpanded, true, 'F6 已在 web 标签 → 不重复触发（不收左栏）')
 
@@ -340,11 +346,18 @@ async function main() {
     st().setRightTab('file')
     eq(st().rightSize, before, 'G2 离开再回来 → 不重置宽度（只在 rightTab!==file 或未展开时给）')
 
-    reset({ activeSessionId: S1, rightExpanded: true, rightTab: 'file', rightSize: 700 })
+    // 「已在文件标签」同样只能由标签集表达（R11b）：seed 一个激活的 file 标签。
+    reset({
+      activeSessionId: S1, rightExpanded: true, rightSize: 700,
+      tabsByScope: { [S1]: { tabs: [{ id: 'tf', kind: 'file' }], activeId: 'tf', closed: [] } },
+    })
     st().setRightTab('file')
     eq(st().rightSize, 700, 'G3 已在文件标签且已展开 → 保持用户调过的宽度')
 
-    reset({ activeSessionId: S1, rightExpanded: false, rightTab: 'file', rightSize: 700 })
+    reset({
+      activeSessionId: S1, rightExpanded: false, rightSize: 700,
+      tabsByScope: { [S1]: { tabs: [{ id: 'tf', kind: 'file' }], activeId: 'tf', closed: [] } },
+    })
     st().setRightTab('file')
     eq(st().rightSize, Math.round(1600 * 0.6), 'G4 从折叠态打开文件标签 → 重新给 60%')
   }
