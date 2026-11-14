@@ -205,6 +205,7 @@ func TestMobileHubCommandAllowlist(t *testing.T) {
 }
 
 func TestMobileWebIsServed(t *testing.T) {
+	t.Setenv("HAI_MOBILE_WEB_DIR", writeMobileWebFixture(t))
 	_, ts := testMobileServer(t)
 	r, err := http.Get(ts.URL + "/m/")
 	if err != nil {
@@ -215,7 +216,7 @@ func TestMobileWebIsServed(t *testing.T) {
 		t.Fatalf("/m/ = %d", r.StatusCode)
 	}
 	body, _ := io.ReadAll(r.Body)
-	if !strings.Contains(string(body), "HAI") {
+	if !strings.Contains(string(body), `<div id="root">`) {
 		t.Fatal("首页内容不对")
 	}
 	if cc := r.Header.Get("Cache-Control"); cc != "no-store" {
