@@ -23,9 +23,13 @@
 //   T6 卸载：index 去掉 → provider 消失、标签变墓碑（PR-10 机制）、事件订阅被清理。
 //   T7 变更/重装：hash 变 → 重新 import（模块求值 +1）；标签恢复渲染。
 //   T8 host.command：未声明 → {ok:false,reason:'denied'} 且**不抛**；声明了 → 走 IPC。
-//   T13 **R-20**：同 hash 继续累计；hash 一变 → 整条健康记录清空，标签恢复渲染。
 //   T9 全程零 pageerror。
 //   T10 **真模板**（templates/surface）经 loader 注册并在 RightPanel 里渲染 + 用 host.command 取数。
+//   T11 index 移除插件 → 该 id 前缀（`<id>:`）下的 localStorage 键全清 + 健康记录一起清（R17a）。
+//   T12 **禁用不清理**：enabled:false 的插件离开 index 的 alive 集合，但数据一个都不能少。
+//   T13 **R-20**：同 hash 继续累计；hash 一变 → 整条健康记录清空，标签恢复渲染。
+//   T14 known-ids 跨启动：首次（无记录）只记不清；第二次启动 index 少一个 id → 清那一个。
+//   T15 **非权威 index**（浏览器版 / 没有 preload）：不清理、不写 known-ids —— 缺省即不权威。
 //
 // 用法：cd desktop/app && node e2e/verify_plugin_loader.mjs
 // 退出码：全通过 0；任一断言失败 1；前置不满足（端口被占 / 探针服务没起来）2。
@@ -145,8 +149,17 @@ const surfaceIndexCalls: Array<unknown> = []
 let surfaceCommandCalls: Array<Record<string, unknown>> = []
 let surfaceCommandReply: unknown = { ok: true, data: { workspaces: [{ path: '/mock', title: 'mock' }] } }
 let bootSettings: unknown = null
-// 插件索引（**可变**：T6/T7 通过改它 + 注入 surfaces_changed 模拟安装/卸载/升级）
-let pluginIndex: unknown = { version: 1, items: [] }
+// 插件索引（**可变**：T6/T7 通过改它 + 注入 surfaces_changed 模拟安装/卸载/升级）。
+// 初值可以预置（\`localStorage['__probe.index']\`）：T14 的「第二次启动」靠它模拟
+// 「上一次会话里 index 里还有谁」—— 探针页 reload 一次就是一次冷启动。
+let pluginIndex: unknown = (() => {
+  try {
+    const raw = localStorage.getItem('__probe.index')
+    return raw ? JSON.parse(raw) : { version: 1, items: [] }
+  } catch {
+    return { version: 1, items: [] }
+  }
+})()
 
 const stub: Record<string, unknown> = {
   startBridge: async () => ({ ok: true }),
@@ -189,7 +202,7 @@ const { getSurface, listSurfaces } = await import('../../src/surfaces/registry')
 const { listSurfaceLoadErrors } = await import('../../src/surfaces/plugin/status')
 // 本机没有 Electron 主进程 → hai-surface:// 未注册。保留 store → loader 这条接线，
 // 只把字节来源换成同源静态目录（见 loader.ts 的 setPluginBaseUrlForTest 注释）。
-const { setPluginBaseUrlForTest } = await import('../../src/surfaces/plugin/loader')
+const { setPluginBaseUrlForTest, syncPlugins: syncPluginsForTest } = await import('../../src/surfaces/plugin/loader')
 setPluginBaseUrlForTest((id) => \`/e2e/_pluginprobe_run/plugins/\${id}\`)
 const health = await import('../../src/surfaces/health')
 const { subscribeUI } = await import('../../src/lib/uiBus')
@@ -203,7 +216,11 @@ w.__probe = {
   sent,
   store: useAppStore,
   surfaceIndexCalls: () => surfaceIndexCalls.length,
-  setIndex: (items: unknown[]) => { pluginIndex = { version: 1, items } },
+  setIndex: (items: unknown[]) => {
+    pluginIndex = { version: 1, items }
+    // 落盘只是为了「下一次冷启动也看到这份 index」（T14）；生产里这份数据在 Go 的 surfaceStore。
+    try { localStorage.setItem('__probe.index', JSON.stringify(pluginIndex)) } catch { /* 忽略 */ }
+  },
   // 健康度（R17a 的 R-20 判据）：探针只调生产函数，不自己拼 surface.disabled 的 JSON。
   health: {
     fail: (k: string) => health.recordMountFailure(k as never, new Error('mount boom（e2e 的 fixture）')),
@@ -217,6 +234,22 @@ w.__probe = {
     authoritative === 'default'
       ? syncPluginsForTest({ version: 1, items } as never, undefined as never)
       : syncPluginsForTest({ version: 1, items } as never, undefined as never, {}, { authoritativeIndex: authoritative }),
+  storageKeys: () => {
+    const out: string[] = []
+    try {
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i)
+        if (k && k !== '__probe.index') out.push(k)
+      }
+    } catch { /* 忽略 */ }
+    return out.sort()
+  },
+  knownIds: () => {
+    try {
+      const raw = localStorage.getItem('hai-surface.known-ids')
+      return raw ? JSON.parse(raw) : null
+    } catch { return null }
+  },
   inject: (line: string) => feeds.forEach((f) => f(line)),
   // 快照类的读：只从 sent 里挑 ui 信封（断言不接触内部实现）。
   snapshots: () =>
@@ -298,8 +331,17 @@ try {
   const browser = await chromium.launch({ headless: true, channel: 'chrome' })
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   page.setDefaultTimeout(5000)
+  // ⚠️ 只在**第一次**导航时清 localStorage：T14 的「跨启动」要 reload 同一页面，
+  // 每次都清等于把 known-ids 记录一起清掉，那条断言就永远测不到东西。
+  // 同时预置 `ghost:keep`（一个**从未**出现在 index 里的 id 的数据）：首次升级
+  // （没有 known-ids 记录）时它必须原样留着 —— 那是「不清理」的反向证据。
   await page.addInitScript(() => {
-    try { localStorage.clear() } catch { /* 忽略 */ }
+    try {
+      if (sessionStorage.getItem('__probe_boot')) return
+      sessionStorage.setItem('__probe_boot', '1')
+      localStorage.clear()
+      localStorage.setItem('ghost:keep', '1')
+    } catch { /* 忽略 */ }
   })
   const errs = []
   page.on('pageerror', (e) => errs.push('pageerror: ' + e.message))
@@ -318,6 +360,17 @@ try {
   const kinds0 = await surfaces()
   for (const k of ['git', 'activity', 'file', 'web']) check(`listSurfaces() 含内置 ${k}`, kinds0.includes(k), JSON.stringify(kinds0))
   check('启动时一个插件都没装（index 为空）', !kinds0.some((k) => k.startsWith('plugin:')), JSON.stringify(kinds0))
+
+  // ---- T14a 首次启动（没有 known-ids 记录）→ 一个键都不清 ----
+  console.log('\nT14a 首次启动：没有 known-ids 记录 → 不清任何键，只记录当前 index')
+  await page.waitForFunction(() => localStorage.getItem('hai-surface.known-ids') !== null, null, { timeout: 5000 }).catch(() => {})
+  const bootKnown = await page.evaluate(() => window.__probe.knownIds())
+  check('启动后就写下了 known-ids 记录（不是等第一次变更）', !!bootKnown, JSON.stringify(bootKnown))
+  check('记录带格式版本字段（v1）', bootKnown?.version === 1, JSON.stringify(bootKnown))
+  check('首次启动记录的内容 = 当前 index（空数组）', Array.isArray(bootKnown?.ids) && bootKnown.ids.length === 0, JSON.stringify(bootKnown?.ids))
+  // 反向证据：ghost 从未出现在 index 里，首次升级时**必须**原样留着。
+  // 一个「把 localStorage 里所有前缀都当孤儿」的实现会在这一步把用户已装插件的数据删光。
+  check('首次升级不清数据：索引外的 ghost:keep 原样还在', (await page.evaluate(() => localStorage.getItem('ghost:keep'))) === '1')
 
   // ---- T1 启动同步：demo 真的被 import + apply ----
   console.log('\nT1 启动同步（index → import → apply → 注册表）')
@@ -473,6 +526,49 @@ try {
     tplCalls.some((c) => c.id === tplManifest.id && c.name === 'workspace_list'), JSON.stringify(tplCalls.slice(-3)))
   check('模板没有引入页面错误', errs.length === 0, errs.join(' | '))
 
+  // ---- T11 卸载即清理（运行中）----
+  console.log('\nT11 运行中卸载 → 该 id 前缀的键 + surface.disabled 记录一起清（R17a）')
+  await page.evaluate(() => {
+    localStorage.setItem('demo:progress:v1', '3/10')
+    localStorage.setItem('demo:last-tab', 'board')
+    // 前缀**相似但不是同一个 id**：'notdemo:' 不属于 'demo:'，不许被前缀清理带走。
+    localStorage.setItem('notdemo:keep', '1')
+  })
+  await page.evaluate(() => { for (let i = 0; i < 3; i += 1) window.__probe.health.fail('plugin:demo') })
+  const rec11 = await page.evaluate(() => window.__probe.health.record('plugin:demo'))
+  const keys11 = await page.evaluate(() => window.__probe.storageKeys())
+  check('基线：3 次挂载失败 → plugin:demo 自动禁用', rec11?.disabled === true && rec11?.count === 3, JSON.stringify(rec11))
+  check('基线：demo: 前缀下 2 个键', keys11.filter((k) => k.startsWith('demo:')).length === 2, JSON.stringify(keys11))
+  // 记录出生时版本表里已经写着 h2 —— 所以这条记录**盖得上戳**（跨重启的升级才比得出来）。
+  check('基线：记录带上了当前版本 hash（来自 surface.versions）',
+    typeof rec11?.hash === 'string' && rec11.hash.length === 64, JSON.stringify(rec11?.hash))
+
+  await setIndex([tplItem]) // demo 从 index 消失 = 运行中卸载
+  await injectChanged()
+  await page.waitForFunction(() => !window.__probe.surfaces.has('plugin:demo'), null, { timeout: 5000 }).catch(() => {})
+  const keysAfter11 = await page.evaluate(() => window.__probe.storageKeys())
+  check('demo: 前缀的键全没了', !keysAfter11.some((k) => k.startsWith('demo:')), JSON.stringify(keysAfter11))
+  check('别的 id 的键没被误删（notdemo:keep 还在）', keysAfter11.includes('notdemo:keep'), JSON.stringify(keysAfter11))
+  check('surface.disabled 里 plugin:demo 的记录也没了（kind 都没了，禁用记录没有意义）',
+    (await page.evaluate(() => window.__probe.health.record('plugin:demo'))) === null)
+
+  // ---- T12 禁用不清理 ----
+  console.log('\nT12 禁用不清理：enabled:false 离开 alive 集合，但数据一个都不能少')
+  await setIndex([item('demo', 'h3'), tplItem])
+  await injectChanged()
+  await page.waitForFunction(() => window.__probe.surfaces.has('plugin:demo'), null, { timeout: 8000 }).catch(() => {})
+  await page.evaluate(() => { localStorage.setItem('demo:progress:v1', '7/10') })
+  await setIndex([item('demo', 'h3', { enabled: false }), tplItem])
+  await injectChanged()
+  await page.waitForFunction(() => !window.__probe.surfaces.has('plugin:demo'), null, { timeout: 5000 }).catch(() => {})
+  check('停用后 provider 已卸下（不是「没装」）', !(await page.evaluate(() => window.__probe.surfaces.has('plugin:demo'))))
+  check('停用**不**清数据（demo:progress:v1 还在）',
+    (await page.evaluate(() => localStorage.getItem('demo:progress:v1'))) === '7/10')
+  // 用户补的那条口径：known-ids 按 index.items 的**全部** id 记（含 enabled:false），
+  // 否则「停用 → 下次启动」会被当成「消失」而把数据清掉。
+  check('known-ids 里仍有 demo（停用的插件不算消失）',
+    ((await page.evaluate(() => window.__probe.knownIds()?.ids)) ?? []).includes('demo'))
+
   // ---- T13 R-20：按版本重置 ----
   console.log('\nT13 R-20：同 hash 继续累计，hash 一变整条清空')
   await setIndex([item('demo', 'h3'), tplItem]) // 重新启用（hash 未变）
@@ -513,6 +609,57 @@ try {
   await page.waitForSelector('[data-plugin="demo"]', { timeout: 5000 }).catch(() => {})
   check('新版可挂载：面板内容真的画出来了（不是墓碑 / 禁用卡）',
     await page.evaluate(() => !!document.querySelector('[data-plugin="demo"]')))
+
+  // ---- T14b known-ids 跨启动 ----
+  console.log('\nT14b 第二次启动：known-ids 里少一个 id → 只清那一个')
+  await page.evaluate((tplId) => {
+    localStorage.setItem('demo:keep', '1')
+    localStorage.setItem(`${tplId}:gone`, '1')
+  }, tplManifest.id)
+  const knownBefore14 = (await page.evaluate(() => window.__probe.knownIds()?.ids)) ?? []
+  check('重启前 known-ids 同时含 demo 与模板 id',
+    knownBefore14.includes('demo') && knownBefore14.includes(tplManifest.id), JSON.stringify(knownBefore14))
+  // 「上一次会话」的 index：模板被卸载了、demo 还在。
+  await page.evaluate((it) => localStorage.setItem('__probe.index', JSON.stringify({ version: 1, items: it })), [item('demo', 'h4')])
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(() => !!window.__probe, null, { timeout: 30000 })
+  await page.waitForFunction(() => window.__probe.surfaces.has('plugin:demo'), null, { timeout: 8000 }).catch(() => {})
+  check('重启后 demo 被重新加载（对照：这一轮 sync 真的跑了）',
+    await page.evaluate(() => window.__probe.surfaces.has('plugin:demo')))
+  check('没消失的 id 不清：demo:keep 还在',
+    (await page.evaluate(() => localStorage.getItem('demo:keep'))) === '1')
+  check('消失的 id 被清（跨重启卸载的数据回收）',
+    (await page.evaluate((tplId) => localStorage.getItem(`${tplId}:gone`), tplManifest.id)) === null)
+  const knownAfter14 = (await page.evaluate(() => window.__probe.knownIds()?.ids)) ?? []
+  check('known-ids 更新成当前 index（只剩 demo）', knownAfter14.length === 1 && knownAfter14[0] === 'demo', JSON.stringify(knownAfter14))
+
+  // ---- T15 非权威 index（浏览器版）→ 一个字节都不动 ----
+  console.log('\nT15 非权威 index（vite 直开 / 没有 preload）→ 不清理、不写 known-ids')
+  await page.evaluate(() => {
+    localStorage.setItem('demo:nonauth', '1')
+    localStorage.setItem('ghost3:nonauth', '1') // 从没进过 known-ids：任何实现都不该碰它
+  })
+  const knownRaw15 = await page.evaluate(() => localStorage.getItem('hai-surface.known-ids'))
+  // 缺省（不传 opts）必须是不权威 —— 这是唯一安全的缺省值。
+  await page.evaluate(() => window.__probe.sync([], 'default'))
+  check('缺省 opts + 空 index：demo 前缀的数据一个都没少',
+    (await page.evaluate(() => localStorage.getItem('demo:nonauth'))) === '1')
+  check('缺省 opts：known-ids 没被覆盖成空', (await page.evaluate(() => localStorage.getItem('hai-surface.known-ids'))) === knownRaw15,
+    `before=${knownRaw15} after=${await page.evaluate(() => localStorage.getItem('hai-surface.known-ids'))}`)
+  await page.evaluate(() => window.__probe.sync([], false))
+  check('显式 authoritative:false：仍然不动数据',
+    (await page.evaluate(() => localStorage.getItem('demo:nonauth'))) === '1')
+  check('显式 false：known-ids 仍然没变', (await page.evaluate(() => localStorage.getItem('hai-surface.known-ids'))) === knownRaw15)
+  // 对照：权威来源 + **空 index** 必须照常清理 —— 「卸载最后一个插件」就是这一档，
+  // 所以这里不能用「items 非空」当权威性的替身。
+  await page.evaluate(() => window.__probe.sync([], true))
+  check('对照：权威 + 空 index 照常清（卸载最后一个插件）',
+    (await page.evaluate(() => localStorage.getItem('demo:nonauth'))) === null)
+  check('对照：从没进过 known-ids 的键照旧不动（ghost3:nonauth）',
+    (await page.evaluate(() => localStorage.getItem('ghost3:nonauth'))) === '1')
+  const knownAfter15 = (await page.evaluate(() => window.__probe.knownIds()?.ids)) ?? null
+  check('对照：权威轮把 known-ids 更新成空（记账真的发生了）',
+    Array.isArray(knownAfter15) && knownAfter15.length === 0, JSON.stringify(knownAfter15))
 
   // ---- T9 全程零 pageerror ----
   console.log('\nT9 全程零 pageerror')

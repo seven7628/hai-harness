@@ -7,8 +7,12 @@
 //  1. **页面不碰磁盘**：读走 surfaceIndex / surfaceAudit 两个 IPC，写走 surfaceSetEnabled /
 //     surfaceRemove。index 的写入纪律（flock + .bak + 原子替换）只有 Go 的 surfaceStore
 //     一份（PR-13）—— 渲染层再写一次就等于把「谁有权改 index」变成两处判定。
-//  2. **卸载不是删文件**：surfaceRemove 走 PR-13 的 Remove，目录进 `.trash/<id>-<ts>`
-//     （手滑一次还能捞回来）。所以按钮要先过 ConfirmModal，且文案说的是「移到回收站」。
+//  2. **卸载不是删文件，但会删数据**：surfaceRemove 走 PR-13 的 Remove，目录进
+//     `.trash/<id>-<ts>`（手滑一次还能捞回来）。**R17a 起数据捞不回来**：卸载成功后会
+//     立刻清掉该插件前缀（`<id>:`）下的所有 localStorage 键（用户拍板的口径）。所以两个
+//     按钮（卸载 / 清除数据）都要先过 ConfirmModal，且文案必须说清「哪些东西会没」。
+//     清理**不等** `surfaces_changed`：事件可能丢、页面可能已经切走，两条路径各自清一次
+//     （`clearPluginData` 幂等，重复调只是删 0 个键）。
 //  3. **action 之后重拉 index + audit**：`surfaces_changed` 会让 loader 重算 provider
 //     （禁用 → 卸下、启用 → 加载），而页面自己的这两份数据也必须跟着刷新，否则
 //     开关显示的还是旧值。两件事都发生，用户才看到「点了就变」。
@@ -26,6 +30,7 @@ import { Switch } from './SettingsGroups'
 import { useAppStore } from '../store/useAppStore'
 import type { TabSpec } from '../store/useAppStore'
 import { entryItemsOf } from '../surfaces/plugin/entries'
+import { clearPluginData } from '../surfaces/plugin/storage'
 
 /**
  * 宿主允许插件调用的只读命令（**展示用副本**）。
@@ -50,6 +55,11 @@ export default function SurfacesPage() {
   // 每行一条错误（键 = 插件 id；页级错误用空串键）：贴在那一行下面，不弹窗。
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  // R17a：清除数据的二次确认走**另一个**状态，而不是复用 confirmId —— 卸载与清数据是
+  // 两个不同的破坏性动作（前者连目录一起走，后者只动 localStorage），共用一个 id 状态
+  // 会让「点卸载弹出来的是清数据」这种错配成为可能。
+  const [clearId, setClearId] = useState<string | null>(null)
+  const showToast = useAppStore((s) => s.showToast)
   // R16：设置页的「打开」= D-2 的第 3 处入口。它**不自己造标签**，只调 store 的 openTab ——
   // 右栏的展开、去重（同一 entry 再点一次 = 激活）都由那一个动作负责，页面不复制一份。
   const openTab = useAppStore((s) => s.openTab)
@@ -150,6 +160,29 @@ export default function SurfacesPage() {
     [refresh, setRowError],
   )
 
+  /**
+   * reportCleared 把「清了几个键」报给用户。
+   *
+   * 为什么连 0 也要报：0 有两种意思（本来就没数据 / 前缀拼错了），而用户刚点了一个
+   * 不可逆的按钮 —— 静默成功与静默失败长得一模一样。
+   */
+  const reportCleared = useCallback(
+    (id: string, n: number) => {
+      showToast(tRef.current('surfaces.clearData.done').replace('{id}', id).replace('{n}', String(n)), 'ok')
+    },
+    [showToast],
+  )
+
+  const onClearData = useCallback(
+    (id: string) => {
+      setClearId(null)
+      setRowError(id, '')
+      // 同步动作（localStorage 是同步的）：异常一律内部吞掉，不允许让一个坏键把页面打崩。
+      reportCleared(id, clearPluginData(id))
+    },
+    [reportCleared, setRowError],
+  )
+
   const onRemove = useCallback(
     async (id: string) => {
       setConfirmId(null)
@@ -161,12 +194,16 @@ export default function SurfacesPage() {
           setRowError(id, surfaceReasonText(tRef.current, r?.reason))
           return
         }
+        // 卸载 = 清数据（用户拍板）。**直接清**，不等 surfaces_changed：那条事件由 bridge
+        // 推给渲染层，页面可能已经切走、监听可能已经卸掉 —— 等它等于「有时候清了有时候没清」。
+        // loader 的 known-ids 对账是跨重启的兜底，不是这条路径的替代品。
+        reportCleared(id, clearPluginData(id))
         await refresh()
       } finally {
         setBusyId(null)
       }
     },
-    [refresh, setRowError],
+    [refresh, reportCleared, setRowError],
   )
 
   const onRefreshAudit = useCallback(async () => {
@@ -254,8 +291,21 @@ export default function SurfacesPage() {
                 label={item.enabled ? t('surfaces.disable') : t('surfaces.enable')}
                 onChange={(next) => void onToggle(item, next)}
               />
+              {/* 清除数据（R17a）：**每一行都有**这个按钮 —— 能出现在这张表里的行，
+                  按定义就是「已安装」（index 只有装过的插件），停用的也在。它的作用域只有
+                  localStorage 里 `<id>:` 前缀的键，不碰目录、不碰 index。
+                  放在卸载按钮**左边**：更轻的那个在左，破坏性更强的在最右（既有口径）。 */}
+              <button
+                className="btn surface-clear-data"
+                data-surface-clear={item.id}
+                disabled={busyId === item.id}
+                onClick={() => setClearId(item.id)}
+              >
+                {t('surfaces.clearData')}
+              </button>
               <button
                 className="btn danger surface-uninstall"
+                data-surface-uninstall={item.id}
                 disabled={busyId === item.id}
                 onClick={() => setConfirmId(item.id)}
               >
@@ -334,6 +384,18 @@ export default function SurfacesPage() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {clearId && (
+        <ConfirmModal
+          title={t('surfaces.clearData.title')}
+          message={t('surfaces.clearData.msg').replace('{id}', clearId)}
+          confirmLabel={t('surfaces.clearData.confirm')}
+          cancelLabel={t('surfaces.cancel')}
+          danger
+          onConfirm={() => onClearData(clearId)}
+          onCancel={() => setClearId(null)}
+        />
       )}
 
       {confirmId && (

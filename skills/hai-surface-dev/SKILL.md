@@ -131,14 +131,26 @@ rest of this file.
 worker. You share its `window`, its `document.documentElement` and its web storage. Your globals,
 timers and listeners live as long as the panel stays loaded.
 
-**Storage is yours.** The host gives plugins no storage API and no file write. Keep your own data:
-`localStorage` is available and is the intended place for small state (progress ticks, the last
-selected tab). Prefix every key with your id (`course-mvp:progress:v1`) — it is the same storage the
-app uses. Two consequences: the origin differs between dev (`http://localhost:5173`) and production
-(`file://…/dist/index.html`), so data written in one is not visible in the other; and **uninstalling
-a plugin does not delete its data** — clearing it is the user's call. If `localStorage` throws
-(quota, disabled storage), fall back to in-memory state and say so in the UI instead of crashing the
-panel.
+**Storage is yours — and disposable.** The host gives plugins no storage API and no file write. Keep
+your own data: `localStorage` is available and is the intended place for small state (progress ticks,
+the last selected tab). Prefix every key with your id (`course-mvp:progress:v1`) — the host uses that
+prefix, it is the same storage the app uses, and namespacing is what keeps two plugins apart.
+
+Three consequences, in increasing order of how much they hurt:
+
+1. The origin differs between dev (`http://localhost:5173`) and production (`file://…/dist/index.html`),
+   so data written in one is not visible in the other.
+2. **Disabling does not delete data.** A disabled plugin keeps everything it wrote; re-enabling
+   resumes where it left off. (The index entry, version and hash stay too.)
+3. **Uninstalling DOES delete every key prefixed `<id>:`.** Treat plugin storage as **disposable**:
+   never store anything that must survive uninstall (user-authored documents, credentials, anything
+   the user would call "my work"). If a value must outlive the plugin, it does not belong in
+   `localStorage` — surface it to the user or put it in the workspace through a declared command.
+   There is also a "Clear data" button on the settings page (same effect, without uninstalling), and
+   the host sweeps the prefix on the next start if the plugin vanished while the app was not running.
+
+If `localStorage` throws (quota, disabled storage), fall back to in-memory state and say so in the UI
+instead of crashing the panel.
 
 **Theme is live.** `host.theme()` returns `{ mode, tokens }` for the theme *right now*. It is not a
 constant: call it **inside render**, not once in `apply` and stored — a cached palette keeps the old

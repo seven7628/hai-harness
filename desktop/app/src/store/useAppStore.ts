@@ -9893,6 +9893,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     pluginLoaderStop = startPluginLoader({
       readIndex: async () =>
         (window.desktop?.surfaceIndex ? await window.desktop.surfaceIndex() : { version: 1, items: [] }),
+      // R17a：上面那条 readIndex 的兜底分支回的是**空 items**，它读起来像「一个插件都没装」。
+      // 数据清理（known-ids 对账）是破坏性动作，绝不能建立在这条兜底上 —— 这里显式告诉
+      // loader「index 算不算数」，浏览器版/没有 preload 时它是 false（= 一个键都不清、也不记账）。
+      indexAuthoritative: () => !!window.desktop?.surfaceIndex,
       baseUrl: surfaceBaseUrl,
       send: (op, data) => {
         void transport.send({ id: ++cmdSeq, type: 'ui', payload: { op, data } })
