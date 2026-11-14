@@ -26,6 +26,12 @@ export interface HostPanelsActions {
   openProjectSession(workspace: string, sessionId: string): void
   closeHub(): void
   setActiveSession(id: string, projectPath?: string): void
+  /** 打开工作区文件（Markdown 里的相对链接）。 */
+  openFile(path: string): void
+  /** 在右侧浏览器页签打开一段 HTML（HTML 代码块的「打开」）。 */
+  openHtmlContentInBrowser(html: string): void
+  /** Markdown 内嵌 widget 的 postMessage 回复（只在 shape 校验通过后调用）。 */
+  receiveWidgetReply(text: string, id: string): void
 }
 
 /**
@@ -70,15 +76,32 @@ const NOOP_ACTIONS: HostPanelsActions = {
   openProjectSession: () => {},
   closeHub: () => {},
   setActiveSession: () => {},
+  openFile: () => {},
+  openHtmlContentInBrowser: () => {},
+  receiveWidgetReply: () => {},
 }
 
 export const HostPanelsActionsContext = createContext<HostPanelsActions>(NOOP_ACTIONS)
 export const HostPanelsLayoutContext = createContext(false)
 export const HostCapabilitiesContext = createContext<HostCapabilities>(DESKTOP_CAPABILITIES)
 
+/**
+ * 当前工作区根（Markdown 相对图片/链接的兜底锚点）。
+ *
+ * 为什么不放进 actions：它是**值**不是动作，桌面每次切工作区都会变 —— 混进动作 context
+ * 会让每条 MessageBubble 跟着重渲染。没有 provider 时是空串：相对路径解析不出来就
+ * 退回原样，不会把路径拼到某个猜出来的目录上。
+ */
+export const HostWorkspaceContext = createContext('')
+
 /** 只取动作的组件用它：布局变化不触发重渲染（MessageBubble/HubAttachments/HubInlineNeeds）。 */
 export function useHostPanelsActions(): HostPanelsActions {
   return useContext(HostPanelsActionsContext)
+}
+
+/** Markdown 渲染用：当前工作区根（空串 = 不知道，相对资源不解析）。 */
+export function useHostWorkspace(): string {
+  return useContext(HostWorkspaceContext)
 }
 
 /** 只读能力的组件用它（HubSidebar/TaskArtifacts/ContextPanel：不订阅右栏开合）。 */

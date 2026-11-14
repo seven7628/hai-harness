@@ -20,6 +20,7 @@ import {
   HostCapabilitiesContext,
   HostPanelsActionsContext,
   HostPanelsLayoutContext,
+  HostWorkspaceContext,
   type HostCapabilities,
   type HostPanelsActions,
 } from './panels'
@@ -65,6 +66,20 @@ export function MobileHostPanelsProvider({
         if (onToast) onToast(msg, 'ok')
         else console.info('[mobile toast]', msg)
       },
+      // Markdown 渲染的三个桌面动作（P8-01b）：手机没有文件预览/侧栏浏览器，
+      // 明确 toast 指路（不是渲染一个点了没反应的链接）。
+      openFile: () => {
+        const msg = '文件预览在手机上还没开放，请在桌面端打开'
+        if (onToast) onToast(msg, 'ok')
+        else console.info('[mobile toast]', msg)
+      },
+      openHtmlContentInBrowser: () => {
+        const msg = 'HTML 预览在手机上还没开放，请在桌面端打开'
+        if (onToast) onToast(msg, 'ok')
+        else console.info('[mobile toast]', msg)
+      },
+      // widget 回复是「沙箱 UI → 草稿」的通道：手机没有草稿区（P8-02），静默丢弃即可。
+      receiveWidgetReply: () => {},
     }),
     [onToast],
   )
@@ -72,9 +87,12 @@ export function MobileHostPanelsProvider({
   return (
     <HostLangProvider lang={lang}>
       <HostCapabilitiesContext.Provider value={MOBILE_CAPABILITIES}>
-        <HostPanelsActionsContext.Provider value={actions}>
-          <HostPanelsLayoutContext.Provider value={rightExpanded}>{children}</HostPanelsLayoutContext.Provider>
-        </HostPanelsActionsContext.Provider>
+        {/* 手机没有工作区：空串 = Markdown 相对资源不解析（不会拼到猜出来的目录）。 */}
+        <HostWorkspaceContext.Provider value="">
+          <HostPanelsActionsContext.Provider value={actions}>
+            <HostPanelsLayoutContext.Provider value={rightExpanded}>{children}</HostPanelsLayoutContext.Provider>
+          </HostPanelsActionsContext.Provider>
+        </HostWorkspaceContext.Provider>
       </HostCapabilitiesContext.Provider>
     </HostLangProvider>
   )

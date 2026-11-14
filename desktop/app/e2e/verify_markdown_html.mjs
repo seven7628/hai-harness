@@ -66,6 +66,7 @@ import { createRoot } from 'react-dom/client'
 import { Markdown } from '../../src/components/markdown'
 import { useAppStore } from '../../src/store/useAppStore'
 import { getTransport } from '../../src/transport'
+import { HostPanelsProvider } from '../../src/host/panels-desktop'
 import '../../src/index.css'
 
 useAppStore.setState({ workspace: '/mock/proj-auth' })
@@ -92,7 +93,9 @@ function Probe() {
     </div>
   )
 }
-createRoot(document.getElementById('root')!).render(<Probe />)
+// 与真应用同一条 host seam（P8-01b）：Markdown 的工作区根/文件打开都从
+// HostPanelsProvider 下发，探针不包一层就拿不到 workspace（相对图片解析不出来）。
+createRoot(document.getElementById('root')!).render(<HostPanelsProvider><Probe /></HostPanelsProvider>)
 `)
 fs.writeFileSync(path.join(PROBE_DIR, 'vite.config.mts'), `
 import { defineConfig } from 'vite'

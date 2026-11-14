@@ -12,7 +12,7 @@ import type { Element, ElementContent, Nodes, Root, RootContent } from 'hast'
 import GithubSlugger from 'github-slugger'
 import 'katex/dist/katex.min.css'
 import { codeToHtml } from './highlight'
-import { useAppStore } from '../store/useAppStore'
+import { useHostPanelsActions, useHostWorkspace } from '../host/panels'
 import { useResolvedTheme } from '../lib/useTheme'
 import { useAppearance } from '../lib/appearance'
 import { copyText } from '../lib/clipboard'
@@ -650,6 +650,12 @@ function canvasCss(theme: 'ink' | 'paper'): string {
 // "最后才显示完整 UI" 的观感一致，但过程不再闪、不再报错。
 function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?: boolean; path?: string }) {
   const t = useT()
+  // 宿主动作走 host seam（P8-01b）：widget 回复 / 右侧浏览器打开都不再直接读桌面 store。
+  // 用 ref 是为了不动下面那条 [] 依赖的 postMessage 监听（动作对象本身是稳定的，
+  // 但把 effect 的依赖列表扩开会让「换 provider 就重挂监听」这种隐式契约冒出来）。
+  const host = useHostPanelsActions()
+  const hostRef = useRef(host)
+  hostRef.current = host
   const resolved = useResolvedTheme()
   const ap = useAppearance()
   const codeTheme = resolved === 'paper' ? ap.codeThemeLight : ap.codeThemeDark
@@ -769,7 +775,7 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
             return
           }
         }
-        useAppStore.getState().receiveWidgetReply(body, id)
+        hostRef.current.receiveWidgetReply(body, id)
         return
       }
 
@@ -838,7 +844,7 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
   const openInBrowser = () => {
     // 未落盘的纯展示代码块：内容本身即展示对象 → 右侧侧边栏（web tab）展示。
     // 有落盘文件的场景由 write_file 工具卡「打开」负责（file://），此处不猜路径。
-    void useAppStore.getState().openHtmlContentInBrowser(cleanDoc)
+    hostRef.current.openHtmlContentInBrowser(cleanDoc)
   }
 
   // 流式中：不挂 iframe（见组件头注释）。骨架高度跟内容走一个保守估计，
@@ -1116,9 +1122,14 @@ export interface MarkdownProps {
    text 不变 → 连渲染都不进，只有尾部还在长的那一块重新解析。 */
 const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming, renderMention }: MarkdownProps) {
   const lang = useLang()
+  const host = useHostPanelsActions()
+  const hostRef = useRef(host)
+  hostRef.current = host
   const resolved = useResolvedTheme()
   // 工作区是本地相对图的兜底锚点（对话区没有文件可锚）；它也是主进程侧的合法性判定依据。
-  const workspace = useAppStore((s) => s.workspace)
+  // 工作区根走 host seam（P8-01b）：markdown.tsx 是 Hub 消息渲染的一部分，
+  // 直接读 useAppStore 会把整个桌面 store 拖进手机包。
+  const workspace = useHostWorkspace()
   const dark = resolved !== 'paper'
   // 相对图片/链接的锚点目录：优先「文件所在目录」（文件预览传 baseDir），对话区退回工作区根。
   // 注意别把它叫成 anchor —— a 覆盖里已有一个「页内锚点 href」的同名局部变量，遮蔽过一次
@@ -1225,7 +1236,7 @@ const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming, rend
                 title: target,
                 onClick: (e: React.MouseEvent) => {
                   e.preventDefault()
-                  useAppStore.getState().openFile(target)
+                  hostRef.current.openFile(target)
                 },
               }
               : { href: anchor ?? href }

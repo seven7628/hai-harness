@@ -15,6 +15,7 @@ import {
   HostCapabilitiesContext,
   HostPanelsActionsContext,
   HostPanelsLayoutContext,
+  HostWorkspaceContext,
   type HostPanelsActions,
 } from './panels'
 import { HostLangProvider } from './lang'
@@ -27,6 +28,8 @@ export function HostPanelsProvider({ children }: { children: ReactNode }) {
   // 语言也从宿主下发（P8-01b）：i18n 不再 import useAppStore，改读 host/lang。
   // 这里订阅 settings.lang —— 切语言时本组件重渲染，context 值随之更新。
   const lang = useAppStore((s) => s.settings.lang)
+  // Markdown 的相对资源锚点（对话区没有文件可锚时退回工作区根）。
+  const workspaceRoot = useAppStore((s) => s.workspace)
 
   const actions = useMemo<HostPanelsActions>(
     () => ({
@@ -38,6 +41,13 @@ export function HostPanelsProvider({ children }: { children: ReactNode }) {
         useHubStore.getState().closeHub()
         useAppStore.getState().setActiveSession(sessionId, workspace || undefined)
       },
+      // Markdown 渲染的三个桌面动作（P8-01b）：原来 markdown.tsx 直接读 store，
+      // 手机复用消息渲染时会把整个桌面 store 拉进手机包。实现与改造前逐字等价。
+      openFile: (path) => useAppStore.getState().openFile(path),
+      openHtmlContentInBrowser: (html) => {
+        void useAppStore.getState().openHtmlContentInBrowser(html)
+      },
+      receiveWidgetReply: (text, id) => useAppStore.getState().receiveWidgetReply(text, id),
     }),
     [setRightExpanded, showToast, setActiveSession],
   )
@@ -46,9 +56,11 @@ export function HostPanelsProvider({ children }: { children: ReactNode }) {
     <HostLangProvider lang={lang}>
       {/* 桌面能力全开：群组/智能体编辑、产物预览、提示词预览都在桌面端存在。 */}
       <HostCapabilitiesContext.Provider value={DESKTOP_CAPABILITIES}>
-        <HostPanelsActionsContext.Provider value={actions}>
-          <HostPanelsLayoutContext.Provider value={rightExpanded}>{children}</HostPanelsLayoutContext.Provider>
-        </HostPanelsActionsContext.Provider>
+        <HostWorkspaceContext.Provider value={workspaceRoot ?? ''}>
+          <HostPanelsActionsContext.Provider value={actions}>
+            <HostPanelsLayoutContext.Provider value={rightExpanded}>{children}</HostPanelsLayoutContext.Provider>
+          </HostPanelsActionsContext.Provider>
+        </HostWorkspaceContext.Provider>
       </HostCapabilitiesContext.Provider>
     </HostLangProvider>
   )
