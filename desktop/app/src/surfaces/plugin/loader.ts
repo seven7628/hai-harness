@@ -400,13 +400,18 @@ export function createHost(
       }
       // Agent 事件：订阅**一条**独立通道，把自己的 surface_id 过滤掉之后再按 type 分发。
       // 过滤在第一跳做（而不是让每个监听器自己判）：插件世界里不该出现别的插件的事件。
+      //
+      // `typeof off === 'function'` 这一道看着多余，其实不是：旧主进程 / 探针的假 api 上
+      // 没有这个方法时，取到的可能是一个**返回 Promise 的兜底函数**。disposer 不是函数
+      // 的后果是插件在 effect cleanup 里 `off()` 直接抛 → 整棵子树卸载（PR-10 的崩溃卡），
+      // 而根因只是「宿主版本老」。
       if (!agentApi?.onSurfaceAgentEvent) return track(() => {})
-      const off = agentApi.onSurfaceAgentEvent((p) => {
+      const raw = agentApi.onSurfaceAgentEvent((p) => {
         if (!p || p.surface_id !== id) return // 别的插件的事件：连监听器都不进
         if (!p.event || p.event.type !== type) return
         fn(p.event)
       })
-      return track(off)
+      return track(typeof raw === 'function' ? raw : () => {})
     },
   }
 }
