@@ -174,7 +174,9 @@ try {
       title: (r.querySelector('.rtab-t')?.textContent ?? '').trim(),
     }))
     return {
-      tab: s.rightTab, expanded: s.rightExpanded, left: s.leftExpanded,
+      // R11b：state 里「当前面板」的字段已删 → 面板就是激活标签的 kind（现算，不是副本）。
+      tab: (tabs.find((x) => x.id === set.activeId) || {}).kind || '',
+      expanded: s.rightExpanded, left: s.leftExpanded,
       kinds: tabs.map((x) => x.kind).join(','),
       modes: tabs.filter((x) => x.kind === 'file').map((x) => `${(x.path || '').split('/').pop()}:${x.mode ?? 'source'}`).join(','),
       webView: tabs.filter((x) => x.kind === 'web').map((x) => x.viewId ?? '(pending)').join(','),
@@ -234,7 +236,9 @@ try {
   check('标签集与顺序恢复（activity,file,file,web）', after.kinds === 'activity,file,file,web', JSON.stringify(after.kinds))
   check('file 标签的 diff/source 模式恢复', after.modes === 'a.ts:source,a.ts:diff', JSON.stringify(after.modes))
   check('激活标签恢复（web，不是回落 activity）', after.activeKind === 'web', JSON.stringify({ activeKind: after.activeKind, tab: after.tab }))
-  check('rightTab 跟随恢复的激活标签（内容区与标签条一致）', after.tab === 'web', JSON.stringify(after.tab))
+  // 与上一条同源（面板 = 激活标签，没有第二份状态可漂移）：保留这一条是为了守住
+  // 「P2 恢复出来的面板是 web」这个契约本身，不是重复计数 —— 两者分开读才不会在改判据时一起错。
+  check('恢复后的面板是 web（内容区与标签条一致）', after.tab === 'web', JSON.stringify(after.tab))
   check('**没有**展开右栏（恢复 ≠ 激活）', after.expanded === false, JSON.stringify(after.expanded))
   check('**没有**收起左栏', after.left === true, JSON.stringify(after.left))
   check('重启后视图池为空（恢复不 eager 创建 WebContentsView）', after.pool.length === 0, JSON.stringify(after.pool))
@@ -305,7 +309,7 @@ try {
   } }))
   const s1 = await snap()
   check('S1 只拿到自己的标签集（git）', s1.kinds === 'git' && s1.tab === 'git', JSON.stringify({ kinds: s1.kinds, tab: s1.tab }))
-  // 切会话走**真实动作**（setActiveSession：未水合会话会 resetView 回落默认 rightTab ——
+  // 切会话走**真实动作**（setActiveSession：未水合会话会走 resetView 的回落 ——
   // 恢复出来的标签集恰恰常常没有 activity 标签，正是「切走再切回会不会被默认值顶掉」的考场）
   await page.evaluate(() => window.__store.getState().setActiveSession('S2', '/w'))
   await page.waitForTimeout(300)

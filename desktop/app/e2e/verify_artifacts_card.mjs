@@ -567,7 +567,7 @@ async function main() {
       await page.evaluate(({ n }) => {
         const st = window.__store
         st.setState({
-          rightExpanded: true, rightTab: 'file',
+          rightExpanded: true,
           blocks: [{ kind: 'tool', id: 900, toolId: 't9', name: 'write_file', args: JSON.stringify({ path: n }), result: 'written', status: 'done' }],
           fileFocus: undefined, filePreviews: {},
         })

@@ -96,7 +96,6 @@ function bigView(n, textLen) {
     pendingQueue: [],
     rightExpanded: false,
     rightLayout: { ratio: 0.32 },
-    rightTab: 'activity',
     compressing: false,
     gitLoading: false,
     hydrated: true,

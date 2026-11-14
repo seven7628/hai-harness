@@ -32,7 +32,7 @@
 //   · **展开/切标签**：只由**用户显式动作**触发（openFile / openInBrowserTab activate:true）
 // 「真视图池里新标签确实是 activeId」在 embed 层由 `e2e:container` 钉住 —— 本脚本跑在普通
 // Chrome 里、用**假**视图池（见 index.html 的内联注入），只能验到 store 层的
-// `rightTab`/`rightExpanded`/`leftExpanded`/标签集/未读点。
+// 激活标签/`rightExpanded`/`leftExpanded`/标签集/未读点。
 //
 // 用例编号说明：本文件的 A1/A2/… 是**用例**编号，与 ADR 的 R0~R5 轮次无关（旧编号 R1/R2/R3
 // 曾与之混淆，2026-09-17 改名）。
@@ -187,24 +187,35 @@ try {
   await page.waitForFunction(() => !!window.__store, null, { timeout: 20000 })
   await page.waitForTimeout(800)
 
-  // 每个用例前复位视图状态，避免用例间互相污染（rightTab/rightExpanded 是会话态）。
+  // 每个用例前复位视图状态，避免用例间互相污染（面板/rightExpanded 是会话态）。
   // leftExpanded 显式置回 true：它是 M4 缺陷的观测点（修复前会被 focusBrowser 静默收起），
   // 每个用例都从「左栏正常展开」出发，才能断言它**没有**被动过。
   // tabsByScope / unreadViews / 假视图池也一并复位 —— 阶段 4 的断言要看「标签集与未读点」。
+  //
+  // R11b：面板 = 激活标签，所以「复位到链路面板」= seed 一个激活的 activity 标签（而不是写
+  // 状态里的面板字段）。直接 seed 而不是等收敛 effect 建默认集，是为了让断言读到的时刻确定。
   const reset = () => page.evaluate(() => {
     window.__pool.length = 0
     window.__activateCalls.length = 0
-    window.__store.setState({ rightTab: 'activity', rightExpanded: false, leftExpanded: true, unreadViews: [], tabsByScope: {} })
+    const s = window.__store.getState()
+    const scope = s.activeSessionId || s.workspace || ''
+    window.__store.setState({
+      rightExpanded: false, leftExpanded: true, unreadViews: [],
+      tabsByScope: { [scope]: { tabs: [{ id: 'act0', kind: 'activity' }], activeId: 'act0', closed: [] } },
+    })
   })
   // 快照：面板三态 + 定位锚 + 未读点 + 本 scope 的标签集 + 折叠态 rail 角标。
   const snap = () => page.evaluate(() => {
     const s = window.__store.getState()
     const scope = s.activeSessionId || s.workspace || ''
-    const tabs = ((s.tabsByScope[scope] || {}).tabs) || []
+    const set0 = s.tabsByScope[scope] || {}
+    const tabs = set0.tabs || []
     const unreadViews = s.unreadViews || []
     const railBtn = document.querySelector('.right-rail .rbtn[aria-label*="网页"]')
     return {
-      tab: s.rightTab, expanded: s.rightExpanded, left: s.leftExpanded,
+      // 面板 = 激活标签的 kind（R11b：状态里那个写穿副本已删）
+      tab: ((tabs.find((x) => x.id === set0.activeId) || {}).kind) || '',
+      expanded: s.rightExpanded, left: s.leftExpanded,
       focus: (s.fileFocus && s.fileFocus.path) || '',
       unread: unreadViews.length,
       unreadTabs: tabs.filter((x) => x.kind === 'web' && unreadViews.includes(x.viewId)).length,
@@ -220,7 +231,15 @@ try {
   const fire = (p, sid = 'S1') => page.evaluate(async ([pp, ss]) => {
     const opened = await window.__AUTO(pp, ss)
     const s = window.__store.getState()
-    return { opened, tab: s.rightTab, expanded: s.rightExpanded, left: s.leftExpanded, focus: (s.fileFocus && s.fileFocus.path) || '', unread: (s.unreadViews || []).length }
+    const scope = s.activeSessionId || s.workspace || ''
+    const set0 = s.tabsByScope[scope] || {}
+    const tabs = set0.tabs || []
+    return {
+      opened,
+      tab: ((tabs.find((x) => x.id === set0.activeId) || {}).kind) || '',
+      expanded: s.rightExpanded, left: s.leftExpanded,
+      focus: (s.fileFocus && s.fileFocus.path) || '', unread: (s.unreadViews || []).length,
+    }
   }, [p, sid])
   // 驱动真实的 onEmbedNav 处理（假池 → 真 store 逻辑）：activeId 指向池里指定视图，
   // 其余页面一并进 targets —— 这正是主进程推过来的形态。
@@ -271,7 +290,7 @@ try {
   check('标签存在（本 scope 标签集里多了一个 web 标签）', pdfS.webIds === bgView, JSON.stringify(pdfS))
   check('标签带**未读点**（unreadViews 命中该视图）',
     pdfS.unread === 1 && pdfS.unreadTabs === 1, JSON.stringify(pdfS))
-  check('**没有**抢激活（rightTab 仍是 activity）', pdfS.tab === 'activity', JSON.stringify(pdfS))
+  check('**没有**抢激活（激活标签仍是 activity）', pdfS.tab === 'activity', JSON.stringify(pdfS))
   check('**没有**展开右栏（rightExpanded=false）', pdfS.expanded === false, JSON.stringify(pdfS))
   check('右栏收起态也看得见未读点（rail 角标）', pdfS.railBadge === '1', JSON.stringify(pdfS))
   check('定位到该文件（fileFocus=out/report.pdf）', pdf.focus === 'out/report.pdf', JSON.stringify(pdf))
@@ -292,7 +311,7 @@ try {
   await page.waitForTimeout(50)
   const userView = await page.evaluate(() => window.__pool[0].id) // 永不重置的 id 序号 → 动态取
   const userOpen = await snap()
-  check('用户点击 → 切到内容标签（rightTab=web）', userOpen.tab === 'web', JSON.stringify(userOpen))
+  check('用户点击 → 切到内容标签（激活标签=web）', userOpen.tab === 'web', JSON.stringify(userOpen))
   check('用户点击 → 展开右栏', userOpen.expanded === true, JSON.stringify(userOpen))
   check('用户点击 → 左栏未被收起', userOpen.left === true, JSON.stringify(userOpen))
   check('用户点击 → 不标未读（内容已经显示出来了）', userOpen.unread === 0, JSON.stringify(userOpen))
@@ -388,24 +407,35 @@ try {
   // 会话 → 切到新会话后下一次任何 nav 事件都又展开一次。这里把两种来源都钉住。
   console.log('S2 别的会话的页面出现 → 当前面板三态**全部不变**')
   await reset()
-  await page.evaluate(() => { window.__store.setState({ activeSessionId: 'S1', rightTab: 'git', rightExpanded: true, leftExpanded: true }) })
+  await page.evaluate(() => {
+    window.__store.setState({
+      activeSessionId: 'S1', rightExpanded: true, leftExpanded: true,
+      // 面板停在「变更」（激活标签 = git）
+      tabsByScope: { S1: { tabs: [{ id: 'g1', kind: 'git' }], activeId: 'g1', closed: [] } },
+    })
+  })
   await page.evaluate(() => { window.__pool.push({ id: 't9', url: 'https://other.example', title: 'Other', sid: 'S-OTHER', srcPath: '' }) })
   const beforeS2 = await snap()
   await nav('t9')
   const afterS2 = await snap()
   check('别的会话的页面不进本 scope 的标签集（syncWebTabs 按 scope 过滤）',
     afterS2.webIds === '', JSON.stringify(afterS2))
-  check('当前面板的 rightTab/rightExpanded/leftExpanded 全部不变',
+  check('当前面板的 激活标签/rightExpanded/leftExpanded 全部不变',
     afterS2.tab === beforeS2.tab && afterS2.expanded === beforeS2.expanded && afterS2.left === beforeS2.left,
     `${JSON.stringify(beforeS2)} → ${JSON.stringify(afterS2)}`)
 
   console.log('S3 AI 在别的会话操作浏览器（onEmbedAiAction）→ 不展开、不切标签、不收左栏')
   await reset()
-  await page.evaluate(() => { window.__store.setState({ activeSessionId: 'S1', rightTab: 'activity', rightExpanded: false, leftExpanded: true }) })
+  await page.evaluate(() => {
+    window.__store.setState({
+      activeSessionId: 'S1', rightExpanded: false, leftExpanded: true,
+      tabsByScope: { S1: { tabs: [{ id: 'act1', kind: 'activity' }], activeId: 'act1', closed: [] } },
+    })
+  })
   const beforeS3 = await snap()
   await page.evaluate(() => window.__aiCb({ kind: 'down', x: 10, y: 20 }))
   const afterS3 = await snap()
-  check('AI 动作后 rightTab/rightExpanded/leftExpanded 全部不变（旧实现走 focusBrowser：展开+切 web+收左栏）',
+  check('AI 动作后 激活标签/rightExpanded/leftExpanded 全部不变（旧实现走 focusBrowser：展开+切 web+收左栏）',
     afterS3.tab === beforeS3.tab && afterS3.expanded === beforeS3.expanded && afterS3.left === beforeS3.left,
     `${JSON.stringify(beforeS3)} → ${JSON.stringify(afterS3)}`)
   const aiActive = await page.evaluate(() => window.__store.getState().embedAiActive)

@@ -42,7 +42,7 @@ const PROBE_URL = `http://localhost:${PORT}/e2e/_plugintabprobe_run/index.html`
 const WS = '/mock/proj-plugin-tabs'
 const LS_TABS = 'go-code.sessionTabs'
 // 期望的标签顺序：探针第一次 boot 时 store 里没有标签集，RightPanel 的 syncTabsToRightTab
-// 会按 rightTab 补一个默认 activity（阶段 1 的既有语义），之后的 git / plugin:demo 排其后。
+// 会补一个默认 activity（阶段 1 的既有语义），之后的 git / plugin:demo 排其后。
 const ORDER = 'activity,git,plugin:demo'
 
 // —— 插件资产（真的静态文件：loader 的 `import()` 必须真的能拉到它们）——

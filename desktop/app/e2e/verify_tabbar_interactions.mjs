@@ -124,8 +124,8 @@ try {
     file: (id, name, mode = 'source') => ({ id, kind: 'file', path: `/mock/proj-auth/${name}`, mode }),
   }
   // 夹具只摆「标签集」这一层；作用域与面板展开态走**真实动作**（setActiveSession +
-  // setRightExpanded）—— 直接写 rightExpanded 会被视图镜像（rightTabPatch → setView）当场
-  // 冲掉，那样测到的是「折叠态下没有标签条」，不是标签条行为。
+  // setRightExpanded）—— 直接写 rightExpanded 会被会话视图镜像（setView）当场冲掉，
+  // 那样测到的是「折叠态下没有标签条」，不是标签条行为。
   const seed = (tabs, activeId, extra = {}) => page.evaluate(([tabs, activeId, extra]) => {
     window.__store.getState().setActiveSession('S1', '/mock/proj-auth')
     window.__store.getState().setRightExpanded(true)

@@ -149,15 +149,17 @@ ev({ event_type: 'task_promoted', task_id: 'tooltask-1', kind: 'tool', name: 'ba
 // 工具跑完（后台任务回执）：结果正文要能在它的子会话里看到
 ev({ event_type: 'tool_run_end', run_id: 'main-1', id: 'call-9', name: 'bash', result: 'sleep done (30s)', is_error: false })
 
-// 视图收尾：右栏展开到「任务」tab（验退役）
+// 视图收尾：右栏展开到「链路」面板（验任务 tab 已退役）。
+// R11b：面板 = 激活标签，所以「展开到链路」= 该 scope 的标签集里有一个激活的 activity 标签
+// （旧实现写的是 state 里的面板字段，那个字段已删）。
 {
   const st = useAppStore.getState()
   const v = st.views[SID]
   useAppStore.setState({
-    views: { ...st.views, [SID]: { ...v, rightExpanded: true, rightTab: 'activity' } },
+    views: { ...st.views, [SID]: { ...v, rightExpanded: true } },
     rightExpanded: true,
-    rightTab: 'activity',
     rightSize: 420,
+    tabsByScope: { ...st.tabsByScope, [SID]: { tabs: [{ id: 'act1', kind: 'activity' }], activeId: 'act1', closed: [] } },
   })
 }
 

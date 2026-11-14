@@ -327,12 +327,12 @@ const { useAppStore, dispatchEvent } = store
 const emit = (line) => { for (const cb of [...listeners]) cb(JSON.stringify(line)) }
 const lastOf = (type, from = 0) => [...emitted.slice(from)].reverse().find((c) => c.type === type)
 const reset = () => {
-  // rightTab/fileFocus 也要复位：syncTabsToRightTab 在 rightTab='file' 且没有 file 标签时
-  // 会按 fileFocus 补一个默认标签（这是产品的既有语义），留着它会让下一段的标签数多一个。
+  // tabsByScope/fileFocus 也要复位：标签集留着会让下一段的标签数多一个
+  //（R11b 之前还要复位面板字段 —— 「按面板补默认标签」那条路已随字段一起删掉）。
   useAppStore.setState({
     bridgeStatus: 'running', bridgeError: undefined, toast: undefined,
     workspace: '/ws', activeSessionId: '', tabsByScope: {}, dirtyTabs: {}, closeConfirm: undefined,
-    rightTab: 'activity', fileFocus: undefined, filePreviews: {},
+    fileFocus: undefined, filePreviews: {},
   })
 }
 

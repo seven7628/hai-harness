@@ -93,7 +93,7 @@ try {
       rightExpanded: true,
       tabsByScope: {},
     })
-    st().setRightTab('activity')
+    st().openTab({ kind: 'activity' })
   })
   await page.waitForTimeout(300)
   await page.locator('.right').screenshot({ path: path.join(OUT, '1-default.png') })
@@ -102,10 +102,10 @@ try {
   // 2026-10：'agent'（任务）tab 已退役 —— 子智能体住左栏会话树，不再占右栏入口。
   await page.evaluate(() => {
     const st = () => window.__store.getState()
-    st().setRightTab('git')
+    st().openTab({ kind: 'git' })
     st().openFile('desktop/app/src/store/useAppStore.ts')
-    st().setRightTab('web')
-    st().setRightTab('git') // 激活「变更」，让多标签状态可见
+    st().openTab({ kind: 'web' })
+    st().openTab({ kind: 'git' }) // 激活「变更」，让多标签状态可见
   })
   await page.waitForTimeout(300)
   await page.locator('.right').screenshot({ path: path.join(OUT, '2-all-tabs.png') })

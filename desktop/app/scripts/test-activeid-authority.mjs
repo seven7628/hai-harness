@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// PR-02 不变量：activeId 权威、rightTab 单点派生。
+// PR-02 不变量：activeId 权威。（R11b 起「面板 = 激活标签的 kind」由选择器现算，
+// 这里原来钉的是派生字段 rightTab === 激活标签的 kind —— 字段已删，同一事实改由
+// `selectRightTab` 表达；选择器本身另有单测 src/lib/rightPanel-test.ts。）
 //
-// 这三条是后续所有 Surface 迁移的地基（PR-03/04/06/07 都假设它们成立）：
-//   1) 任何标签动作之后，rightTab === 激活标签的 kind（没有标签时保留旧值）
-//   2) 外部直接 setState({ rightTab }) **不再**换掉用户正在看的标签（旧的反向收敛已删）
-//   3) 标签动作不碰布局（rightLayout 不变；自动展开只属于 openTab，留给后续 PR 接线）
+// 这几条是后续所有 Surface 迁移的地基（PR-03/04/06/07 都假设它们成立）：
+//   1) 任何标签动作之后，选择器读到的 kind == 激活标签的 kind（关光标签时无值，**不**保留旧值）
+//   2) 外部改非标签状态、以及 syncTabsToRightTab，都**不**换掉用户正在看的标签
+//   3) 标签动作不碰布局（rightLayout 不变；自动展开只属于 openTab）
 //
 // 用法：cd desktop/app && npm run test:activeid
 // 退出码：全通过 0；任一断言失败非 0。
@@ -61,7 +63,7 @@ await build({
   logLevel: 'silent',
   loader: { '.md': 'text', '.svg': 'text', '.png': 'dataurl' },
 })
-const { useAppStore } = require(outfile)
+const { useAppStore, selectRightTab } = require(outfile)
 
 const WS = '/mock/ws'
 const S1 = 's1'
@@ -80,7 +82,6 @@ const reset = (patch = {}) => {
     tabsByScope: {},
     projects: [{ path: WS, sessions: [{ id: S1, title: 'A' }, { id: S2, title: 'B' }] }],
     recentSessions: [],
-    rightTab: 'activity',
     rightExpanded: false,
     rightLayout: { open: false },
     leftExpanded: true,
@@ -92,26 +93,28 @@ const reset = (patch = {}) => {
 const layoutBefore = () => JSON.stringify(st().rightLayout)
 
 async function main() {
-  console.log('\n—— A. 标签动作后 rightTab 恒等于激活标签的 kind ——')
+  console.log('\n—— A. 标签动作后选择器恒等于激活标签的 kind ——')
   {
     reset()
     st().openTab({ kind: 'git' })
     eq(active()?.kind, 'git', 'A1 openTab(git) → 激活 git')
-    eq(st().rightTab, 'git', 'A2 rightTab 派生自激活标签')
+    eq(selectRightTab(st()), 'git', 'A2 选择器派生自激活标签')
 
     const gitId = active().id
     st().openTab({ kind: 'web' })
-    eq(st().rightTab, 'web', 'A3 再开 web → rightTab 跟着走')
+    eq(selectRightTab(st()), 'web', 'A3 再开 web → 选择器跟着走')
     st().activateTab(gitId)
-    eq(st().rightTab, 'git', 'A4 切回 git → rightTab 跟着走')
+    eq(selectRightTab(st()), 'git', 'A4 切回 git → 选择器跟着走')
 
     st().closeTab(gitId)
     const next = active()
     assert(next != null, 'A5a 关掉激活标签后仍有新激活项（顺延到邻居）')
-    eq(st().rightTab, next.kind, 'A5b rightTab 跟着新激活项')
+    eq(selectRightTab(st()), next.kind, 'A5b 选择器跟着新激活项')
   }
 
-  console.log('\n—— B. 外部改 rightTab 不再换掉用户正在看的标签（旧反向收敛已删）——')
+  // R11b：B 组原来验的是「外部直写面板字段不会换掉激活标签」。字段已删，那条路不可表达；
+  // 保留下来的同义事实是：syncTabsToRightTab 与任何**非标签**状态写入都不碰 activeId。
+  console.log('\n—— B. 外部改非标签状态 / sync 都不换掉用户正在看的标签 ——')
   {
     reset()
     st().openTab({ kind: 'web' })   // 集合里**确实存在** web 标签：旧实现一定会切过去
@@ -119,12 +122,12 @@ async function main() {
     st().openTab({ kind: 'git' })
     const gitId = active().id
     assert(gitId !== webId, 'B0 两个标签实例不同')
-    useAppStore.setState({ rightTab: 'web' }) // 模拟旧 e2e / 旧持久化数据直接改派生字段
-    // 关键：真实链路里 RightPanel 的 effect 会调 sync —— 旧分支②正在这里反选 activeId
+    useAppStore.setState({ rightExpanded: true, leftExpanded: false }) // 非标签状态
+    // 关键：真实链路里 RightPanel 的 effect 会调 sync
     st().syncTabsToRightTab()
-    eq(active().id, gitId, 'B1 sync 后 activeId 不变（旧实现会切到 web）')
+    eq(active().id, gitId, 'B1 sync 后 activeId 不变（sync 只建默认集/清标记）')
     eq(active().kind, 'git', 'B2 激活标签仍是 git')
-    eq(st().rightTab, 'git', 'B3 sync 把派生字段纠正回激活标签的 kind')
+    eq(selectRightTab(st()), 'git', 'B3 选择器读的就是激活标签（没有可漂移的副本）')
   }
 
   console.log('\n—— C. D-A：只有 openTab 会展开右栏，其它标签动作不碰布局 ——')
@@ -149,7 +152,7 @@ async function main() {
     eq(st().rightLayout.open, true, 'C7 收起后下一次 openTab 仍展开（D-A 无锁）')
   }
 
-  console.log('\n—— D. 关光标签：activeId=null，rightTab 保留（不抛错）——')
+  console.log('\n—— D. 关光标签：activeId=null，选择器无值（不抛错、不保留旧值）——')
   {
     reset()
     st().openTab({ kind: 'git' })
@@ -157,29 +160,29 @@ async function main() {
     const set = st().tabsByScope[S1]
     eq(set.tabs.length, 0, 'D1 标签全部关闭')
     eq(set.activeId, null, 'D2 activeId = null（空态）')
-    eq(st().rightTab, 'git', 'D3 rightTab 保留最后的值（兼容字段语义）')
+    eq(selectRightTab(st()), undefined, 'D3 关光标签后无值（旧字段会保留最后的值 —— 被删掉的正是那个语义）')
   }
 
-  console.log('\n—— E. 切会话：activeId 恢复，rightTab 与之一致 ——')
+  console.log('\n—— E. 切会话：activeId 恢复，选择器与之一致 ——')
   {
     reset()
     st().openTab({ kind: 'git' })
     const gitId = active().id
-    // 切到 S2：没有标签集 → 按当前 rightTab 建默认集
+    // 切到 S2：没有标签集 → sync 建默认集（activity）
     useAppStore.setState({ activeSessionId: S2 })
     st().syncTabsToRightTab()
     const s2active = active()
     assert(s2active != null, 'E1a 新会话的 activeId 可解析')
     eq(st().tabsByScope[S2]?.tabs.length, 1, 'E1b 新会话建了默认标签集（1 个）')
-    eq(st().rightTab, s2active.kind, 'E2 新会话 rightTab = 其激活标签')
+    eq(selectRightTab(st()), s2active.kind, 'E2 新会话选择器 = 其激活标签 kind')
     // 切回 S1
     useAppStore.setState({ activeSessionId: S1 })
     st().syncTabsToRightTab()
     eq(st().tabsByScope[S1]?.activeId, gitId, 'E3 切回后 activeId 是原来的 git 标签')
-    eq(st().rightTab, 'git', 'E4 切回后 rightTab 与 activeId 一致')
+    eq(selectRightTab(st()), 'git', 'E4 切回后选择器与 activeId 一致')
   }
 
-  console.log('\n—— F. 同 kind 两个实例：rightTab 相同、activeId 不同（PR-04 地基）——')
+  console.log('\n—— F. 同 kind 两个实例：选择器相同、activeId 不同（PR-04 地基）——')
   {
     reset()
     st().openTab({ kind: 'file', path: '/ws/a.md', mode: 'source' })
@@ -187,9 +190,9 @@ async function main() {
     st().openTab({ kind: 'file', path: '/ws/b.md', mode: 'source' })
     const b = active().id
     assert(a !== b, 'F1 两个 file 标签各自成实例（path 不同）')
-    eq(st().rightTab, 'file', 'F2 两个实例的 kind 相同 → rightTab 不变')
+    eq(selectRightTab(st()), 'file', 'F2 两个实例的 kind 相同 → 选择器不变')
     st().activateTab(a)
-    eq(st().rightTab, 'file', 'F3 切到另一个 file 实例，rightTab 仍是 file')
+    eq(selectRightTab(st()), 'file', 'F3 切到另一个 file 实例，选择器仍是 file')
     eq(active().id, a, 'F4 activeId 跟着切')
   }
 

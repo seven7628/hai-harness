@@ -35,7 +35,7 @@ const injected = await page.eval(() => {
     gitFiles: [], gitHistory: [], gitHasMore: false, gitHistLoading: false, gitLoading: false, gitError: undefined,
     turns: [], costUsd: 0, toolStartTs: {}, streaming: false, runEnded: true, aborted: false, reqBlock: {},
     lastLLMBlockId: undefined, runningAgentCount: 0, thinkStartTs: {}, turnThinkMs: {}, questions: [],
-    release: undefined, pendingQueue: [], rightExpanded: false, rightTab: 'activity', traceEvents: [],
+    release: undefined, pendingQueue: [], rightExpanded: false, traceEvents: [],
   }
   const u = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 }
   const cards = [
