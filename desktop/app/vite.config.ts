@@ -10,7 +10,7 @@ const devPort = Number(process.env.VITE_PORT || 5173)
 //   · 默认 `npm run build`（桌面打包）→ 两个入口都进 dist/（Electron 只加载 index.html，
 //     多出来的 mobile.html 不影响打包，但保证「同一份源码、同一条构建」能出手机页）。
 //   · `npm run mobile:build`（MOBILE_ONLY=1）→ 只出手机入口，产物到 dist-mobile/，
-//     给 bridge 用 HAI_MOBILE_WEB_DIR 托管验证（P8-01 不动 /m/ 的默认 embed）。
+//     并把 mobile.html 改名 index.html；bridge 的 /m/ 直接托管该目录（P8 方案 A）。
 // 目录选择：dist-mobile（而不是 dist/mobile）—— dist 是桌面打包产物（含 hai-bridge 二进制），
 // 手机产物单独一目录才不会被打包脚本/清理脚本当成桌面资产。
 const mobileOnly = process.env.MOBILE_ONLY === '1'
