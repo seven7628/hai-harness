@@ -138,10 +138,132 @@ type surfaceManifest struct {
 // 刻意**不**给 entry 加 kind / capabilities：一个插件仍只注册一个 kind（D-2 的第一条规则），
 // 每个 entry 只是它的一面；多给一层能力就等于让一个 manifest 声明出两个插件。
 type surfaceEntryDecl struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Icon  string `json:"icon"`
-	Order int    `json:"order"`
+	ID string `json:"id"`
+	// Title 两种写法都合法（R16b）：`"总览"`（老）或 `{"zh":"总览","en":"Overview"}`。
+	// 单字符串**必须继续可用** —— 改之前先读 07-plugin-entries.md 的「默认入口标题」裁决。
+	Title surfaceEntryTitle `json:"title"`
+	Icon  string            `json:"icon"`
+	Order int               `json:"order"`
+}
+
+// surfaceEntryTitle entries[].title 的两种写法（R16b）。
+//
+// 为什么是结构体而不是 `any` / `json.RawMessage`：
+//   - 校验要能分别判「空」「每个语言超 64 字符」「对象里一个非空都没有」——三种失败给三种
+//     reason（模型据此改输入），`any` 会把它们糊成一个「形状不对」；
+//   - 三个字符串字段 = **可比较**，既有 `TestSurfaceEntriesRoundTrip` 的 `got != want` 语义
+//     （「原样拿回」）继续成立，不必为了类型改造把断言降级成「字段差不多」；
+//   - MarshalJSON 让 `Manifest()` 读出去的形状与磁盘上那份逐字同类（单字符串仍是字符串），
+//     渲染层与诊断看到的是声明本身，不是我们的中间表示。
+type surfaceEntryTitle struct {
+	// Text 单字符串写法的原文（对象写法恒为空）。
+	Text string
+	// Zh / En 对象写法的两种语言（未声明的语言为空串）。
+	Zh string
+	En string
+}
+
+// IsZero 两种写法都没给（缺字段 / null）：校验要判它为空。
+func (t surfaceEntryTitle) IsZero() bool { return t.Text == "" && t.Zh == "" && t.En == "" }
+
+// Primary 回执/日志用的一句人读标题：单字符串 → 它自己；对象 → zh → en。
+func (t surfaceEntryTitle) Primary() string {
+	if t.Text != "" {
+		return t.Text
+	}
+	if t.Zh != "" {
+		return t.Zh
+	}
+	return t.En
+}
+
+// UnmarshalJSON 接受两种形状，其它一律报错（非法形状 = 安装 rejected，D-3）。
+//
+// 对象里**只认 zh/en**：宿主渲染层按当前语言二选一，多出来的键存了也没人读 —— 但一个
+// 只写了 `{"ja":"..."}` 的 title 会被判成「一个非空都没有」，而不是静默变成空标题。
+func (t *surfaceEntryTitle) UnmarshalJSON(raw []byte) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*t = surfaceEntryTitle{}
+		return nil
+	}
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return err
+		}
+		*t = surfaceEntryTitle{Text: s}
+		return nil
+	case '{':
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &m); err != nil {
+			return err
+		}
+		out := surfaceEntryTitle{}
+		for _, k := range []string{"zh", "en"} {
+			v, ok := m[k]
+			if !ok {
+				continue
+			}
+			var s string
+			if err := json.Unmarshal(v, &s); err != nil {
+				// 语言值必须是字符串：数字/null 是「形状不对」，不是「空标题」。
+				return fmt.Errorf("title.%s 必须是字符串", k)
+			}
+			if k == "zh" {
+				out.Zh = s
+			} else {
+				out.En = s
+			}
+		}
+		*t = out
+		return nil
+	default:
+		return errors.New(`title 必须是字符串或 {"zh":"…","en":"…"} 对象`)
+	}
+}
+
+// MarshalJSON 按声明时的形状写回（对象写法里空语言省略，不写 `""`）。
+func (t surfaceEntryTitle) MarshalJSON() ([]byte, error) {
+	if t.Zh == "" && t.En == "" {
+		return json.Marshal(t.Text)
+	}
+	m := map[string]string{}
+	if t.Zh != "" {
+		m["zh"] = t.Zh
+	}
+	if t.En != "" {
+		m["en"] = t.En
+	}
+	return json.Marshal(m)
+}
+
+// validate 标题的长度与「至少一种写法有内容」（R16b）。
+//
+// 长度按 **rune** 判（与 version 的既有校验同口径）：一个 10 字的中文标题是 30 字节，
+// 按字节判会把正常标题判死。对象写法逐语言各判一次 —— 只判最长的那个也行，但
+// reason 里要能指出是哪一种语言超了，模型改起来才不用猜。
+func (t surfaceEntryTitle) validate(limit int) error {
+	if t.Text != "" {
+		if n := len([]rune(strings.TrimSpace(t.Text))); n > limit {
+			return fmt.Errorf("title 过长（%d 字符，上限 %d）", n, limit)
+		}
+		return nil
+	}
+	if t.Zh == "" && t.En == "" {
+		// 缺字段 / null / `{}` / 只写了别的语言：都属于「没有可渲染的标题」。
+		return errors.New(`title 不能为空（字符串，或 {"zh":"…","en":"…"} 里至少一个非空）`)
+	}
+	for _, lang := range []struct{ key, val string }{{"zh", t.Zh}, {"en", t.En}} {
+		if lang.val == "" {
+			continue
+		}
+		if n := len([]rune(strings.TrimSpace(lang.val))); n > limit {
+			return fmt.Errorf("title.%s 过长（%d 字符，上限 %d）", lang.key, n, limit)
+		}
+	}
+	return nil
 }
 
 // surfaceReceipt 安装 / 卸载的回执（工具层直接序列化给模型与脚本）。
@@ -151,6 +273,24 @@ type surfaceReceipt struct {
 	ID      string `json:"id,omitempty"`
 	Version string `json:"version,omitempty"`
 	Hash    string `json:"hash,omitempty"`
+	// Entries 这次安装的入口条数（R16b）：0 = manifest 没声明 → 宿主合成一个默认入口。
+	// 指针而不是 int：`entries: 0` 与「没有这个字段」是两件事，前者是「一个入口都没声明，
+	// 但有一个默认入口」，后者属于别的回执（uninstall / rejected）。
+	Entries *int `json:"entries,omitempty"`
+	// EntryHint 入口在界面上的位置（D-2 的「安装回执写明入口在哪」那一半）。
+	// 固定一句话而不是 i18n key：回执是给**模型**读的（模型据此告诉用户去哪点），
+	// 它不在渲染层的语言订阅里，也不该为了一句话把 i18n 表引进 bridge。
+	EntryHint string `json:"entryHint,omitempty"`
+}
+
+// surfaceEntryHint 安装成功回执里的入口提示（与 D-2 的第 1 处渲染点逐字对应）。
+const surfaceEntryHint = "right panel ＋ → Panel plugins"
+
+// withEntries 给回执补上入口条数 + 位置提示（只用于「装上了」的两种状态）。
+func (r surfaceReceipt) withEntries(n int) surfaceReceipt {
+	r.Entries = &n
+	r.EntryHint = surfaceEntryHint
+	return r
 }
 
 // surfaceListResult 列表回执。与 surfaceReceipt 分开的**唯一**原因：`items` 必须
@@ -223,7 +363,9 @@ func (s *surfaceStore) install(target string, enable bool) surfaceReceipt {
 	if pos >= 0 && idx.Items[pos].Hash == hash {
 		s.audit(mf.ID, "install", true, "already installed (same sha256)")
 		it := idx.Items[pos]
-		return surfaceReceipt{Status: surfaceAlreadyInstalled, ID: it.ID, Version: it.Version, Hash: it.Hash}
+		// 幂等路径也带入口条数：脚本重跑一次不该让「有几个入口」这个答案消失。
+		return surfaceReceipt{Status: surfaceAlreadyInstalled, ID: it.ID, Version: it.Version, Hash: it.Hash}.
+			withEntries(len(mf.Entries))
 	}
 
 	// ④ 拷到暂存目录：只有全部校验通过才会变成 <id>。
@@ -287,7 +429,8 @@ func (s *surfaceStore) install(target string, enable bool) surfaceReceipt {
 	}
 
 	s.audit(mf.ID, "install", true, "")
-	return surfaceReceipt{Status: surfaceApplied, ID: entry.ID, Version: entry.Version, Hash: entry.Hash}
+	return surfaceReceipt{Status: surfaceApplied, ID: entry.ID, Version: entry.Version, Hash: entry.Hash}.
+		withEntries(len(mf.Entries))
 }
 
 // ---- 卸载 ----
@@ -777,12 +920,9 @@ func validateSurfaceEntries(target, id string, list []surfaceEntryDecl) error {
 			return fmt.Errorf("%s: entries 的 id 重复：%q（每个入口的 params.entry 必须唯一）", id, entryID)
 		}
 		seen[entryID] = struct{}{}
-		title := strings.TrimSpace(e.Title)
-		if title == "" {
-			return fmt.Errorf("%s: entries[%d] (%s) 的 title 不能为空", id, i, entryID)
-		}
-		if n := len([]rune(title)); n > maxSurfaceEntryTitleChars {
-			return fmt.Errorf("%s: entries[%d] (%s) 的 title 过长（%d 字符，上限 %d）", id, i, entryID, n, maxSurfaceEntryTitleChars)
+		// title 两种写法（R16b）：单字符串 或 {zh,en}。长度与「至少一个非空」在这里一次判死。
+		if err := e.Title.validate(maxSurfaceEntryTitleChars); err != nil {
+			return fmt.Errorf("%s: entries[%d] (%s) 的 %v", id, i, entryID, err)
 		}
 		if err := validateSurfaceEntryIcon(target, e.Icon); err != nil {
 			return fmt.Errorf("%s: entries[%d] (%s) 的 icon %v", id, i, entryID, err)

@@ -31,6 +31,14 @@ export const DEFAULT_SURFACE_ICON = 'icon.svg'
 export const SURFACE_INDEX_VERSION = 1
 
 /**
+ * entries[].title 的两种写法（R16b）：`"总览"`（老）或 `{ zh: "总览", en: "Overview" }`。
+ *
+ * 与渲染层 src/transport/types.ts 的同名类型同构（preload 不能 import 渲染层代码，
+ * 渲染层不能 import 主进程模块 —— 两处都得写）。
+ */
+export type SurfaceEntryTitle = string | { zh?: string; en?: string }
+
+/**
  * manifest.entries[] 的一项（D-2 的入口声明）。
  *
  * 它是**manifest 字段，不是 index 字段**：index.json 的 schema 一个字节都不动，
@@ -39,7 +47,14 @@ export const SURFACE_INDEX_VERSION = 1
  */
 export interface SurfaceEntryDecl {
   id: string
-  title: string
+  /**
+   * 入口标题（R16b）：老的单字符串，或 `{ zh, en }`。
+   *
+   * 索引层**原样**往下传，不在这里选语言：选语言要读宿主当前语言，而索引是主进程按
+   * 「磁盘上有什么」算出来的 —— 在这里选等于「切语言要重读一次索引」。选语言在渲染层
+   * （surfaces/plugin/entries.ts 的 entryTitleText），它订阅语言变化。
+   */
+  title: SurfaceEntryTitle
   /** `<id>` 目录内的相对路径（缺省 = 没有图标，渲染层用 kind 图标） */
   icon?: string
   /** 菜单里的排序权重（缺省 100；升序） */
@@ -114,7 +129,7 @@ function relInDir(v: unknown): string {
 
 /**
  * manifest.entries[] 的**防御性**解析（守方是渲染层）：bridge 在安装期已经校验过形状
- * （≤20 / id 合法且唯一 / title 非空 ≤64 / icon 在目录内），但 `~/.go-code/surfaces/` 是
+ * （≤20 / id 合法且唯一 / title 非空且每种语言 ≤64 / icon 在目录内），但 `~/.go-code/surfaces/` 是
  * 用户自己的目录 —— 手改一份 surface.json 不该让整份索引读不出来（与「坏 manifest 不炸
  * 整份索引」同一条纪律，见文件头第 1 条）。
  *
@@ -123,6 +138,29 @@ function relInDir(v: unknown): string {
  */
 const MAX_ENTRIES = 20
 const MAX_ENTRY_TITLE = 64
+
+/**
+ * entries[].title 的两种写法都收（R16b），形状不对就返回 null（= 丢这一项）。
+ *
+ * 长度按 **rune** 截断（`[...s]` 而不是 s.slice）：bridge 装的是「每个语言 ≤64 个字符」，
+ * 这里若按 UTF-16 码元截，一个 emoji/多字节字符会被劈成两半（渲染出替换符）。
+ * 语言只认 zh/en，与 bridge 的校验同一套（多出来的键在安装期就被判成「一个非空都没有」）。
+ */
+function parseEntryTitle(v: unknown): SurfaceEntryTitle | null {
+  const clamp = (x: unknown): string => [...str(x).trim()].slice(0, MAX_ENTRY_TITLE).join('')
+  if (typeof v === 'string') {
+    const s = clamp(v)
+    return s ? s : null
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const m = v as Record<string, unknown>
+  const out: { zh?: string; en?: string } = {}
+  const zh = clamp(m.zh)
+  const en = clamp(m.en)
+  if (zh) out.zh = zh
+  if (en) out.en = en
+  return out.zh || out.en ? out : null
+}
 
 function parseEntries(v: unknown): SurfaceEntryDecl[] {
   if (!Array.isArray(v)) return []
@@ -134,10 +172,10 @@ function parseEntries(v: unknown): SurfaceEntryDecl[] {
     const m = raw as Record<string, unknown>
     const id = str(m.id).trim()
     if (!SURFACE_ID_RE.test(id) || seen.has(id)) continue
-    const title = str(m.title).trim()
+    const title = parseEntryTitle(m.title)
     if (!title) continue
     seen.add(id)
-    const decl: SurfaceEntryDecl = { id, title: [...title].slice(0, MAX_ENTRY_TITLE).join('') }
+    const decl: SurfaceEntryDecl = { id, title }
     const icon = relInDir(m.icon)
     if (icon) decl.icon = icon
     if (typeof m.order === 'number' && Number.isFinite(m.order)) decl.order = m.order

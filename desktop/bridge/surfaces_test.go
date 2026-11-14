@@ -455,6 +455,29 @@ func TestSurfaceEntriesRejectedBeforeWrite(t *testing.T) {
 			items:  []any{entry("overview", "总览", "../x.svg", 10)},
 			reason: "icon",
 		},
+		{
+			// R16b：对象写法里一个非空都没有 = 没有可渲染的标题（与空字符串同类失败，
+			// 但 reason 要说清是对象写法，模型才知道该补哪一边）。
+			name:   "title 对象两种语言都空",
+			items:  []any{map[string]any{"id": "overview", "title": map[string]any{"zh": "", "en": ""}, "order": 10}},
+			reason: "title 不能为空",
+		},
+		{
+			// 逐语言各判一次：en 合法、zh 超限 → 必须红（只判「最长那个」也行，但不能不判）。
+			name:   "title.zh 超 64 字符（对象写法）",
+			items:  []any{map[string]any{"id": "overview", "title": map[string]any{"zh": strings.Repeat("看", 65), "en": "Overview"}, "order": 10}},
+			reason: "title.zh 过长",
+		},
+		{
+			name:   "title 对象的值不是字符串",
+			items:  []any{map[string]any{"id": "overview", "title": map[string]any{"zh": 42}, "order": 10}},
+			reason: "title.zh 必须是字符串",
+		},
+		{
+			name:   "title 是数字",
+			items:  []any{map[string]any{"id": "overview", "title": 7, "order": 10}},
+			reason: "title 必须是字符串或",
+		},
 	}
 
 	for _, c := range cases {
@@ -510,13 +533,29 @@ func TestSurfaceEntriesRejectedBeforeWrite(t *testing.T) {
 func TestSurfaceEntriesRoundTrip(t *testing.T) {
 	st, _ := testSurfaceStore(t)
 	want := []surfaceEntryDecl{
-		{ID: "overview", Title: "总览", Order: 10},
-		{ID: "schedule", Title: "课表", Icon: "calendar.svg", Order: 20}, // 不存在也合法
-		{ID: "resources", Title: "课程资源", Order: 30},
+		{ID: "overview", Title: surfaceEntryTitle{Text: "总览"}, Order: 10},
+		{ID: "schedule", Title: surfaceEntryTitle{Text: "课表"}, Icon: "calendar.svg", Order: 20}, // 不存在也合法
+		{ID: "resources", Title: surfaceEntryTitle{Text: "课程资源"}, Order: 30},
+		// R16b：对象写法与单字符串写法可以**混在同一个 manifest 里**（老插件不用改一个字）。
+		{ID: "progress", Title: surfaceEntryTitle{Zh: "进度", En: "Progress"}, Order: 40},
+		{ID: "en-only", Title: surfaceEntryTitle{En: "English only"}, Order: 50},
 	}
 	raw := make([]any, 0, len(want))
 	for _, e := range want {
-		m := map[string]any{"id": e.ID, "title": e.Title, "order": e.Order}
+		m := map[string]any{"id": e.ID, "order": e.Order}
+		switch {
+		case e.Title.Text != "":
+			m["title"] = e.Title.Text // 老的字符串写法
+		default: // 对象写法：只写声明了的语言
+			obj := map[string]any{}
+			if e.Title.Zh != "" {
+				obj["zh"] = e.Title.Zh
+			}
+			if e.Title.En != "" {
+				obj["en"] = e.Title.En
+			}
+			m["title"] = obj
+		}
 		if e.Icon != "" {
 			m["icon"] = e.Icon
 		}
@@ -563,6 +602,162 @@ func TestSurfaceEntriesRoundTrip(t *testing.T) {
 		if len(mf.Entries) != 0 {
 			t.Fatalf("%s 的 entries = %+v，want 空（宿主给默认入口）", id, mf.Entries)
 		}
+	}
+}
+
+// TestSurfaceEntryTitleForms R16b：`entries[].title` 的两种写法。
+//
+// 三条不许破的约束：
+//  1. 单字符串**继续可用**（老 manifest 一个字都不用改）—— 这是「不要为新能力改旧契约」；
+//  2. 对象写法缺哪一边都合法（只写 zh 或只写 en），但「两个都空」不合法；
+//  3. 写回去形状不变（单字符串仍是字符串）：`Manifest()` 读出来的必须是声明本身，
+//     而不是我们内部一律归一化成对象的样子。
+func TestSurfaceEntryTitleForms(t *testing.T) {
+	big64 := strings.Repeat("看", 64) // 64 个汉字 = 192 字节：按字节判会把这条合法标题判死
+	cases := []struct {
+		name    string
+		raw     string
+		want    surfaceEntryTitle
+		primary string
+	}{
+		{"单字符串（老写法）", `"总览"`, surfaceEntryTitle{Text: "总览"}, "总览"},
+		{"对象 zh+en", `{"zh":"总览","en":"Overview"}`, surfaceEntryTitle{Zh: "总览", En: "Overview"}, "总览"},
+		{"对象只有 zh", `{"zh":"总览"}`, surfaceEntryTitle{Zh: "总览"}, "总览"},
+		{"对象只有 en", `{"en":"Overview"}`, surfaceEntryTitle{En: "Overview"}, "Overview"},
+		{"64 个汉字（上限本身合法）", `"` + big64 + `"`, surfaceEntryTitle{Text: big64}, big64},
+		{"对象 64 个汉字（同上）", `{"zh":"` + big64 + `"}`, surfaceEntryTitle{Zh: big64}, big64},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got surfaceEntryTitle
+			if err := json.Unmarshal([]byte(c.raw), &got); err != nil {
+				t.Fatalf("合法写法被判非法：%v（输入 %s）", err, c.raw)
+			}
+			if got != c.want {
+				t.Fatalf("解析 = %+v，want %+v", got, c.want)
+			}
+			if got.Primary() != c.primary {
+				t.Fatalf("Primary() = %q，want %q（回执/日志里那句人读标题）", got.Primary(), c.primary)
+			}
+			if err := got.validate(maxSurfaceEntryTitleChars); err != nil {
+				t.Fatalf("validate = %v，want nil", err)
+			}
+			out, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			wantStringForm := strings.HasPrefix(strings.TrimSpace(c.raw), `"`)
+			gotStringForm := strings.HasPrefix(strings.TrimSpace(string(out)), `"`)
+			if wantStringForm != gotStringForm {
+				t.Fatalf("写回形状变了：输入 %s → 输出 %s（单字符串不许被归一化成对象）", c.raw, out)
+			}
+		})
+	}
+
+	// 非法形状：每条都要有指向具体问题的 reason（不是「形状不对」四个字）。
+	bad := []struct {
+		name   string
+		raw    string
+		reason string
+	}{
+		{"空字符串", `""`, "title 不能为空"},
+		{"null", `null`, "title 不能为空"},
+		{"空对象", `{}`, "title 不能为空"},
+		{"只写了别的语言", `{"ja":"概要"}`, "title 不能为空"},
+		{"65 个汉字", `"` + strings.Repeat("看", 65) + `"`, "title 过长"},
+		{"对象里 en 超限", `{"zh":"总览","en":"` + strings.Repeat("O", 65) + `"}`, "title.en 过长"},
+		{"语言值不是字符串", `{"zh":1}`, "title.zh 必须是字符串"},
+	}
+	for _, c := range bad {
+		t.Run("非法/"+c.name, func(t *testing.T) {
+			var got surfaceEntryTitle
+			err := json.Unmarshal([]byte(c.raw), &got)
+			if err == nil {
+				err = got.validate(maxSurfaceEntryTitleChars)
+			}
+			if err == nil {
+				t.Fatalf("%s 被判合法（%+v）", c.raw, got)
+			}
+			if !strings.Contains(err.Error(), c.reason) {
+				t.Fatalf("reason = %q，必须包含 %q（模型据此改输入）", err.Error(), c.reason)
+			}
+		})
+	}
+}
+
+// TestSurfaceInstallReceiptEntries R16b：安装回执要回答「几个入口 / 入口在哪」。
+//
+// 三条边界一起钉住：
+//   - applied / already_installed 都带 entries（脚本重跑一次，「有几个入口」的答案不该消失）；
+//   - 零入口回执是 `entries: 0`，**不是**没有这个字段（omitempty 不能把它吃掉）；
+//   - uninstall / rejected 不带（那不是「装上了」的信息，带上会被读成「这个插件有 0 个入口」）。
+func TestSurfaceInstallReceiptEntries(t *testing.T) {
+	st, _ := testSurfaceStore(t)
+	src := surfaceFixture(t, "course-manager", "1.0.0", "export default () => null\n",
+		withManifest(func(m map[string]any) {
+			m["entries"] = []any{
+				map[string]any{"id": "overview", "title": "总览", "order": 10},
+				map[string]any{"id": "schedule", "title": map[string]any{"zh": "课表", "en": "Schedule"}, "order": 20},
+				map[string]any{"id": "progress", "title": map[string]any{"en": "Progress"}, "order": 30},
+			}
+		}))
+
+	rec := st.Install(src, true)
+	if rec.Status != surfaceApplied {
+		t.Fatalf("status = %q，want applied（reason=%q）", rec.Status, rec.Reason)
+	}
+	if rec.Entries == nil || *rec.Entries != 3 {
+		t.Fatalf("回执 entries = %v，want 3", rec.Entries)
+	}
+	if rec.EntryHint != surfaceEntryHint {
+		t.Fatalf("回执 entryHint = %q，want %q", rec.EntryHint, surfaceEntryHint)
+	}
+	// 逐字钉住提示内容：它是 D-2 第 1 处渲染点（＋ → 面板插件）的对齐点，改文案得同时改这里。
+	if surfaceEntryHint != "right panel ＋ → Panel plugins" {
+		t.Fatalf("surfaceEntryHint = %q，want \"right panel ＋ → Panel plugins\"", surfaceEntryHint)
+	}
+
+	// 幂等重跑：already_installed 也带入口条数。
+	again := st.Install(src, true)
+	if again.Status != surfaceAlreadyInstalled {
+		t.Fatalf("重跑 status = %q，want already_installed", again.Status)
+	}
+	if again.Entries == nil || *again.Entries != 3 || again.EntryHint != surfaceEntryHint {
+		t.Fatalf("重跑回执 = %+v，want entries=3 + entryHint", again)
+	}
+
+	// 零入口：字段存在且为 0，序列化里也得看得见。
+	zero := st.Install(surfaceFixture(t, "plain-panel", "1.0.0", "export default () => null\n"), true)
+	if zero.Status != surfaceApplied || zero.Entries == nil || *zero.Entries != 0 {
+		t.Fatalf("零入口回执 = %+v，want entries=0（字段必须在）", zero)
+	}
+	raw, err := json.Marshal(zero)
+	if err != nil {
+		t.Fatalf("Marshal 回执: %v", err)
+	}
+	if !strings.Contains(string(raw), `"entries":0`) {
+		t.Fatalf("零入口回执 JSON = %s，必须含 \"entries\":0（omitempty 不能把它吃掉）", raw)
+	}
+
+	// 卸载 / 拒绝不带 entries：同一个 JSON 字段在别的状态里出现=两种含义。
+	rm := st.Remove("plain-panel")
+	// 卸载成功的状态词是 `applied`（既有契约，R16b 不动它）：能删掉就是「这次操作生效了」。
+	if rm.Status != surfaceApplied {
+		t.Fatalf("remove status = %q，want applied", rm.Status)
+	}
+	rawRm, _ := json.Marshal(rm)
+	if strings.Contains(string(rawRm), "entries") || strings.Contains(string(rawRm), "entryHint") {
+		t.Fatalf("卸载回执 = %s，不该带 entries/entryHint", rawRm)
+	}
+	bad := st.Install(surfaceFixture(t, "bad-entries", "1.0.0", "export default () => null\n",
+		withManifest(func(m map[string]any) {
+			m["entries"] = []any{map[string]any{"id": "overview", "title": "", "order": 10}}
+		})), true)
+	if bad.Status != surfaceRejected {
+		t.Fatalf("非法 entries status = %q，want rejected", bad.Status)
+	}
+	if bad.Entries != nil || bad.EntryHint != "" {
+		t.Fatalf("拒绝回执 = %+v，不该带 entries/entryHint", bad)
 	}
 }
 

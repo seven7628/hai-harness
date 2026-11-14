@@ -16,6 +16,8 @@
     "dmg:background": "node build/make-dmg-background.mjs",
     "assets": "npm run icons && npm run dmg:background",
     "e2e:browser": "node e2e/desktop_browser_e2e.mjs",
+    "test:surface-install": "cd ../.. && go test ./desktop/bridge -run TestSurfaceInstallExternal -count=1 -v -args -dir=${SURFACE_DIR:-templates/surface}",
+    "e2e:external-surface": "node e2e/verify_external_surface.mjs --dir=${SURFACE_DIR:-../../templates/surface}",
     "e2e:image": "node e2e/verify_image_attach.mjs",
     "test:e2e-safety": "node --test e2e/safe_cleanup.test.mjs",
     "test:builtin-surfaces": "esbuild src/surfaces/builtin/index-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/builtin-surfaces.test.cjs --loader:.svg=text --loader:.png=dataurl --loader:.md=text --loader:.css=text --loader:.ttf=dataurl --loader:.woff=dataurl --loader:.woff2=dataurl --loader:.jpg=dataurl --loader:.jpeg=dataurl --loader:.gif=dataurl && node --test /tmp/builtin-surfaces.test.cjs",

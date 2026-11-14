@@ -54,6 +54,29 @@ test('entries / name 从 manifest 原样回来（index.json 的 schema 不动）
   assert.equal(onDisk.items[0].entries, undefined, 'index.json 里不该出现 entries')
 })
 
+test('entries[].title 两种写法（R16b）：单字符串与 {zh,en} 都原样返回，空对象/非字符串丢掉', () => {
+  const root = mkRoot([entry('mixed')])
+  mkPlugin(root, 'mixed', {
+    id: 'mixed',
+    kind: 'plugin:mixed',
+    entries: [
+      { id: 'overview', title: '总览' },                            // 老写法：一个字都不用改
+      { id: 'schedule', title: { zh: '课表', en: 'Schedule' } },     // 两种语言都声明
+      { id: 'plan', title: { en: 'Plan' } },                        // 只声明 en 也合法
+      { id: 'empty-obj', title: {} },                               // 一个非空都没有 → 丢
+      { id: 'blank', title: { zh: '   ', en: '' } },                // 只有空白 → 丢
+      { id: 'num', title: 7 },                                      // 不是字符串/对象 → 丢
+    ],
+  })
+  const it = readSurfaceIndex(root).items[0]
+  // 「原样」= 索引层不选语言、不归一化形状：前端按当前语言选（entries.ts 的 entryTitleText）。
+  assert.deepEqual(it.entries, [
+    { id: 'overview', title: '总览' },
+    { id: 'schedule', title: { zh: '课表', en: 'Schedule' } },
+    { id: 'plan', title: { en: 'Plan' } },
+  ], JSON.stringify(it.entries))
+})
+
 test('坏 entry 的处置：id/title 坏丢这一项，icon 坏只丢图标（形状 / 重复 / 上限）', () => {
   const root = mkRoot([entry('messy')])
   mkPlugin(root, 'messy', {

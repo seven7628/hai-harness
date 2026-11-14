@@ -717,9 +717,18 @@ export interface IMChatInfo {
  * 与主进程 electron/surface-index.ts 同构。渲染层把它翻成菜单项/设置页的「打开」，
  * 插件**不能**自己注入菜单（那正是 D-2 否掉的做法）。
  */
+/**
+ * entries[].title 的两种写法（R16b）：单字符串（老）或 `{ zh, en }` 对象。
+ *
+ * 与主进程 electron/surface-index.ts 的同名类型同构（两处都得写：preload 不能 import
+ * 渲染层代码，渲染层不能 import 主进程模块）。**原样**传到这里，选语言在渲染点
+ * （surfaces/plugin/entries.ts 的 entryTitleText + useLang）。
+ */
+export type SurfaceEntryTitle = string | { zh?: string; en?: string }
+
 export interface SurfaceEntryDecl {
   id: string
-  title: string
+  title: SurfaceEntryTitle
   /** `<id>` 目录内的相对路径（缺省 = 没有图标，用 kind 图标） */
   icon?: string
   /** 排序权重（缺省 100，升序） */
