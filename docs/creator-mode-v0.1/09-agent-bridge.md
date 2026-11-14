@@ -116,7 +116,7 @@
 
 - Session 仍是普通 Session：`new_session` / `list` / `ask` / `interrupt` / `approve` / `switch_model` **签名不变**。
 - 运行时：`runtimePlugin`（`runtimeKind` 第三值），装配在 `m.pluginRuntimes[path]`，**不进 `m.workspaces`**。
-- 存储：`~/.go-code/plugin-sessions/<id>/{home,sessions,events}`（0700）。`home` 是 bash/file 工具的根；卸载不删。
+- 存储：`~/.go-code/plugin-sessions/<id>/{home,sessions,events}`（0700）。`home` 是 bash/file 工具的根；卸载不删。会话 record（`record.json` + block sidecar）也落在 `sessions/plugin-<id>/` 下——与 `delete_session` 删的 `storeDir` 同源，避免「删了 jsonl、留下 record，下次打开会话复活」。
 - 工具面：照 `runtimeHubAgent` 装配**全局层**；不叠项目层；再叠加该插件自己的工具（§7）。
 - 模型：普通会话语义（D3）。
 
@@ -124,7 +124,7 @@
 
 - 插件安装并启用 → `plugin_projects_list` 返回虚拟 Project（无需用户操作）。
 - 会话创建：`agent.run` 不带 `session_id` → 新建随机 id 会话（D4）；带 → 复用。插件把 id 存自己的 localStorage。
-- 插件停用：虚拟 Project 仍显示、会话可读；`ask` 在 dispatch 前置拒绝 `denied`。
+- 插件停用/卸载：关闭 runtime（停 run、关 MCP/插件连接），但**会话目录不删**；`list` / 删除仍可用，打开时按需重新装配；`ask` 在 dispatch 前置拒绝 `denied`，`data.reason` 为 `plugin_disabled` / `plugin_uninstalled`。
 - 插件卸载：停止 runtime、取消在跑的 run；会话保留为「已卸载插件」，只读、可手动删。
 - 插件升级：runtime 重启；虚拟路径与会话不变。
 
@@ -329,7 +329,7 @@ host.onEvent('tool.call', async (ev) => {
 | `session_send` / `session_list` | Session Mesh：给其它会话/节点发消息 | 跨会话注入、内容外发 |
 | `workspace_create` | 创建真实工作区 | 插件能批量建项目污染 `workspaces.json` |
 | `session_create` / `assign_task` / `handoff` / `handoff_ack` / `group_*` / `task_*` / `agent_status` | Hub 多智能体/任务板 | 插件不该编排 Hub、改写任务状态 |
-| `promote_task` / cron 类 | 后台持久/定时任务 | 用户不看着时持续消耗 token 与写盘 |
+| `promote_task` / cron 类 | 后台持久/定时任务 | 用户不看着时持续消耗 token 与写盘。注：`promote_task` 目前是宿主命令而非工具，denylist 仍保留该名字，防将来工具化后静默放行 |
 | `git_worktree` | 真实仓库操作 | 插件 home 不是仓库；用户明确不需要 |
 | `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect` | 旧只读命令（已从 command 表移除） | 能读真实项目/会话元数据，与「不碰 Project」冲突（D11） |
 
@@ -443,7 +443,7 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | 插件工具误入项目会话 | 设计上不存在（D10） | 装配点只对 `runtimePlugin` 注册；门禁断言项目会话看不到 `plugin__*` |
 | 旧插件使用已移除的只读命令 | 会 `not_declared` / 安装拒绝 | P1 更新模板与 SKILL；安装回执给出明确 reason |
 | `surface_list` 是否放行 | 禁（D11） | 不开口子；需要清单走宿主 UI |
-| 工具 denylist 随版本漂移 | 新工具默认拒绝（白名单式装配） | 装配时用 allowlist，新增工具需显式放行 |
+| 工具 denylist 随版本漂移 | 集中 denylist + `SetToolFilter`（装配后动态注册）+ `HideTool`（模型不可见、调用即拒）双防线 | MCP/插件工具名是动态的，纯 allowlist 会误伤；P2 若改 allowlist，先解决 `mcp__*` 前缀白名单 |
 
 ---
 
