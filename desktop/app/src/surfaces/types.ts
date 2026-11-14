@@ -2,7 +2,7 @@
 // 设计口径见 docs/creator-mode-v0.1/01-design.md §3、§5.1；实现参考 03-code-plan.md §2.1。
 import type { ReactNode } from 'react'
 import type { AppState, TabInstance } from '../store/useAppStore'
-import type { SurfaceCommandReply } from '../transport/types'
+import type { SurfaceCommandReply, SurfaceEvent } from '../transport/types'
 
 /** 内置 kind 保持 4 个：文档/媒体不是 kind，是 file{mode:'preview'} 的渲染器（D-I） */
 export type BuiltinKind = 'activity' | 'git' | 'file' | 'web'
@@ -46,9 +46,14 @@ export interface HostApi {
   useSession?<T>(sel: (s: SessionProjection) => T): T
   /** 白名单命令：未声明/未允许/超时/内部错误一律回 `{ok:false, reason}`，不抛。 */
   command(name: string, payload?: unknown): Promise<SurfaceCommandReply>
-  events: { on(type: string, fn: (e: unknown) => void): () => void }
-  openTab(spec: DistributiveOmit<SurfaceTab, 'id'>): void
-  toast(msg: string): void
+  /**
+   * 事件入口（09 §5 / §5.2）—— **只有这一个**，且只能订阅 manifest.data 里声明过的 type
+   *（未声明 = 抛：写错的事件名必须在 apply 时炸出来，否则症状是「订阅成功但永远收不到」）。
+   *
+   * 返回 disposer：`const off = host.onEvent('agent.delta', fn)` → 卸载/换订阅时 `off()`。
+   * loader 也会把它登记进插件的 disposer 列表（双保险：插件忘了调也不会变成僵尸监听）。
+   */
+  onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 }
 
 export interface SessionProjection {
