@@ -37,7 +37,12 @@ export default defineConfig({
     // （2026-11-13 的真实卡死事故）。
     //
     // 这些目录**不是应用源码** ⇒ 忽略它们不影响任何功能。
-    ignored: [
+    //
+    // 位置必须是 `server.watch.ignored`：Vite 的 resolveChokidarOptions 直接解构
+    // `watch.ignored`（相对 root 的 glob 会被它 rebase 成绝对路径）。写在 `server`
+    // 下一层会被静默忽略 —— 92c1d77 就那么放过一次，注释说得对、行为一点没变。
+    watch: {
+      ignored: [
       // 两种写法都要：vite 的 `server.watch.ignored` 按**相对 root** 解析，
       // 而 chokidar 实际匹配的是绝对路径 ⇒ 只写一种会有漏网（实测：
       // 只写 `**/e2e/**` 时，探针文件照样触发整页重载）。
@@ -52,7 +57,8 @@ export default defineConfig({
       '**/*_shots/**',
       '**/*_run/**',
       '**/.go-code/**',
-    ],
+      ],
+    },
   },
   build: {
     outDir: mobileOnly ? 'dist-mobile' : 'dist',
