@@ -115,6 +115,11 @@ contextBridge.exposeInMainWorld('desktop', {
   // **唯一**入口（白名单与审计在 bridge —— 主进程只是转发 + 形状校验）。
   surfaceIndex: () => ipcRenderer.invoke('surface:index'),
   surfaceCommand: (p: { id: string; name: string; args?: unknown; workspace?: string }) => ipcRenderer.invoke('surface:command', p),
+  // 插件页（PR-14b）：启用开关 / 卸载（进 .trash）/ 审计尾部。三条都是**转发**到 bridge
+  // —— index 的写入纪律只有 Go 那份 surfaceStore（flock + .bak + 原子替换）。
+  surfaceSetEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('surface:set-enabled', { id, enabled }),
+  surfaceRemove: (id: string) => ipcRenderer.invoke('surface:remove', { id }),
+  surfaceAudit: (limit?: number) => ipcRenderer.invoke('surface:audit', { limit }),
   stopBridge: () => ipcRenderer.invoke('bridge:stop'),
   settingsGet: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   settingsSet: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:set', patch) as Promise<{ ok: boolean; error?: string; settings?: AppSettings }>,

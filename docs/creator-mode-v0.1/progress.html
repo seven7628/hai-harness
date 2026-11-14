@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 14:05",
-    "current": "R14b"
+    "updated": "2026-11-13 15:10",
+    "current": "R15"
   },
   "rounds": [
     {
@@ -1043,23 +1043,25 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     {
       "id": "R14b",
       "pr": "PR-14b",
-      "title": "PluginsPage：列表 / 禁用 / 卸载 / 权限与 audit 对照（UI 半边）",
+      "title": "面板插件页（列表 / 启用开关 / 卸载 / 调用记录）+ 写路径",
       "type": "新增",
       "est": 1.0,
       "deps": [
         "R14"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "eb3ed35",
+      "review": "主会话复核：go vet / TestSurface 39 条 / tsc 0 / eslint 56 / build / 插件页探针 51 / loader 50 / plugin-tabs 33 / session-tabs 38 / tabbar 89 / boundary 82 全绿。读码确认：SetEnabled 只翻 enabled、hash/installedAt/source 逐字不动，写前 .bak；ReadAudit 坏行 continue；页面开关传的是**目标值**不是当前值",
       "perf": [],
       "acc": [
-        "插件页展示已装列表（source 只显示 basename，不暴露用户目录）",
-        "禁用/卸载走 surface_disable/surface_remove，失败有可读原因",
-        "manifest 声明的 commands 与 audit.jsonl 实际调用逐条对照",
-        "卸载后标签变墓碑；重启后仍可见（若 R14 决定持久墓碑）"
+        "列表：id / 版本 / 短 hash / 启用开关 / 声明 commands 与 data / 加载失败徽标",
+        "启用停用走 index（flock + .bak + audit），不删文件；卸载二次确认后进 .trash",
+        "调用记录：最近 50 行平表（最新在上），坏行不炸，空态有文案",
+        "裁决：禁用中的插件标签是墓碑（reason=missing），重新启用走设置页；没给「插件没装」挂必然失败的按钮",
+        "裁决：不显示 source（索引 IPC 不含该字段）；比只显示 basename 更保守",
+        "裁决：禁用只写 enabled，不写 disabledReason（后者留给自动禁用）"
       ],
-      "rollback": "整页可移除，不影响已装插件的运行（loader 与工具独立）"
+      "rollback": "整页与三条命令可移除（删 SurfacesPage / settings 的一行导航 / 三条 case）；已装插件的运行不依赖它们（loader 与工具独立），回滚后禁用只能手改 index.json"
     },
     {
       "id": "R14c",

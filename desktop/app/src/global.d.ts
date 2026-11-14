@@ -1,4 +1,4 @@
-import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus, SurfaceIndex, SurfaceCommandReply } from './transport/types'
+import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus, SurfaceIndex, SurfaceCommandReply, SurfaceActionResult, SurfaceAuditReply } from './transport/types'
 
 export {}
 
@@ -17,6 +17,11 @@ declare global {
       // Surface 插件（PR-14）：索引（只读元数据）+ 宿主只读命令的唯一入口。
       surfaceIndex: () => Promise<SurfaceIndex>
       surfaceCommand: (p: { id: string; name: string; args?: Record<string, unknown>; workspace?: string }) => Promise<SurfaceCommandReply>
+      // 插件页（PR-14b）：启用开关 / 卸载（进 .trash，不直接删）/ 审计尾部。
+      // 三条都转发到 bridge（写纪律只有 Go 一份）；失败给封闭 reason，不抛。
+      surfaceSetEnabled: (id: string, enabled: boolean) => Promise<SurfaceActionResult>
+      surfaceRemove: (id: string) => Promise<SurfaceActionResult>
+      surfaceAudit: (limit?: number) => Promise<SurfaceAuditReply>
       stopBridge: () => Promise<{ ok: boolean }>
       settingsGet: () => Promise<AppSettings>
       settingsSet: (patch: Partial<AppSettings>) => Promise<{ ok: boolean; error?: string; settings?: AppSettings }>

@@ -2544,6 +2544,19 @@ func (m *manager) dispatch(c command) {
 		m.handleSurfaceCommand(c)
 		return
 
+	case CmdSurfaceSetEnabled, CmdSurfaceRemove, CmdSurfaceAudit:
+		// 插件页（PR-14b）：启用开关 / 卸载 / 审计尾部。与上面两条同层级 —— 它们描述的是
+		// `~/.go-code/surfaces/` 这份**应用级**状态，与 workspace、会话都没有关系。
+		switch c.Type {
+		case CmdSurfaceSetEnabled:
+			m.handleSurfaceSetEnabled(c)
+		case CmdSurfaceRemove:
+			m.handleSurfaceRemove(c)
+		default:
+			m.handleSurfaceAudit(c)
+		}
+		return
+
 	case "external_skills_status": // 检测 ~/.codex / ~/.claude 外部 Skills 来源
 		home, err := os.UserHomeDir()
 		if err != nil {
