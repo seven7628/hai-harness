@@ -38,9 +38,16 @@ export default defineConfig({
     //
     // 这些目录**不是应用源码** ⇒ 忽略它们不影响任何功能。
     ignored: [
+      // 两种写法都要：vite 的 `server.watch.ignored` 按**相对 root** 解析，
+      // 而 chokidar 实际匹配的是绝对路径 ⇒ 只写一种会有漏网（实测：
+      // 只写 `**/e2e/**` 时，探针文件照样触发整页重载）。
+      'e2e/**',
       '**/e2e/**',
+      'release/**',
       '**/release/**',
+      'dist/**',
       '**/dist/**',
+      'dist-mobile/**',
       '**/dist-mobile/**',
       '**/*_shots/**',
       '**/*_run/**',
