@@ -2496,8 +2496,16 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 			m.pushMeshSessions() // 新会话注册 → 立即同步对端 session_list（不等 30s 周期）
 		}
 	}
-	// IM 事件桥回填：IM 已启用时新会话直接挂上（emit 全事件漏斗转发用）
-	bs.im = m.imBridgeRef()
+	// IM 事件桥回填：IM 已启用时新会话直接挂上（emit 全事件漏斗转发用）。
+	// 插件虚拟 Project 按 kind **硬排除**（09 §4.3 第 6 点的同类判定）：插件会话不是
+	// 用户的对话，把它的全事件漏斗接到 IM 上等于「插件里跑的一轮发到用户手机」。
+	// 不能靠「随机 sid 没有 mirror」兜底 —— imBridge 的回填逻辑会随版本变化，
+	// 而这里是一条不变式：runtimePlugin 的会话桥恒为 nil。
+	if ws.kind == runtimePlugin {
+		bs.im = nil
+	} else {
+		bs.im = m.imBridgeRef()
+	}
 	rlStart := time.Now()
 	bs.runLoop()
 	startupLog("A6.runLoop", rlStart)
