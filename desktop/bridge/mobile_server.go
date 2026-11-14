@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -269,33 +268,44 @@ func (s *mobileServer) routes() http.Handler {
 	mux.HandleFunc("/api/pair", s.handlePair)
 	mux.HandleFunc("/api/cmd", s.handleCmd)
 	mux.HandleFunc("/api/events", s.handleEvents)
-	if sub := mobileWebSub(os.Getenv("HAI_MOBILE_WEB_DIR")); sub != nil {
-		mux.Handle("/m/", http.StripPrefix("/m/", noStore(http.FileServer(sub))))
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/" {
-				http.Redirect(w, r, "/m/", http.StatusFound)
-				return
-			}
-			http.NotFound(w, r)
+	// 手机页不可用时**不能静默 404**：/m/ 返回 500 + 原因（页面打不开时一眼看到为什么），
+	// 同时写 stderr 进 bridge 日志。
+	sub, subErr := mobileWebSub(os.Getenv("HAI_MOBILE_WEB_DIR"))
+	if subErr != nil {
+		fmt.Fprintln(os.Stderr, "mobile web:", subErr)
+		mux.HandleFunc("/m/", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "手机页面不可用: "+subErr.Error(), http.StatusInternalServerError)
 		})
+	} else {
+		mux.Handle("/m/", http.StripPrefix("/m/", noStore(http.FileServer(sub))))
 	}
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/m/", http.StatusFound)
+			return
+		}
+		http.NotFound(w, r)
+	})
 	return mux
 }
 
-// mobileWebSub 手机端静态资源根。开发态（HAI_MOBILE_WEB_DIR 指向仓库 mobile_web/）
-// 直接读磁盘 —— 改样式/脚本只需手机刷新，不必 go build + 重启 bridge；目录不存在
-// 或打包态回落 go:embed，交付产物永远自带页面。
-func mobileWebSub(diskDir string) http.FileSystem {
+// mobileWebSub 手机端静态资源根。
+//
+// 开发态：HAI_MOBILE_WEB_DIR 指向一个真实目录（desktop/app/dist-mobile，见
+// electron/main.ts 的 dev 分支）就直读磁盘 —— 改样式/脚本手机刷新即可，不必重解压。
+// 交付态：解压内置的 mobile_web.zip 到缓存目录（见 mobile_web.go）。
+func mobileWebSub(diskDir string) (http.FileSystem, error) {
 	if diskDir != "" {
 		if st, err := os.Stat(diskDir); err == nil && st.IsDir() {
-			return http.Dir(diskDir)
+			return http.Dir(diskDir), nil
 		}
+		fmt.Fprintf(os.Stderr, "mobile web: HAI_MOBILE_WEB_DIR=%q 不是目录，回落到内置页面\n", diskDir)
 	}
-	sub, err := fs.Sub(mobileWebFS, "mobile_web")
+	root, err := mobileWebRootFn()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return http.FS(sub)
+	return http.Dir(root), nil
 }
 
 func (s *mobileServer) close() {
