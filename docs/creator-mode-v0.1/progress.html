@@ -205,7 +205,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 17:30",
+    "updated": "2026-11-14 09:10",
     "current": "R16"
   },
   "rounds": [
@@ -919,14 +919,18 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "R11"
       ],
       "status": "done",
-      "commit": "7bc8d32 + 3891f13 + 769b948 + 7d4045a + e4f1fd3",
-      "review": "主会话复核：判据全部达成 —— grep -rn rightTab desktop/app/src = 17 行全是注释（0 处代码引用，含模块改名为 lib/rightPanel.ts）；e2e 0 处（迁移前实测 56 处/16 文件，02 少算了一个截图脚本）；19 项门禁逐项同数（tsc 0 / eslint 0 error·59 warning / vite build，right-tabs 236、tabbar 89、surface-boundary 82、session-tabs 38、ui-snapshot 31、plugin-loader 50、plugin-persist 33、surfaces-page 51、md-file-modes 63、preview-renderers 81、csv 45、html-file-preview 25、agent-tree 110、appearance 78、artifacts 89、auto-open-visual 43），链外 preview_container 88 / subagent-style 46 / activeid 32 同数；新增单测 test:rightpanel-select 9 条（进 npm test）。变异 3 条真红，其中 2 条第一次跑全绿（覆盖缺口）→ 先补 rail 的 data-kind 与 plugin 探针的选择器读点再复跑。3 处有意行为差异：关光标签后 rail 不再高亮幽灵面板 / 标签动作不再无条件 setView（顶层不再被旧会话 view 拉回）/ 直写面板字段 + sync 的复位路径消失。pdf 探针的 11 处已迁但本机缺 PDF 夹具跑不了（前置退出码 2，main 同样缺）",
+      "commit": "09d7b8d（merge）",
+      "review": "主会话复核：tsc 0 / eslint 0·59 / build / right-tabs 236 / rightpanel-select 9 / tabbar 89 / boundary 82 / session-tabs 38 / ui 31 / loader 50 / plugin-tabs 33 / surfaces-page 51 / md 63 / preview 81 —— 与基线逐项同数。终态 grep：src 17 行全是注释、e2e 0 处、setRightTab 仅注释",
       "perf": [],
       "acc": [
         "grep -rn rightTab desktop/app/src = 17 行，全是注释（0 处代码引用）",
         "grep -rn rightTab desktop/app/e2e/*.mjs = 0（迁移前 56 处 / 16 文件）",
         "AppState.rightTab / SessionView.rightTab / rightTabPatch / setRightTab 全部删除；读点走 selectRightTab（不写回 state）",
-        "19 项门禁与 main 逐项同数 + 新增 test:rightpanel-select 9 条"
+        "19 项门禁与 main 逐项同数 + 新增 test:rightpanel-select 9 条",
+        "裁决：TabSet.restored 保留（删它是改状态机，不是删字段）→ 并 R11c",
+        "裁决：语义变化「关光标签后无高亮」「标签动作不再 touch/建会话 view」按缺陷修复接受；后者改变 LRU 触摸面 → 记 R-21",
+        "裁决：模块命名 rightPanel.ts / selectRightTab 保留（判据 grep 需要）",
+        "裁决：commit message 16→17 用后续提交订正，不 rebase 重写历史"
       ],
       "rollback": "五个 commit 各自独立：选择器 / 读点 / 删字段 / 探针 / 证人。删字段那条一旦单独 revert 会与探针迁移冲突，按 4→3 顺序退"
     },
@@ -1573,6 +1577,13 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "title": "heavy 面板内存无基线",
       "d": "web 视图池 + 多标签是本方案最大的性能风险，但当前没有任何内存基线数据。",
       "a": "PR-06 前先跑一次基线（P09/P10），把数值写回本页性能模块；无基线不许合 PR-06。"
+    },
+    {
+      "id": "R-21",
+      "level": "mid",
+      "title": "标签动作不再 touch/创建会话 view —— LRU 触摸面变化",
+      "d": "R11b 删掉「标签动作无条件 setView」后，切标签不再把会话 view 拉回旧值，也不再顺带创建/触摸 view。",
+      "a": "test:right-tabs I 组改用 setRightLayout 造 view；观察 preview container / auto-open 的行为，若 LRU 过早驱逐再补显式触摸。"
     }
   ],
   "hotspots": [
