@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 15:10",
-    "current": "R15"
+    "updated": "2026-11-13 16:20",
+    "current": "R11b"
   },
   "rounds": [
     {
@@ -1101,14 +1101,16 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R14"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "R15-docs",
+      "review": "主会话收口：DESKTOP.md §5.7 补「多标签与面板插件」、RIGHT_PANEL_TABS_PLAN 加 §12（阶段 6 已交付）、README.zh-CN 加一句；全量门禁 20 项探针/单测逐项通过（tabbar 89 / boundary 82 / ui 31 / loader 50 / plugin-tabs 33 / surfaces-page 51 / session-tabs 38 / preview 81 / csv 45 / html 25 / md 63 / agent-tree 110 / appearance 78 / artifacts 89 / auto-open 43 / right-tabs 236 / registry 15 / builtin 10 / protocol 24）；Go：bridge(Surface|UI|File|Office) / codemode / officekit 全绿",
       "perf": [],
       "acc": [
-        "scripts/check.sh 全绿",
-        "npm run check 全绿",
-        "文档回写完成"
+        "DESKTOP §5.7 补多标签交互/边界/插件/自观测通道/快捷键口径",
+        "RIGHT_PANEL_TABS_PLAN §12：阶段 6 交付清单 + 与阶段 3（LRU/休眠）关系不变",
+        "README.zh-CN：右栏多标签 + 面板插件一句",
+        "跨域修复两处：d2c586d 引入的 3 个 eslint error（死赋值）、P8-01b 的 i18n seam 让 boundary 探针 T8 失真（补 HostLangProvider）",
+        "截图 capture_readme_longshot 重跑成功（1179×8590），产物未入库（brand/ 只跟踪 logo/promo）"
       ],
       "rollback": "—"
     },
