@@ -149,13 +149,14 @@ export function measureExact(v: unknown, hardCap = 5_000_000): { bytes: number; 
  */
 export function domStats(): { nodes: number; htmlBytes: number } {
   if (typeof document === 'undefined') return { nodes: 0, htmlBytes: 0 }
-  let nodes = 0
+  // 初值不写 0：try 与 catch 两条路径都赋值，`= 0` 是死赋值（eslint no-useless-assignment）。
+  let nodes: number
   try {
     nodes = document.getElementsByTagName('*').length
   } catch {
     nodes = 0
   }
-  let htmlBytes = 0
+  let htmlBytes: number
   try {
     htmlBytes = document.body?.innerHTML.length ?? 0
   } catch {

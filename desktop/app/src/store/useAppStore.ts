@@ -9327,7 +9327,7 @@ function reportMemoryBreakdown(st: AppState): void {
     const rows: Array<[string, number]> = []
     const exactRows: Array<[string, string]> = []
     for (const [k, v] of Object.entries(obj)) {
-      let n = 0
+      let n: number
       try {
         n = roughSize(v)
       } catch {
