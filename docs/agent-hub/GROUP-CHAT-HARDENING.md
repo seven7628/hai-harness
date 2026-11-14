@@ -199,10 +199,10 @@
 ## 7. 残余风险 / 待观察
 
 - `ask` 审批的阻塞时长与超时策略需要真实 provider E2E 验证。
-- 11 并发对本地 vLLM/远端 provider 的 429 行为需要压测。
+- ~~11 并发~~ **12 人群并发**：人类 @all=12 / owner 智能体 @all=11 已由确定性 fake provider 钉住（P7-03，522f552）；真实 provider 的 429 行为仍需人工压测。
 - 持久化文件写入频率与群日志一致性（消息已落、conversation 未落）需要崩溃注入测试。
 - 旧 observer 数据迁移只做加载时转换；是否需要一次性回写由 P6-12 决定并记录。
-- **I3（follow-up）**：群成员增删/群主转让仍是多条 bridge 命令的非原子序列；任一步失败可能留下半改状态。需要新增一次性 `hub_group_edit`（单次 SaveGroup + roster 重建）并在前端切换。
-- **N7（follow-up）**：同内容指纹命中仍是 generation 级整批熔断，不是 per-target 跳过；保留现状，文档/UI 已按「等待人类继续」表述。
-- I1 热更新只影响之后的 Offer/View/run 超时；已挂的 run 超时定时器按挂载时的值跑完。状态条分母在下一次 `hub_conversation` 事件刷新。
+- **I3 已收口**：`hub_group_edit` 单命令原子编辑（P7-01，ead72e6），前端只发一条；bridge 先全量校验再一次 SaveGroup + 一次 roster 重建。
+- **N7 已收口**：同内容指纹改为 per-target 跳过（P7-02，e9e160b）；命中目标的投递记 skipped，其余目标照常路由。
+- **I1 已收口**：设置保存后立即重播 `hub_conversation` 并按新 `run_timeout_ms` 重挂已挂定时器；429 退回队列前显式撤 timer（P7-04，bac3551）。
 
