@@ -4,13 +4,14 @@ import { useAppStore, SUBAGENT_CONCURRENCY_DEFAULT, COMPRESS_THRESHOLD_DEFAULT, 
 import { useT } from '../i18n'
 import { meshUUID, meshToken } from '../lib/meshRand'
 import { copyText } from '../lib/clipboard'
-import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Smartphone, Sparkles, TerminalIcon } from './icons'
+import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, LayersIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Smartphone, Sparkles, TerminalIcon } from './icons'
 import { BrowserSettingsEditor } from './BrowserSettingsEditor'
 import { ComputerSettingsEditor } from './ComputerSettingsEditor'
 import { IMSettingsEditor } from './IMSettingsEditor'
 import AppearanceTab from './AppearanceTab'
 import { MCPTab } from './MCPTab'
 import { HooksTab } from './HooksTab'
+import SurfacesPage from './SurfacesPage'
 import MobileTab from './MobileTab'
 import UsageStats from './UsageStats'
 import ProviderPage from './ProviderPage'
@@ -18,7 +19,7 @@ import type { MeshSettings, AppSettings, HubConversationSettings } from '../tran
 
 // 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
 // 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不分组，顶部基础项）。
-type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'im' | 'mesh' | 'mobile' | 'memory' | 'usage'
+type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'surfaces' | 'im' | 'mesh' | 'mobile' | 'memory' | 'usage'
 const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab; label: string; icon: ReactElement }[] }[] = [
   {
     id: 'base',
@@ -41,6 +42,9 @@ const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab;
       { key: 'mcp', label: 'settings.mcp', icon: <Globe size={14} /> },
       { key: 'hooks', label: 'settings.hooks', icon: <HookIcon size={14} /> },
       { key: 'plugin', label: 'settings.plugin', icon: <AccessIcon size={14} /> },
+      // 面板插件（PR-14b）：与上面那条 `plugin` 是**两套**插件系统（那套是 MCP/浏览器引擎/
+      // ego 之类的宿主插件，这套是 `~/.go-code/surfaces/` 里的 Surface 面板）。
+      { key: 'surfaces', label: 'settings.surfaces', icon: <LayersIcon size={14} /> },
       { key: 'im', label: 'settings.im', icon: <SessionIcon size={14} /> },
       { key: 'mesh', label: 'settings.mesh', icon: <SendIcon size={14} /> },
       { key: 'mobile', label: 'settings.mobile', icon: <Smartphone size={14} /> },
@@ -116,6 +120,7 @@ export default function SettingsModal() {
           {tab === 'mcp' && <MCPTab />}
           {tab === 'hooks' && <HooksTab />}
           {tab === 'plugin' && <PluginTab />}
+          {tab === 'surfaces' && <SurfacesPage />}
           {tab === 'im' && <IMTab />}
           {tab === 'mesh' && <MeshTab />}
           {tab === 'mobile' && <MobileTab />}

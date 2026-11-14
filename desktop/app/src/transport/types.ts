@@ -745,6 +745,42 @@ export interface SurfaceCommandReply {
 }
 
 /**
+ * 插件页（PR-14b）三条写/读操作的回执。
+ *
+ * reason 是封闭集合（unknown_id / bad_request / error，外加不可信来源的 denied）：
+ * 页面把它映射成一句人话，**不解析桥的中文 error**——文案改了不该让 UI 跟着漂。
+ * status 透传 store 的回执状态（applied / cleaned），页面用它区分「卸掉了」与「本来就干净」。
+ */
+export interface SurfaceActionResult {
+  ok: boolean
+  reason?: string
+  id?: string
+  enabled?: boolean
+  status?: string
+}
+
+/** audit.jsonl 的一行（与 bridge 的 auditLine 同构：字段名即磁盘协议） */
+export interface SurfaceAuditLine {
+  id: string
+  /** install / remove / enable / disable / command */
+  action: string
+  /** action=command 时被调的命令名 */
+  cmd?: string
+  ok: boolean
+  /** RFC3339Nano（UTC） */
+  ts: string
+  /** 拒绝原因（成功行没有这个字段） */
+  reason?: string
+}
+
+/** surface_audit 的回执：lines **恒出现**（空态是 []，不是字段消失） */
+export interface SurfaceAuditReply {
+  ok: boolean
+  reason?: string
+  lines: SurfaceAuditLine[]
+}
+
+/**
  * hub_group_edit（P7-01/I3）的 wire payload：群名/模式/群主是**字段级 patch**（不传 =
  * 不改），成员增删一次提交。bridge 先全量校验再单次落盘，任一失败群逐字段不变 ——
  * 前端不要退化成多条命令的序列（那正是 I3 修掉的半改状态）。

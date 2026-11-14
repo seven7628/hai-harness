@@ -263,6 +263,13 @@ const (
 	// payload = {id, name, args?}；白名单与审计在 Go（surfaces_command.go），
 	// 渲染层的预检只是省一次 IPC，不是边界。
 	CmdSurfaceCommand Command = "surface_command"
+	// CmdSurfaceSetEnabled / CmdSurfaceRemove / CmdSurfaceAudit 插件页（PR-14b）的
+	// 读-改-读三条。与 `ui` / `surface_command` 同一层级：不是事件（不进 28 类）、
+	// 不落盘会话、不重放；回执 reason 是封闭集合（unknown_id / bad_request / error）。
+	// 写路径仍只有一份（Go 的 surfaceStore：flock + .bak + 原子替换），主进程只转发。
+	CmdSurfaceSetEnabled Command = "surface_set_enabled"
+	CmdSurfaceRemove     Command = "surface_remove"
+	CmdSurfaceAudit      Command = "surface_audit"
 )
 
 // String 命令名字符串（dispatch switch 用）。

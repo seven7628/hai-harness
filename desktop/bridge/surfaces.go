@@ -348,6 +348,128 @@ func (s *surfaceStore) remove(id string) surfaceReceipt {
 	return surfaceReceipt{Status: surfaceApplied, ID: id}
 }
 
+// ---- 启用 / 禁用（PR-14b 插件页的写路径）----
+
+// SetEnabled 翻转 index 里某条记录的 enabled（插件页的开关）。**永不返回 error**。
+//
+// 三条语义逐条定死（01-design §5.5「禁用 / 卸载 / 墓碑必须说同一件事」）：
+//  1. **一个字节的插件文件都不动**：禁用不是卸载，也不改 hash / installedAt —— 那两个
+//     字段描述「装的还是不是那一版」，与「现在让不让跑」无关；改它会让下次升级误判。
+//  2. **先 .bak 再原子写 index**（走 writeIndex，与安装/卸载同一条路）：手改坏了还能回滚。
+//  3. **找不到 id → rejected，index 一个字节不改**：把「未知 id」写成一次成功的 enable
+//     会让用户以为开关生效了，而磁盘上根本没有这一条。
+//
+// 禁用后的**能力收走**由既有判据自动发生，不需要额外动作：surface_command 的 Enabled()
+// 变成 false、`hai-surface://` 的协议侧 404、渲染层 loader 下一轮 sync 卸载 provider。
+func (s *surfaceStore) SetEnabled(id string, enabled bool) surfaceReceipt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setEnabled(id, enabled)
+}
+
+func (s *surfaceStore) setEnabled(id string, enabled bool) surfaceReceipt {
+	id = strings.TrimSpace(id)
+	if !surfaceIDPattern.MatchString(id) {
+		// 非法 id 不写盘（也没有可信的 id 可以记进 audit）。
+		return surfaceReceipt{Status: surfaceRejected, Reason: fmt.Sprintf("id 不合法：%q（需匹配 ^[a-z][a-z0-9-]{1,40}$）", id), ID: id}
+	}
+	action := "disable"
+	if enabled {
+		action = "enable"
+	}
+	if err := s.ensureStore(); err != nil {
+		s.audit(id, action, false, err.Error())
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "创建 surfaces 目录失败：" + err.Error(), ID: id}
+	}
+	idx, prev, lock, lerr := s.lockIndex()
+	if lerr != nil {
+		s.audit(id, action, false, lerr.Error())
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "读 index 失败：" + lerr.Error(), ID: id}
+	}
+	defer closeLock(lock)
+
+	pos := idx.pos(id)
+	if pos < 0 {
+		s.audit(id, action, false, "index 中不存在该 id")
+		return surfaceReceipt{Status: surfaceRejected, Reason: fmt.Sprintf("index 里没有 id=%s（先 surface_install）", id), ID: id}
+	}
+	// 只翻这一个字段：整条 entry 原样回写（version/hash/installedAt/source 逐字不变）。
+	entry := idx.Items[pos]
+	entry.Enabled = enabled
+	idx.Items[pos] = entry
+	if err := s.writeIndex(lock, idx, prev); err != nil {
+		s.audit(id, action, false, err.Error())
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "写 index 失败：" + err.Error(), ID: id}
+	}
+	s.audit(id, action, true, "")
+	return surfaceReceipt{Status: surfaceApplied, ID: entry.ID, Version: entry.Version, Hash: entry.Hash}
+}
+
+// ---- 审计（读侧：插件页的「最近调用记录」）----
+
+// 审计读取的两个界：缺省 50 行（一屏表格），上限 200 行（再多也不该塞进设置页）。
+const (
+	surfaceAuditDefaultLimit = 50
+	surfaceAuditMaxLimit     = 200
+)
+
+// auditLine audit.jsonl 的一行（只解出插件页要展示的字段；其余字段忽略）。
+//
+// 用**独立结构**而不是 map[string]any：页面按固定列渲染（id / action / cmd / ok / ts），
+// 一份无字段约束的 map 会让「少一个 ts」变成渲染期的 undefined 而不是这里的零值。
+type auditLine struct {
+	ID     string `json:"id"`
+	Action string `json:"action"`
+	Cmd    string `json:"cmd,omitempty"`
+	OK     bool   `json:"ok"`
+	TS     string `json:"ts"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ReadAudit 读 audit.jsonl **尾部**最多 limit 行，按时间正序（旧 → 新）返回。
+//
+// limit ≤ 0 = 缺省 50；超过 200 压到 200。文件不存在 = 空列表（不是错误：一次都没装过
+// 插件的新用户走的正是这条路）。
+//
+// **坏行跳过，不报错**：审计是观测面（§5.4 第 6 条「写失败不影响主流程」的对称面）。
+// 一次断电写坏的半行、或用户手工编辑过的那一行，不该让整个「调用记录」区域变成一条
+// 错误 —— 那样用户既看不到坏行，也看不到它后面那 49 条好行。跳过 = 少一条记录，
+// 而「整段失败」= 少一个功能。
+func (s *surfaceStore) ReadAudit(limit int) ([]auditLine, error) {
+	if limit <= 0 {
+		limit = surfaceAuditDefaultLimit
+	}
+	if limit > surfaceAuditMaxLimit {
+		limit = surfaceAuditMaxLimit
+	}
+	raw, err := os.ReadFile(filepath.Join(s.Dir(), surfaceAuditName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []auditLine{}, nil
+		}
+		return nil, err
+	}
+	rows := bytes.Split(raw, []byte("\n"))
+	out := make([]auditLine, 0, limit)
+	// 从尾部往前收：只解析最后 limit 条**非空**行（大文件不必整份解析）。
+	for i := len(rows) - 1; i >= 0 && len(out) < limit; i-- {
+		line := bytes.TrimSpace(rows[i])
+		if len(line) == 0 {
+			continue
+		}
+		var rec auditLine
+		if json.Unmarshal(line, &rec) != nil {
+			continue // 坏行跳过（见上：不报错）
+		}
+		out = append(out, rec)
+	}
+	// 收的时候是倒序，翻回文件顺序（表格按「旧 → 新」渲染，最新一行在最下面）。
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 // ---- 列表 ----
 
 // List 读 index。enabledOnly = 只返回启用的（注册表视角）。
@@ -739,7 +861,7 @@ func (s *surfaceStore) audit(id, action string, ok bool, reason string) {
 // auditCommand `surface_command` 的审计行：在通用三字段上多一条 `cmd`。
 //
 // 为什么单独一条而非塞进 reason：「哪个命令被拒了」是权限排查的**第一个**问题
-//（01-design §5.5「软约束 + 可审计」），写进自由文本就再也统计不出来。
+// （01-design §5.5「软约束 + 可审计」），写进自由文本就再也统计不出来。
 // 允许的调用也写一行（ok:true）—— 只有拒绝记录时，「这个插件到底调过什么」无解，
 // 而那正是用户装完插件后唯一的对账材料。
 func (s *surfaceStore) auditCommand(id, cmd string, ok bool, reason string) {

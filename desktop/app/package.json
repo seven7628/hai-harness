@@ -128,6 +128,7 @@
     "e2e:tabbar": "node e2e/verify_tabbar_interactions.mjs",
     "e2e:surface-boundary": "node e2e/verify_surface_boundary.mjs",
     "e2e:plugin-loader": "node e2e/verify_plugin_loader.mjs",
+    "e2e:surfaces-page": "node e2e/verify_surfaces_page.mjs",
     "e2e:preview-renderers": "node e2e/verify_preview_renderers.mjs",
     "e2e:html-file-preview": "node e2e/verify_html_file_preview.mjs",
     "e2e:preview-native": "node e2e/verify_preview_renderers_native.mjs",

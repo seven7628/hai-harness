@@ -438,6 +438,40 @@ skill requires 双向生效、panel.js 无 JSX / 无裸模块 import）。
 
 ---
 
+### PR-14b 落地（R14b）—— 插件页 + 写路径，与上面条款的口径差
+
+原立项写的是「PluginsPage：列表 / 禁用 / 卸载 / 权限与 audit 对照」。真正缺的不是页面，
+而是**页面的写路径**：那时禁用只能手改 `index.json`。逐条记下与 01 / 02 / 03 的差：
+
+| 项 | 计划里的写法 | 落地 | 为什么 |
+|---|---|---|---|
+| 写路径的位置 | 未写（`surface_disable` 记为「本轮未做」，见 PR-14 栏） | 新增三条**命令**：`surface_set_enabled {id,enabled}` / `surface_remove {id}` / `surface_audit {limit?}`（`surfaces_manage.go`），与 `ui` / `surface_command` 同层级（在 workspace 判空之前） | `~/.go-code/surfaces/` 的写入纪律（flock + `.bak` + 原子替换）只有 Go 的 `surfaceStore` 一份。主进程直接改盘 = 把「谁有权改 index」变成两处判定，而松的那一处就是「禁用只是 UI 上灰了」 |
+| 命令名 | `surface_disable`（只关不开） | `surface_set_enabled`（一个命令两个方向） | 插件页要能**重新启用**；两条命令各写一遍 read-modify-write 必然分叉。`enable`/`disable` 只体现在 audit 行的 action 上 |
+| 卸载 IPC | 「走 surface_remove」（指工具） | 新增同名**命令** `surface_remove`，与 `surface_remove` 工具共用 `store.Remove`（目录进 `.trash/<id>-<ts>`） | 工具是模型的入口，IPC 是用户的入口；磁盘路径必须同一条，否则「用户点的卸载」与「模型卸载」会出现两种磁盘语义 |
+| 回执形状 | 工具那套 `{status,reason}` | 命令回执 `{ok:true,…}` / `{ok:false,reason}`，reason 封闭为 `unknown_id｜bad_request｜error`（+ 主进程侧 `denied`） | 页面直接把 reason 映射成一句话；把 store 的中文 reason 原样吐给 UI，会让文案一改就漂 |
+| `enabled` 缺省 | 未写 | **当 bad_request**，不当 false | 一次少传字段的调用不该变成静默禁用 |
+| 禁用 / 卸载 / 墓碑三处语义（§5.5） | 「必须一致」 | `plugin:` 墓碑的「重新启用」**先** `surfaceSetEnabled(id,true)` **再** `enableSurface(kind)`；内置 kind 行为字节不变；没有 IPC（浏览器 dev / 老 preload）时退回旧路径 | 顺序反了会得到「灰着但点了没反应」的墓碑：index 还写着 false，loader 不注册 provider，清本地禁用集等于什么都没发生 |
+| index 里 `enabled:false` 的标签 | 未写 | 仍是 PR-14c 的墓碑（provider 没注册 → reason=`missing`，按钮只有「移除标签」）；恢复入口在设置 → 面板插件 | 「重新启用」按钮只在 reason=`disabled`（health 的本地禁用集）时出现。给 `missing` 也挂一个会让「插件真的没装」变成一个点了必然失败的按钮（待裁决：见下列表第 1 条） |
+| audit 展示 | 「manifest 声明的 commands 与 audit.jsonl 实际调用逐条对照」 | 平表（id / action / cmd / ok / ts，最新在上，最近 50 行），**不按 id 分组**；声明 chip 在每行插件卡片上，对照靠同一屏上下两处 | 分组把「一条 id 的完整时间线」压缩成折叠块，而 V0.1 的插件数量是个位数；先按时间看全局（待裁决：见下列表第 2 条） |
+| `source` 展示 | 「只显示 basename，不暴露用户目录」 | **未做**：R14 的索引 IPC 只回元数据，`source` 不在 wire 上（要显示就得改磁盘协议字段） | 页面显示不出来不是取舍而是缺口；下一轮要么给 IPC 加字段（带一次协议评审），要么放弃这个信息 |
+| 时间列 | 未写 | 截 RFC3339 字符串成「日期 时分秒」，不用 `toLocaleString` | 后者的输出是渲染环境时区/语言的函数：同一份审计在探针机与开发机上显示成两串字，截图对比与断言都会飘 |
+| 表面上的「两套插件」 | 未写 | 设置里新增 `surfaces` 导航项，与既有 `plugin`（MCP / 浏览器引擎 / ego）分列；`PluginTab` **一行未动** | 两套插件的存储、加载、权限面完全不同，合在一个页面里只会让「停用」被理解为另一种意思 |
+
+**证据**：`desktop/bridge/surfaces_manage_test.go`（5 条：翻转+.bak+audit+推送 / 未知 id /
+形状四连 / 卸载进 .trash + 幂等 / ReadAudit 的界与坏行）、
+`e2e/verify_surfaces_page.mjs`（51 项，端口 5230：列表三态、开关传目标值、卸载确认、
+audit 表与坏行、失败文案、墓碑重新启用、零 pageerror）。
+变异 4 条真红并复原：开关传反值 3 红 / 卸载不确认直接发 5 红 / `SetEnabled` 不写 `.bak`
+1 红 / `ReadAudit` 遇坏行整段失败 1 红。
+
+**留给裁决的两条**（本轮按「先可回滚」的口径落地，改起来都是一处）：
+
+1. 禁用中的插件，它的标签该是「墓碑 + 重新启用」还是**直接关掉**？现在仍是 PR-14c 的
+   墓碑（`missing`，无重新启用按钮）—— 恢复要绕到设置页。
+2. audit 要不要按 id 分组？现在是平表（最新在上），一条 id 的时间线靠肉眼顺着看。
+
+---
+
 ### PR-15 收口
 
 - 回写 `docs/DESKTOP.md` §5.7（⌘S、右栏三态、多标签）；
