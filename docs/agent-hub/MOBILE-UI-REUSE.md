@@ -22,7 +22,8 @@
   1. `getTransport()` 浏览器静默走 mock → 移动入口需分流到 `mobileTransport`。
   2. 手机 WS 不投 `command_response` → 移动 transport 必须在 HTTP `/api/cmd` 应答后合成事件。
   3. `Transport` 60+ 方法 → 移动实现只做核心方法，其余降级 `unsupported`。
-  4. `i18n.ts` 绑 `useAppStore` → 后续抽 `langStore`，P8-01 暂不处理。
+  4. `i18n.ts` 绑 `useAppStore` → P8-01b 已抽 `host/lang.tsx`（`useT/useLang/t` 只读 host lang），手机包不再拉桌面 store。
+- 第五个边界（P8-01b 实测）：`components/markdown.tsx` / `lib/localAsset` 也静态依赖 `useAppStore`/`getTransport`；消息一渲染就把整个桌面 store + mock 拖进手机包。已改走 `HostWorkspaceContext` + `getHostTransport()`。
 - CSS：不要 import 整个 `index.css`；mobile 入口只引 tokens + `hub.css` + `runtime-skin.css`，移动布局单独 `mobile.css`。
 
 ## 2. 分期
@@ -42,11 +43,13 @@ desktop/app/mobile.html
 desktop/app/src/mobile/main.tsx
 desktop/app/src/mobile/MobileApp.tsx
 desktop/app/src/mobile/transport/mobile.ts
-desktop/app/src/mobile/shell/MobileFrame.tsx
 desktop/app/src/mobile/screens/HubListScreen.tsx
-desktop/app/src/mobile/screens/HubThreadScreen.tsx
+desktop/app/src/mobile/screens/ConversationScreen.tsx
+desktop/app/src/mobile/screens/InspectorDrawer.tsx
 desktop/app/src/mobile/mobile.css
 desktop/app/src/host/panels.ts
+desktop/app/src/host/lang.tsx
+desktop/app/src/transport/host.ts
 desktop/app/scripts/build-mobile.mjs（或 npm script）
 ```
 
@@ -74,11 +77,18 @@ Hub 屏幕要求：
 - 布局：单列、`100dvh`、safe-area、底部 composer 不被遮挡、所有可点 ≥44px、无横向溢出。
 - 主题：`applyTheme` + `data-skin='runtime'`；移动 CSS 覆盖 `.hub-demo` 的色板到 ink/paper（先保证深色一致，浅色跟随）。
 
+### P8-01b 落地记录（2026-11-13，`926c94d` / merge `ab5a01f`）
+
+- 新增 `HostCapabilities`：桌面全开；手机 `groupAdmin/agentEditor/artifactPreview/promptPreview = false`，allowlist 之外的入口不渲染、也不发请求（不留会 403 的按钮）。
+- 列表 = `<HubSidebar variant="mobile" />`；会话 = `<HubSurface />`（群内部 `GroupView`）；详情 = `<HubInspector />` 装进右侧抽屉。
+- 三个 seam：`transport/host.ts`（Hub store/命令/附件）、`host/lang.tsx`（i18n）、`HostWorkspaceContext` + `getHostTransport()`（markdown/localAsset）。
+- 手机包边界：`grep -c "useAppStore|mock/proj-auth|electronTransport|proj-auth" dist-mobile/assets/*.js` 全 0；首屏 218KB，会话 chunk 按需加载。
+
 ## 4. 测试
 
-- Node：mobile transport 单测（HTTP 应答 → command_response、WS 事件分发、401/断线）；host seam 桌面实现快照。
-- 浏览器：390×844/430×932 打开 mobile 入口（mock 或测试 bridge），列表→群/DM，断言无横向溢出、44px、composer 可见；截图。
-- 桌面回归：`npx tsc --noEmit`、`test:css`、`test:hub-conv`、`check-hub-*` 关键脚本。
+- Node：mobile transport 单测（HTTP 应答 → command_response、WS 事件分发、401/断线）；`test:host-seams` 锁 transport/lang/markdown 三个 seam 的桌面等价与手机降级。
+- 浏览器：390×844/430×932 打开 mobile 入口（mock 或测试 bridge），列表→群/DM，断言无横向溢出、44px、composer 可见；`check:mobile-hub` 已覆盖 38 条。
+- 桌面回归：`npx tsc --noEmit`、`test:css`、`test:hub-conv`、`test:hub-p3b`、`test:right-tabs`、`check-hub-*` 关键脚本。
 - Go：`go test ./desktop/bridge -run Mobile`（若改 embed/白名单）。
 - 不占 5173/5180；用 52xx。
 
