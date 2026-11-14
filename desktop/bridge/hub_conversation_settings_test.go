@@ -237,7 +237,8 @@ func TestHubConversationLimitsHotReload(t *testing.T) {
 	}); err != nil || len(w3) != 1 {
 		t.Fatalf("新 pair_limit 应立即生效: %v %+v", err, w3)
 	}
-	// 新 run_timeout 立即用于挂超时（旧定时器按旧值跑完是已知语义）。
+	// 新 run_timeout 立即用于挂超时；已经挂着的定时器由 reload_settings 重挂
+	// （P7-04，见 hub_conversation_reload_test.go）。
 	m.armHubRunTimeout(g.ID, a.ID, "wake_hot_reload")
 	m.hubRunTimerMu.Lock()
 	rt := m.hubRunTimers[hubRunTimerKey(g.ID, a.ID)]

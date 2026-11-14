@@ -3653,6 +3653,10 @@ func (m *manager) dispatch(c command) {
 		// rebuildAll 建的也是新 loop（装配时读同一份 settings），两者同源不会漂移。
 		m.applyFirstChunkTimeout()
 		m.rebuildAll() // 现有：重建全部 loop（兜底对齐 system 工具清单）
+		// P7-04：对话限额（hub.conversation）热更新后立即刷新状态条 —— 重播每个已有
+		// 对话的 hub_conversation 事件并按新 run_timeout 重挂超时定时器，不必等群里
+		// 下一次有人说话才看到新分母。
+		m.refreshHubConversationLimits()
 		m.resp(c, true, "", nil)
 
 	case CmdMeshStatus: // 查询 Session Mesh 状态（设置页「别人怎么连我」/ 排障）
