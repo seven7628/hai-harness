@@ -24,7 +24,7 @@ import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
 
-const PORT = 5230
+const PORT = 5252
 const PROBE_DIR = path.join(__dirname, '_surfacespageprobe_run')
 const PROBE_MARKER = '<title>surfaces-page probe</title>'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_surfacespageprobe_run/index.html`

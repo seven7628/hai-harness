@@ -38,8 +38,10 @@ import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
 
-// 端口按口径固定 5228（PR-14；5227 是 PR-12 的 ui 快照探针）。
-const PORT = 5228
+// 端口按口径固定 5251（PR-14 起原为 5228；5227 是 PR-12 的 ui 快照探针）。
+// R17a 迁移 = **并行轮次避让**：5225–5232 那一段正被并行 R17b 的五个探针占着，
+// 同一时刻启动会互相顶掉 vite（--strictPort 下后起的那个直接 exit 2，看起来像「前置不满足」）。
+const PORT = 5251
 const PROBE_DIR = path.join(__dirname, '_pluginprobe_run')
 const PROBE_MARKER = '<title>plugin-loader probe</title>'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_pluginprobe_run/index.html`

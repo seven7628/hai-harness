@@ -37,9 +37,11 @@ import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
 
-// 端口按口径固定 5227（PR-12）；归属自检走 _serve.mjs 的 waitProbePage，
-// 撞上一个还没退干净的别人的 vite 时报「前置不满足」并退出 2（04 F46）。
-const PORT = 5227
+// 端口按口径固定 5253（PR-12 起原为 5227；R17a 迁移 = **并行轮次避让** —— 5225–5232
+// 那一段正被并行的 R17b 占着跑，两个轮次同时启动就会互相把对方的 vite 顶掉）。
+// 归属自检走 _serve.mjs 的 waitProbePage：撞上一个还没退干净的别人的 vite 时报
+// 「前置不满足」并退出 2（04 F46），不会当作通过。
+const PORT = 5253
 const PROBE_DIR = path.join(__dirname, '_uisnapprobe_run')
 const PROBE_MARKER = '<title>ui-snapshot probe</title>'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_uisnapprobe_run/index.html`
