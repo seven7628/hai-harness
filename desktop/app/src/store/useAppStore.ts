@@ -3731,7 +3731,17 @@ function responseWorkspaceMatches(respWs: string, meta: PendingCommand | undefin
 // bridge 不可用（进程退出/未启动/写 stdin 失败）→ UI 需要升级为「需要重启 bridge」，
 // 而不是普通命令失败。普通业务错误（session not found 等）不应把整个 bridge 标红。
 function looksBridgeDown(err: string | undefined): boolean {
-  return /bridge\s*(未运行|退出|进程错误|响应超时)|not running|exited|EPIPE|stdin/i.test(err || '')
+  if (!/bridge\s*(未运行|退出|进程错误|响应超时)|not running|exited|EPIPE|stdin/i.test(err || '')) return false
+  // **启动中**的「bridge 未运行」是**瞬时**的（主进程正在 go build / spawn bridge，
+  // 那几秒里 bridge 变量还是 null）⇒ 不能 latch 成永久 error：红横幅「bridge 已退出」
+  // 会常驻，用户得手点「重启 bridge」才消。
+  //
+  // 2026-11-14 实测：重启应用后立刻出现（当时刚好在重建 bridge ⇒ ensureBridgeBin
+  // 触发了 go build ⇒ 窗口被拉长到好几秒）。主进程侧已改成**排队**（electron/main.ts
+  // 的 bridgeBooting 闸门），这里再兜一层：即使还有别的路径漏进来，starting 期间
+  // 也不标红。
+  if (useAppStore.getState().bridgeStatus === 'starting') return false
+  return true
 }
 // interrupt_task 在途请求（命令 id → 目标任务）：失败时按 id 回滚乐观 interrupting 态。
 const interruptPending = new Map<number, { sid: string; taskId: string }>()

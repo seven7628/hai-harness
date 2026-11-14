@@ -78,6 +78,20 @@ let mainWindow: BrowserWindow | null = null
 const rendererSender = createRendererSender(() => mainWindow)
 const sendToRenderer = rendererSender.send
 let bridge: ChildProcessWithoutNullStreams | null = null
+
+// —— bridge 启动闸门（2026-11-14）——
+//
+// `ensureBridgeBin()` 在产物比源码旧时会**跑 go build**（数秒）。这段时间里
+// `bridge` 还是 null，而渲染层**已经在发命令**了（wire 的快照、hub attach、
+// office-kit 探针、new_session…）⇒ 老实现直接回「bridge 未运行」⇒
+// 前端 `looksBridgeDown()` 命中 ⇒ `bridgeStatus` 被**永久** latch 成 error
+// ⇒ 红色横幅「bridge 已退出」常驻，要用户手点「重启 bridge」才消失。
+// （实测：刚重建过 bridge 就会命中——产物与源码的 mtime 比较正好触发 go build。）
+//
+// ⇒ 改成：启动期间把命令**排队**，bridge 起来后按序补发（命令 id 原样带上，
+// 回执仍能对上号）。只有「不在启动中」才是真的没跑起来。
+let bridgeBooting = false
+const bridgeBootQueue: string[] = []
 // —— 原生脏标记 + 退出拦截（PR-05b）——
 // docDirty 由渲染层镜像（任一编辑标签有未保存改动）；allowQuit 是**防死循环**的放行标志：
 // 拦下 → 问用户 → 用户选丢弃/保存完 → quitAnyway() 置 true → app.quit() 第二次进
@@ -1087,6 +1101,19 @@ function spawnBridge(bin: string): boolean {
     return false
   }
 
+  // 放行闸门：把启动期间排队的命令按序补发（id 原样 ⇒ 回执对得上号）。
+  if (bridgeBootQueue.length) {
+    const queued = bridgeBootQueue.splice(0)
+    for (const line of queued) {
+      try {
+        bridge!.stdin.write(line)
+      } catch {
+        /* 忽略：bridge 刚起来，写失败让它自己报错 */
+      }
+    }
+  }
+  bridgeBooting = false
+
   const pending: string[] = []
   const FLUSH_INTERVAL_MS = 16
   const FLUSH_THRESHOLD = 200
@@ -1251,7 +1278,14 @@ async function pushProviderKeys(): Promise<void> {
 //   · payload 已带 api_key（用户输入 / 显式空串清 key）一律不覆盖。
 // key 只进 stdin，**不进日志/错误消息**（这里也不打印 cmd）。
 function sendCommand(cmd: unknown): { ok: boolean; error?: string } {
-  if (!bridge || bridge.killed) return { ok: false, error: 'bridge 未运行' }
+  if (!bridge || bridge.killed) {
+    // 启动中（可能在 go build）⇒ **排队**，别把前端推进永久错误态。
+    if (bridgeBooting) {
+      bridgeBootQueue.push(JSON.stringify(injectProviderKey(cmd, providerKeyOf)) + '\n')
+      return { ok: true }
+    }
+    return { ok: false, error: 'bridge 未运行' }
+  }
   bridge.stdin.write(JSON.stringify(injectProviderKey(cmd, providerKeyOf)) + '\n')
   return { ok: true }
 }
@@ -1544,10 +1578,22 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     return r.canceled || r.filePaths.length === 0 ? null : r.filePaths[0]
   })
   ipcMain.handle('bridge:start', async () => {
+    // 闸门**在 await 之前**就上：ensureBridgeBin 可能要 go build（数秒），
+    // 这段时间渲染层的命令要排队而不是被判成「bridge 未运行」。
+    bridgeBooting = true
     const res = await ensureBridgeBin()
-    if (!res.ok || !res.bin) return res
+    if (!res.ok || !res.bin) {
+      bridgeBooting = false
+      bridgeBootQueue.length = 0 // 起不来 ⇒ 排队的命令也送不了，丢掉
+      return res
+    }
     const ok = spawnBridge(res.bin)
-    return ok ? { ok: true } : { ok: false, error: 'bridge 启动失败' }
+    if (!ok) {
+      bridgeBooting = false
+      bridgeBootQueue.length = 0
+      return { ok: false, error: 'bridge 启动失败' }
+    }
+    return { ok: true }
   })
   ipcMain.handle('bridge:command', (_e, cmd: unknown) => sendCommand(cmd))
   ipcMain.handle('bridge:stop', () => {
