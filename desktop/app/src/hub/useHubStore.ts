@@ -30,6 +30,7 @@ import {
   type HubDeepLinkKind,
 } from './deeplink'
 import type { HubJumpRequest } from './seqJump'
+import type { HubGroupEditPayload } from '../transport/types'
 import { normalizePromptScope, promptScopeMatches } from './promptScope'
 
 // Agent Hub 的前端状态（§8.2 Hub Rail + §8.4 DM 视图）。
@@ -310,15 +311,12 @@ interface HubState {
   openGroupEditor(groupID?: string | null): void
   closeGroupEditor(): void
   /**
-   * 保存群组编辑（编辑模式）：name/owner/mode 走 hub_group_update，成员增删走
-   * hub_group_member_add/remove。返回刷新后的 group（失败返回 null 并写 error）。
+   * 保存群组编辑（编辑模式）：**一条** hub_group_edit 同时提交 name/mode/owner 与
+   * 成员增删（P7-01/I3）。bridge 先全量校验再单次落盘，任一失败群逐字段不变 ——
+   * 不再有「转让成功但成员删了一半」的中间态。
    *
-   * 顺序（bridge 的校验决定的，不能随意换）：
-   *  1. 已在群里的 owner 变更 → 先转让（否则下一步移除旧 owner 会被拒）；
-   *  2. 移除（先腾出名额，避免「12 人时先加后删」撞上限）；
-   *  3. 添加；
-   *  4. 新 owner 来自「本次新加的人」→ 再加一次 update 转让。
-   * 前端先做同一套校验（重名/非成员/上限/owner 不可移除），错误文案直接给原因。
+   * 返回刷新后的 group（失败返回 null 并写 error）。前端仍先做同一套校验
+   *（重名/非成员/上限/owner 不可移除），错误文案直接给原因，不必等一次往返。
    */
   saveGroupEdit(req: {
     group_id: string
@@ -1433,35 +1431,25 @@ export const useHubStore = create<HubState>((set, get) => ({
     }
     const mode = String(req.mode ?? group.policy?.mode ?? 'ask')
 
-    const steps: Array<{ type: string; payload: Record<string, unknown> }> = []
-    const ownerIsNew = !!owner && owner !== oldOwner
-    const transferFirst = ownerIsNew && current.includes(owner)
-    const updatePayload = (withOwner: boolean): Record<string, unknown> => ({
+    // 一条命令提交全部字段：bridge 校验通过才落盘（P7-01/I3）。
+    // owner 只在真的变了时才带 —— 未传 = 不改群主，避免把「同值 patch」当转让。
+    const payload: HubGroupEditPayload = {
       group_id: gid,
-      patch: {
-        name,
-        policy: { mode },
-        ...(withOwner ? { owner_agent_id: owner } : {}),
-      },
-    })
-    if (transferFirst) steps.push({ type: 'hub_group_update', payload: updatePayload(true) })
-    for (const id of remove) steps.push({ type: 'hub_group_member_remove', payload: { group_id: gid, agent_id: id } })
-    for (const id of add) steps.push({ type: 'hub_group_member_add', payload: { group_id: gid, agent_id: id } })
-    if (!transferFirst) steps.push({ type: 'hub_group_update', payload: updatePayload(ownerIsNew) })
-
-    let firstError: string | null = null
-    for (const step of steps) {
-      const r = await hubCommand<{ group?: HubGroup }>(step.type, step.payload)
-      if (!r.ok && !firstError) firstError = r.error || `${step.type} 失败`
+      name,
+      mode,
+      ...(owner && owner !== oldOwner ? { owner } : {}),
+      ...(add.length > 0 ? { add_members: add } : {}),
+      ...(remove.length > 0 ? { remove_members: remove } : {}),
     }
-    // 部分成功也要刷新：界面必须显示服务端的真实状态，不能停在乐观视图上。
+    const r = await hubCommand<{ group?: HubGroup }>('hub_group_edit', { ...payload })
+    // 失败也要刷新：界面显示服务端的真实状态（服务端保证「失败 = 完全没改」）。
     await get().loadGroups()
     if (get().activeGroupId === gid) await get().selectGroup(gid)
-    if (firstError) {
-      set({ error: firstError })
+    if (!r.ok) {
+      set({ error: r.error || 'hub_group_edit 失败' })
       return null
     }
-    return get().groups.find((g) => g.id === gid) ?? null
+    return get().groups.find((g) => g.id === gid) ?? r.data?.group ?? null
   },
 
   async selectGroup(groupID) {

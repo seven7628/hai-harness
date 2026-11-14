@@ -103,6 +103,8 @@ func (m *manager) dispatchHub(c command) bool {
 		m.hubGroupMemberAdd(c)
 	case CmdHubGroupMemberRemove:
 		m.hubGroupMemberRemove(c)
+	case CmdHubGroupEdit:
+		m.hubGroupEdit(c)
 	case CmdHubGroupHistory:
 		m.hubGroupHistory(c)
 	case CmdHubGroupActivity:

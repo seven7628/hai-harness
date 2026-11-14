@@ -431,6 +431,208 @@ func (m *manager) hubGroupMemberRemove(c command) {
 	m.respGroupChanged(c, &next, true, false)
 }
 
+// hubGroupEdit 群组编辑的原子命令（P7-01/I3）。
+//
+// 旧路径（P6-17）由前端依次发 hub_group_update（转让）→ member_remove×N → member_add×N
+// → hub_group_update，每条命令各自 LoadGroup/SaveGroup。任一步失败就留下半改状态
+// （owner 已换、成员删了一半）。这里把「群名/模式/群主 + 成员增删」合成一条命令：
+// 先在一份**副本**上全量校验，全部通过才 SaveGroup 一次、名册重建一次。任一校验失败
+// 都不落盘 —— 磁盘上的 group 逐字段保持调用前。
+func (m *manager) hubGroupEdit(c command) {
+	ctx := context.Background()
+	st, err := m.hubStore()
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	id := agenthub.GroupID(strings.TrimSpace(str(c.Payload, "group_id")))
+	if id == "" {
+		m.resp(c, false, "group_id 不能为空", nil)
+		return
+	}
+	g, err := st.LoadGroup(ctx, id)
+	if err != nil {
+		m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+		return
+	}
+	if g.Deleted {
+		m.resp(c, false, "群组已删除", nil)
+		return
+	}
+	// owner 用新字段名（旧命令是 patch.owner_agent_id）；未传 = 不改群主。
+	var req struct {
+		Name          *string            `json:"name"`
+		Mode          *string            `json:"mode"`
+		Owner         *agenthub.AgentID  `json:"owner"`
+		AddMembers    []agenthub.AgentID `json:"add_members"`
+		RemoveMembers []agenthub.AgentID `json:"remove_members"`
+	}
+	if err := decodeGroupPayload(c.Payload, &req); err != nil {
+		m.resp(c, false, "参数格式错误: "+err.Error(), nil)
+		return
+	}
+	add, err := cleanGroupMemberIDs(req.AddMembers, "add_members")
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	remove, err := cleanGroupMemberIDs(req.RemoveMembers, "remove_members")
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	existing := groupMemberSet(g)
+	removeSet := make(map[agenthub.AgentID]struct{}, len(remove))
+	for _, agentID := range remove {
+		removeSet[agentID] = struct{}{}
+	}
+	addSet := make(map[agenthub.AgentID]struct{}, len(add))
+	for _, agentID := range add {
+		// 先判「同时加入和移除」：它比「不在群里」更接近调用方的意图错误。
+		if _, both := removeSet[agentID]; both {
+			m.resp(c, false, "同一个智能体不能同时加入和移除: "+string(agentID), nil)
+			return
+		}
+		addSet[agentID] = struct{}{}
+	}
+	for _, agentID := range remove {
+		if _, ok := existing[agentID]; !ok {
+			m.resp(c, false, "该智能体不在群里: "+string(agentID), nil)
+			return
+		}
+	}
+	for _, agentID := range add {
+		if _, ok := existing[agentID]; ok {
+			m.resp(c, false, "该智能体已在群里: "+string(agentID), nil)
+			return
+		}
+		// 新成员必须存活；已在群的软删成员由下面的 allowDeleted 放行（与 hub_group_update 同口径）。
+		if err := m.validateHubAgentActive(ctx, agentID); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+	}
+	owner := g.OwnerAgentID
+	if req.Owner != nil {
+		owner = agenthub.AgentID(strings.TrimSpace(string(*req.Owner)))
+		if owner == "" {
+			m.resp(c, false, "owner 不能为空", nil)
+			return
+		}
+	}
+	if _, removed := removeSet[owner]; removed {
+		m.resp(c, false, "不能移除群 owner，请先转让", nil)
+		return
+	}
+	// owner 必须在**最终**成员表里 —— 本次新加的人也可以直接当群主（转让与增删同一条命令）。
+	ownerIsMember := false
+	if _, ok := existing[owner]; ok {
+		ownerIsMember = true
+	}
+	if _, ok := addSet[owner]; ok {
+		ownerIsMember = true
+	}
+	if !ownerIsMember {
+		m.resp(c, false, "群主必须是群成员", nil)
+		return
+	}
+	if owner != g.OwnerAgentID {
+		// 新 owner 必须存活；旧 owner 可以是已删除成员（群记录保留）。
+		if err := m.validateHubAgentActive(ctx, owner); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+	}
+	next := *g
+	next.Members = make([]agenthub.Member, 0, len(g.Members)+len(add))
+	for _, member := range g.Members {
+		if _, drop := removeSet[member.AgentID]; drop {
+			continue
+		}
+		next.Members = append(next.Members, member)
+	}
+	now := time.Now().UTC()
+	for _, agentID := range add {
+		next.Members = append(next.Members, agenthub.Member{AgentID: agentID, Role: agenthub.RoleMember, JoinedAt: now})
+	}
+	if len(next.Members) == 0 {
+		m.resp(c, false, "至少保留 1 个成员", nil)
+		return
+	}
+	if len(next.Members) > agenthub.MaxGroupMembers {
+		m.resp(c, false, fmt.Sprintf("群成员上限 %d 人（当前 %d 人，改后 %d 人）",
+			agenthub.MaxGroupMembers, len(g.Members), len(next.Members)), nil)
+		return
+	}
+	if req.Name != nil {
+		next.Name = *req.Name
+	}
+	if req.Mode != nil {
+		next.Policy.Mode = *req.Mode
+	}
+	// owner 成对改写：新 owner 升 owner，其余（含旧 owner）一律 member —— 保证 owner 唯一。
+	next.OwnerAgentID = owner
+	for i := range next.Members {
+		if next.Members[i].AgentID == owner {
+			next.Members[i].Role = agenthub.RoleOwner
+		} else {
+			next.Members[i].Role = agenthub.RoleMember
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(next.Name), strings.TrimSpace(g.Name)) {
+		groups, err := st.ListGroups(ctx)
+		if err != nil {
+			m.resp(c, false, "读取群组失败: "+err.Error(), nil)
+			return
+		}
+		if err := agenthub.ValidateGroupNameUnique(next.Name, groups, g.ID); err != nil {
+			m.resp(c, false, err.Error(), nil)
+			return
+		}
+	}
+	// 兜底校验（与 update/member_add 共用同一套）：群名/模式值域/唯一 owner/12 人上限、
+	// 成员 profile 存在且未删除（已在群的软删成员放行）、成员显示名不重复。
+	if err := m.validateGroupAgents(ctx, &next, existing); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	next.ID, next.CreatedAt = g.ID, g.CreatedAt
+	next.UpdatedAt = now
+	if err := next.Normalize(); err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	// 单次落盘：所有校验都过了才写。之前任何失败都没有碰过磁盘上的群。
+	if err := st.SaveGroup(ctx, &next); err != nil {
+		m.resp(c, false, "保存群组失败: "+err.Error(), nil)
+		return
+	}
+	rosterChanged := next.Name != g.Name || next.OwnerAgentID != g.OwnerAgentID || len(add) > 0 || len(remove) > 0
+	modeChanged := next.Policy.EffectiveMode() != g.Policy.EffectiveMode()
+	// 名册/模式各重建一次（不是逐成员循环）：respGroupChanged 是全套命令共用的收尾入口。
+	m.respGroupChanged(c, &next, rosterChanged, modeChanged)
+}
+
+// cleanGroupMemberIDs 规整 add_members/remove_members：trim、拒绝空 id、去重（保序）。
+// 同一个人在一次请求里写两遍不是错误 —— 幂等去重比报错更符合「一次编辑」的语义；
+// 「重复添加已在群的人」由调用方按群成员表拒绝。
+func cleanGroupMemberIDs(ids []agenthub.AgentID, field string) ([]agenthub.AgentID, error) {
+	out := make([]agenthub.AgentID, 0, len(ids))
+	seen := make(map[agenthub.AgentID]struct{}, len(ids))
+	for _, raw := range ids {
+		agentID := agenthub.AgentID(strings.TrimSpace(string(raw)))
+		if agentID == "" {
+			return nil, fmt.Errorf("%s 不能包含空 id", field)
+		}
+		if _, dup := seen[agentID]; dup {
+			continue
+		}
+		seen[agentID] = struct{}{}
+		out = append(out, agentID)
+	}
+	return out, nil
+}
+
 // respGroupChanged 群变更后的统一响应：名册变了就重建成员们的群会话 loop，
 // 模式变了就把新 agents.Mode 推到已装配会话。失败不静默 —— 把原因带回响应，
 // UI 能提示「重启后生效」，而不是模型一直看旧名册/按旧模式执行。

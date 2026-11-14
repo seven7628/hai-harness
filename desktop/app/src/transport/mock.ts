@@ -4041,6 +4041,78 @@ class MockTransport implements Transport {
         this.respond(cmd, { group })
         break
       }
+      case 'hub_group_edit': {
+        // P7-01/I3：一条命令提交 name/mode/owner + 成员增删。先在**副本**上全量校验，
+        // 全部通过才写回 group —— 任一失败群逐字段不变（与 bridge 同语义）。
+        const gid = String(cmd.payload?.group_id ?? '').trim()
+        const group = this.hubGroup(gid)
+        if (!group || group.deleted) { this.respondErr(cmd, '群组不存在或已删除'); break }
+        const nameRaw = cmd.payload?.name
+        if (nameRaw !== undefined && nameRaw !== null && typeof nameRaw !== 'string') {
+          this.respondErr(cmd, '参数格式错误: name 必须是字符串')
+          break
+        }
+        const name = typeof nameRaw === 'string' ? nameRaw.trim() : undefined
+        if (name !== undefined && !name) { this.respondErr(cmd, '群名称不能为空'); break }
+        if (name !== undefined && this.hubGroups.some((g) => String(g.id) !== gid && String(g.name ?? '').trim() === name)) {
+          this.respondErr(cmd, '已存在同名群组')
+          break
+        }
+        const modeRaw = cmd.payload?.mode
+        if (!mockGroupModeOK(modeRaw)) {
+          this.respondErr(cmd, `群模式只能是 ask/auto/readonly（got=${String(modeRaw)}）`)
+          break
+        }
+        const ownerRaw = cmd.payload?.owner
+        if (ownerRaw !== undefined && ownerRaw !== null && typeof ownerRaw !== 'string') {
+          this.respondErr(cmd, '参数格式错误: owner 必须是字符串')
+          break
+        }
+        const addRes = mockGroupEditIDs(cmd.payload?.add_members, 'add_members')
+        if (addRes.error) { this.respondErr(cmd, addRes.error); break }
+        const removeRes = mockGroupEditIDs(cmd.payload?.remove_members, 'remove_members')
+        if (removeRes.error) { this.respondErr(cmd, removeRes.error); break }
+        const add = addRes.ids
+        const remove = removeRes.ids
+        const members = mockGroupMembers(group)
+        const existing = new Set(members.map((m) => m.agent_id))
+        const removeSet = new Set(remove)
+        let failure = ''
+        const fail = (msg: string): void => { if (!failure) failure = msg }
+        for (const id of add) {
+          if (removeSet.has(id)) fail(`同一个智能体不能同时加入和移除: ${id}`)
+          else if (existing.has(id)) fail(`该智能体已在群里: ${id}`)
+          else if (!this.hubAgents.some((a) => String(a.id ?? '') === id)) fail(`智能体不存在: ${id}`)
+        }
+        for (const id of remove) {
+          if (!existing.has(id)) fail(`该智能体不在群里: ${id}`)
+        }
+        const owner = typeof ownerRaw === 'string' ? ownerRaw.trim() : String(group.owner_agent_id ?? '')
+        if (!owner) fail('owner 不能为空')
+        else if (removeSet.has(owner)) fail('不能移除群 owner，请先转让')
+        else if (!existing.has(owner) && !add.includes(owner)) fail('群主必须是群成员')
+        const finalCount = existing.size - remove.length + add.length
+        if (finalCount > 12) fail(`群成员上限 12 人（当前 ${existing.size} 人，改后 ${finalCount} 人）`)
+        if (finalCount < 1) fail('至少保留 1 个成员')
+        if (failure) { this.respondErr(cmd, failure); break }
+        // 校验全过：一次性写回（owner 成对改写，保证恰好一个 owner）。
+        const nextMembers = members
+          .filter((m) => !removeSet.has(m.agent_id))
+          .map((m) => ({ ...m, role: m.agent_id === owner ? 'owner' : 'member' }))
+        for (const id of add) {
+          nextMembers.push({ agent_id: id, role: id === owner ? 'owner' : 'member', joined_at: new Date().toISOString() })
+        }
+        group.members = nextMembers
+        group.owner_agent_id = owner
+        if (name !== undefined) group.name = name
+        if (typeof modeRaw === 'string' && modeRaw !== '') {
+          group.policy = { ...(group.policy as Record<string, unknown>), mode: modeRaw }
+        }
+        group.updated_at = new Date().toISOString()
+        this.emit({ event_type: 'hub_group_update', group })
+        this.respond(cmd, { group })
+        break
+      }
       case 'hub_mark_read': {
         const gid = String(cmd.payload?.group_id ?? '')
         const seq = Number(cmd.payload?.seq ?? 0)
@@ -5830,6 +5902,26 @@ function mockGroupMembers(group: Record<string, unknown>): Array<{ agent_id: str
 function mockGroupModeOK(raw: unknown): boolean {
   if (raw === undefined || raw === null || raw === '') return true
   return raw === 'ask' || raw === 'auto' || raw === 'readonly'
+}
+
+/**
+ * hub_group_edit 的成员数组规整（与 bridge cleanGroupMemberIDs 同口径）：
+ * trim、拒绝空 id、去重保序；非字符串数组直接报错。
+ */
+function mockGroupEditIDs(raw: unknown, field: string): { ids: string[]; error?: string } {
+  if (raw === undefined || raw === null) return { ids: [] }
+  if (!Array.isArray(raw)) return { ids: [], error: `${field} 必须是字符串数组` }
+  const ids: string[] = []
+  const seen = new Set<string>()
+  for (const x of raw) {
+    if (typeof x !== 'string') return { ids: [], error: `${field} 必须是字符串数组` }
+    const id = x.trim()
+    if (!id) return { ids: [], error: `${field} 不能包含空 id` }
+    if (seen.has(id)) continue
+    seen.add(id)
+    ids.push(id)
+  }
+  return { ids }
 }
 
 // 群策略里**还真生效**的键（P6-13）。已删的 max_parallel_runs / max_turns_per_human
