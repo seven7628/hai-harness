@@ -1780,6 +1780,46 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     }
     return { ok: true, data: response.data?.result }
   })
+  // surface:set-enabled / surface:remove / surface:audit —— 插件页（PR-14b）的三条。
+  //
+  // 三条都是**转发**：index 的写入纪律（flock + .bak + 原子替换）只住在 Go 的
+  // surfaceStore（PR-13），主进程在这里再写一份就等于把「谁有权改 index」变成两处判定，
+  // 而松的那一处就是「禁用只是 UI 上灰了」。这里的形状校验只为省一条注定被拒的
+  // bridge 命令；真正的封闭拒绝集合在 surfaces_manage.go（unknown_id / bad_request / error）。
+  //
+  // 走 sendBridgeRequest（负 id 一问一答）而不是渲染层的事件流：这三条描述的是
+  // `~/.go-code/surfaces/` 这份应用级状态，没有 run/session 归属，进了事件流就会以
+  // 「会话事实」的身份参与视图构建（与 surface:command 同一条理由）。
+  ipcMain.handle('surface:set-enabled', async (e, p: { id?: unknown; enabled?: unknown } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, reason: 'denied' }
+    const id = typeof p?.id === 'string' ? p.id : ''
+    // enabled 必须是**布尔**：缺省当 false 会让一次少传字段的调用变成静默禁用。
+    const enabled = typeof p?.enabled === 'boolean' ? p.enabled : null
+    if (!SURFACE_ID_RE.test(id) || enabled === null) return { ok: false, reason: 'bad_request' }
+    const response = await sendBridgeRequest('surface_set_enabled', { id, enabled }, 10_000)
+    if (!response.ok) return { ok: false, reason: response.code ?? 'error' }
+    return { ok: true, id, enabled }
+  })
+  // surface:remove 走 PR-13 的 Remove：目录进 `.trash/<id>-<ts>`，**不直接删**。
+  // 插件页的卸载按钮与 `surface_remove` 工具是同一条磁盘路径，只有入口不同。
+  ipcMain.handle('surface:remove', async (e, p: { id?: unknown } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, reason: 'denied' }
+    const id = typeof p?.id === 'string' ? p.id : ''
+    if (!SURFACE_ID_RE.test(id)) return { ok: false, reason: 'bad_request' }
+    const response = await sendBridgeRequest('surface_remove', { id }, 10_000)
+    if (!response.ok) return { ok: false, reason: response.code ?? 'error' }
+    return { ok: true, id, status: response.data?.status }
+  })
+  // surface:audit 读 audit.jsonl 的尾部（limit 缺省 50、上限 200 —— 界在 Go 的 ReadAudit）。
+  // 坏行在桥侧就跳过了，这里拿到的是一份**已经干净**的数组：空数组 = 还没有调用记录。
+  ipcMain.handle('surface:audit', async (e, p: { limit?: unknown } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, reason: 'denied', lines: [] }
+    const limit = typeof p?.limit === 'number' && Number.isFinite(p.limit) ? Math.trunc(p.limit) : 0
+    const response = await sendBridgeRequest('surface_audit', limit > 0 ? { limit } : {}, 10_000)
+    if (!response.ok) return { ok: false, reason: response.code ?? 'error', lines: [] }
+    const lines = Array.isArray(response.data?.lines) ? response.data.lines : []
+    return { ok: true, lines }
+  })
   // workspace:forget：工作区被移除时回收媒体根（评审裁决 1 的「关闭时删除」）。
   // 只有主窗口主 frame 能调；删的是清单里的条目，不做任何路径推断。
   ipcMain.handle('workspace:forget', (e, p: unknown) => {
