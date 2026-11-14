@@ -332,7 +332,7 @@
     必须先回答「provider 能不能给」—— 能，就进 provider；不能，是标签形状的固有语义）。
 
 - **11b（R11b 已收口）**：删 `AppState.rightTab` / `SessionView.rightTab` 与它的兼容入口。
-  - **判据全部达成**：`grep -rn "rightTab" desktop/app/src` = **16 行，全是注释**（0 处代码引用）；
+  - **判据全部达成**：`grep -rn "rightTab" desktop/app/src` = **17 行，全是注释**（0 处代码引用）；
     `grep -rn "rightTab" desktop/app/e2e/*.mjs` = **0**（迁移前实测 **56 处 / 16 个文件** —— 02 原写
     「55 处 / 15 文件」，少算了 `capture_brand_readme_shot.mjs`）。
   - **做法**：先加派生选择器（`src/lib/rightPanel.ts` 的 `tabScopeKey` / `activeTabOf` / `selectRightTab`），

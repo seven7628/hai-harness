@@ -885,7 +885,7 @@ PR-11 开工第一件事是**核它自己的判据**，结果两条都过期了�
 
 | 派单写的 | 实测 | 说明 |
 |---|---|---|
-| `grep -rn rightTab desktop/app/src` = 0 代码引用 | 16 行，**全是注释** | 含模块路径改名（`lib/rightTab.ts` → `lib/rightPanel.ts`），否则 import 路径也带 `rightTab` 子串 |
+| `grep -rn rightTab desktop/app/src` = 0 代码引用 | 17 行，**全是注释** | 含模块路径改名（`lib/rightTab.ts` → `lib/rightPanel.ts`），否则 import 路径也带 `rightTab` 子串 |
 | `grep -rn rightTab desktop/app/e2e/*.mjs` = 0 | 0（迁移前 **56 处 / 16 文件**） | 02 写「55 / 15」，少算了一个截图脚本 |
 | 19 项门禁逐项同数 | 19/19 同数 | 另加 `preview_container 88 / subagent-style 46 / activeid 32` 三个链外探针 |
 

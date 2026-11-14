@@ -920,10 +920,10 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       ],
       "status": "done",
       "commit": "7bc8d32 + 3891f13 + 769b948 + 7d4045a + e4f1fd3",
-      "review": "主会话复核：判据全部达成 —— grep -rn rightTab desktop/app/src = 16 行全是注释（0 处代码引用，含模块改名为 lib/rightPanel.ts）；e2e 0 处（迁移前实测 56 处/16 文件，02 少算了一个截图脚本）；19 项门禁逐项同数（tsc 0 / eslint 0 error·59 warning / vite build，right-tabs 236、tabbar 89、surface-boundary 82、session-tabs 38、ui-snapshot 31、plugin-loader 50、plugin-persist 33、surfaces-page 51、md-file-modes 63、preview-renderers 81、csv 45、html-file-preview 25、agent-tree 110、appearance 78、artifacts 89、auto-open-visual 43），链外 preview_container 88 / subagent-style 46 / activeid 32 同数；新增单测 test:rightpanel-select 9 条（进 npm test）。变异 3 条真红，其中 2 条第一次跑全绿（覆盖缺口）→ 先补 rail 的 data-kind 与 plugin 探针的选择器读点再复跑。3 处有意行为差异：关光标签后 rail 不再高亮幽灵面板 / 标签动作不再无条件 setView（顶层不再被旧会话 view 拉回）/ 直写面板字段 + sync 的复位路径消失。pdf 探针的 11 处已迁但本机缺 PDF 夹具跑不了（前置退出码 2，main 同样缺）",
+      "review": "主会话复核：判据全部达成 —— grep -rn rightTab desktop/app/src = 17 行全是注释（0 处代码引用，含模块改名为 lib/rightPanel.ts）；e2e 0 处（迁移前实测 56 处/16 文件，02 少算了一个截图脚本）；19 项门禁逐项同数（tsc 0 / eslint 0 error·59 warning / vite build，right-tabs 236、tabbar 89、surface-boundary 82、session-tabs 38、ui-snapshot 31、plugin-loader 50、plugin-persist 33、surfaces-page 51、md-file-modes 63、preview-renderers 81、csv 45、html-file-preview 25、agent-tree 110、appearance 78、artifacts 89、auto-open-visual 43），链外 preview_container 88 / subagent-style 46 / activeid 32 同数；新增单测 test:rightpanel-select 9 条（进 npm test）。变异 3 条真红，其中 2 条第一次跑全绿（覆盖缺口）→ 先补 rail 的 data-kind 与 plugin 探针的选择器读点再复跑。3 处有意行为差异：关光标签后 rail 不再高亮幽灵面板 / 标签动作不再无条件 setView（顶层不再被旧会话 view 拉回）/ 直写面板字段 + sync 的复位路径消失。pdf 探针的 11 处已迁但本机缺 PDF 夹具跑不了（前置退出码 2，main 同样缺）",
       "perf": [],
       "acc": [
-        "grep -rn rightTab desktop/app/src = 16 行，全是注释（0 处代码引用）",
+        "grep -rn rightTab desktop/app/src = 17 行，全是注释（0 处代码引用）",
         "grep -rn rightTab desktop/app/e2e/*.mjs = 0（迁移前 56 处 / 16 文件）",
         "AppState.rightTab / SessionView.rightTab / rightTabPatch / setRightTab 全部删除；读点走 selectRightTab（不写回 state）",
         "19 项门禁与 main 逐项同数 + 新增 test:rightpanel-select 9 条"
