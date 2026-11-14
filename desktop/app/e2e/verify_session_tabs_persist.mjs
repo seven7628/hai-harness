@@ -23,7 +23,9 @@
 //      （不新增重复标签）
 //   P5 http(s) 网页（无 srcPath）走 url 快照重建
 //   P6 坏数据不炸（截断 JSON → 静默丢弃、正常启动）
-//   P7 跨 scope 不串（A 工作区/会话的标签不出现在 B）
+//   P8 恢复的 kind 白名单（内置四类 + 合法 plugin:<id>；未知/非法丢弃）
+//   P9 原生宿主判定（R11c）：web / file{preview} 是宿主（不 hide），其余不是 ——
+//      能力位本身 + 闸门的真实行为（动 effect 依赖看 embedHide 有没有发生）
 //
 // 用法：cd desktop/app && node e2e/verify_session_tabs_persist.mjs
 // 退出码：全通过 0；任一断言失败 1；前置不满足（端口被占 / 探针服务没起来）2。
@@ -36,7 +38,10 @@ import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
-const PORT = 5208
+// 端口：**5241**（R11c 起，原 5208）。5208 在并行分支上被另一棵 worktree 的同一脚本占过 ——
+// 而这个脚本的就绪判据（探针页 <title>）在同一个脚本的两棵 worktree 之间是**同一个字符串**，
+// 挡不住「连上了别人家的服务器，然后它中途退出」。5240+ 是 e2e 的备用段（见 04 F46）。
+const PORT = 5241
 const LS_TABS = 'go-code.sessionTabs'
 
 // 端口就绪 + 归属自检（e2e/_serve.mjs 的 waitProbePage）：固定端口跑在链里，撞上一个还没
@@ -59,6 +64,9 @@ window.__pool = []
 window.__navCb = null
 window.__seq = 0
 window.__activateCalls = []
+// R11c：原生宿主闸门（RightPanel 的 nativeHost effect）的唯一可观测副作用就是 embedHide。
+// 计数放在假池里，P9 用它区分「宿主 → 不 hide」与「非宿主 → hide」。
+window.__hideCalls = 0
 const impl = {
   embedStatus: async () => ({ ok: true, targets: window.__pool.map((t) => ({ ...t })) }),
   embedOpenTarget: async (url, o) => {
@@ -72,7 +80,7 @@ const impl = {
   embedNavigateTarget: async () => ({ ok: true }),
   onEmbedNav: (cb) => { window.__navCb = cb; return () => {} },
   onEmbedAiAction: (cb) => { window.__aiCb = cb; return () => {} },
-  embedHide: async () => ({ ok: true }),
+  embedHide: async () => { window.__hideCalls++; return { ok: true } },
   embedShow: async () => ({ ok: true }),
   embedResize: async () => ({ ok: true }),
   embedCommand: async () => ({ ok: true }),
@@ -97,12 +105,15 @@ import { useAppStore } from '../../src/store/useAppStore'
 // 本脚本的实测：R06b 把 web 的 title 委派给 provider 后，这里少了这行，「标签名用快照 url 还原
 // （report.pdf）」拿到的是 kindLabel 的「网页」→ 探针假红（脚本不在 npm test 链里，一直没人发现）。
 import '../../src/surfaces/builtin'
+import { getSurface } from '../../src/surfaces/registry'
 import '../../src/index.css'
 
 // 启动顺序与真实应用一致：先 start()（它会重置视图字段），会话恢复（new_session 响应 →
 // activeSessionId）**在其后**发生 —— 顺序反了会把恢复的激活标签又打回默认。
 useAppStore.setState({ workspace: '/w' })
 ;(window as unknown as { __store: unknown }).__store = useAppStore
+// R11c：把注册表本身交给探针 —— 宿主判定是 provider 的能力位，P9 要当着它的面问。
+;(window as unknown as { __getSurface: unknown }).__getSurface = getSurface
 void useAppStore.getState().start('/w')
 
 createRoot(document.getElementById('root')!).render(<RightPanel />)
@@ -358,7 +369,76 @@ try {
     kinds8.activeKind === 'plugin:dummy'
       && (await page.evaluate(() => document.querySelector('.surface-tombstone[data-reason="missing"]')?.getAttribute('data-kind') ?? '')) === 'plugin:dummy',
     JSON.stringify({ activeKind: kinds8.activeKind }))
+  // R11c：标题兜底是**一条**策略（已声明入口 > provider.title > kind 名）。provider 缺失
+  // （加载失败/已卸载/本用例的 plugin:dummy）时标签标题必须非空 —— 空白标签在标签条上等于
+  // 「点哪个都不知道」。这条同时钉住兜底没有退化成「未知 kind → 空串」。
+  // 已知 UX 债务（不在本轮）：plugin kind 没有 i18n 文案，兜底落回键名 'rp.tab.plugin:dummy'。
+  const dummyTitle = (kinds8.rows.find((r) => r.kind === 'plugin:dummy') || {}).title ?? ''
+  check('provider 缺失的插件标签标题非空（兜底到 kind 名，不是空串）',
+    dummyTitle.includes('plugin:dummy'), JSON.stringify(dummyTitle))
 
+
+  // —— P9：原生宿主判定归 provider（R11c 的 nativeHost 能力位）——
+  //
+  // 为什么这条必须在这里（浏览器探针）而不是 pdf 探针：判定点的真身是「RightPanel 会不会
+  // 把原生视图 hide 掉」，而**不**依赖 Electron —— 闸门的唯一副作用是 window.desktop.embedHide，
+  // 假池已经能数它。pdf / container 两个探针要真 Electron + 真夹具（不进默认链），
+  // 这条进默认链才有回归保护。
+  //
+  // 两个方向，各自都能被一条变异打红：
+  //   · 能力位恒 false → P9a/P9b/P9d 红（宿主被当成非宿主，pdf 预览会被自己藏掉）；
+  //   · file 按 mode 判而不看运行时标记 → P9c 红（面板还没挂载就自称宿主）。
+  console.log('P9 原生宿主判定（nativeHost）：web / file{preview} 仍是宿主，其余不是')
+  const cap = await page.evaluate(() => {
+    const g = window.__getSurface
+    const s = window.__store.getState()
+    const web = { id: 'w9', kind: 'web', url: 'https://host.example/' }
+    const prev = { id: 'p9', kind: 'file', path: '/w/out/report.pdf', mode: 'preview' }
+    const src = { id: 's9', kind: 'file', path: '/w/src/a.ts', mode: 'source' }
+    // 能力位是可选的（types.ts）：没声明的 provider 一律 undefined，闸门用 ?. 读 → false。
+    // 探针这里刻意用同一个读法，顺带钉住「缺省不等于宿主」。
+    const host = (kind, tab, st) => !!g(kind)?.nativeHost?.(tab, st)
+    return {
+      web: host('web', web, { ...s, previewEmbedActive: false }),
+      previewOn: host('file', prev, { ...s, previewEmbedActive: true }),
+      previewOff: host('file', prev, { ...s, previewEmbedActive: false }),
+      sourceOff: host('file', src, { ...s, previewEmbedActive: false }),
+      activity: host('activity', { id: 'a9', kind: 'activity' }, { ...s, previewEmbedActive: true }),
+    }
+  })
+  check('P9a web 恒为原生宿主', cap.web === true, JSON.stringify(cap))
+  check('P9b file 在 previewEmbedActive 时是宿主（pdf 预览不被闸门 hide —— R08b 的空白根因）',
+    cap.previewOn === true, JSON.stringify(cap))
+  check('P9c previewEmbedActive 为假时 file 不是宿主（mode 不参与判定：它就是那个运行时标记）',
+    cap.previewOff === false && cap.sourceOff === false, JSON.stringify(cap))
+  check('P9d activity 不是宿主（没声明的/不挂原生视图的面板一律 false）', cap.activity === false, JSON.stringify(cap))
+
+  // 行为面：闸门真的问 provider。做法 = 只动 effect 的依赖字段（previewEmbedActive），
+  // 于是「hide 了没有」只可能来自这道闸门。
+  const beh = await page.evaluate(async () => {
+    const st = window.__store
+    const s0 = st.getState()
+    const scope = s0.activeSessionId || s0.workspace || ''
+    const drain = () => new Promise((r) => { requestAnimationFrame(() => requestAnimationFrame(r)) })
+    const setTabs = (tabs, activeId) => st.setState({ tabsByScope: { ...st.getState().tabsByScope, [scope]: { tabs, activeId, closed: [] } } })
+    const web = { id: 'w9b', kind: 'web', url: 'https://host.example/' }
+    st.setState({ rightExpanded: true, previewEmbedActive: false })
+    setTabs([web], web.id)
+    await new Promise((r) => setTimeout(r, 400)) // 让 WebTab 自己的挂载期 hide（若有）先跑完
+    const beforeWeb = window.__hideCalls
+    st.setState({ previewEmbedActive: true }) // 依赖变化 → 闸门重跑；宿主 → 不 hide
+    await drain()
+    const afterWeb = window.__hideCalls
+    const file = { id: 'f9b', kind: 'file', path: '/w/src/a.ts', mode: 'source' }
+    setTabs([file], file.id)
+    await new Promise((r) => setTimeout(r, 400))
+    const beforeFile = window.__hideCalls
+    st.setState({ previewEmbedActive: false }) // 非宿主 → hide
+    await drain()
+    return { beforeWeb, afterWeb, beforeFile, afterFile: window.__hideCalls }
+  })
+  check('P9e web 激活时闸门不 hide（宿主）', beh.afterWeb === beh.beforeWeb, JSON.stringify(beh))
+  check('P9f file{source} 且无预览视图时闸门 hide（非宿主）', beh.afterFile > beh.beforeFile, JSON.stringify(beh))
 
   check('全程无页面错误', errs.length === 0, errs.join('; '))
   await browser.close()
