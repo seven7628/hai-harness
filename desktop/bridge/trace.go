@@ -652,7 +652,7 @@ func (m *manager) traceData(wsPath, sid, traceID string, limit int, wantLatest b
 			}
 		}
 	}
-	evPath := filepath.Join(wsEventsDir(wsPath), sid+".jsonl")
+	evPath := filepath.Join(m.eventsDirFor(wsPath), sid+".jsonl")
 	details := projectTraces(evPath, liveRoot)
 	if len(details) == 0 {
 		return out

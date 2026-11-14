@@ -29,6 +29,9 @@ type surfaceInstallTool struct {
 	tools.BaseTool
 	store *surfaceStore
 	push  func() // 安装成功后的通知（生产：manager.PushSurfacesChanged）
+	// onApplied 落盘成功后的宿主钩子（nil = 不关心）：插件虚拟 Project 用它做
+	// 「升级 → runtime 重启」（09 §4.2），路径与会话不变、只是重新装配。
+	onApplied func(id string)
 }
 
 func newSurfaceInstallTool(store *surfaceStore, push func()) *surfaceInstallTool {
@@ -86,8 +89,13 @@ func (t *surfaceInstallTool) Call(ctx context.Context, _ string, args string) (s
 		enable = *a.Enable
 	}
 	rec := t.store.Install(a.Target, enable)
-	if rec.Status == surfaceApplied && t.push != nil {
-		t.push() // 只有真的落盘了才通知（rejected/error 改了什么的说法都不成立）
+	if rec.Status == surfaceApplied {
+		if t.push != nil {
+			t.push() // 只有真的落盘了才通知（rejected/error 改了什么的说法都不成立）
+		}
+		if t.onApplied != nil {
+			t.onApplied(rec.ID)
+		}
 	}
 	return surfaceJSON(ctx, rec)
 }
@@ -98,6 +106,9 @@ type surfaceRemoveTool struct {
 	tools.BaseTool
 	store *surfaceStore
 	push  func()
+	// onRemoved 成功卸载后的宿主钩子（nil = 不关心）：停该插件的虚拟 Project
+	// （取消在跑的 run、关连接）。会话与 home **不删**（09 §4.2）。
+	onRemoved func(id string)
 }
 
 func newSurfaceRemoveTool(store *surfaceStore, push func()) *surfaceRemoveTool {
@@ -144,8 +155,13 @@ func (t *surfaceRemoveTool) Call(ctx context.Context, _ string, args string) (st
 	}
 	rec := t.store.Remove(a.ID)
 	// cleaned 也可能改了 index（清掉幽灵记录），所以两者都通知。
-	if (rec.Status == surfaceApplied || rec.Status == surfaceCleaned) && t.push != nil {
-		t.push()
+	if rec.Status == surfaceApplied || rec.Status == surfaceCleaned {
+		if t.push != nil {
+			t.push()
+		}
+		if t.onRemoved != nil {
+			t.onRemoved(a.ID)
+		}
 	}
 	return surfaceJSON(ctx, rec)
 }
@@ -281,7 +297,11 @@ func (m *manager) registerSurfaceTools(eng *tools.Engine) {
 		return
 	}
 	store := &m.surfaces
-	eng.RegisterTool(context.Background(), newSurfaceInstallTool(store, m.PushSurfacesChanged))
-	eng.RegisterTool(context.Background(), newSurfaceRemoveTool(store, m.PushSurfacesChanged))
+	install := newSurfaceInstallTool(store, m.PushSurfacesChanged)
+	install.onApplied = m.closePluginRuntime // 升级/覆盖安装 → 下次打开按新版本重新装配
+	eng.RegisterTool(context.Background(), install)
+	remove := newSurfaceRemoveTool(store, m.PushSurfacesChanged)
+	remove.onRemoved = m.closePluginRuntime // 卸载 → 先停运行时（会话与 home 保留）
+	eng.RegisterTool(context.Background(), remove)
 	eng.RegisterTool(context.Background(), newSurfaceListTool(store))
 }

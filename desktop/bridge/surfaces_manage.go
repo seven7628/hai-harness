@@ -50,6 +50,13 @@ func (m *manager) handleSurfaceSetEnabled(c command) {
 		return
 	}
 	rec := m.surfaces.SetEnabled(id, enabled)
+	// 停用 → 优雅关闭该插件的虚拟 Project（09 §4.2）：停 run、关 MCP 与插件私有连接。
+	// sessions/events/home **不删**，会话仍可读 —— 再打开时按需重新装配（verify：
+	// pluginRuntime 只看磁盘与全局层，不依赖启用状态）。启用时不做事：没有运行态就没有
+	// 要关的东西，首次 open/new_session 才装配（「打开插件页不得让插件活起来」同理）。
+	if rec.Status == surfaceApplied && !enabled {
+		m.closePluginRuntime(id)
+	}
 	m.replySurfaceReceipt(c, rec, map[string]any{"id": id, "enabled": enabled})
 }
 
@@ -64,6 +71,11 @@ func (m *manager) handleSurfaceRemove(c command) {
 		return
 	}
 	rec := m.surfaces.Remove(id)
+	// 卸载 → 先停运行时（取消在跑的 run、关连接），再回执（09 §4.2）。
+	// 顺序要紧：先回执会让渲染层立刻可以发下一条命令，而 run 还在写 home。
+	if rec.Status == surfaceApplied || rec.Status == surfaceCleaned {
+		m.closePluginRuntime(id)
+	}
 	m.replySurfaceReceipt(c, rec, map[string]any{"id": id})
 }
 

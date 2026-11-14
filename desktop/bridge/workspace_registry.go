@@ -22,6 +22,13 @@ const mobileMaxWorkspaces = 50
 
 var errWorkspaceInvalid = errors.New("工作区路径无效")
 
+// errPluginWorkspace 插件虚拟 Project 的 home 不是项目工作区（09 §4.4 的后端不变式）。
+//
+// 为什么要在**注册表层**拦而不是只在命令层：workspaces.json 是「虚拟路径永不进」
+// 的那份文件，而写它的入口有三个（workspace_add / workspace_sync / 手机端），
+// 只挡命令层等于每个入口各维护一次判断 —— 漏一个就是虚拟路径落盘、重启后被当成项目打开。
+var errPluginWorkspace = errors.New("插件虚拟 Project 不是项目工作区")
+
 type workspaceEntry struct {
 	Path       string `json:"path"`
 	Title      string `json:"title,omitempty"`
@@ -99,6 +106,11 @@ func (r *workspaceRegistry) add(path string) (workspaceEntry, error) {
 	p := normalizeWorkspacePath(path)
 	if p == "" {
 		return workspaceEntry{}, errWorkspaceInvalid
+	}
+	// 硬拒绝（不是过滤）：插件 home 在磁盘上确实是个存在的目录，validateWorkspaceDir
+	// 会放行 —— 目录校验在这里根本不构成防线（09 §4.4 第 2 条）。
+	if isPluginHomePath(p) {
+		return workspaceEntry{}, errPluginWorkspace
 	}
 	if err := validateWorkspaceDir(p); err != nil {
 		return workspaceEntry{}, err
@@ -181,7 +193,18 @@ func (r *workspaceRegistry) remove(path string) bool {
 //
 // 为什么只增不减：手机可能刚加过一个工作区，桌面端 localStorage 还是旧的；
 // 一次性同步若做「以外部为准」，会把手机刚加的删掉。
-func (r *workspaceRegistry) sync(paths []string) []workspaceEntry {
+//
+// 含插件虚拟路径 → **整批拒绝**（返回 errPluginWorkspace，index 一个字节不改）。
+// 刻意不是「跳过那几个路径」：sync 的入参是渲染层 localStorage 的一份快照，里面出现
+// 虚拟路径说明调用方的项目清单已经混进了插件（09 §4.6 第 1 点没做），静默过滤会让
+// 那处 bug 一直存在且只在「某个插件历史会话消失」时才可见。注意 sync 不做目录校验
+// （见上：路径可能是别的机器上的），所以这里必须显式拦。
+func (r *workspaceRegistry) sync(paths []string) ([]workspaceEntry, error) {
+	for _, raw := range paths {
+		if isPluginHomePath(normalizeWorkspacePath(raw)) || isPluginHomePath(raw) {
+			return r.list(), errPluginWorkspace
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	have := map[string]bool{}
@@ -204,7 +227,7 @@ func (r *workspaceRegistry) sync(paths []string) []workspaceEntry {
 			r.entries = r.entries[:baseLen] // 落盘失败回滚本次新增
 		}
 	}
-	return r.listLocked()
+	return r.listLocked(), nil
 }
 
 func (r *workspaceRegistry) listLocked() []workspaceEntry {
@@ -268,9 +291,10 @@ func (m *manager) workspaceRemove(path string) bool {
 	return m.wsReg.remove(path)
 }
 
-func (m *manager) workspaceSync(paths []string) []workspaceEntry {
+// workspaceSync 同 registry.sync：含插件虚拟路径 → 整批拒绝（显式拦，不改盘）。
+func (m *manager) workspaceSync(paths []string) ([]workspaceEntry, error) {
 	if m == nil || m.wsReg == nil {
-		return []workspaceEntry{}
+		return []workspaceEntry{}, nil
 	}
 	return m.wsReg.sync(paths)
 }

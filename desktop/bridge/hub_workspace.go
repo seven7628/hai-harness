@@ -47,7 +47,9 @@ func (o *hubWorkspaceOps) ListWorkspaces(ctx context.Context) ([]agenthub.Worksp
 	byPath := map[string]agenthub.WorkspaceInfo{}
 	if o.m.wsReg != nil {
 		for _, e := range o.m.wsReg.list() {
-			if e.Path == "" || isHubHomePath(e.Path) || hubSensitivePath(e.Path) {
+			// 插件虚拟 home 绝不作为 Hub 派发目标（09 §4.4 第 3 条）：它没有项目上下文，
+			// 派进去就等于「智能体拿插件的 home 当仓库改」。
+			if e.Path == "" || isHubHomePath(e.Path) || isPluginHomePath(e.Path) || hubSensitivePath(e.Path) {
 				continue
 			}
 			name := e.Title
@@ -59,7 +61,7 @@ func (o *hubWorkspaceOps) ListWorkspaces(ctx context.Context) ([]agenthub.Worksp
 	}
 	o.m.mu.Lock()
 	for path, ws := range o.m.workspaces {
-		if ws == nil || ws.kind == runtimeHubAgent || isHubHomePath(path) || hubSensitivePath(path) {
+		if ws == nil || ws.kind == runtimeHubAgent || isHubHomePath(path) || isPluginHomePath(path) || hubSensitivePath(path) {
 			continue
 		}
 		if _, ok := byPath[path]; !ok {
@@ -837,6 +839,11 @@ func (o *hubWorkspaceOps) knownWorkspace(path string) (string, error) {
 	clean := filepath.Clean(strings.TrimSpace(path))
 	if clean == "" || clean == "." {
 		return "", fmt.Errorf("%w: workspace 不能为空", agenthub.ErrInvalid)
+	}
+	// 09 §4.4 第 3 条：插件虚拟 home 硬拒绝（unknownWorkspace 的语义是「不是工作区」，
+	// 这里用 ErrForbidden 而不是 ErrNotFound —— 路径形状合法、只是永远不许派任务）。
+	if isPluginHomePath(clean) {
+		return "", fmt.Errorf("%w: workspace %q 是插件虚拟 Project 的 home，不是项目工作区", agenthub.ErrForbidden, clean)
 	}
 	if isHubHomePath(clean) || hubSensitivePath(clean) {
 		// registry 里的路径是用户显式加的（workspace_add/sync 不查敏感目录），

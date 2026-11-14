@@ -1395,6 +1395,9 @@ type manager struct {
 	// hubRuntimes Agent Hub 智能体的运行时，key = agentID（方案 §6.1.1）。
 	// 刻意不放进 workspaces：那些遍历是项目语义（workspace_list / reload / MCP 重放）。
 	hubRuntimes map[string]*workspaceRuntime
+	// pluginRuntimes 插件虚拟 Project 的运行时，key = pluginID（09-agent-bridge §4.1）。
+	// 同上：不放进 workspaces —— 一个插件变成一个项目，左栏/清单/workspaces.json 全会跟着错。
+	pluginRuntimes map[string]*workspaceRuntime
 	// hubFS Hub 领域存储（~/.go-code/hub，懒开；见 hubStore）。
 	hubFS *agenthub.FileStore
 	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
@@ -1661,11 +1664,13 @@ type runtimeKind int
 const (
 	runtimeProject  runtimeKind = iota // 现有工作区：项目上下文 + 工具面
 	runtimeHubAgent                    // Agent Hub 智能体：全局层 + 工具面，无项目上下文
+	runtimePlugin                      // 插件虚拟 Project：全局层 + denylist，home 在 plugin-sessions/（09 §4）
 )
 
 type workspaceRuntime struct {
 	kind            runtimeKind // 零值 = runtimeProject（既有构造点不必改）
 	agentID         string      // kind=runtimeHubAgent 时非空
+	pluginID        string      // kind=runtimePlugin 时非空（surface id，也是 plugin-sessions/<id> 的一段）
 	path            string
 	storeDir        string
 	eventsDir       string
@@ -1744,6 +1749,12 @@ func (m *manager) get(wsPath, id string) *bridgeSession {
 		return nil
 	}
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		// 插件虚拟 home 未装配（09 §4.4 第 1 条）：m.runtime 返回 nil 而不是造项目
+		// runtime。按 workspace+session_id 寻址的命令一律判「没有会话」，由 dispatch
+		// 的插件入口决定要不要先装配（绝不在只读寻址里顺手创建）。
+		return nil
+	}
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	return ws.sessions[id]
@@ -1760,6 +1771,9 @@ func (m *manager) interruptAllIn(wsPath string) int {
 		return 0
 	}
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return 0 // 插件 home 未装配：没有内存会话可中断（见 m.get 同款判空）
+	}
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
@@ -1940,6 +1954,18 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	if ws, ok := m.workspaces[path]; ok {
 		return ws
 	}
+	// 插件虚拟 Project 的守卫（09 §4.4 第 1 条）：插件 home **不是**项目工作区。
+	// 命中插件表 → 返回该运行时；未命中 → 返回 nil，绝不往下走项目装配
+	//（那会读 {home}/.go-code 的项目层配置、并把虚拟路径塞进 m.workspaces，
+	//  于是 workspace_list / 配置监听 / MCP 重放全都把一个插件当成一个项目）。
+	// 调用方必须判空 —— 装配入口是 pluginRuntime()，不是这里。
+	if isPluginHomePath(path) {
+		id := pluginIDFromHomePath(path)
+		if id == "" {
+			return nil
+		}
+		return m.pluginRuntimes[id]
+	}
 	// 办公技能随包分发同步（2026-09）：内置技能集合（dev = desktop/vendor/office-skills；
 	// 打包 = Resources/office-skills）下的每个技能子目录 → ~/.agents/skills/<name>
 	//（不存在才复制，逐技能判断：新增技能目录能到达已装用户，改既有技能内容则到不了）。
@@ -2080,6 +2106,13 @@ func (m *manager) createOpts(wsPath, id, effort string, opts sessionOpts) (*brid
 	if isHubHomePath(wsPath) {
 		return nil, fmt.Errorf("create session: %q 是 Hub 智能体 home，不是项目工作区（Hub 会话请走 hubDMSession/hubGroupSession）", wsPath)
 	}
+	// 负向守卫（09 §4.4 第 1 条）：插件虚拟 home 同样不是项目工作区。
+	// 走这里会造出 kind=runtimeProject 的 runtime（读 {home}/.go-code 项目层、
+	// 混进 m.workspaces、写 workspaces.json）。插件会话的唯一入口是
+	// createPluginSession（装配 runtimePlugin + 全局层 + denylist）。
+	if isPluginHomePath(wsPath) {
+		return nil, fmt.Errorf("%w: %q 是插件虚拟 Project 的 home（会话请走 createPluginSession）", errPluginWorkspace, wsPath)
+	}
 	return m.createIn(m.runtime(wsPath), id, effort, opts)
 }
 
@@ -2165,7 +2198,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	var recordSetupErr error
 	recordCorrupt := false // record 在但读不出来 → 打开时要靠事件重放自愈（见字段注释）
 	if !opts.noRecord {
-		if recordStore, recordSetupErr = newRecordStore(); recordSetupErr == nil {
+		if recordStore, recordSetupErr = recordStoreFor(ws, wsKey); recordSetupErr == nil {
 			// sidecar 回收默认放后台（见 session/compact_scheduler.go）：
 			// settings.checkpoint.background_compact=false 可回退到同步回收。
 			recordStore.SetBackgroundCompact(loadCheckpointSettings().backgroundCompact())
@@ -2241,9 +2274,12 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	reg := subagent.NewRegistry()
 	// 已结束任务的对象不再留在注册表里（只留终态摘要，见 subagent.Registry.reclaimTask）
 	// → 按 id 查历史任务时从 journal 还原。journal 路径只是 task id 的函数
-	// （sessions/<wsKey>/<sid>/agents/<taskId>.jsonl），跨进程同样成立。
+	// （<sessionsRoot>/<sid>/agents/<taskId>.jsonl），跨进程同样成立。
+	// sessionsRoot 由 runtime 决定（09 §4.3 第 3 点）：插件虚拟 Project 锚在
+	// plugin-sessions/<id>/sessions，项目/Hub 保持 wsSessionsDir 的既有口径。
+	sessionsRoot := ws.sessionsRoot()
 	reg.SetTaskRehydrator(func(taskID string) (*subagent.Task, bool) {
-		path, perr := journalPathFor(wsSessionsDir(wsPath), id, taskID)
+		path, perr := journalPathFor(sessionsRoot, id, taskID)
 		if perr != nil {
 			return nil, false
 		}
@@ -2311,7 +2347,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	// 闭包捕获变量本身，首次 Run 前 bs 已赋值，告警才能经 bs.emit 到达 UI。
 	warnHook := func(name, message string) { bs.warnHook(name, message) }
 	hookOpt := session.WithHooks(nil)
-	if ws.kind == runtimeHubAgent {
+	if ws.kind == runtimeHubAgent || ws.kind == runtimePlugin {
+		// 插件虚拟 Project 与 Hub 同规（09 §4.3 第 1 点）：插件 home 是**插件自己**
+		// 可写的目录，把它当 WorkspaceDir 就等于「插件写 hooks.json、宿主执行命令」。
 		hookOpt = m.hooksOptionUser(wsPath, id, warnHook)
 	} else {
 		hookOpt = m.hooksOption(wsPath, id, warnHook)
@@ -2458,8 +2496,16 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 			m.pushMeshSessions() // 新会话注册 → 立即同步对端 session_list（不等 30s 周期）
 		}
 	}
-	// IM 事件桥回填：IM 已启用时新会话直接挂上（emit 全事件漏斗转发用）
-	bs.im = m.imBridgeRef()
+	// IM 事件桥回填：IM 已启用时新会话直接挂上（emit 全事件漏斗转发用）。
+	// 插件虚拟 Project 按 kind **硬排除**（09 §4.3 第 6 点的同类判定）：插件会话不是
+	// 用户的对话，把它的全事件漏斗接到 IM 上等于「插件里跑的一轮发到用户手机」。
+	// 不能靠「随机 sid 没有 mirror」兜底 —— imBridge 的回填逻辑会随版本变化，
+	// 而这里是一条不变式：runtimePlugin 的会话桥恒为 nil。
+	if ws.kind == runtimePlugin {
+		bs.im = nil
+	} else {
+		bs.im = m.imBridgeRef()
+	}
 	rlStart := time.Now()
 	bs.runLoop()
 	startupLog("A6.runLoop", rlStart)
@@ -2529,6 +2575,31 @@ func (m *manager) dispatch(c command) {
 	}()
 	ws := str(c.Payload, "workspace")
 	sid := str(c.Payload, "session_id")
+	// 插件虚拟 Project 的 dispatch 前置（09 §4.2 / §4.3 / §4.4）。
+	//
+	//  1. 形状不对 → 拒绝：虚拟 home 反解不出 pluginID 时，任何按 workspace 解析的
+	//     handler 都只能拿到 nil runtime。
+	//  2. **只有 new_session 会按需装配运行态**（「打开会话 = 装配」）。其余命令一律
+	//     不动运行态：装配意味着建 home/sessions 目录、连 MCP、起探活 goroutine，
+	//     「打开技能页/插件页看一眼」不该产生这种副作用（09 §4.1 同一条纪律）。
+	//     未装配时各入口由自己的前置判空拒绝（respPluginNotReady：denied/plugin_not_ready），
+	//     读类命令（list/trace/session_rename/session_pin）走磁盘回退照常可用。
+	//
+	// 关键点：m.runtime 对插件 home **只判定不装配**，所以「谁装配」必须有唯一答案。
+	// 答案就是 new_session（以及 pluginRuntimeForHome 的显式调用点），其余路径拿到 nil
+	// 后必须判空 —— 绝不因为某个 handler 顺手 m.runtime 就造出项目 runtime。
+	if isPluginHomePath(ws) {
+		if pluginIDFromHomePath(ws) == "" {
+			m.respCode(c, false, "workspace 不是合法的插件虚拟 Project 路径", "plugin_workspace_invalid", nil)
+			return
+		}
+		if c.Type == CmdNewSession {
+			if _, perr := m.pluginRuntimeForHome(ws); perr != nil {
+				m.respCode(c, false, perr.Error(), "plugin_workspace_invalid", nil)
+				return
+			}
+		}
+	}
 	switch c.Type {
 	case CmdUI:
 		// 渲染层自述（快照 / 面板状态）：只有内存写入，没有回执、没有事件（见 ui_state.go）。
@@ -2728,8 +2799,17 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", map[string]any{"workspace": entry, "workspaces": m.workspaceEntries()})
 
+	case CmdPluginProjectsList: // 插件虚拟 Project 清单（surface 注册表 ∪ 有历史会话的插件目录）
+		m.resp(c, true, "", map[string]any{"projects": m.pluginProjectsData()})
+
 	case CmdWorkspaceSync: // 渲染进程首次迁移：把 localStorage 里的项目列表灌进来（只增不减）
-		m.resp(c, true, "", map[string]any{"workspaces": m.workspaceSync(strSlice(c.Payload, "paths"))})
+		// 含插件虚拟路径 → 整批拒绝（09 §4.4 第 2 条；sync 不校验目录，必须显式拦）。
+		list, err := m.workspaceSync(strSlice(c.Payload, "paths"))
+		if err != nil {
+			m.respCode(c, false, err.Error(), "workspace_invalid", map[string]any{"workspaces": list})
+			return
+		}
+		m.resp(c, true, "", map[string]any{"workspaces": list})
 
 	case CmdWorkspacePick: // 手机请求桌面弹目录选择器（结果异步经事件回传）
 		if m.wsPick == nil {
@@ -2869,16 +2949,26 @@ func (m *manager) dispatch(c command) {
 		if a, ok := c.Payload["attempt"].(float64); ok {
 			attempt = int64(a)
 		}
-		bs, err := m.create(ws, id, "") // 进程内已存在 → 复用；新从磁盘载入 → 恢复有效上下文
+		// 插件虚拟 Project：createOpts 会硬拒绝（09 §4.4 第 1 条），这里走显式入口。
+		var bs *bridgeSession
+		var err error
+		if isPluginHomePath(ws) {
+			bs, err = m.createPluginSession(ws, id, "")
+		} else {
+			bs, err = m.create(ws, id, "") // 进程内已存在 → 复用；新从磁盘载入 → 恢复有效上下文
+		}
 		if err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
 		}
 		respData := map[string]any{
 			"session_id": id,
-			"sessions":   m.listSessions(ws),
-			"todos":      bs.s.TodoItems(), // 恢复会话时带当前待办（宿主 TODO 面板）
-			"live":       wasLive,          // true=进程内复用，后台运行态仍有效；false=磁盘冷恢复
+			// owner path 的回执源（09 §4.5）：前端据此把 sid 的归属钉在这个 workspace 上，
+			// 之后 send() 不需再猜（虚拟 Project 与项目会话同形，多一个字段不影响旧前端）。
+			"workspace": ws,
+			"sessions":  m.listSessions(ws),
+			"todos":     bs.s.TodoItems(), // 恢复会话时带当前待办（宿主 TODO 面板）
+			"live":      wasLive,          // true=进程内复用，后台运行态仍有效；false=磁盘冷恢复
 		}
 		// 当前轮已产出、但还没进 blocks 的文本：中途打开会话或 WS 重连时，
 		// 手机靠它把「正在流的那一轮」补上（blocks 只到上一个轮次边界）。
@@ -3030,6 +3120,13 @@ func (m *manager) dispatch(c command) {
 		m.resp(c, true, "", respData)
 
 	case CmdAsk:
+		// 插件停用/卸载后前置拒绝（09 §4.2）：run 一旦跑起来，读全局 MCP/技能到一半
+		// 才发现插件已停用，用户看到的是「发了消息没反应」。code=denied（§4.2 的用词），
+		// data.reason 给封闭集合 plugin_disabled / plugin_uninstalled。
+		if reason := m.pluginAskDenyReason(ws); reason != "" {
+			m.respCode(c, false, "插件已停用或卸载，不能发起对话", "denied", map[string]any{"reason": reason})
+			return
+		}
 		bs := m.get(ws, sid)
 		if bs == nil {
 			m.respCode(c, false, "session not found", "session_not_found", nil)
@@ -3046,6 +3143,12 @@ func (m *manager) dispatch(c command) {
 		m.resp(c, true, "", nil)
 
 	case CmdAskBatch:
+		// 插件停用/卸载后前置拒绝：与 CmdAsk 同一条闸门（ask_batch 是同一个能力，
+		// 手机端与暂存队列都走它 —— 只拦 ask 等于留了一条旁路）。
+		if reason := m.pluginAskDenyReason(ws); reason != "" {
+			m.respCode(c, false, "插件已停用或卸载，不能发起对话", "denied", map[string]any{"reason": reason})
+			return
+		}
 		// 批量推送用户输入（客户端暂存队列一次性推送）。每条输入是一条 user 消息，
 		// 消息 = 内容块数组（对齐 core.Content：text / image，图文可混排，可携带文件/图片附件）。
 		// 逐条经 Session.Ask 入 inbox —— 下一轮 takeBatch / 插话 Poll 一起成批消费，
@@ -3215,7 +3318,12 @@ func (m *manager) dispatch(c command) {
 			m.respCode(c, false, "task_id 为空", "invalid_argument", nil)
 			return
 		}
-		path, perr := journalPathFor(wsSessionsDir(bs.workspace), bs.id, taskID)
+		// 会话子树根跟着 runtime 走（插件虚拟 Project 的 journal 在 plugin-sessions/<id>/sessions）。
+		agentHistRoot := wsSessionsDir(bs.workspace)
+		if bs.runtime != nil {
+			agentHistRoot = bs.runtime.sessionsRoot()
+		}
+		path, perr := journalPathFor(agentHistRoot, bs.id, taskID)
 		if perr != nil {
 			m.respCode(c, false, perr.Error(), "invalid_argument", nil)
 			return
@@ -3912,6 +4020,11 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
+		// 插件虚拟 Project 未装配 → 明确拒绝（skillList 要读运行态技能注册表）。
+		if m.runtime(ws) == nil {
+			m.respPluginNotReady(c)
+			return
+		}
 		// 带 session_id 时按该会话的**选中模型**给出能力面：面板能标出「当前模型用不了」
 		// 及其原因（而不是把所有技能都显示成可用、等用户点了才发现加载失败）。
 		// 不带（老前端/技能页未选会话）→ nil = 不过滤，与历史行为一致。
@@ -3992,7 +4105,13 @@ func (m *manager) dispatch(c command) {
 		}
 		name := str(c.Payload, "name")
 		on := boolVal(c.Payload["enabled"])
-		if err := m.runtime(ws).skills.SetEnabled(name, on); err != nil {
+		// 插件虚拟 Project 未装配 → 明确拒绝（绝不在命令路径里顺手造 runtime）。
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
+		if err := rt.skills.SetEnabled(name, on); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
 		}
@@ -4004,7 +4123,12 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
-		s, err := m.runtime(ws).skills.Skill(str(c.Payload, "name"))
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
+		s, err := rt.skills.Skill(str(c.Payload, "name"))
 		if err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
@@ -4159,6 +4283,13 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "命令为空", nil)
 			return
 		}
+		// 插件虚拟 Project 未装配 → 拒绝：本 case 的每个分支都要读技能/子代理注册表
+		// （/reload_skills、/技能名），没有运行态时只能拒绝，不能顺手造一个。
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
 		var cmdErr error
 		switch raw {
 		case "summary": // 会话摘要 = 压缩（自动/主动压缩统一 LLMCompressor）
@@ -4168,8 +4299,8 @@ func (m *manager) dispatch(c command) {
 		case "reload_skills": // 重扫工作区技能目录 + 自定义 subagent 目录 + 重建会话 loop（新增/修改无需重启生效）
 			m.rebuildSkills(ws)
 			m.rebuildSubagents(ws)
-			n := len(m.runtime(ws).skills.All())
-			na := len(m.runtime(ws).subagents.List())
+			n := len(rt.skills.All())
+			na := len(rt.subagents.List())
 			bs.emit(&events.CommandResult{
 				Name:      "reload_skills",
 				Result:    fmt.Sprintf("已重载技能与子代理注册表（全局 ~/.agents/skills + ~/.go-code/skills + 工作区 .agents/skills + .go-code/skills + 全局 ~/.agents/agents + ~/.go-code/agents + ~/.claude/agents + 工作区 .agents/agents + agents + .claude/agents），技能 %d 个、子代理 %d 个", n, na),
@@ -4189,7 +4320,7 @@ func (m *manager) dispatch(c command) {
 				// 自行处理（如经 load_skill 工具加载技能后执行正文）。
 				return bs.s.Ask(context.Background(), core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: str(c.Payload, "line")}))
 			}
-			if _, skerr := m.runtime(ws).skills.Skill(name); skerr == nil {
+			if _, skerr := rt.skills.Skill(name); skerr == nil {
 				cmdErr = bs.s.Command(context.Background(), "skills", "load "+name)
 				if cmdErr != nil {
 					// 加载失败（禁用技能等）→ 文本回退，不报错死局
@@ -4216,8 +4347,14 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
+		// 插件虚拟 Project 未装配 → 拒绝；已装配时读它自己的（全局层）MCP 状态。
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
 		servers := []map[string]any{}
-		for _, st := range m.runtime(ws).mcp.Status() {
+		for _, st := range rt.mcp.Status() {
 			servers = append(servers, map[string]any{
 				"name": st.Name, "type": st.Type, "command": st.Command,
 				"enabled": st.Enabled, "state": st.State,
@@ -4246,7 +4383,12 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		name := str(c.Payload, "name")
-		if err := m.runtime(ws).mcp.Refresh(context.Background(), name); err != nil {
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
+		if err := rt.mcp.Refresh(context.Background(), name); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
 		}
@@ -4258,6 +4400,11 @@ func (m *manager) dispatch(c command) {
 		// 只作用于该工作区（项目层本就是每工作区独立）。
 		if ws == "" {
 			m.resp(c, false, "workspace 为空", nil)
+			return
+		}
+		// 插件虚拟 Project 未装配 → 拒绝（reloadMCP 要读运行态分层，见 mcpLayerStates 同款）。
+		if m.runtime(ws) == nil {
+			m.respPluginNotReady(c)
 			return
 		}
 		m.reloadMCP(ws)
@@ -4517,6 +4664,12 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
+		// 插件虚拟 Project 不是工作区（09 §4.4）：这里会 RemoveAll plugin-sessions/<id>，
+		// 而「卸载不删会话」是设计前提。要清会话用 delete_session。
+		if isPluginHomePath(ws) {
+			m.respCode(c, false, "插件虚拟 Project 不是工作区，不能用 delete_workspace 删除（会话请用 delete_session）", "plugin_workspace_invalid", nil)
+			return
+		}
 		m.deleteWorkspace(ws)
 		if m.wsReg != nil {
 			m.wsReg.remove(ws)
@@ -4551,9 +4704,17 @@ func (m *manager) shutdownWorkspace(wsPath string) {
 	_, registered := m.workspaces[wsPath]
 	m.mu.Unlock()
 	if !registered {
+		// 插件虚拟 Project 不在 m.workspaces（09 §4.3 第 5 点）：关闭路径必须也能遍历到它，
+		// 否则 shutdown_workspace / shutdown 之后插件会话的 run goroutine 仍在跑。
+		if pid := pluginIDFromHomePath(wsPath); pid != "" {
+			m.closePluginRuntime(pid)
+		}
 		return
 	}
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 防御：注册表里已摘除（并发 delete_workspace），不造 runtime
+	}
 	ws.mu.Lock()
 	items := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
@@ -4609,6 +4770,9 @@ func (m *manager) shutdownAll() {
 	}
 	// Hub 智能体运行时同理（不在 m.workspaces 里，单独收尾）
 	m.shutdownHubRuntimes()
+	// 插件虚拟 Project 同样单独收尾（09 §4.3 第 5 点）：停 run goroutine、关 MCP 与
+	// 插件私有连接；home/sessions/events 不删（卸载不删，进程退出更不删）。
+	m.closePluginRuntimes()
 	// 预览转换器槽位回收（进程退出：不留任何工作区登记）
 	m.releaseAllPreviewSlots()
 	// 进程级单例的显式收尾（IM 连接不随工作区关闭而停，只能在这里停一次）
@@ -4632,13 +4796,33 @@ func (m *manager) deleteSession(wsPath, id string) {
 	}
 	m.mu.Lock()
 	ws, ok := m.workspaces[wsPath]
+	if !ok {
+		// 插件虚拟 Project 不在 m.workspaces（09 §4.3 第 4 点）：按 pluginID 找运行态。
+		if pid := pluginIDFromHomePath(wsPath); pid != "" {
+			ws, ok = m.pluginRuntimes[pid]
+		}
+	}
 	m.mu.Unlock()
+	// 删对目录：插件会话在 plugin-sessions/<id>/{sessions,events}，项目会话在
+	// {appData}/{sessions,events}/<wsKey>。**不能用 m.runtime 兜底推导**——它会给
+	// 从未注册过的项目路径造一份 runtime（这里刻意只做无副作用的查表）。
+	storeDir, eventsDir := wsSessionsDir(wsPath), wsEventsDir(wsPath)
+	if ok && ws != nil && ws.kind == runtimePlugin {
+		storeDir, eventsDir = ws.storeDir, ws.eventsDir
+	} else if !ok {
+		if sd, ed, dok := pluginSessionDirsForHome(wsPath); dok {
+			// 插件已卸载（无运行态）：历史会话仍要能删（09 §4.2）。
+			storeDir, eventsDir = sd, ed
+		}
+	}
 	if ok {
 		ws.mu.Lock()
 		bs := ws.sessions[id]
 		delete(ws.sessions, id)
 		ws.mu.Unlock()
-		if m.hub != nil {
+		// mesh 只登记项目会话（createIn 的 Register 同样只对 runtimeProject）：
+		// 插件 / Hub 会话从来没进 mesh，注销一次是无害的空操作，但也不必打扰对端。
+		if m.hub != nil && ws.kind == runtimeProject {
 			m.hub.Unregister(id) // Session Mesh 注销
 			m.pushMeshSessions() // 会话删除 → 对端 session_list 立即剔除
 		}
@@ -4646,12 +4830,20 @@ func (m *manager) deleteSession(wsPath, id string) {
 			stopSession(bs)
 		}
 	}
-	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".jsonl"))
-	_ = os.Remove(filepath.Join(wsEventsDir(wsPath), id+".jsonl"))
+	_ = os.Remove(filepath.Join(storeDir, id+".jsonl"))
+	_ = os.Remove(filepath.Join(eventsDir, id+".jsonl"))
 	// record 文件（checkpoint-first 目标恢复源）+ 其 .bak 一并删除；coord 已 drain 完毕
-	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json"))
-	_ = os.Remove(filepath.Join(wsSessionsDir(wsPath), id+".record.json.bak"))
-	removeSubagentJournals(wsSessionsDir(wsPath), id)
+	// record 目录跟着 record store 的根走（插件虚拟 Project 在 plugin-sessions/<id>/sessions
+	// 下的同名子目录里）。recordKey 与 sessionRecordKey 同源，否则删不掉写的那一份。
+	recDir := recordDirFor(ws, workspaceKey(wsPath))
+	if pid := pluginIDFromHomePath(wsPath); pid != "" {
+		recDir = filepath.Join(pluginSessionsDir(pid), "plugin-"+pid)
+	}
+	_ = os.Remove(filepath.Join(recDir, id+".record.json"))
+	_ = os.Remove(filepath.Join(recDir, id+".record.json.bak"))
+	_ = os.Remove(filepath.Join(recDir, id+".record.json.blocks"))
+	_ = os.Remove(filepath.Join(recDir, id+".record.json.blocks.idx"))
+	removeSubagentJournals(storeDir, id)
 	// 清理该会话的置顶标记与手动标题（防残留文件把已删会话又「复活」）
 	sessionPins.set(workspaceKey(wsPath), id, false)
 	sessionManualTitles.set(workspaceKey(wsPath), id, "")
@@ -4705,7 +4897,13 @@ func removeSubagentJournals(storeDir, sid string) {
 // DataDir 覆盖（appDataDirOverride，测试用）通过 wsSessionsDir 已生效；FileStore 构造的
 // MkdirAll 与 journalPathFor 的 MkdirAll 幂等，两者可自由先后。
 func subagentStateStore(workspace, sid string) subagent.StateStore {
-	base := subagentsBase(wsSessionsDir(workspace), sid)
+	return subagentStateStoreAt(wsSessionsDir(workspace), sid)
+}
+
+// subagentStateStoreAt 同 subagentStateStore，但会话子树根由调用方给（插件虚拟 Project
+// 传 plugin-sessions/<id>/sessions，见 ws.sessionsRoot）。
+func subagentStateStoreAt(sessionsRoot, sid string) subagent.StateStore {
+	base := subagentsBase(sessionsRoot, sid)
 	fs, err := session.NewFileStore(base)
 	if err != nil {
 		// 目录不可建（权限/磁盘）→ 降级为端口零值（no-op）：子任务照跑，只是不可恢复。
@@ -4746,6 +4944,12 @@ func subagentStateStore(workspace, sid string) subagent.StateStore {
 // deleteWorkspace 删除一个工作区的全部 HAI 元数据（{ws}/.go-code），保留用户工作区文件本身
 // （那是用户真实项目，绝不代删）。停全部会话 → 摘除运行态 → 删元数据目录。
 func (m *manager) deleteWorkspace(wsPath string) {
+	// 负向守卫（09 §4.4）：插件虚拟 home 不是工作区。走到这里会把 plugin-sessions/<id>
+	// 整棵删掉（下面 RemoveAll 会话/事件目录），而「卸载不删会话」是设计前提。
+	// 真拒绝发生在 dispatch（workspace_delete_payload 之前），这里是纵深防御。
+	if isPluginHomePath(wsPath) {
+		return
+	}
 	m.mu.Lock()
 	ws, ok := m.workspaces[wsPath]
 	if ok {
@@ -4834,8 +5038,27 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 	out := []map[string]any{}
 	wsKey := workspaceKey(wsPath)
 
-	ws.mu.Lock()
-	for id, bs := range ws.sessions {
+	// storeDir/eventsDir：运行态给了就用它的（插件虚拟 Project 有自己的子树），
+	// 没有运行态时——插件**已卸载**、会话保留可读可删（09 §4.2）——按 pluginID
+	// 直接推目录。项目路径不会走到这里：m.runtime 对它们恒定返回非 nil。
+	storeDir, eventsDir := "", ""
+	if ws != nil {
+		storeDir, eventsDir = ws.storeDir, ws.eventsDir
+	} else if s, e, ok := pluginSessionDirsForHome(wsPath); ok {
+		storeDir, eventsDir = s, e
+	} else {
+		return out
+	}
+
+	live := map[string]*bridgeSession{}
+	if ws != nil {
+		ws.mu.Lock()
+		for id, bs := range ws.sessions {
+			live[id] = bs
+		}
+		ws.mu.Unlock()
+	}
+	for id, bs := range live {
 		if seen[id] {
 			continue
 		}
@@ -4846,14 +5069,13 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 		out = append(out, map[string]any{
 			"id":         id,
 			"title":      resolveLiveSessionTitle(wsKey, bs, id),
-			"updated_at": sessionUpdatedAt(ws, id, bs.lastActive.Load()),
+			"updated_at": sessionUpdatedAt(storeDir, eventsDir, id, bs.lastActive.Load()),
 			"pinned":     sessionPins.isPinned(wsKey, id),
 			"running":    bs.running.Load() || bs.hubDispatchPending.Load(),
 		})
 	}
-	ws.mu.Unlock()
 
-	entries, err := os.ReadDir(ws.storeDir)
+	entries, err := os.ReadDir(storeDir)
 	if err == nil {
 		type diskTitleJob struct {
 			idx         int
@@ -4872,7 +5094,7 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 				continue
 			}
 			seen[id] = true
-			path := filepath.Join(ws.storeDir, name)
+			path := filepath.Join(storeDir, name)
 			// 标题缓存按文件 mtime+size 失效；Info() 对符号链接返回链接自身，
 			// 测试/迁移目录里会话文件可能是软链 → 再 Stat 一次跟随到真实 inode。
 			var modNs, size int64
@@ -4886,8 +5108,8 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 			}
 			out = append(out, map[string]any{
 				"id":         id,
-				"title":      defaultSessionTitle,         // 先占位；下方并行解析后原地填
-				"updated_at": sessionUpdatedAt(ws, id, 0), // 冷磁盘会话：lastActive 无 → 文件 mtime 回退
+				"title":      defaultSessionTitle,                          // 先占位；下方并行解析后原地填
+				"updated_at": sessionUpdatedAt(storeDir, eventsDir, id, 0), // 冷磁盘会话：lastActive 无 → 文件 mtime 回退
 				"pinned":     sessionPins.isPinned(wsKey, id),
 			})
 			jobs = append(jobs, diskTitleJob{idx: len(out) - 1, path: path, id: id, modNs: modNs, size: size})
@@ -4927,14 +5149,18 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 	return out
 }
 
-func sessionUpdatedAt(ws *workspaceRuntime, id string, lastActive int64) int64 {
+// sessionUpdatedAt 会话最近活跃时刻：内存值优先，否则回退事件/会话文件的 mtime。
+//
+// 目录由调用方给（而不是 runtime）：插件已卸载时没有 runtime，但磁盘上的会话
+// 仍要能列出并显示时间（09 §4.2「会话保留、只读、可手动删」）。
+func sessionUpdatedAt(storeDir, eventsDir, id string, lastActive int64) int64 {
 	if lastActive > 0 {
 		return lastActive
 	}
-	if fi, err := os.Stat(filepath.Join(ws.eventsDir, id+".jsonl")); err == nil {
+	if fi, err := os.Stat(filepath.Join(eventsDir, id+".jsonl")); err == nil {
 		return fi.ModTime().UnixMilli()
 	}
-	if fi, err := os.Stat(filepath.Join(ws.storeDir, id+".jsonl")); err == nil {
+	if fi, err := os.Stat(filepath.Join(storeDir, id+".jsonl")); err == nil {
 		return fi.ModTime().UnixMilli()
 	}
 	return 0
@@ -5119,7 +5345,13 @@ func buildSubagentRegistry(ws string) *subagent.DefinitionRegistry {
 // 面板要能区分「用户禁用」和「当前模型用不了」—— 后者写成"已禁用"会让用户
 // 去技能面板反复开关，而真正要换的是模型。nil = 旧口径（只看启用集）。
 func (m *manager) skillList(wsPath string, caps *skills.Capabilities) []map[string]any {
-	reg := m.runtime(wsPath).skills
+	wsRT := m.runtime(wsPath)
+	if wsRT == nil {
+		// 插件虚拟 Project 未装配：命令层已前置拒绝（respPluginNotReady），这里是纵深防御
+		// ——本函数也被 /command 与面板复用，任何一条路径都不该在这里 nil 解引用。
+		return []map[string]any{}
+	}
+	reg := wsRT.skills
 	src := m.remoteSources()
 	out := []map[string]any{}
 	for _, d := range reg.AllFor(caps) {
@@ -5155,7 +5387,11 @@ func (m *manager) sessionSkillCapabilities(wsPath, sid string) *skills.Capabilit
 // 写盘失败（目录权限等）只记日志：开关本身已生效，不该因为持久化问题回滚用户操作；
 // 但必须可见——静默失败会让「禁用」在重启后失效且无从排查。
 func (m *manager) persistSkillsDisabled(wsPath string) {
-	reg := m.runtime(wsPath).skills
+	wsRT := m.runtime(wsPath)
+	if wsRT == nil {
+		return // 未装配：没有可持久化的注册表状态（命令层已前置拒绝）
+	}
+	reg := wsRT.skills
 	var disabled []string
 	for _, d := range reg.All() {
 		if !d.Enabled {
@@ -5190,6 +5426,9 @@ func (m *manager) remoteSources() map[string]string {
 // rebuildSkills 重建单工作区技能注册表 + 会话 loop（工作区作用域安装/卸载后生效）。
 func (m *manager) rebuildSkills(wsPath string) {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 插件虚拟 Project 未装配：没有注册表可重建（见 respPluginNotReady）
+	}
 	ws.mu.Lock()
 	ws.skills = buildSkillsRegistry(wsPath)
 	ws.mu.Unlock()
@@ -5200,6 +5439,9 @@ func (m *manager) rebuildSkills(wsPath string) {
 // （工作区新增/修改定义文件后生效，/reload_skills 触发）。
 func (m *manager) rebuildSubagents(wsPath string) {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 同上：未装配的虚拟 Project 没有可重建的定义表
+	}
 	ws.mu.Lock()
 	ws.subagents = buildSubagentRegistry(wsPath)
 	ws.mu.Unlock()
@@ -5800,9 +6042,23 @@ func toolSpillDir(sid string) string {
 	return filepath.Join(os.TempDir(), "hai-harness-toolspill", safe)
 }
 
+// newSessionEngine 项目 / Hub 会话的工具引擎（record/journal 的会话子树根 = wsSessionsDir(workspace)）。
+//
+// 插件虚拟 Project 走 newSessionEngineAt（sessionsRoot 由 runtime 提供，见 09 §4.3 第 3 点）；
+// 本函数是它的薄包装，保持既有 ~16 处调用点逐字不变。
 func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
+	return newSessionEngineAt(wsSessionsDir(workspace), workspace, sid, cs, pc, prov, model, effort, bgCtx, reg, qw, sk, subagentsReg, mcpm, plg, profile, sbx, hub, pyRT, egoOnLoad, egoBashBeforeExec, memCfg...)
+}
+
+// newSessionEngineAt 同 newSessionEngine，但会话子树根（journal / codemode store）由调用方给：
+// 项目 / Hub 传 wsSessionsDir(workspace)（= ws.sessionsRoot()），插件虚拟 Project 传
+// plugin-sessions/<id>/sessions。空值回退 wsSessionsDir(workspace)（测试/旧调用兜底）。
+func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
+	}
+	if sessionsRoot == "" {
+		sessionsRoot = wsSessionsDir(workspace)
 	}
 	// 子 agent 档位持有者：装配期与主 loop 同档，之后由 switch_effort 同步（见类型注释）。
 	effortRef := newSubagentEffortRef(provider.ReasoningEffortLevel(effort))
@@ -5874,11 +6130,11 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 		// 子任务输出 journal 路径解析器（D1）：sessions/<wsKey>/<sid>/agents/<taskId>.jsonl。
 		// 解析失败（含 taskId 非法）降级不落盘——journal 是尽力而为的旁路，绝不影响 spawn。
 		journalPath := func(taskID string) (string, error) {
-			return journalPathFor(wsSessionsDir(workspace), sid, taskID)
+			return journalPathFor(sessionsRoot, sid, taskID)
 		}
 		// 子任务状态存储（与主会话同一套 FileStore，只是目录不同）：每轮 checkpoint 落
 		// 有效上下文 + 用量，agent_resume 据此原地续跑（见 subagentStateStore）。
-		subStore := subagentStateStore(workspace, sid)
+		subStore := subagentStateStoreAt(sessionsRoot, sid)
 		for _, t := range subagent.NewAgentTools(spawnLoop, bgCtx, reg, journalPath, subagentsReg,
 			func(def *subagent.AgentDefinition) *agents.AgentLoop {
 				// 每次调用新建 → 读当前档位（switch_effort 后派生的子 agent 立即同档）。
@@ -5965,7 +6221,7 @@ func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig,
 	// 默认关闭（对齐 pi defaultActive:false）。**完全不注册**而不是注册成 hidden —— 见
 	// codemode.go 文件头。沙箱/解释器/store/工具表都在 registerCodemode 里接（与 bash、
 	// run_python 同一个 sbx 实例、同一个工作区锚）。开关热更新走 reload_settings（rebuildAll）。
-	registerCodemode(eng, workspace, sid, sbx, loadCodemodeSettingsQuiet())
+	registerCodemode(eng, workspace, sessionsRoot, sid, sbx, loadCodemodeSettingsQuiet())
 	// load_skill：技能渐进披露激活。**放在最后**——它的能力面（skillCapabilitiesFor）
 	// 要读 eng 的完整工具集，提前注册会漏掉 MCP/插件/codemode/cron/mesh 工具，
 	// 于是声明 requires.tools 的技能会被误判不可用。
@@ -6020,23 +6276,36 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 
 	// 执行通道沙箱装配（见 execSandbox 注释）。
 	sbx := m.execSandbox(workspace, sid, profile, gate, pyRT)
+	if ws.kind == runtimePlugin {
+		// 插件虚拟 Project：沙箱 root = 虚拟 home，且**不**放开整个 ~（见 pluginSandbox）。
+		// 项目会话的 execSandbox 会 WithHomeWrite（pip/npm 需要），插件不该有那个写面。
+		sbx = m.pluginSandbox(workspace, sid, gate)
+	}
 
 	// TEMP-STARTUP A7：newSessionEngine（工具注册）
 	engStart := time.Now()
 	// 合并 main 的 ws 运行时签名（subagents/mcp/plugins 走 ws.*，不再每次 m.runtime(workspace)），
 	// 保留 R08d 的办公工具注册。
-	eng, effortRef := newSessionEngine(workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
-	// 办公组件验收工具（R08d）：kit 不可用则不注册（注册必然失败的工具只白耗轮次）。
-	// 放在 newSessionEngine 之后是为了不改那条 20 参数的签名 —— 工具需要的是宿主能力
-	// （缓存/信号量/受管运行时），不是引擎装配的一部分。
-	m.registerOfficeTools(eng, ws.path)
-	// UI 快照查询工具（PR-12）：**无条件**注册 —— 渲染层没连上时它回答
-	// {ok:false, reason:"no_snapshot"}，那是状态而不是失败（见 ui_tools.go）。
-	m.registerUITools(eng)
-	// Surface 插件安装器（PR-13/PR-14）：受 settings.features.surfaceTools 控制
-	//（缺省 **false**，见 surface_settings.go —— 常驻 schema 的成本纪律）。
-	// 开关判定在注册函数内部：调用点只有这一处，摆在外面就成了两处各自解释同一个开关。
-	m.registerSurfaceTools(eng)
+	var eng *tools.Engine
+	var effortRef *subagentEffortRef
+	if ws.kind == runtimePlugin {
+		// 分流点 3 + 工具面（09 §4.3 / §7）：journal/codemode 落 plugin-sessions/<id>/sessions，
+		// 工具面 = 全局层 + denylist（cron/mesh 传 nil，surface/ui 不注册）。
+		eng, effortRef = m.buildPluginEngine(ws, sid, prov, model, effort, reg, qw, bgCtx)
+	} else {
+		eng, effortRef = newSessionEngineAt(ws.sessionsRoot(), workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
+		// 办公组件验收工具（R08d）：kit 不可用则不注册（注册必然失败的工具只白耗轮次）。
+		// 放在 newSessionEngine 之后是为了不改那条 20 参数的签名 —— 工具需要的是宿主能力
+		// （缓存/信号量/受管运行时），不是引擎装配的一部分。
+		m.registerOfficeTools(eng, ws.path)
+		// UI 快照查询工具（PR-12）：**无条件**注册 —— 渲染层没连上时它回答
+		// {ok:false, reason:"no_snapshot"}，那是状态而不是失败（见 ui_tools.go）。
+		m.registerUITools(eng)
+		// Surface 插件安装器（PR-13/PR-14）：受 settings.features.surfaceTools 控制
+		//（缺省 **false**，见 surface_settings.go —— 常驻 schema 的成本纪律）。
+		// 开关判定在注册函数内部：调用点只有这一处，摆在外面就成了两处各自解释同一个开关。
+		m.registerSurfaceTools(eng)
+	}
 	startupLog("A7.newSessionEngine", engStart)
 	// TEMP-STARTUP A7：newProvider
 	pvStart := time.Now()
@@ -6177,6 +6446,12 @@ func (m *manager) rebuildLoop(bs *bridgeSession) {
 	ws := bs.runtime
 	if ws == nil {
 		ws = m.runtime(bs.workspace) // 兜底：本提交之前创建的会话没有 runtime 快照
+	}
+	if ws == nil {
+		// 插件虚拟 Project 未装配（已停用/卸载后运行态被摘除）：没有装配输入可重建。
+		// 保留旧 loop —— 会话已不在运行态，下一次 createPluginSession 会重新装配。
+		fmt.Fprintf(os.Stderr, "· rebuildLoop: %s 的运行态未装配，跳过重建\n", bs.workspace)
+		return
 	}
 	prov, model, effort := bs.modelCfg()
 	loop, effortRef, caps := m.buildLoop(ws, bs.id, prov, model, effort,
@@ -6834,6 +7109,9 @@ func (m *manager) autoEnablePlugins(ws *workspaceRuntime) {
 func (m *manager) autoEnablePluginsAsync(wsPath string) {
 	ctx := context.Background()
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 运行态已摘除（关闭/删除）：没有插件要自动恢复
+	}
 	restored := false
 	for _, cap := range ws.plugins.List() {
 		we, ok := cap.(interface{ WasEnabled() bool })
@@ -6881,6 +7159,11 @@ func (m *manager) autoEnablePluginsAsync(wsPath string) {
 // rebuildWorkspace 重建单个工作区的全部会话 loop（mcp_refresh 后工具集/连接状态更新）。
 func (m *manager) rebuildWorkspace(wsPath string) {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		// 插件虚拟 Project 未装配（已停用/已卸载）：没有会话 loop 可重建。
+		// 这里**不**顺手装配 —— rebuild 是「让已存在的运行态跟上新配置」，不是打开会话。
+		return
+	}
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
@@ -6961,15 +7244,16 @@ func serve() error {
 	pc := loadProviderConfig()
 	startupLog("A2.loadProviderConfig", pcStart)
 	m := &manager{
-		workspaces:  map[string]*workspaceRuntime{},
-		hubRuntimes: map[string]*workspaceRuntime{},
-		hubMsgDedup: map[string]string{},
-		provCfg:     pc,
-		out:         newOut(os.Stdout),
-		metrics:     NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
-		imPlugin:    implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
-		hub:         session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
-		memPrefs:    newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
+		workspaces:     map[string]*workspaceRuntime{},
+		hubRuntimes:    map[string]*workspaceRuntime{},
+		pluginRuntimes: map[string]*workspaceRuntime{},
+		hubMsgDedup:    map[string]string{},
+		provCfg:        pc,
+		out:            newOut(os.Stdout),
+		metrics:        NewFileMetricsStore(filepath.Join(metricsHomeDir(), "metrics.jsonl")),
+		imPlugin:       implugin.New(implugin.DefaultConfigPath()), // 全局 IM 单例（跨 workspace 共享）
+		hub:            session.NewHub(meshNodeID()),               // Session Mesh Hub（node id 持久化解析）
+		memPrefs:       newMemoryPrefStore(),                       // Project Memory 开关（面板读写；会话装配期取值）
 	}
 	// 会话文件维护清扫（后台）：把「已结束、不会再被写入」的会话文件里
 	// 攒下的 O(N²) 一次性收掉（实测子智能体 journal 13.4GB / 主会话 jsonl 6.8GB）。

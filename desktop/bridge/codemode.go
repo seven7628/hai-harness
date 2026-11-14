@@ -210,14 +210,16 @@ var codemodeNodeRuntime = runtime.NewNodeRuntime(runtime.NodeConfig{})
 
 // codemodeStore 打开会话级 store。
 //
-// 路径：<appData>/sessions/<wsKey>/<sid>/codemode/codemode-store.jsonl（与 subagent
-// journal 的 <sid>/agents/ 同构）。目录不存在时由**本函数**建（codemode.OpenStore 刻意
+// 路径：<sessionsRoot>/<sid>/codemode/codemode-store.jsonl（与 subagent journal 的
+// <sid>/agents/ 同构）。sessionsRoot 由 runtime 提供：项目 / Hub = <appData>/sessions/<wsKey>，
+// 插件虚拟 Project = ~/.go-code/plugin-sessions/<id>/sessions（09 §4.3 第 3 点）。
+// 目录不存在时由**本函数**建（codemode.OpenStore 刻意
 // 不建目录：store 不住在别人的目录所有权里，装配方才是目录 owner）。
 //
 // 拿不到合适路径时（sid 非法/空、建目录失败、OpenStore 失败）退化为**进程内内存 store**
 // 并返回一条可读说明：不落盘也要能用（跨调用可见），但绝不允许静默半残 —— 调用方必须
 // 把说明写进日志。第二个返回值 "" 表示正常落盘。
-func codemodeStore(workspace, sid string) (*codemode.Store, string) {
+func codemodeStore(sessionsRoot, sid string) (*codemode.Store, string) {
 	degrade := func(why string) (*codemode.Store, string) {
 		st, err := codemode.OpenStore("") // "" = 纯内存
 		if err != nil {
@@ -229,7 +231,7 @@ func codemodeStore(workspace, sid string) (*codemode.Store, string) {
 	if err := session.ValidateSessionID(sid); err != nil {
 		return degrade(fmt.Sprintf("会话 id 不可用（%v）", err))
 	}
-	dir := filepath.Join(wsSessionsDir(workspace), sid, codemodeStoreDirName)
+	dir := filepath.Join(sessionsRoot, sid, codemodeStoreDirName)
 	if err := os.MkdirAll(dir, 0o700); err != nil { // 会话数据含脚本产物，0700（同 session 层）
 		return degrade(fmt.Sprintf("创建会话目录 %s 失败（%v）", dir, err))
 	}
@@ -314,11 +316,14 @@ func inlineBudgetFunc(v int) func() int {
 //
 // 只在这里注册一次：profile 不参与门控（与 run_python 同款口径 —— 它是执行通道而不是
 // shell，Work 档也要能编排）；真正的门是用户显式打开的 codemode.enabled。
-func registerCodemode(eng *tools.Engine, workspace, sid string, sbx sandbox.Sandbox, cfg codemodeSettings) bool {
+func registerCodemode(eng *tools.Engine, workspace, sessionsRoot, sid string, sbx sandbox.Sandbox, cfg codemodeSettings) bool {
 	if eng == nil || !cfg.Enabled {
 		return false
 	}
-	st, note := codemodeStore(workspace, sid)
+	if sessionsRoot == "" {
+		sessionsRoot = wsSessionsDir(workspace)
+	}
+	st, note := codemodeStore(sessionsRoot, sid)
 	if note != "" {
 		logCodemodeWarnings([]string{note})
 	}

@@ -106,6 +106,9 @@ func testManager(t *testing.T) (*manager, *syncBuf) {
 		// Hub 智能体运行态不在 m.workspaces 里（刻意分开登记），单独收尾：
 		// 否则 DM 会话的 run goroutine 会在 TempDir 清理后继续写盘（directory not empty）。
 		m.shutdownHubRuntimes()
+		// 插件虚拟 Project 同样不在 m.workspaces 里（pluginRuntimes），单独收尾：
+		// 否则虚拟 home/sessions 里的 record 提交与 block 回收会在 TempDir 清理后继续写。
+		m.closePluginRuntimes()
 		m.mu.Lock()
 		paths := make([]string, 0, len(m.workspaces))
 		for wsPath := range m.workspaces {
