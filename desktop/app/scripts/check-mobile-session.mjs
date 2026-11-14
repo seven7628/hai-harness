@@ -43,6 +43,30 @@ const MIME = {
 }
 
 const WS_PATH = '/mock/go-code'
+// Hub 侧只放「一张带归属的任务卡」：用来验 P8-02 的第二条入口 ——
+// 任务卡「打开会话」→ host 的 openProjectSession → 手机会话页（不再 toast 指路）。
+const HUB_AGENT = { id: 'ag_alice', name: 'Alice', role: '研究', version: 1, provider: 'mock', model: 'mock-large', effort: 'medium' }
+const HUB_GROUP = {
+  id: 'grp_1', name: '产品评审群',
+  members: [{ agent_id: 'ag_alice', role: 'owner' }],
+  owner: { agent_id: 'ag_alice' },
+  policy: { mode: 'ask', daily_budget_usd: 0 },
+  created_at: new Date().toISOString(),
+}
+const HUB_GROUP_MESSAGES = [
+  {
+    id: 'g_1', seq: 1, group_id: 'grp_1', kind: 'task_result',
+    sender: { kind: 'agent', agent_id: 'ag_alice' },
+    text: '整理了三份竞品资料', created_at: new Date().toISOString(),
+    refs: {
+      status: 'completed', summary: '整理了三份竞品资料', title: '资料整理',
+      agent_id: 'ag_alice', origin_kind: 'group', origin_agent_id: 'ag_alice', origin_agent_name: 'Alice',
+      task_id: 'task_1',
+      // Project 结果卡：目标是一个**工作区会话**（不是发起者 DM）
+      target_kind: 'workspace', target_workspace: WS_PATH, target_session_id: 's_demo',
+    },
+  },
+]
 const NOW = Date.now()
 const SESSIONS = [
   { id: 's_demo', title: 'P8 会话', updated_at: NOW, pinned: false, running: false },
@@ -72,6 +96,12 @@ const ALLOWED = new Set([
   'hub_group_list',
   'hub_open',
   'hub_history',
+  'hub_group_get',
+  'hub_group_history',
+  'hub_group_activity',
+  'hub_task_list',
+  'hub_need_list',
+  'hub_mark_read',
   'git_snapshot',
   'git_history',
 ])
@@ -103,9 +133,21 @@ function mockCmd(cmd, payload) {
       return { session_id: String(payload?.session_id || '') }
     // Hub 列表与手机壳共用（P8-01b 的既有入口）：空清单就够 —— 本夹具只验会话页。
     case 'hub_agent_list':
-      return { agents: [], dm: {} }
+      return { agents: [HUB_AGENT], dm: { ag_alice: { unread: 0, last_text: '你好', last_at: new Date().toISOString() } } }
     case 'hub_group_list':
-      return { groups: [], progress: {} }
+      return { groups: [HUB_GROUP], progress: { grp_1: { unread: 1, last_text: '整理了三份竞品资料', last_at: new Date().toISOString() } } }
+    case 'hub_group_get':
+      return { group: HUB_GROUP, conversation: { status: 'idle', turns_used: 0, turn_budget: -1 } }
+    case 'hub_group_history':
+      return { messages: HUB_GROUP_MESSAGES, has_more: false }
+    case 'hub_group_activity':
+      return { activity: [] }
+    case 'hub_task_list':
+      return { tasks: [] }
+    case 'hub_need_list':
+      return { needs: [] }
+    case 'hub_mark_read':
+      return { ok: true }
     case 'hub_open':
     case 'hub_history':
       return { messages: [], has_more: false }
@@ -480,7 +522,28 @@ async function runViewport(browser, baseURL, vp) {
   await measure(page, '返回会话列表', vp)
   shots.push(await shot(page, vp, '8-back'))
 
-  // 11) 能力收窄：桌面专属入口不渲染（点了会 403 的按钮一个都不该在）
+  // 11) 第二条入口：Hub 群里的 Project 结果卡「打开会话」→ openProjectSession →
+  //     **真的**跳到手机会话页（P8-02 之前这里只是 toast「请在桌面端打开」）。
+  await page.click('[data-testid="mobile-tab-hub"]')
+  await waitFor(() => page.locator('.hub-side-tabs button').count())
+  await page.locator('.hub-side-tabs button', { hasText: '群组' }).first().click()
+  await waitFor(() => page.locator('.hub-group-row').count())
+  await page.locator('.hub-group-row', { hasText: '产品评审群' }).first().click()
+  await waitFor(() => page.locator('.hub-group-view').count())
+  await waitFor(async () => (await page.locator('.hub-group-view .messages').innerText()).includes('资料整理'))
+  await page.locator('.hub-group-view .hub-task-open').first().click()
+  await waitFor(() => page.locator('[data-testid="mobile-session"]').count())
+  await waitFor(async () => (await page.locator('.m-session .narrative').innerText()).includes('先看目录'))
+  assert((await page.locator('[data-testid="mobile-session-title"]').innerText()).includes('P8 会话'), '任务卡打开的不是目标会话')
+  console.log('  ✅ Hub 任务卡「打开会话」→ 真的跳到手机会话页（不是 toast 指路）')
+  // 返回：会话栈回会话列表（不是回刚才那个 Hub 群）——两条栈分开
+  await page.click('[data-testid="mobile-session-back"]')
+  await waitFor(() => page.locator('[data-testid="mobile-session-list"]').count())
+  assert((await page.locator('[data-testid="mobile-conversation"]').count()) === 0, '从任务卡开的会话返回时落回了 Hub 会话页（返回栈串了）')
+  console.log('  ✅ 任务卡 → 会话 → 返回：落到会话列表，Hub 群没有抢回视图')
+  await measure(page, '任务卡跳转后返回', vp)
+
+  // 12) 能力收窄：桌面专属入口不渲染（点了会 403 的按钮一个都不该在）
   const dead = await page.evaluate(() => ({
     modelChip: document.querySelectorAll('.m-session .model-chip').length,
     modeChip: document.querySelectorAll('.m-session .mode-chip').length,
@@ -492,7 +555,7 @@ async function runViewport(browser, baseURL, vp) {
     `手机上仍渲染了桌面专属入口：${JSON.stringify(dead)}`)
   console.log('  ✅ 能力收窄：模型/模式/Effort/上下文/附件入口都不渲染')
 
-  // 12) 命令集合：只出现 allowlist 内的命令（集合外的会被 mock 403，界面上就是死按钮）
+  // 13) 命令集合：只出现 allowlist 内的命令（集合外的会被 mock 403，界面上就是死按钮）
   const outside = [...new Set(seen.cmds)].filter((c) => !ALLOWED.has(c))
   assert(outside.length === 0, `出现了 allowlist 外的命令（界面有会 403 的入口）：${JSON.stringify(outside)}`)
   for (const must of ['workspace_list', 'list', 'new_session', 'ask_batch', 'approve', 'answer_question']) {
