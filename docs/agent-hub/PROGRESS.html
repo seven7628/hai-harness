@@ -3881,7 +3881,8 @@ const BASE = {
     },
     "P8-03": {
       "status": "in_progress",
-      "commit": "—"
+      "commit": "—",
+      "reviewNote": "P8-03a 已合并；P8-03b 构建嵌入/旧页退役待做。"
     },
     "P8-01a": {
       "status": "done",
@@ -3898,9 +3899,11 @@ const BASE = {
       "reviewNote": "手机 Hub 列表/群/DM + 抽屉；transport/lang/markdown 三个 seam；能力收窄；390/430 38 条浏览器断言。"
     },
     "P8-03a": {
-      "status": "in_progress",
-      "commit": "—",
-      "reviewNote": "手机主题/布局/键盘收口（不退役旧页）"
+      "status": "done",
+      "commit": "233dfa7",
+      "merge": "359efeb",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：tsc + host-seams 57 + mobile transport 154 + mobile session 120 + css + turn-layout 42 全绿；mobile:build + check:mobile-hub 180 条 + check:mobile-session 162 条（390/430/640 × ink/paper）全绿。merge 359efeb。"
     },
     "P8-04": {
       "status": "done",
