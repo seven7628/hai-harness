@@ -44,6 +44,126 @@ export const VIEW_BUDGET_BYTES = 256 * 1024 * 1024
 /** 机器在换页颠簸时的收紧预算：降到一半，逼出更多空间。 */
 export const VIEW_BUDGET_PRESSURE_BYTES = 128 * 1024 * 1024
 
+/** **V8 堆**的独立预算（字节）。
+ *
+ * ## 为什么数据预算不够（2026-11-13 实测事故）
+ *
+ * 数据预算量的是「**我们的数据**」（blocks / cards / turns，roughSize 估算）。
+ * 但渲染进程的真实占用里有一大块**不是我们的数据**：React 的 fiber 树、DOM、
+ * props、闭包 —— 这些**没有**被 roughSize 统计。
+ *
+ * 实测（2026-11-13 一次真实卡死）：
+ *
+ *   我们的数据估算  30 MB
+ *   V8 活堆        554 MB     ← 18 倍
+ *   V8 已提交堆   3.7 GB      ← 124 倍
+ *   其中被换出到 swap 3.5 GB
+ *
+ * ⇒ 数据预算**永远看不到**这 554 MB ⇒ `降级 0 淘汰 0` ⇒ 一路涨到 3.7 GB
+ * ⇒ 机器 16 GB 内存被换页颠簸 ⇒ **major GC 退化成全量磁盘读**（每轮 ~48 秒，
+ * 因为堆大部分在 swap 里）⇒ 渲染进程主线程卡死 ⇒ **整个应用点不动**。
+ *
+ * ⇒ 所以 V8 堆必须是**独立的一根轴**：它才是「渲染进程还能不能活」的真实指标。
+ * 堆超线 ⇒ 降级视图（丢可重取的历史）⇒ 丢掉 React 树 ⇒ 堆缩回去。
+ *
+ * 定 400 MB 的依据：正常态实测 51–120 MB（3 个会话 / 1016 张卡），
+ * 离 400 MB 还有 3 倍余量；离事故时的 554 MB 只差一步 —— 400 能在撞上
+ * 颠簸**之前**就开始收。
+ */
+export const V8_HEAP_BUDGET_BYTES = 400 * 1024 * 1024
+
+/** 读 V8 当前活堆字节数（0 = 读不到，Chromium 未开 precise-memory-info 时）。 */
+export function v8HeapBytes(): number {
+  const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory
+  const n = mem?.usedJSHeapSize
+  return typeof n === 'number' && n > 0 ? n : 0
+}
+
+/** **精确**计量（诊断用，无节点上限）。
+ *
+ * ## 为什么需要它
+ *
+ * `roughSize` 有 `MAX_NODES = 20000` 的**节点上限**：超过就提前返回 ⇒
+ * **大视图被系统性低估**。实测（2026-11-13，探针 v2）：
+ * 8000 块 + 800 张卡（50 item/卡）的视图，roughSize 说 **5.9MB**，真实堆代价
+ * **28.6MB** ⇒ 低估 5 倍。
+ *
+ * ⇒ 这不只是「估得不准」：预算机制**据此判超不超**，估小了 ⇒ **永远不降级**
+ * ⇒ 这正是「978MB 的 V8 堆，预算 256MB 却没触发降级」的机制性原因。
+ *
+ * 这个函数没有上限（但有环保护 + 硬节点上限兜底），只用于**归因**；
+ * 生产路径仍用 roughSize（要快）。
+ */
+export function measureExact(v: unknown, hardCap = 5_000_000): { bytes: number; nodes: number; capped: boolean } {
+  const seen = new WeakSet<object>()
+  let bytes = 0
+  let nodes = 0
+  let capped = false
+  const stack: Array<{ v: unknown; depth: number }> = [{ v, depth: 0 }]
+  while (stack.length) {
+    if (nodes >= hardCap) {
+      capped = true
+      break
+    }
+    const { v: cur, depth } = stack.pop() as { v: unknown; depth: number }
+    if (cur === null || cur === undefined) continue
+    const t = typeof cur
+    if (t === 'string') {
+      bytes += (cur as string).length * 2
+      nodes++
+      continue
+    }
+    if (t === 'number') {
+      bytes += 8
+      nodes++
+      continue
+    }
+    if (t === 'boolean') {
+      bytes += 4
+      nodes++
+      continue
+    }
+    if (t !== 'object') continue
+    const o = cur as Record<string, unknown>
+    if (seen.has(o)) continue
+    seen.add(o)
+    bytes += 48
+    nodes++
+    if (depth >= 32) continue
+    if (Array.isArray(o)) {
+      for (const x of o) stack.push({ v: x, depth: depth + 1 })
+    } else {
+      for (const k in o) {
+        bytes += k.length * 2 + 16
+        stack.push({ v: o[k], depth: depth + 1 })
+      }
+    }
+  }
+  return { bytes, nodes, capped }
+}
+
+/** DOM 侧的规模（诊断用）：节点数 + HTML 字面量长度。
+ *
+ * 为什么需要它：V8 堆里「不是我们数据」的那部分，主要是 React 树与 DOM。
+ * 节点数能立刻回答「是不是卡片树没虚拟化撑爆了」。
+ */
+export function domStats(): { nodes: number; htmlBytes: number } {
+  if (typeof document === 'undefined') return { nodes: 0, htmlBytes: 0 }
+  let nodes = 0
+  try {
+    nodes = document.getElementsByTagName('*').length
+  } catch {
+    nodes = 0
+  }
+  let htmlBytes = 0
+  try {
+    htmlBytes = document.body?.innerHTML.length ?? 0
+  } catch {
+    htmlBytes = 0
+  }
+  return { nodes, htmlBytes }
+}
+
 /** 降级后保留的**尾部**块数（保留最近的对话 + 正在流式输出的内容）。 */
 export const VIEW_KEEP_BLOCKS = 200
 
@@ -74,20 +194,47 @@ const blockSizeCache = new WeakMap<object, number>()
 /** roughSize 的深度上限：再深的结构按固定值算（避免环与深树）。 */
 const MAX_DEPTH = 8
 
-/** roughSize 单次遍历的节点上限：超过就按剩余量粗估（防病态结构拖慢估算本身）。 */
-const MAX_NODES = 20000
+/** roughSize 单次遍历的节点上限：超过就按**已测得的平均单节点字节**外推
+ *  （防病态结构拖慢估算本身）。
+ *
+ * ## 为什么上限从 20000 提到 100000（2026-11-13）
+ *
+ * 上限本身是对的（防病态结构），但**截断时的算法是错的**：原实现对数组
+ * 直接按 `64 字节/项` 收尾 ⇒ 一个 10 万项、每项 1 KB 的数组被算成 6.4 MB
+ * （真值 100 MB）⇒ **低估 15 倍**。
+ *
+ * 而预算机制**恰恰靠这个数判断要不要降级** ⇒ 估小了 ⇒ 永远不降级 ⇒
+ * 这就是「978MB 的 V8 堆，预算 256MB 却没触发降级」的机制性原因
+ * （2026-11-12 当时的结论是「机制没生效」，其实是**尺子坏了**）。
+ *
+ * 改成「按已测平均外推」后，截断也保持数量级正确。
+ */
+const MAX_NODES = 100_000
 
 /** 粗略估算一个值的字节数。
  *
  *  JS 字符串是 UTF-16 ⇒ 按 2 字节/字符算（base64 图片尤其吃亏：它们是字符串）。
  *  `String.length` 是 O(1) 的属性读 ⇒ 即使是 2 MB 的 base64，估算也只是一次读。
  */
-export function roughSize(v: unknown, depth = 0, budget = { left: MAX_NODES }): number {
+export function roughSize(v: unknown, depth = 0, budget = { left: MAX_NODES, bytes: 0, nodes: 0 }): number {
   if (v === null || v === undefined) return 0
   const t = typeof v
-  if (t === 'string') return (v as string).length * 2
-  if (t === 'number') return 8
-  if (t === 'boolean') return 4
+  if (t === 'string') {
+    const n = (v as string).length * 2
+    budget.bytes += n
+    budget.nodes++
+    return n
+  }
+  if (t === 'number') {
+    budget.bytes += 8
+    budget.nodes++
+    return 8
+  }
+  if (t === 'boolean') {
+    budget.bytes += 4
+    budget.nodes++
+    return 4
+  }
   if (t !== 'object') return 0
   if (depth >= MAX_DEPTH) return 64
   if (budget.left <= 0) return 64
@@ -97,7 +244,11 @@ export function roughSize(v: unknown, depth = 0, budget = { left: MAX_NODES }): 
     for (const x of o) {
       budget.left--
       n += 16 + roughSize(x, depth + 1, budget)
-      if (budget.left <= 0) return n + 64 * Math.max(0, o.length - 1)
+      if (budget.left <= 0) {
+        // 截断：按**已测得的平均单节点字节**外推剩余项（不是固定 64 字节）。
+        const avg = budget.nodes > 0 ? budget.bytes / budget.nodes : 64
+        return n + avg * Math.max(0, o.length - 1)
+      }
     }
     return n
   }
@@ -280,6 +431,8 @@ export interface BudgetPlan {
   degrade: string[]
   /** 要整体淘汰的会话 id。 */
   evict: string[]
+  /** 处置**前**的估算总量（= 当前占用）—— 与预算比较用这个。 */
+  total: number
   /** 处置后估算还剩多少字节。 */
   remaining: number
 }
@@ -307,10 +460,11 @@ export function planBudget(opts: {
   /** 额外的「不可淘汰」判据（调用方传 sessionBusy）。 */
   protect?: (sid: string, v: SessionView) => boolean
 }): BudgetPlan {
-  const plan: BudgetPlan = { degrade: [], evict: [], remaining: 0 }
+  const plan: BudgetPlan = { degrade: [], evict: [], remaining: 0, total: 0 }
   const { views, order, budget } = opts
   let total = 0
   for (const v of Object.values(views)) total += viewBytes(v)
+  plan.total = total
   plan.remaining = total
   if (total <= budget) return plan
 
