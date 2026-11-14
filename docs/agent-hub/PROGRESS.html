@@ -2662,6 +2662,23 @@ const BASE = {
       "tests": "test:mobile-390；test:mobile-hub；tokens_sync；check-mobile-*；tsc",
       "commit": "—",
       "status": "in_progress"
+    },
+    {
+      "id": "P8-04",
+      "phase": "P8",
+      "title": "Narrative 折叠边界：交卷后又来工具时 Worked 盒不弹回",
+      "deps": [],
+      "files": [
+        "desktop/app/src/components/Narrative.tsx",
+        "desktop/app/src/components/runtime/turn/selectTurns.ts",
+        "desktop/app/src/components/runtime/turn/selectTurns-test.ts"
+      ],
+      "acceptance": "settle mark 有效时不被当前 items.length 覆盖；内容整体替换时重建；Worked 盒 state key 稳定。",
+      "tests": "npx tsc --noEmit；npm run test:turn-layout（42）；npm run test:runtime-turns（25）；390/430 手机会话夹具。",
+      "commit": "651b012",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：tsc + turn-layout 42 + runtime-turns 25 绿；浏览器反证（旧代码 1 个 act，修复后 2 个且点开保持）；手机会话夹具 390/430 绿。merge 57d6d76。"
     }
   ],
   "deferred": [
@@ -3884,6 +3901,13 @@ const BASE = {
       "status": "in_progress",
       "commit": "—",
       "reviewNote": "手机主题/布局/键盘收口（不退役旧页）"
+    },
+    "P8-04": {
+      "status": "done",
+      "commit": "651b012",
+      "merge": "57d6d76",
+      "review": "passed",
+      "reviewNote": "结算边界保留 + 失效重建；unit + 浏览器反证 + 手机会话回归绿。"
     }
   },
   "reviewGate": {
