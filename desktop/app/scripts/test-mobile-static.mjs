@@ -12,7 +12,8 @@
 //   C. 令牌同源：mobile.css 只 @import 桌面令牌/hub/skin，不另起色板（替代已删除的
 //      tokens_sync_test.go）；
 //   D. 传输契约：配对/命令/事件端点与凭据 key（旧页配对过的手机不掉档）；
-//   E. 旧页退役：mobile_web/ 目录不存在、代码里没有旧文件引用、内置 zip 结构正确；
+//   E. 旧页退役 + 方案 A：mobile_web/ 与 zip 都不存在；手机页是 dist-mobile 目录，
+//      package.json 的 extraResources 把它复制成 Resources/mobile-web；
 //   F. 触控与动效：44px 触控下限、prefers-reduced-motion 有兜底。
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -22,7 +23,6 @@ const APP = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const REPO = resolve(APP, '..', '..')
 const SRC = join(APP, 'src', 'mobile')
 const BRIDGE = join(REPO, 'desktop', 'bridge')
-const ZIP = join(BRIDGE, 'mobile_web.zip')
 
 let pass = 0
 const failures = []
@@ -125,47 +125,33 @@ check('代码里没有旧页文件引用（注释/脚本一起清）', () => {
   assert(hits.length === 0, `还有旧页引用：${hits.join('; ')}`)
 })
 
-// zip 中央目录（不引第三方依赖，只读名字）
-function zipEntryNames(buf) {
-  let eocd = -1
-  const floor = Math.max(0, buf.length - 22 - 0xffff)
-  for (let i = buf.length - 22; i >= floor; i--) {
-    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break }
-  }
-  if (eocd < 0) throw new Error('不是 zip（找不到 EOCD）')
-  const count = buf.readUInt16LE(eocd + 10)
-  let off = buf.readUInt32LE(eocd + 16)
-  const names = []
-  for (let i = 0; i < count; i++) {
-    if (buf.readUInt32LE(off) !== 0x02014b50) throw new Error(`中央目录第 ${i} 项损坏`)
-    const nameLen = buf.readUInt16LE(off + 28)
-    const extraLen = buf.readUInt16LE(off + 30)
-    const commentLen = buf.readUInt16LE(off + 32)
-    names.push(buf.toString('utf8', off + 46, off + 46 + nameLen))
-    off += 46 + nameLen + extraLen + commentLen
-  }
-  return names
-}
-
-check('mobile_web.zip: 有 index.html + assets，且没有旧页文件', () => {
-  assert(existsSync(ZIP), '缺 desktop/bridge/mobile_web.zip（先跑 npm run mobile:embed）')
-  const buf = readFileSync(ZIP)
-  assert(buf.length < 16 * 1024 * 1024, `zip ${(buf.length / 1024 / 1024).toFixed(1)}MB 过大`)
-  const names = zipEntryNames(buf)
-  assert(names.includes('index.html'), 'zip 根缺 index.html（/m/ 只能靠它兜底）')
-  assert(names.some((n) => n.startsWith('assets/') && n.endsWith('.js')), 'zip 里没有 assets/*.js')
-  assert(names.some((n) => n.startsWith('assets/') && n.endsWith('.css')), 'zip 里没有 assets/*.css')
-  for (const gone of ['mobile.html', 'app.js', 'hub_model.js', 'tokens.css', 'style.css']) {
-    assert(!names.includes(gone), `zip 里还有旧页文件 ${gone}`)
-  }
-  for (const n of names) {
-    assert(!n.startsWith('/') && !n.split('/').includes('..') && !n.includes('\\'), `zip 条目路径非法：${n}`)
-  }
+check('方案 A：没有 mobile_web 目录、没有 mobile_web.zip', () => {
+  assert(!existsSync(join(BRIDGE, 'mobile_web')), '旧页目录还在')
+  assert(!existsSync(join(BRIDGE, 'mobile_web.zip')), 'zip 还在（方案 A 不应有运行时解压缓存）')
 })
-check('bridge 只 embed zip，不再 embed 目录', () => {
-  const go = readFileSync(join(BRIDGE, 'mobile_web.go'), 'utf8')
-  assert(/\/\/go:embed mobile_web\.zip/.test(go), 'go:embed 应指向 mobile_web.zip')
-  assert(!/\/\/go:embed mobile_web\n/.test(go), '仍在 embed 旧目录')
+
+check('package.json：dist-mobile 作为 extraResources → Resources/mobile-web', () => {
+  const pkg = JSON.parse(readFileSync(join(APP, 'package.json'), 'utf8'))
+  const extra = pkg.build?.extraResources ?? []
+  assert(extra.some((x) => x.from === 'dist-mobile' && x.to === 'mobile-web'), 'extraResources 缺 dist-mobile → mobile-web')
+  assert(String(pkg.scripts?.build || '').includes('mobile:build'), 'build 应先跑 mobile:build')
+  assert(!String(pkg.scripts?.build || '').includes('mobile:embed'), 'build 不应再跑 mobile:embed')
+  assert(String(pkg.scripts?.['mobile:build'] || '').includes('mobile-dist-index.mjs'), 'mobile:build 应把 mobile.html 改成 index.html')
+})
+
+check('electron/main.ts：dev 与打包态都设置 HAI_MOBILE_WEB_DIR', () => {
+  const ts = readFileSync(join(APP, 'electron', 'main.ts'), 'utf8')
+  assert(ts.includes('bundledMobileWebDir'), '缺 bundledMobileWebDir')
+  assert(ts.includes("path.join(process.resourcesPath, 'mobile-web')"), '打包态应指向 Resources/mobile-web')
+  assert(ts.includes("path.join(APP_ROOT, 'dist-mobile')"), 'dev 应指向 dist-mobile')
+  assert(ts.includes('env.HAI_MOBILE_WEB_DIR = bundledMobileWebDir()'), 'bridgeEnv 应设置 HAI_MOBILE_WEB_DIR')
+})
+
+check('bridge：/m/ 只服务磁盘目录，不再 embed zip', () => {
+  const go = readFileSync(join(BRIDGE, 'mobile_server.go'), 'utf8')
+  assert(go.includes('func mobileWebSub(diskDir string)'), '缺 mobileWebSub')
+  assert(go.includes('HAI_MOBILE_WEB_DIR 未设置'), '缺缺失目录的明确错误')
+  assert(!existsSync(join(BRIDGE, 'mobile_web.go')), 'mobile_web.go 应已删除')
 })
 
 // ── F. 触控与动效 ─────────────────────────────────────────────
