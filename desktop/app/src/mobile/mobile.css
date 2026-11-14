@@ -35,6 +35,32 @@
   --m-safe-right: env(safe-area-inset-right, 0px);
   --m-safe-bottom: env(safe-area-inset-bottom, 0px);
   --m-safe-left: env(safe-area-inset-left, 0px);
+
+  /* index.css 的派生令牌补丁（P8-03a）。
+   *
+   * 手机包只引 runtime-palette + runtime-tokens + hub.css + runtime-skin，不引 index.css；
+   * 但 hub.css / runtime-skin.css 里有 16 个 var(--text-2 / --text-3 / --elevated /
+   * --warning / --error / --running / --focus-ring / --bg / --surface / --border …)
+   * 是 index.css 的派生层。缺定义 = invalid at computed-value time：整条声明被丢弃，
+   * 颜色退化成「继承」—— 实测列表预览/抽屉小节标题与正文同色（对比度 17.9:1），
+   * 警告点透明、头像眼睛没有底色。这里按 index.css 的同名同义补一层，值全部来自
+   * runtime-palette 基色，不新增颜色。 */
+  --bg: var(--paper);
+  --surface: var(--paper-2);
+  --surface-2: var(--paper-3);
+  --surface-3: var(--paper-3);
+  --elevated: var(--paper-3);
+  --text: var(--ink);
+  --text-2: var(--ink-2);
+  --text-3: var(--ink-3);
+  --muted: var(--ink-2);
+  --muted-2: var(--ink-3);
+  --border: var(--line);
+  --border-strong: var(--ink-line-2);
+  --warning: var(--ochre);
+  --error: var(--crimson);
+  --running: var(--indigo);
+  --focus-ring: var(--indigo);
 }
 
 /* 表单控件/滚动条/输入法候选条跟随主题（meta[name=color-scheme] 只认系统偏好，
@@ -367,7 +393,7 @@ body {
   --surface-2: var(--paper-3);
   --surface-3: color-mix(in srgb, var(--ink) 9%, var(--paper-2));
   --border: var(--line);
-  --border-strong: var(--line-2);
+  --border-strong: var(--ink-line-2);
   --text: var(--ink);
   --muted: var(--ink-2);
   --muted-2: var(--ink-3);
@@ -1570,6 +1596,89 @@ body {
   padding: 1px 8px;
   cursor: pointer;
   font-family: var(--font-mono, monospace);
+}
+
+/* 审批卡的 JSON 视图（.json-box / .jv-*）：与 composer 外壳同理，样式住在 index.css，
+   手机不引。不补的话 jv-toggle 是浏览器默认按钮、键/字符串没有配色。只补结构/颜色，
+   尺寸与桌面一致（jv-toggle 是代码行内的行内控件，走 WCAG 2.5.8 的行内例外）。 */
+.m-session .json-box {
+  max-height: 320px;
+  overflow: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.m-session .jv {
+  font-family: var(--mono, var(--font-mono, monospace));
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+.m-session .jv-raw {
+  white-space: pre-wrap;
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.m-session .jv .jv-node,
+.m-session .jv .jv-collapsed {
+  display: inline;
+}
+
+.m-session .jv .jv-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.m-session .jv .jv-key {
+  color: var(--accent);
+}
+
+.m-session .jv .jv-str {
+  color: var(--green);
+  word-break: break-all;
+}
+
+.m-session .jv .jv-num {
+  color: var(--amber);
+}
+
+.m-session .jv .jv-bool {
+  color: var(--violet);
+}
+
+.m-session .jv .jv-null,
+.m-session .jv .jv-punct {
+  color: var(--ink-3);
+}
+
+.m-session .jv .jv-null {
+  font-style: italic;
+}
+
+.m-session .jv .jv-toggle {
+  background: none;
+  border: 1px solid var(--ink-line-2);
+  border-radius: 4px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  padding: 0 5px;
+  margin: 0 4px;
+  cursor: pointer;
+  font-family: var(--mono, var(--font-mono, monospace));
+  vertical-align: 1px;
+}
+
+.m-session .jv .jv-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .m-session .dock .acts {
