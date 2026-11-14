@@ -17,17 +17,21 @@ import { readFile } from 'node:fs/promises'
 import { existsSync, statSync, mkdirSync } from 'node:fs'
 import { extname, join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { auditContrast, installFakeVisualViewport, installTheme } from './mobile-fixture-helpers.mjs'
 
 const APP = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(APP, 'dist-mobile')
-const SHOTS = '/tmp/p8-hub-screens'
+const SHOTS = '/tmp/p8-polish'
 const TOKEN = 'tok-p8-hub-screens'
 const PAIR_CODE = '123456'
 
 const VIEWPORTS = [
   { name: '390', width: 390, height: 844 },
   { name: '430', width: 430, height: 932 },
+  { name: '640', width: 640, height: 900 },
 ]
+// P8-03a：手机固定 data-skin='runtime'，主题 ink/paper 与桌面同 key（hai.theme）。
+const THEMES = ['ink', 'paper']
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -265,7 +269,9 @@ async function waitFor(fn, timeout = 6000, step = 30) {
 // 手机壳的导航、列表行、tab、搜索框、composer、抽屉页签与关闭。
 const TOUCH_SELECTORS = [
   '[data-testid="mobile-back"]',
-  '[data-testid="mobile-inspector-open"]',
+  // P8-03a：外层「⋯」撤掉，抽屉入口 = 共享 chat-header 的「上下文」按钮；
+  // 头里两个 icon-btn（上下文/更多）都必须是 44px。
+  '.m-conv .chat-header .icon-btn',
   '[data-testid="mobile-lang"]',
   '[data-testid="mobile-theme"]',
   '[data-testid="mobile-pair-submit"]',
@@ -335,22 +341,24 @@ async function measure(page, label, vp, settle = 100) {
   return m
 }
 
-async function shot(page, vp, name) {
+async function shot(page, vp, name, theme) {
   // 等动画停稳再截：抽屉滑入 180ms，动画中途截图会拍出「抽屉只露一半」的假象。
   await page.waitForTimeout(300)
-  const file = join(SHOTS, `${vp.name}-${name}.png`)
+  const file = join(SHOTS, `${vp.name}-${theme}-${name}.png`)
   await page.screenshot({ path: file })
   return file
 }
 
-async function runViewport(browser, baseURL, vp) {
-  console.log(`\n── ${vp.name}×${vp.height} ──`)
+async function runViewport(browser, baseURL, vp, theme) {
+  console.log(`\n── ${vp.name}×${vp.height} · ${theme} ──`)
   const context = await browser.newContext({
     viewport: { width: vp.width, height: vp.height },
     deviceScaleFactor: 2,
     isMobile: true,
     hasTouch: true,
   })
+  await installTheme(context, theme)
+  await installFakeVisualViewport(context)
   const page = await context.newPage()
   const errors = []
   page.on('pageerror', (e) => errors.push(`pageerror ${e.message}`))
@@ -371,10 +379,22 @@ async function runViewport(browser, baseURL, vp) {
   const shots = []
   await page.goto(baseURL, { waitUntil: 'load' })
 
+  // 主题 boot：data-skin 固定 runtime，data-theme 由 hai.theme 映射成 ink/paper；
+  // theme-color 由 mobile/chrome.ts 的 MutationObserver 跟着写（状态栏/地址栏）。
+  const boot = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    skin: document.documentElement.dataset.skin,
+    meta: document.querySelector('meta[name="theme-color"]')?.getAttribute('content') ?? '',
+  }))
+  assert(boot.skin === 'runtime', `data-skin 不是 runtime：${boot.skin}`)
+  assert(boot.theme === theme, `data-theme=${boot.theme}，期望 ${theme}（hai.theme 没生效？）`)
+  assert(boot.meta === (theme === 'paper' ? '#f4f3f1' : '#08080a'), `theme-color 没跟随主题：${boot.meta}`)
+  console.log(`  ✅ 主题：data-skin=runtime, data-theme=${theme}, theme-color=${boot.meta}`)
+
   // 1) 配对屏 → 配对
   await waitFor(() => page.locator('[data-testid="mobile-pair-code"]').count())
   await measure(page, '配对屏', vp)
-  shots.push(await shot(page, vp, '1-pair'))
+  shots.push(await shot(page, vp, '1-pair', theme))
   await page.fill('[data-testid="mobile-pair-code"]', PAIR_CODE)
   await page.fill('[data-testid="mobile-pair-name"]', 'P8 夹具')
   await page.click('[data-testid="mobile-pair-submit"]')
@@ -390,7 +410,23 @@ async function runViewport(browser, baseURL, vp) {
   const listText = await page.locator('.hub-side-list').innerText()
   assert(listText.includes('Alice'), `列表里没有 Alice：${listText.slice(0, 80)}`)
   await measure(page, '列表', vp)
-  shots.push(await shot(page, vp, '2-list'))
+  shots.push(await shot(page, vp, '2-list', theme))
+
+  // 640（平板竖屏）：单列内容最宽 640 居中，390/430 等于铺满；三档都不横向溢出。
+  const listW = await page.evaluate(() => {
+    const r = document.querySelector('.hub-side').getBoundingClientRect()
+    return { w: Math.round(r.width), left: Math.round(r.left), right: Math.round(r.right) }
+  })
+  assert(listW.w <= 640, `列表内容宽 ${listW.w} > 640（单列被拉宽）`)
+  if (vp.width > 640) {
+    assert(Math.abs(listW.left - (vp.width - listW.right)) <= 1, `列表没有居中：${JSON.stringify(listW)}`)
+  }
+  await auditContrast(page, [
+    ['.hub-side-row .hub-name', '列表名字'],
+    ['.hub-side-row .hub-preview', '列表预览'],
+    ['.hub-side-tabs button.on', '列表 tab（选中）'],
+    ['.hub-side-tabs button:not(.on)', '列表 tab（未选中）'],
+  ], `${vp.name}/${theme} 列表`)
 
   // 3) DM：HubSurface（DM 时间线/composer 都是桌面同一份）+ 发消息（乐观气泡）
   await page.locator('.hub-side-row', { hasText: 'Alice' }).first().click()
@@ -399,7 +435,112 @@ async function runViewport(browser, baseURL, vp) {
   await waitFor(async () => (await page.locator('.hub-dm .messages').innerText()).includes('我先看一遍资料'))
   assert((await page.locator('[data-testid="mobile-conv-title"]').innerText()).includes('Alice'), '会话标题不是当前智能体')
   await measure(page, 'DM 会话', vp)
-  shots.push(await shot(page, vp, '3-dm'))
+  shots.push(await shot(page, vp, '3-dm', theme))
+
+  // 单头（P8-03a）：共享 chat-header 是唯一的头；外层不再有「⋯」，标题只画一次。
+  const header = await page.evaluate(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect()
+      return r.width > 0 && r.height > 0 && getComputedStyle(el).display !== 'none'
+    }
+    const more = [...document.querySelectorAll('[aria-label="更多操作"]')].filter(visible)
+    const outerTitle = document.querySelector('[data-testid="mobile-conv-title"]')
+    const ot = outerTitle?.getBoundingClientRect()
+    return {
+      more: more.length,
+      outerInspector: document.querySelectorAll('[data-testid="mobile-inspector-open"]').length,
+      outerTitleW: ot ? Math.round(ot.width) : null,
+      innerTitle: document.querySelector('.hub-dm .chat-title .name')?.innerText.trim() ?? '',
+      chatHeaderTop: Math.round(document.querySelector('.hub-dm .chat-header').getBoundingClientRect().top),
+      mainW: Math.round(document.querySelector('.hub-dm').getBoundingClientRect().width),
+    }
+  })
+  assert(header.more === 1, `会话页有 ${header.more} 个「更多操作」入口（应只有 chat-header 一个）`)
+  assert(header.outerInspector === 0, '外层「⋯」抽屉入口还在（与 chat-header 的更多菜单重复）')
+  assert(header.outerTitleW !== null && header.outerTitleW <= 1, `外层标题没有视觉隐藏：w=${header.outerTitleW}`)
+  assert(header.innerTitle === 'Alice', `内层标题不是 Alice：${header.innerTitle}`)
+  assert(header.chatHeaderTop === 0, `chat-header 没有贴顶（返回键浮层对不齐）：top=${header.chatHeaderTop}`)
+  assert(header.mainW <= 640, `会话面宽 ${header.mainW} > 640`)
+  console.log('  ✅ 单头：chat-header 贴顶，外层无重复「⋯」，标题只画一次')
+
+  // composer 高度（P8-03a）：100px → ~71px；输入行 28px；空 meta 行不再占位。
+  const comp = await page.evaluate(() => {
+    const r = (s) => {
+      const e = document.querySelector(s)
+      const b = e.getBoundingClientRect()
+      return { h: Math.round(b.height), bottom: Math.round(b.bottom) }
+    }
+    return {
+      wrap: r('.hub-dm .composer-wrap'),
+      composer: r('.hub-dm .composer'),
+      ta: r('.hub-dm .composer textarea'),
+      meta: r('.hub-dm .composer-meta'),
+    }
+  })
+  assert(comp.wrap.h <= 90, `DM composer 整块 ${comp.wrap.h}px 偏高（应 ≤90）`)
+  assert(comp.composer.h >= 44, `DM composer ${comp.composer.h}px 太小`)
+  assert(comp.ta.h >= 24 && comp.ta.h <= 96, `DM 输入行 ${comp.ta.h}px 不在 24–96 内`)
+  assert(comp.meta.h === 0, `DM 空 meta 行仍占 ${comp.meta.h}px`)
+  console.log(`  ✅ composer：整块 ${comp.wrap.h}px，输入行 ${comp.ta.h}px，空 meta 行 0px`)
+
+  await auditContrast(page, [
+    ['.hub-dm .agent-text', 'DM 正文'],
+    ['.hub-dm .chat-title .name', 'DM 标题'],
+    ['.hub-dm .composer textarea', 'composer 输入'],
+  ], `${vp.name}/${theme} DM`)
+
+  // 软键盘（visualViewport）：layout viewport 不变、可见区缩到 400 —— composer 仍在上沿之上。
+  const beforeVv = await page.evaluate(() => Math.round(document.querySelector('.m-app').getBoundingClientRect().height))
+  await page.evaluate(() => {
+    window.visualViewport.height = 400
+    window.visualViewport.dispatchEvent(new Event('resize'))
+  })
+  await page.waitForTimeout(150)
+  const kb = await page.evaluate(() => {
+    const app = document.querySelector('.m-app').getBoundingClientRect()
+    const c = document.querySelector('.hub-dm .composer').getBoundingClientRect()
+    return {
+      vvH: window.visualViewport.height,
+      innerH: window.innerHeight,
+      appH: Math.round(app.height),
+      compBottom: Math.round(c.bottom),
+      varH: getComputedStyle(document.documentElement).getPropertyValue('--m-vv-height').trim(),
+    }
+  })
+  assert(kb.innerH === vp.height, `键盘模拟前 innerHeight=${kb.innerH}，期望 ${vp.height}（layout viewport 不该变）`)
+  assert(kb.vvH === 400, `假 visualViewport 高度没生效：${kb.vvH}`)
+  assert(kb.varH === '400px', `--m-vv-height=${kb.varH}，期望 400px`)
+  assert(kb.appH <= 401, `键盘弹出后 .m-app 高 ${kb.appH}，没有跟着可见区缩`)
+  assert(kb.compBottom <= 401, `键盘弹出后 composer 底 ${kb.compBottom} 超出可见区 400`)
+  shots.push(await shot(page, vp, '9-keyboard', theme))
+  console.log(`  ✅ 软键盘：可见区 400（innerHeight 仍 ${kb.innerH}），app=${kb.appH}，composer 底=${kb.compBottom}`)
+  await page.evaluate(() => {
+    window.visualViewport.height = 0
+    window.visualViewport.dispatchEvent(new Event('resize'))
+  })
+  await page.waitForTimeout(150)
+  const restored = await page.evaluate(() => Math.round(document.querySelector('.m-app').getBoundingClientRect().height))
+  assert(Math.abs(restored - beforeVv) <= 1, `键盘收起后 .m-app 没恢复：${restored} vs ${beforeVv}`)
+
+  // safe-area：home 条由 .m-app 统一让位。夹具覆写 --m-safe-bottom=34px 量真值
+  // （桌面 Chromium 的 env() 恒为 0，不覆写就永远测不到）。
+  await page.addStyleTag({ content: ':root{--m-safe-bottom:34px !important}' })
+  await page.waitForTimeout(120)
+  const safe = await page.evaluate(() => {
+    const c = document.querySelector('.hub-dm .composer').getBoundingClientRect()
+    return {
+      gap: Math.round(window.innerHeight - c.bottom),
+      appPad: getComputedStyle(document.querySelector('.m-app')).paddingBottom,
+    }
+  })
+  assert(safe.gap >= 33, `--m-safe-bottom=34px 时 composer 离底 ${safe.gap}px（应 ≥33，说明安全区没生效）`)
+  console.log(`  ✅ safe-area：--m-safe-bottom=34px → composer 离底 ${safe.gap}px（app padding ${safe.appPad}）`)
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll('style')) {
+      if (el.textContent?.includes('--m-safe-bottom:34px')) el.remove()
+    }
+  })
+  await page.waitForTimeout(100)
 
   const draft = '手机端发一条'
   await page.fill('.hub-dm .composer textarea', draft)
@@ -412,26 +553,69 @@ async function runViewport(browser, baseURL, vp) {
   await measure(page, 'DM 会话（发送后）', vp)
 
   // 4) 详情抽屉：Context / 任务 / Needs
-  await page.click('[data-testid="mobile-inspector-open"]')
+  await page.locator('.m-conv .chat-header .icon-btn[aria-label="上下文"]').first().click()
   await waitFor(() => page.locator('[data-testid="mobile-inspector-drawer"]').count())
   const drawerTabs = await page.locator('.m-drawer .hub-inspector-tabs button').allInnerTexts()
-  for (const label of ['概览', '任务', 'Needs', 'Context']) {
+  for (const label of ['概览', '任务', 'Needs', '会话', 'Context']) {
     assert(drawerTabs.some((t) => t.includes(label)), `抽屉缺少「${label}」页签：${JSON.stringify(drawerTabs)}`)
   }
+  // 页签可达性：每个 ≥44px，且 scrollIntoView 后完整落在页签条可视区内
+  // （390 下 5 个页签 + 关闭按钮只剩 0px 余量，320 下必须靠横向滚动）。
+  const tabCheck = await page.evaluate(() => {
+    const nav = document.querySelector('.m-drawer .hub-inspector-tabs')
+    const navRect = nav.getBoundingClientRect()
+    const tabs = [...nav.querySelectorAll('button[role="tab"]')].map((b) => {
+      b.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+      const r = b.getBoundingClientRect()
+      return {
+        t: b.innerText.trim().replace(/\s+/g, ' '),
+        left: Math.round(r.left),
+        right: Math.round(r.right),
+        h: Math.round(r.height),
+        inNav: r.left >= navRect.left - 1 && r.right <= navRect.right + 1,
+      }
+    })
+    return {
+      clientW: Math.round(nav.clientWidth),
+      scrollW: Math.round(nav.scrollWidth),
+      overflow: nav.dataset.overflow ?? 'none',
+      tabs,
+    }
+  })
+  assert(tabCheck.tabs.length === 5, `抽屉页签数量 ${tabCheck.tabs.length}，期望 5`)
+  for (const t of tabCheck.tabs) {
+    assert(t.h >= 43.5, `页签「${t.t}」高 ${t.h}px < 44`)
+    assert(t.inNav, `页签「${t.t}」不在可视区（left=${t.left}, right=${t.right}）`)
+  }
+  console.log(`  ✅ 抽屉页签：5 个全 ≥44px 且在可视区（scroll ${tabCheck.scrollW}/${tabCheck.clientW}, overflow=${tabCheck.overflow}）`)
+  // 「上下文」按钮打开的是 Context 页；先切回概览，量概览的排版/对比度。
+  await page.locator('.m-drawer .hub-inspector-tabs button', { hasText: '概览' }).first().click()
+  await waitFor(() => page.locator('.m-drawer .hub-ov-id').count())
   await measure(page, '详情抽屉（概览）', vp, 350)
-  shots.push(await shot(page, vp, '4-drawer'))
+  shots.push(await shot(page, vp, '4-drawer', theme))
+  await auditContrast(page, [
+    ['.m-drawer .hub-ov-id strong', '抽屉名字'],
+    ['.m-drawer .hub-ov-id span', '抽屉副标题'],
+  ], `${vp.name}/${theme} 抽屉`)
 
   await page.locator('.m-drawer .hub-inspector-tabs button', { hasText: '任务' }).first().click()
   await waitFor(async () => (await page.locator('.m-drawer .hub-panel-list').innerText()).includes('整理竞品资料'))
   console.log('  ✅ 抽屉 → 任务：任务行可见')
   await measure(page, '详情抽屉（任务）', vp, 350)
-  shots.push(await shot(page, vp, '5-drawer-tasks'))
+  shots.push(await shot(page, vp, '5-drawer-tasks', theme))
 
   await page.locator('.m-drawer .hub-inspector-tabs button', { hasText: 'Needs' }).first().click()
   await waitFor(async () => (await page.locator('.m-drawer').innerText()).includes('写文件前确认'))
   console.log('  ✅ 抽屉 → Needs：审批卡可见')
   await measure(page, '详情抽屉（Needs）', vp, 350)
-  shots.push(await shot(page, vp, '6-drawer-needs'))
+  shots.push(await shot(page, vp, '6-drawer-needs', theme))
+
+  // 会话页签：五档里最后一个没被上面覆盖的，点一下确认面板可切换。
+  await page.locator('.m-drawer .hub-inspector-tabs button', { hasText: '会话' }).first().click()
+  await page.waitForTimeout(200)
+  const sessTabText = await page.locator('.m-drawer').innerText()
+  assert(sessTabText.length > 20, `抽屉「会话」页签内容为空：${sessTabText.slice(0, 60)}`)
+  console.log('  ✅ 抽屉 → 会话：面板可切换')
 
   // 5) Esc 先关抽屉（不退出会话）
   await page.keyboard.press('Escape')
@@ -459,7 +643,22 @@ async function runViewport(browser, baseURL, vp) {
   assert((await page.locator('.hub-group-view .event-card--task').innerText()).includes('资料整理'), '群时间线里没有任务卡')
   console.log('  ✅ 群会话：GroupView + 任务卡可见')
   await measure(page, '群会话', vp)
-  shots.push(await shot(page, vp, '7-group'))
+  shots.push(await shot(page, vp, '7-group', theme))
+
+  // 注意量 .composer 本身：.composer-wrap 里还有内联 Needs/待办卡（审批卡停靠区），
+  // 那是消息区内容，不是 composer 高度。
+  const gcomp = await page.evaluate(() => {
+    const r = (s) => Math.round(document.querySelector(s).getBoundingClientRect().height)
+    return { composer: r('.hub-group-view .composer'), meta: r('.hub-group-view .composer-meta'), ta: r('.hub-group-view .composer textarea') }
+  })
+  assert(gcomp.composer <= 80, `群 composer ${gcomp.composer}px 偏高（应 ≤80）`)
+  assert(gcomp.meta <= 52, `群 composer meta 行 ${gcomp.meta}px 偏高（应 ≤52，含 44px 切换）`)
+  assert(gcomp.ta >= 24 && gcomp.ta <= 96, `群输入行 ${gcomp.ta}px 不在 24–96 内`)
+  await auditContrast(page, [
+    ['.hub-group-view .event-card--task .event-title', '任务卡标题'],
+    ['.hub-group-view .agent-text', '群正文'],
+    ['.hub-group-view .composer textarea', '群 composer'],
+  ], `${vp.name}/${theme} 群`)
 
   // 8) 群 composer 发消息（hub_group_send）
   await page.fill('.hub-group-view .composer textarea', '群里也说一句')
@@ -469,12 +668,12 @@ async function runViewport(browser, baseURL, vp) {
   console.log('  ✅ 群发消息：乐观气泡出现 + hub_group_send')
 
   // 9) 群会话里打开抽屉的 Context（只读、手机不渲染提示词分层）
-  await page.locator('.hub-group-view .chat-header .icon-btn').first().click()
+  await page.locator('.hub-group-view .chat-header .icon-btn[aria-label="上下文"]').first().click()
   await waitFor(() => page.locator('[data-testid="mobile-inspector-drawer"]').count())
   await waitFor(async () => (await page.locator('.m-drawer').innerText()).includes('消息上下文'))
   assert(!(await page.locator('.m-drawer').innerText()).includes('提示词分层'), '手机不应渲染提示词分层（allowlist 未放行）')
   console.log('  ✅ 抽屉 Context：消息上下文可见、提示词分层不渲染（避免 403）')
-  shots.push(await shot(page, vp, '8-drawer-context'))
+  shots.push(await shot(page, vp, '8-drawer-context', theme))
   await page.locator('.m-drawer .hub-inspector-close').click()
   await waitFor(async () => (await page.locator('[data-testid="mobile-inspector-drawer"]').count()) === 0)
 
@@ -504,7 +703,9 @@ async function main() {
   const browser = await chromium.launch()
   const all = []
   try {
-    for (const vp of VIEWPORTS) all.push(...await runViewport(browser, baseURL, vp))
+    for (const vp of VIEWPORTS) {
+      for (const theme of THEMES) all.push(...await runViewport(browser, baseURL, vp, theme))
+    }
   } finally {
     await browser.close()
     await new Promise((r) => server.close(r))

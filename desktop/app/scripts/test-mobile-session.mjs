@@ -219,6 +219,25 @@ console.log('\n4) 静态边界：会话页复用桌面组件 + 按需加载')
   assert(/onOpenSession=\{openSession\}/.test(app), '壳把 openSession 交给 host provider（Hub 任务卡的「打开会话」同一落点）')
   assert(/data-testid="mobile-tab-sessions"/.test(app) && /data-testid="mobile-tab-hub"/.test(app), '入口条有 Hub / 会话两个并列入口')
   assert(/setSess\(null\)\s*\n\s*useHubStore\.getState\(\)\.closeHub\(\)/.test(app), '返回/后退同时清会话与 Hub（两条栈共用一条 history 记录）')
+  // P8-03a：软键盘（visualViewport）与浏览器 UI 主题色都在入口装一次，不进组件树。
+  const main = read('src/mobile/main.tsx')
+  assert(/installVisualViewport\(\)/.test(main), '入口装 visualViewport 观察者（软键盘）')
+  assert(/installThemeColor\(\)/.test(main), '入口装 theme-color 观察者（ink/paper 状态栏）')
+
+  const vv = read('src/mobile/visual-viewport.ts')
+  for (const [re, why] of [
+    [/window\.visualViewport/, '读 visualViewport'],
+    [/--m-vv-height/, '写可见高度变量'],
+    [/--m-vv-offset/, '写可见区偏移变量'],
+    [/offsetTop/, '用 offsetTop 跟随 iOS 上滚'],
+    [/addEventListener\('resize'/, '监听 resize'],
+    [/addEventListener\('scroll'/, '监听 scroll'],
+    [/requestAnimationFrame/, 'resize/scroll 合并到下一帧'],
+  ]) assert(re.test(vv), `visualViewport：${why}`)
+
+  const chrome = read('src/mobile/chrome.ts')
+  assert(/MutationObserver/.test(chrome) && /theme-color/.test(chrome), 'theme-color 跟随 data-theme（含 system 实时切换）')
+  assert(/#08080a/.test(chrome) && /#f4f3f1/.test(chrome), 'theme-color 取 runtime ink/paper 的 --paper')
 
   const sess = read('src/mobile/screens/SessionScreen.tsx')
   assert(/<CenterPanel variant="mobile" \/>/.test(sess), '会话页直接挂桌面 CenterPanel（不复制转录/composer）')
@@ -261,10 +280,24 @@ console.log('\n4) 静态边界：会话页复用桌面组件 + 按需加载')
   for (const [re, why] of [
     [/\.m-session \.center \{/, 'CenterPanel 单列容器'],
     [/\.m-session \.narrative \{/, '叙述区自己滚'],
-    [/\.m-session \.composer-wrap \{[\s\S]{0,200}env\(safe-area-inset-bottom\)/, 'composer 贴底 + 吃安全区'],
+    // P8-03a：安全区先落到 --m-safe-* 变量（夹具可覆写成 34px 验证 home 条），
+    // 由 .m-app 统一让位；composer-wrap 不再重复吃 env()（否则 iPhone 上双倍内边距）。
+    [/:root \{[\s\S]{0,400}--m-safe-bottom: env\(safe-area-inset-bottom, 0px\)/, '安全区落到 --m-safe-* 变量'],
+    [/\.m-session \.composer-wrap \{[\s\S]{0,200}padding: 6px 10px 8px/, 'composer 贴底（安全区不重复吃）'],
     [/\.m-session \.composer \.input,\s*\n\.m-session \.composer \.input-hl \{\s*\n\s*font-size: 16px/, 'iOS 输入 16px（不缩放）'],
     [/\.m-session \.composer \.row2 \.send-btn \{[\s\S]{0,80}width: 44px/, '发送/停止 44px'],
     [/\.m-session \.dock \.btn,[\s\S]{0,200}min-height: 44px/, '审批/提问按钮 44px'],
+    // P8-03a：软键盘 / 单头 / composer 收紧 / 抽屉溢出 / 主题令牌补丁。
+    [/\.m-app \{[\s\S]{0,400}height: var\(--m-vv-height, 100dvh\)/, '.m-app 用 --m-vv-height（软键盘）'],
+    [/\.m-app \{[\s\S]{0,500}translateY\(var\(--m-vv-offset/, '.m-app 跟随可见区偏移'],
+    [/\.m-conv \.hub-dm \.composer-meta \{\s*\n\s*display: none/, 'DM 空 meta 行不占位'],
+    [/\.m-conv \.hub-demo \.composer > textarea \{[\s\S]{0,200}max-height: 88px/, 'composer 输入行 4 行封顶'],
+    [/\.m-conv-head \{[\s\S]{0,300}position: absolute/, '会话返回键浮在共享 chat-header 上（单头）'],
+    [/\.m-drawer \.hub-inspector-tabs\[data-overflow='end'\]/, '抽屉页签溢出边缘渐隐'],
+    [/\.m-conv \.hub-demo\[data-theme\] \{[\s\S]{0,800}--text: var\(--ink\)/, 'Hub 会话面重指到 runtime 令牌'],
+    [/--text-2: var\(--ink-2\)/, '补 index.css 派生令牌（muted 文字不再继承正文色）'],
+    [/@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.m-app,/, 'reduced-motion 覆盖手机壳与复用组件'],
+    [/\.m-session \.json-box \{/, '审批卡 JSON 视图的壳样式（index.css 不在手机包）'],
   ]) assert(re.test(css), `手机样式：${why}`)
 }
 

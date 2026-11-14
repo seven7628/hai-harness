@@ -21,33 +21,90 @@
   box-sizing: border-box;
 }
 
+/* 安全区（刘海 / home 条）先落到自定义属性上，再由各层引用。
+ *
+ * 为什么不直接写 env()：env() 在桌面 Chromium 里恒为 0，夹具无法验证「home 条不会
+ * 盖住 composer」；改成变量后，夹具只要把 --m-safe-bottom 覆写成 34px，就能量到
+ * composer 真的抬起来了。取值语义与 env() 完全一致（不支持 env 的浏览器走 0px）。
+ *
+ * 只在这里定义一次：.m-app 负责整页内边距；抽屉/toast 是 fixed，但有 visualViewport
+ * 时 .m-app 的 transform 会把它们收进自己的 padding box（padding box 含 padding 区），
+ * 所以抽屉/toast 仍各自保留 safe padding —— 不会双倍，也不会被 home 条盖住。 */
+:root {
+  --m-safe-top: env(safe-area-inset-top, 0px);
+  --m-safe-right: env(safe-area-inset-right, 0px);
+  --m-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --m-safe-left: env(safe-area-inset-left, 0px);
+
+  /* index.css 的派生令牌补丁（P8-03a）。
+   *
+   * 手机包只引 runtime-palette + runtime-tokens + hub.css + runtime-skin，不引 index.css；
+   * 但 hub.css / runtime-skin.css 里有 16 个 var(--text-2 / --text-3 / --elevated /
+   * --warning / --error / --running / --focus-ring / --bg / --surface / --border …)
+   * 是 index.css 的派生层。缺定义 = invalid at computed-value time：整条声明被丢弃，
+   * 颜色退化成「继承」—— 实测列表预览/抽屉小节标题与正文同色（对比度 17.9:1），
+   * 警告点透明、头像眼睛没有底色。这里按 index.css 的同名同义补一层，值全部来自
+   * runtime-palette 基色，不新增颜色。 */
+  --bg: var(--paper);
+  --surface: var(--paper-2);
+  --surface-2: var(--paper-3);
+  --surface-3: var(--paper-3);
+  --elevated: var(--paper-3);
+  --text: var(--ink);
+  --text-2: var(--ink-2);
+  --text-3: var(--ink-3);
+  --muted: var(--ink-2);
+  --muted-2: var(--ink-3);
+  --border: var(--line);
+  --border-strong: var(--ink-line-2);
+  --warning: var(--ochre);
+  --error: var(--crimson);
+  --running: var(--indigo);
+  --focus-ring: var(--indigo);
+}
+
+/* 表单控件/滚动条/输入法候选条跟随主题（meta[name=color-scheme] 只认系统偏好，
+   这里用 data-theme 覆盖；ink/paper 由 applyTheme 写在 <html> 上）。 */
+html[data-theme='ink'] {
+  color-scheme: dark;
+}
+
+html[data-theme='paper'] {
+  color-scheme: light;
+}
+
 html,
 body {
   margin: 0;
   padding: 0;
+  height: 100%;
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font, var(--font-ui, system-ui, sans-serif));
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
-  /* 手机端不允许整页横向滚动：单列布局的硬约束（溢出会被 e2e 抓成 scrollWidth > 视口）。 */
-  overflow-x: hidden;
+  /* 手机端不允许整页滚动：单列布局的硬约束（溢出会被 e2e 抓成 scrollWidth > 视口）。
+     纵向也锁住 —— 消息区/列表自己滚，整页滚会把 composer 和键盘对不齐。 */
+  overflow: hidden;
 }
 
 #root {
-  min-height: 100dvh;
+  height: 100dvh;
 }
 
 .m-app {
   /* 固定一屏高：会话页的消息区自己滚、composer 贴底（min-height 会让 composer 跑到
-     首屏之外，手机上没有「滚动到输入框」这种直觉）。 */
-  height: 100dvh;
+     首屏之外，手机上没有「滚动到输入框」这种直觉）。
+     软键盘（P8-03a）：visualViewport 把可见高度/偏移写到 html 变量上，见
+     mobile/visual-viewport.ts。没有该接口时回落 100dvh，与 P8-02 行为一致。
+     translateY 让 iOS 为露出焦点上滚页面时整壳跟着可见区走。 */
+  height: var(--m-vv-height, 100dvh);
+  transform: translateY(var(--m-vv-offset, 0px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
   /* 刘海/home 条：内容躲开安全区，背景铺满（padding 在容器上，背景仍在 body 上）。 */
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-    env(safe-area-inset-left);
+  padding: var(--m-safe-top) var(--m-safe-right) var(--m-safe-bottom) var(--m-safe-left);
 }
 
 .m-head {
@@ -321,6 +378,95 @@ body {
   font-size: 13px;
 }
 
+/* —— Hub 会话面收敛到 runtime 调色板（P8-03a）——
+ *
+ * .hub-demo 自带一套暖灰 demo 色板（深色 #0b0b0a / 浅色 #f2ede3…），与桌面 runtime
+ * 的冷黑/暖纸不是一套：手机列表与抽屉吃 runtime 令牌，会话面吃 demo 变量，拼在一起
+ * 能看出接缝（MOBILE-UI-REUSE §0.3 要求手机 Hub 收敛到 ink/paper）。
+ * 这里只重指变量，不改任何组件规则；值全部来自 runtime-palette / runtime-tokens，
+ * 不新增颜色。选择器带 [data-theme] 是为了压过 demo.css 的
+ * .hub-demo[data-theme='light']（同特指度，靠加载顺序本来也能赢，写明更稳）。 */
+.m-conv .hub-demo[data-theme] {
+  --bg: var(--paper);
+  --chat: var(--paper);
+  --surface: var(--paper-2);
+  --surface-2: var(--paper-3);
+  --surface-3: color-mix(in srgb, var(--ink) 9%, var(--paper-2));
+  --border: var(--line);
+  --border-strong: var(--ink-line-2);
+  --text: var(--ink);
+  --muted: var(--ink-2);
+  --muted-2: var(--ink-3);
+  /* 注意不能写 var(--accent)：那是同一个变量，自引用会失效。基色直接用 palette 的
+     三支（--cinnabar/--crimson/--ochre/--bamboo），与 runtime-tokens 的别名同源。 */
+  --accent: var(--cinnabar);
+  --accent-soft: var(--accent-weak);
+  --danger: var(--crimson);
+  --warn: var(--ochre);
+  --success: var(--bamboo);
+  --focus: var(--cinnabar-2);
+  --owner: var(--ink);
+  --user-bubble: var(--hub-user-bubble);
+  --user-text: var(--hub-user-ink);
+  --header-bg: color-mix(in srgb, var(--paper) 86%, transparent);
+  --sans: var(--font-ui);
+  --mono: var(--font-mono);
+  /* 圆角四档也对齐 runtime（demo 的 9/13/18/26 比 app 大一号）。 */
+  --radius-s: var(--r-sm);
+  --radius-m: var(--r-md);
+  --radius-l: var(--r-lg);
+  --radius-xl: var(--r-xl);
+}
+
+/* demo.css 里少数写死的暖色（不是变量）在 ink/paper 下会失真 —— 最典型的是
+   tool 事件卡 rgba(21,20,18,.62) 的深底：浅色主题下变成深底深字。 */
+.m-conv .hub-demo .event-card--tool {
+  background: color-mix(in srgb, var(--surface) 82%, var(--paper));
+}
+
+.m-conv .hub-demo .event-card--approval {
+  border-color: color-mix(in srgb, var(--warn) 24%, transparent);
+  background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--warn) 4%, transparent));
+}
+
+.m-conv .hub-demo .event-card--approval .event-icon {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.m-conv .hub-demo .event-card--artifact .event-icon {
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.m-conv .hub-demo .handoff-card {
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.m-conv .hub-demo .event-status.ok {
+  border-color: color-mix(in srgb, var(--success) 22%, transparent);
+}
+
+.m-conv .hub-demo .event-status.wait {
+  border-color: color-mix(in srgb, var(--warn) 26%, transparent);
+}
+
+.m-conv .hub-demo .agent-tag.reply {
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.m-conv .hub-demo .btn.danger {
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.m-conv .hub-demo .composer:focus-within {
+  border-color: var(--accent-border);
+}
+
+.m-conv .hub-demo ::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 /* —— 列表 —— */
 
 .m-hub-list {
@@ -335,7 +481,11 @@ body {
   /* 桌面是「左栏里限高 38vh 的一段」，手机是整页：吃掉剩余高度，滚动留给内部列表。 */
   flex: 1 1 auto;
   max-height: none;
-  margin: 0;
+  margin: 0 auto;
+  /* 640（平板竖屏）：列表行不被拉成整屏宽的一条 —— 单列内容最宽 640 居中，
+     和 .m-main 的桌面表单屏同一把尺子。390/430 下等于铺满，视觉零变化。 */
+  width: 100%;
+  max-width: 640px;
   border-bottom: 0;
   background: var(--paper);
 }
@@ -373,7 +523,8 @@ body {
 }
 
 .m-hub-list .hub-side-results {
-  padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  /* 安全区由 .m-app 统一让位（列表在它的 padding box 里），这里只留呼吸位。 */
+  padding-bottom: 12px;
 }
 
 .m-hub-list .hub-search-hit {
@@ -399,6 +550,7 @@ body {
 /* —— 会话 —— */
 
 .m-conv {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -406,30 +558,46 @@ body {
   background: var(--paper-2);
 }
 
+/* 返回键浮在共享 chat-header 的左上角（P8-03a 单头）：外层头不再占一行，
+   也不重复画标题/「⋯」。pointer-events:none 让其余区域照常点到底下的头像/标题；
+   只有 44px 的返回按钮接事件。 */
 .m-conv-head {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* .chat-header 自己是一层（z-index:50，见 hub.css 的菜单穿透修复）——
+     返回键必须压在它上面，否则被 header 的背景整块盖住。 */
+  z-index: 60;
+  width: 56px;
+  height: 56px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 48px;
-  padding: 0 6px;
-  border-bottom: 1px solid var(--line);
-  background: var(--paper);
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
 }
 
-.m-conv-back,
-.m-conv-inspector {
-  margin-right: 0;
+.m-conv-back {
+  margin: 0;
+  pointer-events: auto;
+  /* 半透明底：头像/名字从按钮底下经过时图标仍可辨（不新增颜色，复用纸面）。 */
+  background: color-mix(in srgb, var(--paper) 72%, transparent);
+  backdrop-filter: blur(6px);
 }
 
+/* 视觉隐藏的标题：内层 .chat-title 已经显示同一个名字，这里只留给 e2e/读屏。 */
 .m-conv-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .m-conv-body {
@@ -440,19 +608,39 @@ body {
 }
 
 /* demo.css 的 `.hub-demo .main` 是 100dvh（整页 demo）；手机这里要的是「填满剩余」，
-   否则 composer 会被顶到视口外。只改高度来源，不动内部解剖。 */
+   否则 composer 会被顶到视口外。只改高度来源，不动内部解剖。
+   640 上限 + 居中：平板竖屏下会话面不再被拉成 900px 宽的一列（见 .m-hub-list .hub-side）。 */
 .m-conv .hub-demo.main {
   height: 100%;
   width: 100%;
+  max-width: 640px;
+  margin-inline: auto;
   min-height: 0;
 }
 
-/* 手机上的会话头收紧一档：桌面 64px 是为三栏留呼吸，手机每像素都算消息区。 */
+/* 手机上的会话头收紧一档：桌面 64px 是为三栏留呼吸，手机每像素都算消息区。
+   左边让出 56px 给浮动的返回键（.m-conv-head），其余解剖不动。 */
 .m-conv .hub-demo .chat-header {
   min-height: 56px;
   height: auto;
-  padding: 6px 10px;
+  padding: 6px 6px 6px 56px;
   gap: 8px;
+}
+
+/* 头里的「上下文（抽屉）/更多」也要 44px：桌面是 30px 的图标密度。 */
+.m-conv .hub-demo .chat-header .icon-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+}
+
+.m-conv .hub-demo .chat-header .header-actions {
+  gap: 0;
+}
+
+/* 菜单锚在 56px 头下方：44px 按钮的底边是 50px，38px 会盖住按钮。 */
+.m-conv .hub-demo .chat-header .header-menu {
+  top: 52px;
 }
 
 /* 输入框 16px（iOS 聚焦不放大）。textareas 全部命中：DM/群 composer 与派任务表单。 */
@@ -460,14 +648,39 @@ body {
   font-size: 16px;
 }
 
+/* composer 高度（P8-03a）：桌面 34px 输入行 + 18px meta 行 + 24px 内边距 = 100px，
+   手机上 meta 行是空的（键盘提示与「它看到了什么」在 ≤900 都已被 demo.css 隐藏），
+   整块空白。这里把 DM 的空 meta 行拿掉、输入行压到 28px（4 行封顶 88px，自动增高
+   由 useComposerAutoGrow 按 line-height/padding 真值算，不靠写死 rows）。 */
 .m-conv .hub-demo .composer {
-  padding: 6px 6px 6px 8px;
+  padding: 4px 6px 4px 8px;
+  /* demo 是 19px；对齐 runtime 的 --r-lg（16px），与主会话页 composer 的 14px 同族。 */
+  border-radius: var(--r-lg);
+}
+
+.m-conv .hub-demo .composer > textarea {
+  height: 28px;
+  min-height: 28px;
+  max-height: 88px;
+  padding: 4px 2px;
+  line-height: 20px;
 }
 
 .m-conv .hub-demo .composer .icon-btn {
   width: 44px;
   height: 44px;
   margin-bottom: 0;
+}
+
+/* DM 的 meta 行只有「Enter 发送 / 它看到了什么」——触屏上两项都不显示，留着的
+   只是一个 18px 的空行。群 composer 的 meta 行有「对话/派任务」切换，不能隐藏。 */
+.m-conv .hub-dm .composer-meta {
+  display: none;
+}
+
+.m-conv .hub-group-view .composer-meta {
+  margin-top: 4px;
+  min-height: 0;
 }
 
 /* 群 composer 的「对话 / 派任务」切换：桌面是 28px 的小 tab，手机要 44px 才点得准。 */
@@ -494,10 +707,10 @@ body {
   margin-bottom: 0;
 }
 
-/* composer 底部安全区：home 条不能盖住发送键（.m-app 已有 padding，这里再兜一层
-   —— 附件条/提示行会把 composer 顶高一档，实际贴底的是它自己的 padding）。 */
+/* composer 底部留白：home 条由 .m-app 的 padding 统一让位（子元素再吃一次 env()
+   会变成双倍内边距，iPhone 上 composer 离底边 68px），这里只给 8px 视觉间距。 */
 .m-conv .hub-demo .composer-wrap {
-  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  padding: 6px 10px 8px;
 }
 
 /* —— 详情抽屉（Context / 任务 / Needs / 会话 / 概览）—— */
@@ -519,15 +732,17 @@ body {
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(88vw, 400px);
+  /* 92vw（不是 88）：390 下 5 个页签 + 关闭按钮原本只剩 0px 余量，系统字体稍宽
+     就把 Context 截成「Conte›」。多出的 4vw 给页签条留出可滚动的呼吸位。 */
+  width: min(92vw, 400px);
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--paper-2);
   border-left: 1px solid var(--line);
   box-shadow: -16px 0 40px rgb(0 0 0 / 35%);
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-top: var(--m-safe-top);
+  padding-bottom: var(--m-safe-bottom);
   animation: m-drawer-in 0.18s ease-out;
 }
 
@@ -544,18 +759,68 @@ body {
 
 /* 抽屉里的触控目标：页签与关闭按钮原本是 24px 的桌面密度。 */
 .m-drawer .hub-inspector-head {
-  padding: 4px 6px;
+  gap: 2px;
+  padding: 2px 2px 2px 4px;
+}
+
+/* 页签条：5 个页签 + 关闭按钮在 343px 抽屉里本来刚好排满（390 下 0px 余量），
+   badge 变两位数或系统字体略宽就截断。这里改成**可横向滚动 + 两端渐隐**：
+   · 每个页签仍 ≥44×44，Tab 逐格聚焦时浏览器自动滚进可视区；
+   · 溢出只发生在页签条内部（overflow-x:auto），不会把整页撑出横向滚动条；
+   · data-overflow 由 InspectorDrawer 量 scrollWidth/clientWidth 后写入，
+     只在真的溢出时才挂 mask —— 没溢出时页签边缘不会莫名其妙变淡。 */
+.m-drawer .hub-inspector-tabs {
+  gap: 2px;
+  padding: 2px 6px;
+  scroll-snap-type: x proximity;
+  scroll-padding-inline: 6px;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.m-drawer .hub-inspector-tabs[data-overflow='end'] {
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%);
+}
+
+.m-drawer .hub-inspector-tabs[data-overflow='start'] {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 18px, #000 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 18px, #000 100%);
+}
+
+.m-drawer .hub-inspector-tabs[data-overflow='both'] {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 18px,
+    #000 calc(100% - 18px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 18px,
+    #000 calc(100% - 18px),
+    transparent 100%
+  );
 }
 
 .m-drawer .hub-inspector-tabs button[role='tab'] {
   min-height: 44px;
   min-width: 44px;
-  /* 5 个页签 + 关闭按钮要在 343px 的抽屉里排下（min-width 44 是触控底线，
-     省下来的宽度从横向内边距出）：否则 Context 会被截成「Conte›」。 */
-  padding: 0 6px;
+  /* 44 是触控底线，省下来的宽度从横向内边距出：5 个页签 + 关闭按钮在 390 下排得下。 */
+  padding: 0 8px;
+  scroll-snap-align: start;
+  scroll-margin-inline: 6px;
+}
+
+.m-drawer .hub-inspector-tabs button[role='tab']:focus-visible {
+  outline: 2px solid var(--accent, var(--cinnabar-2, currentColor));
+  outline-offset: -2px;
 }
 
 .m-drawer .hub-inspector-close {
+  flex: 0 0 44px;
   width: 44px;
   height: 44px;
 }
@@ -634,7 +899,7 @@ body {
 .m-toast {
   position: fixed;
   left: 50%;
-  bottom: calc(20px + env(safe-area-inset-bottom));
+  bottom: calc(20px + var(--m-safe-bottom));
   transform: translateX(-50%);
   z-index: 90;
   max-width: calc(100vw - 32px);
@@ -657,7 +922,7 @@ body {
   position: fixed;
   left: 12px;
   right: 12px;
-  bottom: calc(8px + env(safe-area-inset-bottom));
+  bottom: calc(8px + var(--m-safe-bottom));
   z-index: 85;
   padding: 8px 12px;
   border-radius: var(--r-sm, 8px);
@@ -943,13 +1208,14 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
-/* composer 贴底：桌面是 max-width:800 居中的一块，手机铺满 + 吃安全区。 */
+/* composer 贴底：桌面是 max-width:800 居中的一块，手机铺满；home 条由 .m-app 的
+   padding 让位（不要在这里再吃 env()，否则双倍内边距）。 */
 .m-session .composer-wrap {
   flex: 0 0 auto;
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 6px 10px calc(8px + env(safe-area-inset-bottom));
+  padding: 6px 10px 8px;
 }
 
 /* 输入框的解剖（index.css 的 .composer .input-wrap / .input-hl / .input）：
@@ -1108,14 +1374,17 @@ body {
   line-height: 1.5;
 }
 
+/* 输入区高度（P8-03a）：桌面 64px 是为了三行草稿，手机单列里太高、下方 row2 再占
+   44px，composer 整块 ~130px。压到 48px 起步（两行）、32vh 封顶，键盘弹出时消息区
+   仍留得下内容；overlay 与 textarea 的 padding 必须逐字一致，否则双层文字错位。 */
 .m-session .composer .input {
-  min-height: 64px;
-  max-height: 40vh;
-  padding: 10px 12px;
+  min-height: 48px;
+  max-height: 32vh;
+  padding: 8px 12px;
 }
 
 .m-session .composer .input-hl {
-  padding: 10px 12px;
+  padding: 8px 12px;
 }
 
 /* 发送/停止：44px 触控目标（桌面 26px；runtime 皮肤给的是 28px）。
@@ -1133,7 +1402,7 @@ body {
 }
 
 .m-session .composer .row2 {
-  padding: 6px 8px 8px;
+  padding: 4px 8px 6px;
 }
 
 .m-session .composer .row2-right {
@@ -1329,6 +1598,89 @@ body {
   font-family: var(--font-mono, monospace);
 }
 
+/* 审批卡的 JSON 视图（.json-box / .jv-*）：与 composer 外壳同理，样式住在 index.css，
+   手机不引。不补的话 jv-toggle 是浏览器默认按钮、键/字符串没有配色。只补结构/颜色，
+   尺寸与桌面一致（jv-toggle 是代码行内的行内控件，走 WCAG 2.5.8 的行内例外）。 */
+.m-session .json-box {
+  max-height: 320px;
+  overflow: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.m-session .jv {
+  font-family: var(--mono, var(--font-mono, monospace));
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  word-break: break-word;
+}
+
+.m-session .jv-raw {
+  white-space: pre-wrap;
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.m-session .jv .jv-node,
+.m-session .jv .jv-collapsed {
+  display: inline;
+}
+
+.m-session .jv .jv-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.m-session .jv .jv-key {
+  color: var(--accent);
+}
+
+.m-session .jv .jv-str {
+  color: var(--green);
+  word-break: break-all;
+}
+
+.m-session .jv .jv-num {
+  color: var(--amber);
+}
+
+.m-session .jv .jv-bool {
+  color: var(--violet);
+}
+
+.m-session .jv .jv-null,
+.m-session .jv .jv-punct {
+  color: var(--ink-3);
+}
+
+.m-session .jv .jv-null {
+  font-style: italic;
+}
+
+.m-session .jv .jv-toggle {
+  background: none;
+  border: 1px solid var(--ink-line-2);
+  border-radius: 4px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  padding: 0 5px;
+  margin: 0 4px;
+  cursor: pointer;
+  font-family: var(--mono, var(--font-mono, monospace));
+  vertical-align: 1px;
+}
+
+.m-session .jv .jv-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .m-session .dock .acts {
   display: flex;
   justify-content: flex-end;
@@ -1388,7 +1740,21 @@ body {
   min-width: 44px;
 }
 
+/* 减少动态偏好（P8-03a）：手机壳与复用组件里所有「非必要动画」一次关掉 ——
+   抽屉滑入、骨架/运行点、状态条、hover/active 过渡都不承载信息，不该让前庭敏感
+   用户等它们跑完。demo.css 自己有一条 .hub-demo 的同类规则，这里覆盖壳层与
+   抽屉（HubInspector 不在 .hub-demo 里）。 */
 @media (prefers-reduced-motion: reduce) {
+  .m-app,
+  .m-app *,
+  .m-app *::before,
+  .m-app *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
   .m-icon-btn,
   .m-btn {
     transition: none;
