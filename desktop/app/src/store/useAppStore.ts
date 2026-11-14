@@ -44,7 +44,7 @@ import { ownerValid } from '../lib/owner'
 import { forgetSessionOwnerPath, forgetSessionOwnerPathsOf, getSessionOwnerPath, isPluginProjectPath, resolveSendWorkspace, setSessionOwnerPath } from '../lib/ownerPath'
 // 虚拟 Project（插件）的判据/分组/回执归一化全在 lib/pluginProjects（纯函数，可单测）：
 // 「哪些地方要看它、哪些地方必须看不见它」只在这里表达一次。
-import { isVirtualProject, mergePluginProjects, pluginProjectsFromResponse, realProjects, splitPluginProjects } from '../lib/pluginProjects'
+import { isVirtualProject, mergePluginProjects, pluginProjectsFromResponse, realProjects } from '../lib/pluginProjects'
 // 「当前归属」派生：Hub 打开时读 Hub 的 session/群，否则按工作区会话
 // （B1：只读 activeSessionId 会把 Hub DM/群的确认写成 workspace:，服务端判 agent:/group: 查不到）
 import { resolveActiveOwner } from '../lib/activeOwner'
@@ -3744,9 +3744,19 @@ function disarmBrowserBusyWatchdog(): void {
 
 // 工作区级 git_history「加载更多」意图标记（请求前置位，响应消费后复位）由 wsHistAppend 承担；
 // Git 写操作统一入口：无 workspace / 已有在途操作时忽略；busy 标识驱动按钮禁用与 spinner。
+// isVirtualWorkspace 当前活跃项目是不是虚拟 Project（插件 home）。
+//
+// 「按工作区」的能力（git、项目层 skills/MCP、文件树刷新）一律以它判定（§4.6 第 4、5、8 条）：
+// 插件 home 没有仓库、没有 .agents/skills、也不该叠项目层工具 —— 发出去只会拿到拒绝，
+// 而拒绝又会被渲染成一张错误卡片/一行 bridgeError（用户看不懂，等于坏了）。
+function isVirtualWorkspace(): boolean {
+  const st = useAppStore.getState()
+  return isPluginProjectPath(st.workspace) || isVirtualProject(st.projects.find((p) => p.path === st.workspace))
+}
+
 function gitWriteOp(type: 'git_stage' | 'git_unstage' | 'git_discard' | 'git_commit' | 'git_checkout' | 'git_init', payload: Record<string, unknown>): void {
   const st = useAppStore.getState()
-  if (!st.workspace || st.gitOpBusy) return
+  if (!st.workspace || st.gitOpBusy || isVirtualWorkspace()) return
   useAppStore.setState({ gitOpBusy: type, gitOpError: undefined })
   send({ type, payload })
 }
@@ -4017,7 +4027,7 @@ function mobileHost(): boolean {
   return typeof window !== 'undefined' && window.__HAI_MOBILE__ === true
 }
 
-function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void, onData?: (r: { ok: boolean; error?: string; code?: string; data?: unknown; raw?: Record<string, unknown> }) => void): number {
+function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void, onData?: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): number {
   // 手机：白名单外的命令直接不发（见 MOBILE_UNSUPPORTED_COMMANDS 的注释）。
   // 返回 0 = 「没有发出」——这几条命令的调用方都不等回执（都走事件流的状态更新）。
   if (mobileHost() && MOBILE_UNSUPPORTED_COMMANDS.has(cmd.type)) return 0
@@ -4140,9 +4150,7 @@ function onCommandResponseOnce(id: number, cb: (r: { ok: boolean; error?: string
 
 // onCommandResponseData 一次性 command_response 回调（带完整 data；如 mesh_status）。
 // 与 onCommandResponseOnce 同构，但回传 data 供展示类查询用；超时 10s 释放。
-// raw = 整条回执（含 data 之外的顶层字段）：plugin_projects_list 早期形态把 `projects`
-// 挂在回执根上而不是 data 里，只传 data 就取不到（见 lib/pluginProjects）。
-function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string; code?: string; data?: unknown; raw?: Record<string, unknown> }) => void): void {
+function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): void {
   let timer: ReturnType<typeof setTimeout> | undefined
   const off = transport.onEvent((line) => {
     try {
@@ -4152,7 +4160,7 @@ function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string
       if (ev.event_type !== 'command_response' || ev.id !== id) return
       off()
       if (timer) clearTimeout(timer)
-      cb({ ok: ev.ok === true, error: ev.error, code: ev.code, data: ev.data, raw: ev as Record<string, unknown> })
+      cb({ ok: ev.ok === true, error: ev.error, code: ev.code, data: ev.data })
     } catch {
       /* 非 JSON 事件忽略 */
     }
@@ -4164,16 +4172,9 @@ function onCommandResponseData(id: number, cb: (r: { ok: boolean; error?: string
 }
 // sendData：与 send 同一条通道，但把**带 code/data** 的一次性响应交回调用方（Promise 形态）。
 // 用在「错误码本身就是业务分支」的命令上（编辑器三命令、mesh_ping）。
-function sendData(cmd: Omit<BridgeCommand, 'id'>): Promise<{ ok: boolean; error?: string; code?: string; data?: Record<string, unknown>; raw?: Record<string, unknown> }> {
+function sendData(cmd: Omit<BridgeCommand, 'id'>): Promise<{ ok: boolean; error?: string; code?: string; data?: Record<string, unknown> }> {
   return new Promise((resolve) => {
-    send(cmd, false, undefined, (r) =>
-      resolve({
-        ok: r.ok,
-        error: r.error,
-        code: r.code,
-        data: (r.data ?? undefined) as Record<string, unknown> | undefined,
-        raw: r.raw,
-      }))
+    send(cmd, false, undefined, (r) => resolve({ ok: r.ok, error: r.error, code: r.code, data: (r.data ?? undefined) as Record<string, unknown> | undefined }))
   })
 }
 
@@ -5519,6 +5520,20 @@ export function dispatchEvent(raw: AnyEvent): void {
       }
       const d = r.data || {}
       const respWs = typeof r.workspace === 'string' ? r.workspace : ''
+
+      // 虚拟 Project（插件）水合回执：并入项目树（按 path 去重、保留本地会话），再对每个
+      // 虚拟 path 发 list 水合会话。失败与「形状不认识」都**静默**：已加载的虚拟项目保持
+      // 原样（一次 RPC 失败不该让插件分组消失），也不置 bridgeError —— 老 bridge 不认识
+      // 这条命令，升级成全屏错误会让「没有插件分组」看起来像 bridge 挂了。
+      if (t === 'plugin_projects_list') {
+        const incoming = r.ok ? pluginProjectsFromResponse({ data: d, raw: r as Record<string, unknown> }) : undefined
+        if (incoming) {
+          const merged = mergePluginProjects(getState().projects, incoming)
+          setState({ projects: orderProjects(merged.projects) })
+          for (const path of merged.paths) send({ type: 'list', payload: { workspace: path } })
+        }
+        break
+      }
 
       // list 分流：并入对应项目会话列表；仅启动水合的活跃项目 list 才自动恢复最近/新建
       //（recoverPaths 门控：主动添加/切换工作区不自动建会话，建会话是显式动作）
@@ -10162,28 +10177,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (get().widgetReply) set({ widgetReply: undefined })
   },
 
-  // 虚拟 Project（插件）水合：plugin_projects_list → 并入项目树 → 逐个虚拟 path 发 list。
-  //
-  // 时机：bridge 进入 running（与 startPluginLoader 同一处，见 start）。重复调用幂等。
-  // 失败与「形状不认识」都**静默**：已加载的虚拟项目保持原样（一次 RPC 失败不该让插件
-  // 分组消失），也不置 bridgeError —— 老 bridge 不认识这条命令，升级成全屏错误会让
-  // 「没有插件分组」看起来像 bridge 挂了。
+  // 虚拟 Project（插件）水合：发 plugin_projects_list；回执在 dispatchEvent 的
+  // command_response 里处理（并入项目树 + 逐个虚拟 path 发 list，见那里的注释）。
+  // 走中心 dispatcher 而不是 sendData 的一次性回调：这条命令在**启动路径**上，
+  // 多注册一个 transport.onEvent 监听会改变事件投递（且失败语义也要静默）。
+  // 时机：bridge 进入 running（与 startPluginLoader 同一处，见 start）；重复调用幂等。
   loadPluginProjects: () => {
-    void sendData({ type: 'plugin_projects_list', payload: {} }).then((r) => {
-      if (!r.ok) return
-      const incoming = pluginProjectsFromResponse(r)
-      if (!incoming) return // undefined = 回执形状不认识（≠ 空数组）
-      const merged = mergePluginProjects(get().projects, incoming)
-      set({ projects: orderProjects(merged.projects) })
-      // 会话水合：每个虚拟 path 一条 list（回执按 path 归并，并登记 sessionOwnerPath）。
-      for (const path of merged.paths) send({ type: 'list', payload: { workspace: path } })
-    })
+    send({ type: 'plugin_projects_list', payload: {} })
   },
 
   // 切换活跃工作区：注册（缺失则加入项目树）→ 激活 → 水合该工作区会话列表。
   // 不登记 recoverPaths → list 只并入列表，不自动建/恢复会话（新建会话是显式动作）。
   setActiveWorkspace: (path) => {
     const s = get()
+    // 虚拟 Project（插件）不是工作区（§4.6 第 4 条）：绝不 workspace_add / list / skills /
+    // git（后端 P1a 在 workspaceSync/workspaceAdd 硬拒）。调用方若把它当工作区传来
+    // （文件树切换、快捷入口），退化成「打开该插件项目的第一个会话」—— 与左栏点行同义。
+    if (isVirtualProject(s.projects.find((p) => p.path === path)) || isPluginProjectPath(path)) {
+      const first = s.projects.find((p) => p.path === path)?.sessions[0]
+      if (first && first.id !== s.activeSessionId) get().setActiveSession(first.id, path)
+      return
+    }
     if (path === s.workspace) return
     ++navigationGeneration
     // 切换工作区：作废未投递的自动建会话缓冲（等待期切走，防消息进错工作区）
@@ -10216,6 +10230,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     const s = get()
     const project = s.projects.find((p) => p.path === path)
     if (!project) return
+    // 虚拟 Project（插件）不参与置顶：它不是工作区，置顶会把它排到真实项目前面并在
+    // 重启后要求一个不存在的路径（§4.6 第 3 条）。
+    if (isVirtualProject(project)) return
     const pinnedCount = s.projects.filter((p) => p.pinned).length
     if (!project.pinned && pinnedCount >= MAX_WORKSPACE_PINS) return
     const projects = orderProjects(s.projects.map((p) => (p.path === path ? { ...p, pinned: !p.pinned } : p)))
@@ -10276,6 +10293,28 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 复用 newSession 的 loading shell / 超时 / firstAsks 缓冲语义（此前直接 send，
   // 响应慢时界面停在旧工作区，且新建期间输入会发到旧会话）。
   createSessionIn: (path) => {
+    const project = get().projects.find((p) => p.path === path)
+    if (isVirtualProject(project) || isPluginProjectPath(path)) {
+      // 虚拟 Project（插件）不是工作区：不走 setActiveWorkspace（它会发 workspace_add /
+      // list / skills / git_*，插件 home 在后端按工作区解析 = 一片拒绝）。这里只切「当前
+      // 项目指针」，再复用 newSession 的 loading shell / 首条消息缓冲语义。
+      if (project?.installed === false) return // 已卸载插件只读：不建会话（UI 也不给入口）
+      if (path !== get().workspace) {
+        set({
+          workspace: path,
+          sessions: project ? project.sessions : [],
+          activeSessionId: undefined,
+          skills: [], // 技能清单是项目层的：插件会话不叠项目层（§7.1）
+          ...resetView(),
+          ...clearBrowser(),
+          browserBusy: false,
+        })
+      }
+      // send() 按 activeWorkspace（= 刚设的虚拟 path）注入 workspace；new_session 回执
+      // 会把新会话写进 sessionOwnerPath，此后它的命令都按归属回投。
+      void get().newSession()
+      return
+    }
     if (path !== get().workspace) get().setActiveWorkspace(path)
     void get().newSession()
   },
@@ -10285,6 +10324,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     const s = get()
     const path = projectPath || s.workspace || '' // 兜底空串：recentSessions 要求 string（无 workspace 时不会匹配真实会话）
     const sameProject = path === s.workspace
+    // 虚拟 Project（插件，§4.5）：归属先落地 —— send() 同步读 sessionOwnerPath，
+    // 下面那条 new_session 因此即使在 workspace 还没切换时也投到插件 home。
+    const project = s.projects.find((p) => p.path === path)
+    const virtual = isVirtualProject(project) || isPluginProjectPath(path)
+    if (virtual) setSessionOwnerPath(id, path)
+    // 从真实项目切进插件项目：上一个项目里「无会话时的输入」不能带进插件会话
+    //（那是用户在那个项目里打的字，flush 进插件会话就是跨项目误投）。
+    if (virtual && !sameProject) {
+      sessionPending = false
+      firstAsks.length = 0
+    }
     // 先守卫「已活跃会话重点击」：无变化直接返回，避免误闪加载遮罩。
     // 例外（2026-09-21）：该会话的恢复曾失败（重试上限用尽、视图只剩重载后的内容）时，
     // 重点击就是用户的手动补救动作 —— 不拦，走下面的恢复分支重拉一次（否则只能切走再切回）。
@@ -10295,7 +10345,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (switchTimer) clearTimeout(switchTimer)
       // 兜底护栏：正常路径由响应到达推进（见 new_session 处理里的 endSkeleton）
       switchTimer = setTimeout(() => abortSkeleton(), SKELETON_MAX_MS)
-      send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT } }, false)
+      send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT, ...(virtual ? { workspace: path } : {}) } }, false)
       return
     }
     // 记录最近点开（顶部横条 + 快捷键切换）：队列语义见 withRecent —— 新打开的
@@ -10360,10 +10410,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 新会话的页面/截图即时重新拉取，不再永久卡「拉取中…」。
     disarmBrowserBusyWatchdog()
     if (!sameProject) {
-      const proj = s.projects.find((p) => p.path === path)
       // 带上 views：切项目前先把当前会话的顶层镜像写回去（与同项目切换一致），
       // 否则切回来可能读到旧历史。
-      set({ ...resetView(), views, browserBusy: false, ...clearBrowser(), activeSessionId: undefined, workspace: path, sessions: proj ? proj.sessions : [] })
+      set({
+        ...resetView(),
+        views,
+        browserBusy: false,
+        ...clearBrowser(),
+        activeSessionId: undefined,
+        workspace: path,
+        sessions: project ? project.sessions : [],
+        // 插件会话不叠项目层技能（§7.1）：切进虚拟 Project 时清掉上一个项目的清单，
+        // 否则斜杠菜单会把真实项目的项目技能列在插件会话里。
+        ...(virtual ? { skills: [] as never[] } : {}),
+      })
     }
     if (isHydrated(id)) {
       touchView(id)
@@ -10378,7 +10438,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 恢复后立即固化为该会话自己的记录：老会话（无会话级记录）首次查看时即
       // 冻结本次恢复的配置，不再持续跟随「最近一次全局选择」（模型串 Session 的表现之一）。
       persistPrefs(get())
-      get().refreshGit()
+      // 虚拟 Project（插件）：git 属真实工作区，插件 home 没有仓库语义 → 跳过（§4.6 第 5 条）
+      if (!virtual) get().refreshGit()
       // 缓冲消息已转入本会话暂存队列：空闲立即推送（与 ask 的即时发送语义一致）
       if (movedToSession) get().flushPending(id)
     } else {
@@ -10393,8 +10454,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 注意：setActiveSession 开头已 ++navigationGeneration（本次点击 = 一次导航），
       // send 不能再传 navigation=true（否则 pending 记录的代际 = 二次递增后的值，
       // 响应在途时任何并发导航会再 ++ → 校验失败 → 响应被静默丢弃 → 历史不显示）。
-      send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT } }, false)
-      get().refreshGit()
+      // 虚拟 path 显式带 workspace：归属在 send() 里同步读得到（不依赖 set 的时序）。
+      send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT, ...(virtual ? { workspace: path } : {}) } }, false)
+      if (!virtual) get().refreshGit()
     }
     evictViews(id)
     set({ recentSessions })
@@ -10404,7 +10466,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 删除会话：桥命令（停进程内会话 + 删磁盘 sessions/events 日志）+ 本地状态移除
   //（项目树 / 视图 / 标题覆盖 / 顶部快捷栏 recentSessions）。活跃会话被删 → 切同工作区第一条，无剩余则清空。
   deleteSession: (path, sid) => {
+    // 虚拟 Project 的会话同样走 delete_session（payload.workspace = 插件 home，后端按
+    // runtime 解析，§4.2）。归属必须同步清掉：会话 id 被复用时不能继承旧路径。
     send({ type: 'delete_session', payload: { workspace: path, session_id: sid } })
+    forgetSessionOwnerPath(sid)
     const s = get()
     const overrides = { ...s.titleOverrides }
     delete overrides[titleKey(path, sid)]
@@ -10424,7 +10489,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (s.activeSessionId === sid) {
       const next = projects.find((p) => p.path === path)?.sessions[0]?.id
       if (next) get().setActiveSession(next, path)
-      else set({ activeSessionId: undefined, ...resetView() })
+      else {
+        set({ activeSessionId: undefined, ...resetView() })
+        // 虚拟 Project 的最后一个会话删完：项目条目**保留**（D1：还能继续新建/删除），
+        // 但活跃工作区不能停在一个没有会话的插件 home 上（后续 skills/git/水合都会打到
+        // 插件目录）→ 回落到第一个真实项目。
+        if (isPluginProjectPath(path)) {
+          const realPath = realProjects(projects)[0]?.path
+          if (realPath) get().setActiveWorkspace(realPath)
+        }
+      }
     }
     persistProjects(get())
     // 清理持久化 lastSession：若指向被删会话 → 清掉（连同 lastSessionAt，否则重启会重建一个空会话）
@@ -10447,6 +10521,37 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 删除工作区：桥命令（停全部会话 + 删 {ws}/.go-code 元数据，保留用户文件）+ 本地移除
   //（项目 + 该工作区全部标题覆盖/视图）。活跃工作区被删 → 切到剩余第一个项目；无 → idle。
   deleteWorkspace: (path) => {
+    const target = get().projects.find((p) => p.path === path)
+    if (isVirtualProject(target) || isPluginProjectPath(path)) {
+      // 虚拟 Project 不是工作区（§4.6 第 6/11 条）：绝不发 delete_workspace（P1a 硬拒）。
+      // 左栏也不给这个入口；这里只做本地摘除（视图/标签/归属一起回收），会话本身由
+      // 「删除会话」逐个删 —— 卸载插件时磁盘上的会话数据同样不删（§4.1）。
+      const cur = get()
+      const sids = target?.sessions.map((x) => x.id) ?? []
+      const views = { ...cur.views }
+      const tabsByScope = { ...cur.tabsByScope }
+      for (const sid of sids) {
+        delete views[sid]
+        delete tabsByScope[sid]
+        forgetSessionOwnerPath(sid)
+      }
+      delete tabsByScope[path]
+      forgetSessionOwnerPathsOf(path)
+      const projects = cur.projects.filter((p) => p.path !== path)
+      set({
+        projects,
+        views,
+        tabsByScope,
+        recentSessions: cur.recentSessions.filter((r) => r.path !== path),
+      })
+      if (cur.workspace === path) {
+        set({ ...resetView(), workspace: undefined, activeSessionId: undefined, sessions: [], skills: [] })
+        const realPath = realProjects(projects)[0]?.path
+        if (realPath) get().setActiveWorkspace(realPath)
+      }
+      persistProjects(get())
+      return
+    }
     send({ type: 'delete_workspace', payload: { workspace: path } })
     const s = get()
     const overrides = { ...s.titleOverrides }
@@ -10908,6 +11013,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     persistPrefs(get())
   },
   refreshGit: () => {
+    if (isVirtualWorkspace()) return // 虚拟 Project：git 属真实工作区（§4.6 第 5 条）
     get().loadGitSnapshot()
     get().loadGitHistory()
   },
@@ -10915,23 +11021,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 的仓库状态（is_repo/branch/变更文件…）。响应由 command_response(git_snapshot) 的
   // 「无 session」分支写入 wsGit。添加/切换工作区、启动水合时自动调用 —— 无需先建会话。
   loadWsGit: () => {
-    if (!get().workspace) return
+    if (!get().workspace || isVirtualWorkspace()) return
     set({ wsGitLoading: true, wsGitError: undefined })
     send({ type: 'git_snapshot', payload: {} })
   },
   // 工作区级提交历史（无会话也可浏览）；appendMore=「加载更多」追加下一页（skip=现有条数）
   loadWsGitHistory: (appendMore = false) => {
-    if (!get().workspace) return
+    if (!get().workspace || isVirtualWorkspace()) return
     wsHistAppend = appendMore
     set({ wsGitHistLoading: true })
     send({ type: 'git_history', payload: { limit: 30, skip: appendMore ? get().wsGitHistory.length : 0 } })
   },
   loadWsFileDiff: (path, staged = false) => {
-    if (!get().workspace || !path || path.length > 4096) return
+    if (!get().workspace || isVirtualWorkspace() || !path || path.length > 4096) return
     send({ type: 'git_file_diff', payload: { path, staged } })
   },
   loadWsCommitDiff: (hash) => {
-    if (!get().workspace || !/^[0-9a-fA-F]{7,64}$/.test(hash)) return
+    if (!get().workspace || isVirtualWorkspace() || !/^[0-9a-fA-F]{7,64}$/.test(hash)) return
     set({ wsCommitDiffLoading: hash })
     send({ type: 'git_commit_diff', payload: { hash } })
   },
@@ -10943,29 +11049,29 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearGitOpError: () => set({ gitOpError: undefined }),
   // —— 分支与仓库初始化（P2）——
   loadGitBranches: () => {
-    if (!get().workspace) return
+    if (!get().workspace || isVirtualWorkspace()) return
     send({ type: 'git_branch_list', payload: {} })
   },
   gitCheckout: (branch) => gitWriteOp('git_checkout', { branch }),
   gitInitRepo: () => gitWriteOp('git_init', {}),
   loadGitHistory: (appendMore = false) => {
     const sid = get().activeSessionId
-    if (!sid) return
+    if (!sid || isVirtualWorkspace()) return
     sessHistAppend = appendMore
     set((s) => { const v = s.views[sid] ?? emptyView(); return setView(s, sid, { ...v, gitHistLoading: true }) })
     const skip = appendMore ? (get().views[sid]?.gitHistory.length ?? 0) : 0
     send({ type: 'git_history', payload: { session_id: sid, limit: 30, skip } })
   },
-  loadCommitDiff: (hash) => { const sid=get().activeSessionId; if(sid && /^[0-9a-fA-F]{7,64}$/.test(hash)) send({type:'git_commit_diff',payload:{session_id:sid,hash}}) },
+  loadCommitDiff: (hash) => { const sid=get().activeSessionId; if(sid && !isVirtualWorkspace() && /^[0-9a-fA-F]{7,64}$/.test(hash)) send({type:'git_commit_diff',payload:{session_id:sid,hash}}) },
   loadGitSnapshot: () => {
     const sid = get().activeSessionId
-    if (!sid || !get().workspace) return
+    if (!sid || !get().workspace || isVirtualWorkspace()) return
     set((s) => { const v=s.views[sid]??emptyView(); return setView(s,sid,{...v,gitLoading:true,gitError:undefined}) })
     send({ type: 'git_snapshot', payload: { session_id: sid } })
   },
   loadGitDiff: (path, staged = false) => {
     const sid = get().activeSessionId
-    if (!sid || !get().workspace || path.length > 4096) return
+    if (!sid || !get().workspace || isVirtualWorkspace() || path.length > 4096) return
     send({ type: 'git_file_diff', payload: { session_id: sid, path, staged } })
   },
   loadGitFileDiff: (path, staged = false) => { get().loadGitDiff(path, staged) },
@@ -11152,7 +11258,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 技能清单：进 SkillsPage / 开 /skill 面板时拉取
   // 带 session_id：bridge 按该会话**选中的模型**给出能力面，从而标出「当前模型用不了」
   // 的技能及其原因。无活跃会话（如刚启动）→ 不带，bridge 退回不过滤（与历史行为一致）。
-  fetchSkills: () => send({ type: 'skills', payload: skillsPayload() }),
+  // 项目层技能清单（§4.6 第 4/8 条）：虚拟 Project 不叠项目层 → 不发（也不清空：
+  // 清空会让切回真实项目时斜杠菜单空一屏，切换处已按需清 skills）。
+  fetchSkills: () => {
+    if (isVirtualWorkspace()) return
+    send({ type: 'skills', payload: skillsPayload() })
+  },
 
   // 上下文构成分区：Composer ctx 环 hover 时拉取（一次往返，毫秒级；响应见 command_response
   // 分发的 context_breakdown 分支）。无活跃会话（未建会话/恢复中）→ 不发命令（面板显示空态）。
