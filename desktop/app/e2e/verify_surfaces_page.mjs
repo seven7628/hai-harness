@@ -11,9 +11,13 @@
 //   T4 审计：3 行表格（最新在上）+ 坏行不炸 + 空态一句话；
 //   T5 失败：ok:false 的可读原因贴在那一行上，**不 alert**；
 //   T6 白名单说明：四条只读命令以 chip 形式出现在页面顶部；
+//   T9 **清除数据**（R17a）：每行一个按钮、先二次确认、确认后 `<id>:` 前缀的键消失 +
+//      toast 出现；**卸载路径同样清**（两条路径都不许只依赖 surfaces_changed）。
 //   T7 全程 pageerror = 0（含坏行刷新那一步）。
 //
-// 端口 5230（5227 = PR-12 的 ui 快照、5228 = PR-14 的插件加载器、5229 = PR-14c 的跨重启）。
+// 端口 5252（5227 = PR-12 的 ui 快照、5228 = PR-14 的插件加载器、5229 = PR-14c 的跨重启）。
+// R17a 迁移 = **并行轮次避让**：5225–5232 那一段正被并行 R17b 的探针占着，同一时刻
+// 启动会互相顶掉 vite（--strictPort 下后起的那个直接 exit 2）。
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
@@ -24,7 +28,7 @@ import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
 
-const PORT = 5230
+const PORT = 5252
 const PROBE_DIR = path.join(__dirname, '_surfacespageprobe_run')
 const PROBE_MARKER = '<title>surfaces-page probe</title>'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_surfacespageprobe_run/index.html`
@@ -118,11 +122,15 @@ const stub = {
 // 就会用 getTransport() 分流；静态 import 会被提升到桩赋值之前，与生产里 preload
 // 先于 bundle 的顺序不一致 —— verify_plugin_loader.mjs 同一段注释）。
 void (async () => {
-  const [{ createRoot }, { default: SurfacesPage }, { SurfaceTombstone }] = await Promise.all([
+  const [{ createRoot }, { default: SurfacesPage }, { SurfaceTombstone }, { useAppStore }] = await Promise.all([
     import('react-dom/client'),
     import('../../src/components/SurfacesPage'),
     import('../../src/surfaces/SurfaceBoundary'),
+    import('../../src/store/useAppStore'),
   ])
+  // toast 的真实产出点：SurfacesPage 调 store.showToast（ToastView 挂在 App 壳里，
+  // 这个探针只渲染设置页 —— 所以断言读的是**生产状态**，不是探针自造的 DOM）。
+  ;(window as any).__probe.toast = () => useAppStore.getState().toast
   createRoot(document.getElementById('root')!).render(<SurfacesPage />)
   // 第二个容器：一块 plugin: 的墓碑（右栏「重新启用」那条路；右栏本身在
   // verify_surface_boundary.mjs 里测，这里只钉「plugin: 会先去写 index」）。
@@ -357,6 +365,59 @@ try {
     const raw = localStorage.getItem('surface.disabled') ?? '{}'
     return raw.includes('plugin:alpha')
   })) === false)
+
+  // ================= T9 清除数据（R17a）=================
+  console.log('\nT9 清除数据：每行一个按钮 → 二次确认 → 前缀键消失 + toast；卸载路径同样清')
+  // T5 故意把 surfaceRemove 设成了失败，这里必须复位 —— 否则下面那条「卸载也清数据」的
+  // 断言会因为卸载根本没成功而红，看起来像清理没实现（假红）。
+  await page.evaluate(() => window.__probe.clearFail())
+  // 此时列表是 alpha + gamma（beta 已在 T3 卸载）。
+  const clearBtns = await page.locator('[data-surface-clear]').count()
+  check('每一行都有「清除数据」按钮', clearBtns === (await rows().count()) && clearBtns === 2,
+    `buttons=${clearBtns} rows=${await rows().count()}`)
+  check('按钮文案 = 清除数据',
+    (await textOf(row('alpha').locator('[data-surface-clear]'))) === '清除数据',
+    await textOf(row('alpha').locator('[data-surface-clear]')))
+
+  await page.evaluate(() => {
+    localStorage.setItem('alpha:progress:v1', '5/10')
+    localStorage.setItem('alphax:keep', '1') // 前缀陷阱：'alphax:' 不属于 'alpha:'
+    localStorage.setItem('gamma:note', 'x')
+  })
+  await reset()
+  await row('alpha').locator('[data-surface-clear]').click()
+  await softSelector('.confirm-card', 2000)
+  check('点「清除数据」先弹确认框', (await page.locator('.confirm-card').count()) === 1)
+  check('确认框点名了 alpha', (await textOf(page.locator('.confirm-card'))).includes('alpha'))
+  // 不确认就什么都不许删（这条是「二次确认」的实质判据）。
+  check('未确认时数据还在', (await page.evaluate(() => localStorage.getItem('alpha:progress:v1'))) === '5/10')
+  check('未确认时不发任何 IPC（清数据是纯渲染侧动作）',
+    (await callsOf('surfaceRemove')).length === 0 && (await callsOf('surfaceSetEnabled')).length === 0,
+    JSON.stringify(await calls()))
+
+  await page.locator('.confirm-card .acts button').nth(1).click().catch(() => {})
+  await softWait(() => localStorage.getItem('alpha:progress:v1') === null)
+  check('确认后 alpha 前缀的键消失', (await page.evaluate(() => localStorage.getItem('alpha:progress:v1'))) === null)
+  check('前缀不同的键没被误删（alphax:keep）', (await page.evaluate(() => localStorage.getItem('alphax:keep'))) === '1')
+  const toastAfterClear = await page.evaluate(() => window.__probe.toast())
+  check('出现了 toast（store.showToast 真的被调）', !!toastAfterClear && typeof toastAfterClear.msg === 'string', JSON.stringify(toastAfterClear))
+  check('toast 文案点名了 id 与键数',
+    typeof toastAfterClear?.msg === 'string' && toastAfterClear.msg.includes('alpha') && toastAfterClear.msg.includes('个键'),
+    JSON.stringify(toastAfterClear?.msg))
+  check('清除数据不动 index（该行还在）', (await row('alpha').count()) === 1)
+  check('清除数据的确认框已关', (await page.locator('.confirm-card').count()) === 0)
+
+  // 卸载路径：**卸载成功就立刻清**，不等 surfaces_changed（那条事件可能已经没人听）。
+  await page.evaluate(() => { localStorage.setItem('gamma:note', 'x') })
+  check('基线：gamma 前缀的键在', (await page.evaluate(() => localStorage.getItem('gamma:note'))) === 'x')
+  await reset()
+  await row('gamma').locator('.surface-uninstall').click()
+  await softSelector('.confirm-card', 2000)
+  await page.locator('.confirm-card .acts button').nth(1).click().catch(() => {})
+  await softWait(() => !document.querySelector('[data-surface-id="gamma"]'))
+  check('卸载后 gamma 前缀的键也被清了（不依赖 sync）',
+    (await page.evaluate(() => localStorage.getItem('gamma:note'))) === null)
+  check('卸载后列表少一行', (await rows().count()) === 1, String(await rows().count()))
 
   // ================= T7 pageerror =================
   console.log('\nT7 全程 pageerror = 0')

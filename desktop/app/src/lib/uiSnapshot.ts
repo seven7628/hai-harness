@@ -16,7 +16,6 @@ import type { AppState, TabInstance } from '../store/useAppStore'
 import { getSurface, listSurfaces, subscribeSurfaces } from '../surfaces/registry'
 import { listDisabled } from '../surfaces/health'
 import { listSurfaceLoadErrors } from '../surfaces/plugin/status'
-import { shortName } from './shortPath'
 
 /** debounce 窗口（与 02-pr-plan 的 500ms 口径一致；改它要同步改 e2e 的等待窗口）。 */
 export const UI_SNAPSHOT_DEBOUNCE_MS = 500
@@ -72,16 +71,19 @@ function clip(s: string): string {
   return s.length > UI_TITLE_MAX ? s.slice(0, UI_TITLE_MAX) : s
 }
 
-function basename(path: string): string {
-  return path.split('/').filter(Boolean).pop() ?? ''
-}
-
-/** 标签标题：与 RightPanel 的 tabTitle 同源（provider.title），file 用短文件名。 */
+/**
+ * 标签标题：**唯一策略 = 问 provider**（`getSurface(kind)?.title(tab, t)`）。
+ *
+ * R17a 之前这里留着一条本地 `file` 分支（basename + shortName），R11c 把界面侧统一到
+ * `fileSurface.title` 之后它就成了**第二份真相** —— 而且是悄悄分叉的那种：provider 里
+ * 有「preview 加 · 预览」的后缀，本地分支没有，于是 `ui_inspect` 看到的标题与用户看到的
+ * 不是同一个字符串（同一份快照被用来判读界面，分叉就是误判）。所以这里只留一条路：
+ * 与 RightPanel 的 tabTitle 同源，file 的短名/后缀口径由 fileSurface 自己决定。
+ *
+ * provider 缺失 → 退回 kind 名；provider 自己抛 → 退回 kind 名（provider 的 bug 不该让
+ * 整份快照消失，那会让 agent 连「界面上有什么标签」都看不到）。
+ */
 function titleOf(tab: TabInstance, t: (k: string) => string): string {
-  if (tab.kind === 'file') {
-    const base = basename(tab.path ?? '')
-    return clip((base && shortName(base)) || t('rp.tab.file'))
-  }
   const prov = getSurface(tab.kind)
   if (prov) {
     try {

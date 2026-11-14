@@ -13,6 +13,9 @@
 //  3. **卸载必须连带注销**：`dispose()` 调 `unregisterSurface` 并清掉 host 订阅；
 //     漏了这一步，标签还开着但 provider 没了 —— PR-10 的墓碑机制能兜住（unavailable
 //     reason = missing），但「关掉再打开」会变成空面板。
+//  4. **卸载连带清数据**（R17a）：插件的数据在 localStorage 里、以 `<id>:` 开头，
+//     用户拍板「卸载 = 清掉它前缀下的所有键」。这里只负责触发（每轮 sync 拿 index 的
+//     全部 id 去和「上次见过的 id 列表」对账，见 storage.ts）；禁用**不**清数据。
 //
 // 缓存：URL 里带 `?v=<hash>`（bridge 安装时算的 sha256）。hash 变 = 新 URL = 新模块实例
 // （浏览器不会复用旧的 module record）；hash 不变 = 用同一份，不重复求值。
@@ -25,7 +28,9 @@ import type { ReactNode } from 'react'
 import { subscribeUI } from '../../lib/uiBus'
 import { t as i18nT } from '../../i18n'
 import { registerSurface, unregisterSurface } from '../registry'
+import { noteSurfaceVersion } from '../health'
 import { setSurfaceEntryIndex } from './entries'
+import { reconcileKnownIds } from './storage'
 import { clearSurfaceLoadError, setSurfaceLoadError } from './status'
 import type { SurfaceIndex, SurfaceIndexItem, SurfaceCommandReply } from '../../transport/types'
 import type { DistributiveOmit, HostApi, SurfaceKind, SurfaceProvider, SurfaceTab } from '../types'
@@ -66,12 +71,32 @@ export interface PluginHostDeps {
   t?: (key: string, vars?: Record<string, unknown>) => string
   /** 主题（缺省读 <html data-theme> + index.css 的 CSS 变量）。 */
   theme?: () => { mode: 'light' | 'dark'; tokens: Record<string, string> }
+  /**
+   * 当前环境能不能读到**权威** index（生产 = `!!window.desktop?.surfaceIndex`）。
+   * 缺省（不给这个函数）= 不权威 = 不做数据清理。每次 sync 都重新问一遍：环境可能在运行中变
+   * （比如 mobile/browser 模式下永远拿不到，那就不该有任何跨重启清理发生）。
+   */
+  indexAuthoritative?: () => boolean
 }
 
 export interface PluginFailure {
   id: string
   kind: SurfaceKind
   error: string
+}
+
+/**
+ * 一轮 sync 的来源声明。
+ *
+ * `authoritativeIndex` 缺省 **false**：传进来的 index 不权威时，数据清理（known-ids 对账）
+ * 既不执行也不记账。为什么必须有这个开关：浏览器版（vite 直开、没有 preload）没有
+ * `window.desktop.surfaceIndex`，store 那条路回的是硬编码的 `{items:[]}` —— 若把
+ * 「拿不到 index」读成「插件全没了」，一次网页会话就会清空全部插件数据。
+ * 也不能靠 `items` 非空去猜：卸载**最后一个**插件时 index 恰好是空的，那一次必须能清。
+ */
+export interface SyncOptions {
+  /** true = 这份 index 是权威来源（生产 = Go 的 surfaceStore）。缺省 / false = 不权威。 */
+  authoritativeIndex?: boolean
 }
 
 export interface SyncReport {
@@ -329,13 +354,28 @@ export function isPluginLoaded(id: string): boolean {
   return loaded.has(id)
 }
 
-async function syncOnce(index: SurfaceIndex, baseUrl: SurfaceBaseUrl, deps: PluginHostDeps): Promise<SyncReport> {
+async function syncOnce(
+  index: SurfaceIndex,
+  baseUrl: SurfaceBaseUrl,
+  deps: PluginHostDeps,
+  opts: SyncOptions = {},
+): Promise<SyncReport> {
   const report: SyncReport = { loaded: [], unloaded: [], skipped: [], failed: [] }
   currentBase = baseUrl
   // 入口快照必须在**注册/卸载之前**更新：宿主的所有入口都读这一份（R16 / D-2），
   // 而禁用 → 入口消失、启用 → 入口回来这两件事都发生在同一轮 sync 里。放在这里
   // 还保证「插件加载失败」时入口照样在（D-3 最后一行：点它能开出墓碑标签）。
   setSurfaceEntryIndex(index)
+  // ⓪ 跨重启的数据回收（R17a）：index 里**全部**的 id（含 enabled:false、含带 error
+  //     的）才是「现在还有谁」的真相 —— 只看 alive / loaded 会漏掉「manifest 就坏掉、
+  //     从来没加载成功过」的插件，用户卸掉它时数据会原地留下。没有 known-ids 记录
+  //     （首次升级）时这里一个都不清，见 storage.ts 的 reconcileKnownIds 注释。
+  reconcileKnownIds(
+    (index?.items ?? []).map((it) => String(it?.id ?? '')).filter((x) => x.length > 0),
+    // 「这份 index 算不算数」是**显式**入参，缺省 false：浏览器版那条路回的是硬编码的空
+    // items，靠 items 非空去猜会在一次网页会话里清空全部插件数据（见 storage.ts 第 0 条）。
+    opts.authoritativeIndex === true,
+  )
   const alive = new Map<string, SurfaceIndexItem>()
   for (const item of index?.items ?? []) {
     if (!item || item.id === undefined) continue
@@ -372,6 +412,10 @@ async function syncOnce(index: SurfaceIndex, baseUrl: SurfaceBaseUrl, deps: Plug
       continue
     }
     try {
+      // R-20：**换版本 = 干净重来**。放在 apply 之前是刻意的 —— 新版本连 import 都过不去
+      // 时，旧版本留下的「3 次失败 → 自动禁用」会继续挂在墓碑上，用户看到的是「装了新版
+      // 还是坏的」。真正的坏版本由 status.ts 的 load error 报告，不走这套计数。
+      noteSurfaceVersion(pluginKindOf(id), item.hash)
       const p = await applyManifest(item, baseUrl, deps)
       loaded.set(id, p)
       clearSurfaceLoadError(p.kind)
@@ -392,8 +436,13 @@ async function syncOnce(index: SurfaceIndex, baseUrl: SurfaceBaseUrl, deps: Plug
  * 传进来的 index 是**调用那一刻**的快照，所以「连续两次 surfaces_changed」第二次
  * 通常只需要处理增量（hash 未变的走 skipped）。
  */
-export function syncPlugins(index: SurfaceIndex, baseUrl: SurfaceBaseUrl = baseUrlOverride ?? surfaceBaseUrl, deps: PluginHostDeps = {}): Promise<SyncReport> {
-  const run = syncChain.then(() => syncOnce(index, baseUrl, deps))
+export function syncPlugins(
+  index: SurfaceIndex,
+  baseUrl: SurfaceBaseUrl = baseUrlOverride ?? surfaceBaseUrl,
+  deps: PluginHostDeps = {},
+  opts: SyncOptions = {},
+): Promise<SyncReport> {
+  const run = syncChain.then(() => syncOnce(index, baseUrl, deps, opts))
   // 链上只保留「最后一次」失败不炸链：否则一次失败会让后续 sync 永远 reject。
   syncChain = run.catch(() => ({ loaded: [], unloaded: [], skipped: [], failed: [] }))
   return run
@@ -419,7 +468,10 @@ export function startPluginLoader(deps: PluginLoaderDeps): () => void {
     if (stopped) return
     void deps
       .readIndex()
-      .then((index) => syncPlugins(index, baseUrl, deps))
+      .then((index) =>
+        // 每轮都重新问：桥起来/断掉时「index 算不算数」也会跟着变。
+        syncPlugins(index, baseUrl, deps, { authoritativeIndex: deps.indexAuthoritative?.() === true }),
+      )
       .catch((e: unknown) => {
         // 读索引失败**不改动注册表**：一次 IPC 抖动不该等于「所有插件都被卸载」。
         console.warn('[surface] 读插件索引失败（保持现状）：', e)

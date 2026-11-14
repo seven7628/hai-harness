@@ -24,6 +24,8 @@
 //   T5 bridge → 渲染层：注入 surfaces_changed → uiBus 收到；未知 op / 非 JSON 行不产生
 //      pageerror（页面上任何未捕获异常都算失败）。
 //   T6 窗口 resize 走同一条 debounce → 快照的 viewport 更新。
+//   T6b **标题单一策略**（R17a）：file{mode:preview} 标签的快照 title 与 provider 的
+//       title 逐字相同，且带「· 预览」后缀 —— 快照不再自留一份 file 分支。
 //
 // 用法：cd desktop/app && node e2e/verify_ui_snapshot.mjs
 // 退出码：全通过 0；任一断言失败 1；前置不满足（端口被占 / 探针服务没起来）2。
@@ -37,9 +39,11 @@ import { exitCodeOf, isPrecondition, waitProbePage } from './_serve.mjs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const APP = path.resolve(__dirname, '..')
 
-// 端口按口径固定 5227（PR-12）；归属自检走 _serve.mjs 的 waitProbePage，
-// 撞上一个还没退干净的别人的 vite 时报「前置不满足」并退出 2（04 F46）。
-const PORT = 5227
+// 端口按口径固定 5253（PR-12 起原为 5227；R17a 迁移 = **并行轮次避让** —— 5225–5232
+// 那一段正被并行的 R17b 占着跑，两个轮次同时启动就会互相把对方的 vite 顶掉）。
+// 归属自检走 _serve.mjs 的 waitProbePage：撞上一个还没退干净的别人的 vite 时报
+// 「前置不满足」并退出 2（04 F46），不会当作通过。
+const PORT = 5253
 const PROBE_DIR = path.join(__dirname, '_uisnapprobe_run')
 const PROBE_MARKER = '<title>ui-snapshot probe</title>'
 const PROBE_URL = `http://localhost:${PORT}/e2e/_uisnapprobe_run/index.html`
@@ -108,6 +112,8 @@ const { createRoot } = await import('react-dom/client')
 const [{ default: RightPanel }] = await Promise.all([import('../../src/components/RightPanel')])
 await import('../../src/surfaces/builtin') // 副作用注册（F45：缺了它 T0 会当场红）
 const { getSurface, listSurfaces } = await import('../../src/surfaces/registry')
+// 标题的**界面侧真相源**：RightPanel 的 tabTitle 与 store 传给快照的 t 都是这一份。
+const { t: i18nT } = await import('../../src/i18n')
 const { disableSurface, enableSurface, listDisabled } = await import('../../src/surfaces/health')
 const { subscribeUI } = await import('../../src/lib/uiBus')
 const { useAppStore } = await import('../../src/store/useAppStore')
@@ -141,6 +147,24 @@ w.__probe = {
   open: (kind: string, extra: Record<string, unknown>) =>
     useAppStore.getState().openTab({ kind, ...extra } as never),
   activate: (id: string) => useAppStore.getState().activateTab(id),
+  // 每个标签的 provider 标题（= 界面标签上显示的那一串）。快照的 title 必须与它逐字相同 ——
+  // 这条对照就是 R17a 的判据：快照自留一份标题分支时，两边会悄悄分叉。
+  tabs: () => {
+    const s = useAppStore.getState()
+    const scope = s.activeSessionId || s.workspace || ''
+    return (s.tabsByScope[scope]?.tabs ?? []).map((tb) => ({
+      id: tb.id,
+      kind: tb.kind,
+      mode: tb.mode || '',
+      provider: (() => {
+        try {
+          return getSurface(tb.kind)?.title(tb, i18nT) ?? ''
+        } catch {
+          return ''
+        }
+      })(),
+    }))
+  },
   tabIds: () => {
     const s = useAppStore.getState()
     const scope = s.activeSessionId || s.workspace || ''
@@ -314,6 +338,27 @@ try {
   check('resize 产生了新快照', afterResize > beforeResize, `before=${beforeResize} after=${afterResize}`)
   check(`viewport = 1000×700（实得 ${resized.viewport?.w}×${resized.viewport?.h}）`,
     resized.viewport?.w === 1000 && resized.viewport?.h === 700)
+
+  // ---- T6b file 预览标签的标题：快照 = 界面（同一个 provider，逐字相同） ----
+  console.log('\nT6b 快照里的 file 预览标题 = fileSurface.title（带「· 预览」后缀）')
+  const beforeTabs = await page.evaluate(() => window.__probe.tabs())
+  await page.evaluate(() => window.__probe.open('file', { path: '/mock/proj-ui-snapshot/doc.md', mode: 'preview' }))
+  await page.waitForTimeout(700) // > debounce(500)
+  const providerTabs = await page.evaluate(() => window.__probe.tabs())
+  const previewTab = providerTabs.find((tb) => !beforeTabs.some((b) => b.id === tb.id))
+  check('新开的 file{mode:preview} 标签存在', !!previewTab, JSON.stringify(providerTabs.map((tb) => tb.id)))
+  const snapTabs = (await snapshots()).at(-1)?.tabs?.tabs ?? []
+  const snapEntry = snapTabs.find((tb) => tb.id === previewTab?.id)
+  // 「界面」这一侧：provider 的 title 就是 RightPanel 标签上渲染的那串字（R11c 起唯一真相）。
+  check('provider 侧标题以「· 预览」结尾（界面上确实有后缀）',
+    typeof previewTab?.provider === 'string' && previewTab.provider.endsWith(' · 预览'),
+    JSON.stringify(previewTab?.provider))
+  check('快照 title 与 provider 标题逐字相同（同一份策略，不是本地第二份）',
+    !!snapEntry && snapEntry.title === previewTab?.provider,
+    `snapshot=${JSON.stringify(snapEntry?.title)} provider=${JSON.stringify(previewTab?.provider)}`)
+  check('快照 title 也以「· 预览」结尾（agent 看到的 = 用户看到的）',
+    typeof snapEntry?.title === 'string' && snapEntry.title.endsWith(' · 预览'),
+    JSON.stringify(snapEntry?.title))
 
   // ---- 收尾：整场零 pageerror ----
   console.log('\nT7 全程零 pageerror')
