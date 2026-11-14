@@ -23,7 +23,6 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type
 import type { HostLang } from '../host/lang'
 import { MobileHostPanelsProvider } from '../host/panels-mobile'
 import { attachHubEvents, useHubStore } from '../hub/useHubStore'
-import { useT } from '../i18n'
 import { applyTheme, type ThemePref } from '../lib/theme'
 import { readLangPref, writeLangPref } from './lang'
 import { sharedMobileTransport, type MobileLinkState, type MobileStatus, type MobileTransport } from './transport/mobile'
@@ -77,7 +76,6 @@ export default function MobileApp() {
   const [theme, setTheme] = useState<ThemePref>(() => readThemePref())
   const [lang, setLang] = useState<HostLang>(() => readLangPref())
   const [toast, setToast] = useState<{ id: number; msg: string; kind: 'ok' | 'error' } | null>(null)
-  const t = useT()
   // 顶部两个并列入口：Hub（智能体/群组）与「会话」（工作区会话）。配对后默认 Hub
   // （P8-01b 的既有入口不变），点「会话」才切过去。
   const [tab, setTab] = useState<'hub' | 'sessions'>('hub')
@@ -275,7 +273,11 @@ export default function MobileApp() {
 
         {/* 两个并列入口（P8-02）：Hub / 会话。只在列表层出现 —— 详情页有自己的返回。 */}
         {fullScreen || pairing || !paired ? null : (
-          <nav className="m-tabs" role="tablist" aria-label={t('mobile.tabs.aria')}>
+          /* 文案刻意**不走 i18n**：i18n.ts 带着中英两份完整字典（~200KB），
+             静态 import 会把它整份拉进首屏 Hub chunk（实测 +215KB）。手机壳的
+             既有文案（重连/重新配对/配对失败…）本来就是这种就地写法，这里保持一致；
+             会话屏在按需 chunk 里，那边照常用 useT()。 */
+          <nav className="m-tabs" role="tablist" aria-label={lang === 'en' ? 'Mobile navigation' : '手机主导航'}>
             <button
               type="button"
               role="tab"
@@ -284,7 +286,7 @@ export default function MobileApp() {
               onClick={() => setTab('hub')}
               data-testid="mobile-tab-hub"
             >
-              {t('mobile.tab.hub')}
+              Hub
             </button>
             <button
               type="button"
@@ -294,7 +296,7 @@ export default function MobileApp() {
               onClick={() => setTab('sessions')}
               data-testid="mobile-tab-sessions"
             >
-              {t('mobile.tab.sessions')}
+              {lang === 'en' ? 'Sessions' : '会话'}
             </button>
           </nav>
         )}
@@ -312,7 +314,7 @@ export default function MobileApp() {
               }}
             />
           ) : (
-            <Suspense fallback={<p className="m-loading" role="status">{t('mobile.loading')}</p>}>
+            <Suspense fallback={<p className="m-loading" role="status">{lang === 'en' ? 'Loading…' : '加载中…'}</p>}>
               {sess ? (
                 <SessionScreen ws={sess.ws} sid={sess.sid} title={sess.title} onBack={back} />
               ) : convOpen ? (

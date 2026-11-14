@@ -213,6 +213,9 @@ console.log('\n4) 静态边界：会话页复用桌面组件 + 按需加载')
   assert(/lazy\(\(\) => import\('\.\/screens\/SessionListScreen'\)\)/.test(app), '会话列表按需加载（首屏 chunk 不带 store）')
   assert(/lazy\(\(\) => import\('\.\/screens\/SessionScreen'\)\)/.test(app), '会话页按需加载')
   assert(!/from '\.\.\/store\/useAppStore'/.test(app), 'MobileApp 仍不 import useAppStore（P8-01b 的边界不能破）')
+  // 实测：静态引 i18n 会把中英两份完整字典（~200KB）整份拉进首屏 Hub chunk
+  // （218KB → 433KB）。手机壳的既有文案本来就是就地写法，入口条两格也一样。
+  assert(!/from '\.\.\/i18n'/.test(app), 'MobileApp 不静态 import i18n（字典不进首屏 chunk）')
   assert(/onOpenSession=\{openSession\}/.test(app), '壳把 openSession 交给 host provider（Hub 任务卡的「打开会话」同一落点）')
   assert(/data-testid="mobile-tab-sessions"/.test(app) && /data-testid="mobile-tab-hub"/.test(app), '入口条有 Hub / 会话两个并列入口')
   assert(/setSess\(null\)\s*\n\s*useHubStore\.getState\(\)\.closeHub\(\)/.test(app), '返回/后退同时清会话与 Hub（两条栈共用一条 history 记录）')
