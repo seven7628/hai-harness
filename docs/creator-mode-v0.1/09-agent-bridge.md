@@ -115,39 +115,52 @@
 ### 2.5 插件侧看到的身份
 
 插件只知道自己收到的 `session_id` / `run_id`，不知道虚拟路径，也不能选择真实项目；虚拟路径由 main 从 **token 派生**的 `plugin_id` 注入（payload 里**没有** `plugin_id`，见 §4.2），bridge 只信任 main 注入的值。
-## 3. 能力面（插件看到的）
+## 3. 能力面：只有两个口子
 
-### 3.1 HostApi 新增
+插件对外**只有两条通道**（这是用户定稿）：
 
 ```ts
-host.agent = {
-  session(opts?: { title?: string }): Promise<{ sessionId: string }>
-  run(req: AgentRunRequest): AgentRunHandle   // 不传 session_id = 新建随机会话
-  cancel(runId: string): void
-}
-
-host.composer = {
-  quote(input: { text: string; source?: QuoteSource }): { ok: boolean; reason?: string }
-}
-
-host.tools = {
-  register(name: string, handler: (args: any, ctx: ToolCtx) => Promise<ToolResult>): () => void
-}
+// apply({ host, React }) 里
+host.command(name: string, payload?: unknown): Promise<{ ok: boolean; [k: string]: unknown }>
+host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 ```
 
-- `AgentRunHandle`：`{ runId, sessionId, on(type, fn), cancel() }`；事件 `delta | tool | usage | done | error`。`sessionId` 在 `run()` 返回时即已确定（新建或复用），插件据此决定要不要持久化。
-- `host.tools.register` 必须在 manifest `tools[]` 里声明过；未声明直接抛（与 `events.on` 同口径）。
-- 所有返回值恒为对象，不抛传输错误；`reason` 见 §6 错误码。
+- **`command`**：插件 → 宿主 / Agent。名字必须在 manifest `commands[]` 里声明；未声明 → `{ok:false, reason:'not_declared'}`。身份由 token 绑定，payload 里没有 `plugin_id`。
+- **`onEvent`**：宿主 / Agent → 插件。只投递 manifest `data[]` 里声明过、且**属于这个插件**的事件；插件怎么处理是它的事（渲染、存状态、忽略都行）。
+- `React` / `t` / `theme()` 仍作为**本地工具**给（没有宿主权限）；`openTab` / `toast` 收进 `command`（`ui.open_tab` / `ui.toast`），不再单独开 API。
 
-### 3.2 manifest 新增
+### 3.1 `command` 清单（V1）
+
+| 命令 | 载荷 | 回执 |
+|---|---|---|
+| `agent.session` | `{title?}` | `{ok, session_id}`（随机 id） |
+| `agent.run` | `{run_id?, session_id?, input, instructions?, schema?, tools:"global"\|"none"}` | `{ok, run_id, session_id}`（`session_id` 缺省 = 新建；立即回，流式走事件） |
+| `agent.cancel` | `{run_id}` | `{ok}` |
+| `tool.result` | `{call_id, ok, result?, error?}` | `{ok}` |
+| `composer.quote` | `{text, source?}` | `{ok, reason?}` |
+| `ui.open_tab` | `{kind, params?}`（只能开自己的 kind） | `{ok}` |
+| `ui.toast` | `{message}` | `{ok}` |
+
+### 3.2 `onEvent` 清单（V1）
+
+| 事件 | data | 说明 |
+|---|---|---|
+| `agent.delta` | `{text}` | 文本增量（50ms 合并） |
+| `agent.tool` | `{name, status:'start'\|'end', ok?}` | 只给工具名与状态，不给参数/结果 |
+| `agent.usage` | `{input_tokens, output_tokens}` | 结束时一次 |
+| `agent.done` | `{text, json?}` | 终态；`json` 仅当 schema 通过 |
+| `agent.error` | `{reason, message?}` | 终态 |
+| `tool.call` | `{call_id, tool, args, deadline_ms}` | Agent 调插件工具；用 `tool.result` 回 |
+| `surfaces.changed` | `{}` | 插件装卸/启停（安全的全量生命周期事件） |
+
+事件信封统一为 `{type, seq, run_id?, session_id?, data}`；`seq` 单调递增，终态后不再有事件。
+
+### 3.3 manifest
 
 ```json
 {
-  "agent": {
-    "sessions": true,          // 允许创建/使用自己的 plugin session（默认 false）
-    "run": true,               // 允许发起 run（默认 false）
-    "quote": true              // 允许插草稿（默认 false）
-  },
+  "commands": ["agent.run", "agent.session", "agent.cancel", "tool.result", "composer.quote", "ui.toast"],
+  "data": ["agent.delta", "agent.tool", "agent.done", "agent.error", "tool.call", "surfaces.changed"],
   "tools": [
     {
       "name": "course_week",
@@ -160,18 +173,20 @@ host.tools = {
 }
 ```
 
-- 安装页用自然语言展示能力：**「可发起 AI 请求（消耗你的模型额度）」「可把内容放进输入框草稿」「可向 Agent 提供 3 个工具」**。
-- 设置页每项可撤销；撤销后：`agent.run/quote` 立即拒绝，工具从引擎 Hide。
+- 安装页用自然语言展示：**「可发起 AI 请求（消耗你的模型额度）」「可把内容放进输入框草稿」「可向 Agent 提供 3 个工具」「可接收 5 类事件」**。
+- 设置页每项可撤销；撤销后命令立即 `denied`，事件立即停投，工具从引擎 Hide。
 - 工具名：模型侧 `plugin__<id>__<name>`（id 的 `-`→`_`）；**不得与内置/MCP/subagent 工具重名**，冲突整条 manifest 拒绝。
+- **工具不再有 `host.tools.register`**：manifest 声明即注册；调用走 `tool.call` 事件，插件自己按 `tool` 名字分发，用 `command('tool.result')` 回。
 
+## 4. 协议
 ## 4. 协议
 
 ### 4.1 通道
 
 ```
-插件(renderer) --host.agent.run--> loader(闭包持 token) --IPC surface:agent--> main
+插件(renderer) --host.command('agent.run')--> loader(闭包持 token) --IPC surface:agent--> main
    --stdio command surface_agent_run--> bridge
-bridge --event surface_agent_event--> main --独立 IPC surface:agent-event--> loader --路由 runId--> 插件
+bridge --event surface_agent_event--> main --独立 IPC surface:agent-event--> loader --按 mask 过滤/路由--> host.onEvent
 ```
 
 - **身份只来自 token**：main 在插件加载前签发 per-plugin token（`surface:tokens`），loader 闭包持有；`surface_agent_*` 的 payload **不带 `plugin_id`**，main 校验 token 后注入 `plugin_id`。防跨插件冒充（评审 #8）。
@@ -179,17 +194,18 @@ bridge --event surface_agent_event--> main --独立 IPC surface:agent-event--> l
 - 所有 bridge→插件的 agent 事件只带 `{run_id, session_id, seq, type, data}`；loader 按 run 归属路由。
 - **与 transcript 的关系**：同一 run 的文本既会产生会话视图的 `content_chunk`（权威，进 record/checkpoint），也会产生给插件的 `delta`（派生，不落盘）。`delta` 只是同一流的副本，run 结束以会话 transcript 为准；取消时两边一起停。
 
-### 4.2 命令（renderer → bridge）
+### 4.2 命令（Public name → 内部 op）
 
-| 命令 | 载荷 | 回执 |
+| `host.command` | 内部 IPC / bridge 命令 | 说明 |
 |---|---|---|
-| `surface_agent_session` | `{title?}`（plugin_id 由 main 注入） | `{ok, session_id}`（随机 id） |
-| `surface_agent_run` | `{run_id, session_id?, input, instructions?, schema?, tools:"global"\|"none"}` | `{ok, run_id, session_id}`（`session_id` 缺省 = 新建；立即回，流式走事件） |
-| `surface_agent_cancel` | `{run_id}` | `{ok}` |
-| `surface_tool_result` | `{call_id, ok, result?, error?}` | `{ok}` |
-| `plugin_projects_list` | `{}` | `{projects:[{plugin_id,name,enabled,virtual:true,sessions:[...]}]}` |
-| `plugin_session_open` | `{plugin_id, id?, create?}` | 与 `new_session` 同形（内部用虚拟路径） |
-| `plugin_session_delete` | `{plugin_id, id}` | `{ok}` |
+| `agent.session` | `surface_agent_session` | 建插件会话 |
+| `agent.run` | `surface_agent_run` | 立即回 `{run_id, session_id}`，流式走事件 |
+| `agent.cancel` | `surface_agent_cancel` | 取消 run |
+| `tool.result` | `surface_tool_result` | 回工具调用 |
+| `composer.quote` | renderer 内 `uiBus.emit('composer_quote')` | 不经过桥 |
+| `ui.open_tab` / `ui.toast` | renderer 内 `openTab` / `showToast` | 只能开自己的 kind |
+
+**宿主内部命令**（不属于插件 API）：`plugin_projects_list` / `plugin_session_open` / `plugin_session_delete`，由宿主 UI 调用。
 
 `surface_agent_run` 的 prompt 组装（bridge 侧，插件不可绕过）：
 
@@ -202,41 +218,29 @@ user message:
 
 插件提供的文本永远以**用户消息**进入，不拼 system prompt；`schema` 有值时最终文本必须是合法 JSON 并通过校验。
 
-### 4.3 事件（bridge → renderer）
+### 4.3 事件（bridge → renderer → `onEvent`）
 
 ```json
 { "type":"surface_agent_event",
   "payload": { "plugin_id":"course-mvp", "session_id":"s_...", "run_id":"r_...",
-               "seq": 7, "event":"delta", "data": {"text":"..."} } }
+               "seq": 7, "event":"agent.delta", "data": {"text":"..."} } }
 ```
 
-事件类型：
+- loader 按 `manifest.data` 过滤后调用 `host.onEvent('agent.delta', fn)`；插件看不到未声明、也不属于自己 run 的事件。
+- `surfaces.changed` 走既有 `ui` op（非 agent 通道）；`plugin_projects_changed` 只给宿主 UI，不给插件。
 
-| event | data | 说明 |
-|---|---|---|
-| `delta` | `{text}` | 文本增量（50ms 合并） |
-| `tool` | `{name, status:'start'\|'end', ok?}` | 只给工具名与状态，不给参数/结果 |
-| `usage` | `{input_tokens, output_tokens}` | 结束时一次 |
-| `done` | `{text, json?}` | 终态；`json` 仅当 schema 通过 |
-| `error` | `{reason, message?}` | 终态 |
+### 4.4 工具调用（`tool.call` 事件 + `tool.result` 命令）
 
-`seq` 单调递增，终态之后不再有事件；插件取消/卸载后迟到事件由 loader 丢弃。
-
-### 4.4 工具调用（bridge → renderer → bridge）
-
-```json
-// bridge → renderer
-{ "type":"surface_tool_call",
-  "payload": { "call_id":"tc_...", "plugin_id":"course-mvp",
-               "tool":"course_week", "args":{...}, "deadline_ms":10000 } }
-
-// renderer → bridge
-{ "type":"surface_tool_result",
-  "payload": { "call_id":"tc_...", "ok":true, "result":{...} } }
+```js
+host.onEvent('tool.call', async (ev) => {
+  // ev.data = { call_id, tool:'course_week', args:{...}, deadline_ms:10000 }
+  const result = await handle(ev.data.tool, ev.data.args)
+  await host.command('tool.result', { call_id: ev.data.call_id, ok: true, result })
+})
 ```
 
 - 超时：默认 10s（manifest 可声明 ≤60s）；超时 → 工具返回 `{ok:false, reason:"timeout"}`，不中断 run。
-- 插件卸载/崩溃：等待中的 call 立即失败 `plugin_unloaded`。
+- 插件卸载/崩溃：等待中的 call 立即失败 `plugin_unloaded`，未回的结果丢弃。
 - 结果上限 64 KiB（JSON），超出截断并标记 `truncated:true`。
 - `requires_panel: true` 的工具在面板未打开时返回 `panel_not_open`（宿主不偷偷挂隐藏实例）。
 - 审批：`read_only:false` 的工具走现有工具审批；审批卡显示「<插件名> · <工具名>」，插件不能代点。
@@ -244,10 +248,10 @@ user message:
 ### 4.5 引用（renderer 内，不过桥）
 
 ```js
-host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
+host.command('composer.quote', { text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 ```
 
-- loader 通过 `uiBus.emit('composer_quote', payload)`；`Composer.tsx` 订阅并把内容插入当前草稿（带来源 chip）。
+- 插件调 `host.command('composer.quote', {...})`；loader 通过 `uiBus.emit('composer_quote', payload)`，`Composer.tsx` 订阅并把内容插入当前草稿（带来源 chip）。
 - 上限 8 KiB；去掉控制字符；**绝不自动发送**；无活动会话 → `{ok:false, reason:'no_session'}`。
 - V1 不落审计（纯本地 UI 动作）；P2 若加自动发送再进审计。
 
@@ -271,7 +275,7 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 
 **保留**：`memory_dream`（用户决定：记忆能力需要；写入仍受既有护栏与审计）。装配完成后 `buildLoop` 追加的 office/UI/surface 三组注册也要按 `runtimeKind` 过滤（`main.go:6037`）。
 
-- 注册点：`newSessionEngine` 装配完成后，按 `pluginToolsFor(runtime)` 注册；项目会话在授权变化时热注册/Hide。
+- 注册点：`newSessionEngine` 装配完成后，按 manifest `tools[]` 注册代理工具；项目会话在授权变化时热注册/Hide。插件侧没有 register API，只有 `tool.call` / `tool.result`。
 - 命名：`plugin__<id>__<name>`；冲突（与任何已有工具同名）→ manifest 安装即拒绝。
 - 子 agent 继承主引擎 → 插件工具对子 agent 也可用（与现有"继承全部工具"一致）。
 - 插件工具**不能**：修改工具集、注册 MCP server、定义 subagent、读取其它工具的 schema/结果。
@@ -297,7 +301,7 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
   - 可覆写 → loader 捕获真对象到模块作用域，再把 `window.desktop` 换成收窄视图；
   - 不可覆写 → 改为 preload 只暴露收窄对象（宿主代码另走一条内部 IPC），或把插件放进 sandboxed iframe（真正的隔离，成本另算）。
 - **诚实边界**：插件是 `import()` 进宿主**同一 realm** 的，能读同源 `localStorage`（项目路径、会话标题、prefs）、能改宿主全局。L0 是**降低误用**，不是安全边界；真正的边界只有隔离（iframe / 独立 world / 独立 WebContents）。
-- **L0 必删清单**：`onEvent`（广播所有 bridge 事件）、`command`（任意桥命令）、`providerKey` / `providerCopyKey`、全部 `fs*`、`settingsGet/Set`、`oauth*`、`startBridge/stopBridge`、`pick*`、`openPath` / `showItemInFolder`。插件只留 host API。
+- **L0 必删清单**：**原始** `onEvent`（广播所有 bridge 事件）、**原始** `command`（任意桥命令）、`providerKey` / `providerCopyKey`、全部 `fs*`、`settingsGet/Set`、`oauth*`、`startBridge/stopBridge`、`pick*`、`openPath` / `showItemInFolder`。插件只留 host API。
 - **token**：per-plugin capability token，loader 闭包持有；main 校验 token ↔ plugin_id；payload 不带 plugin_id（§4.1）。
 - **不可信输入**：插件文本以用户消息 + 来源标注进入；不拼 system prompt；schema 校验后再交给插件。
 - **额度**（V1 默认，可在设置页调）：并发 run 1/插件；20 run/小时；input ≤32 KiB；instructions ≤8 KiB；schema ≤16 KiB；单 run ≤10 min；工具结果 ≤64 KiB；取消即停。
@@ -311,7 +315,7 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 2. 会话视图：插件徽标；顶部 Provider/Model 选择器与普通会话完全一致（现有 `switch_model` 会更新全局 active，不承诺按会话隔离）；空态说明「该会话由插件创建，使用全局工具集与当前模型」。
 3. 设置页插件行：能力开关（agent.run / quote / tools）、当前会话数、审计入口。
 4. 安装页/回执：能力摘要（自然语言），安装前可见。
-5. 插件面板：`host.agent` / `host.composer` 的示例（SKILL 提供）。
+5. 插件面板：`host.command` / `host.onEvent` 的示例（SKILL 提供）。
 6. Composer：来源 chip + 删除；不自动发送。
 
 ## 9. 决策记录
@@ -355,14 +359,16 @@ P2 完成才有「用户在项目会话里说一句，PDF 面板自己更新」�
 2. **runtime 分支不全**（hooks 走项目分支会读插件 home 的 hooks.json；delete/shutdown/存储根错）→ 新增 §2.3 分流表（7 个点）。
 3. **缺负向守卫**（停用/卸载后 `m.runtime` 会兜底造项目 runtime，把虚拟路径写进 workspaces.json）→ `isPluginHomePath` 在 `m.runtime` / `createOpts` / `workspaceSync|Add` / `knownWorkspace` 四道硬拒绝；"虚拟路径永不进 workspaces.json"是**后端不变式**，不是前端过滤。
 
+协议定稿（用户 2026-11-14）：对外**只有 `command` + `onEvent` 两条通道**，`agent.run`/`quote`/`tool.result` 全部是命令名，`tool.call`/`agent.delta` 全部是事件名；具名 `host.agent` / `host.tools` / `host.composer` API 取消。
+
 其余已吸收：D3 改为"与普通会话一致，切模型会更新全局 active"；工具集加 denylist（surface_*/mesh/cron/promote_task/git_worktree），`memory_dream` 按用户决定保留；agent 事件走独立 IPC、不复用 `onEvent`；plugin_id 由 token 派生；L0 先 spike，且明说"同 realm 下 L0 不是安全边界"；成本 P1 从 3 轮上调到 **5–6 轮**。
 
 ## 11. Skill 同步大纲（`skills/hai-surface-dev/SKILL.md` 新增一节）
 
 1. 何时需要 Agent：引用 vs 跑任务 vs 供工具；一张决策表。
 2. manifest 声明示例 + 安装页会展示什么。
-3. `host.composer.quote` recipe（含来源字段、上限、不自动发送）。
-4. `host.agent.run` recipe（新建/复用 session_id、schema、delta/done/error、取消；id 存插件自己的 localStorage）。
-5. `host.tools.register` recipe（manifest 对齐、read_only、requires_panel、超时、结果上限）。
+3. `host.command('composer.quote')` recipe（来源字段、上限、不自动发送）。
+4. `host.command('agent.run')` recipe（新建/复用 session_id、schema、`agent.delta/done/error`、取消；id 存插件自己的 localStorage）。
+5. `tool.call` / `tool.result` recipe（manifest 对齐、read_only、requires_panel、超时、结果上限）。
 6. 错误码表 + 额度表。
 7. 反例：不要伪造数据、不要假装宿主会持久化、不要试图改全局工具集。
