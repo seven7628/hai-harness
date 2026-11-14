@@ -38,6 +38,10 @@ import { useHubStore } from '../hub/useHubStore'
 import { t as i18nT } from '../i18n'
 // 归属（owner）编码：信任/启用按归属隔离（FE 侧只做展示与回传，判定在 bridge）
 import { ownerValid } from '../lib/owner'
+// 归属**路径**（虚拟 Project §4.5）：send() 按会话归属取 workspace，而不是只看
+// state.workspace —— 插件会话停在虚拟 home 上时，两者会不一致。注册表是模块级 Map
+// （非渲染状态），send() 同步读。
+import { forgetSessionOwnerPath, forgetSessionOwnerPathsOf, getSessionOwnerPath, resolveSendWorkspace, setSessionOwnerPath } from '../lib/ownerPath'
 // 「当前归属」派生：Hub 打开时读 Hub 的 session/群，否则按工作区会话
 // （B1：只读 activeSessionId 会把 Hub DM/群的确认写成 workspace:，服务端判 agent:/group: 查不到）
 import { resolveActiveOwner } from '../lib/activeOwner'
@@ -987,6 +991,21 @@ export interface Project {
   path: string
   sessions: SessionMeta[]
   pinned?: boolean
+  // —— 虚拟 Project（插件，docs/creator-mode-v0.1/09-agent-bridge.md §4.1）——
+  // 插件 = 一个虚拟 Project：path 是插件的会话 home，**不是**工作区（绝不进
+  // workspaces.json，也不落 localStorage）。它仍放在 projects 里，好让会话列表、
+  // `list` 回执、左栏会话渲染原样复用；所有「当它是工作区」的入口靠 virtual 过滤
+  //（清单见该文档 §4.6，判据集中在 lib/pluginProjects）。
+  virtual?: boolean
+  pluginId?: string
+  /** 左栏显示名（后端回执的 name；缺省用 pluginId） */
+  name?: string
+  /** 插件图标（emoji 或短字符串；后端回执原样转发） */
+  icon?: string
+  /** 已卸载（false）= 只读：会话可打开/删除，不提供新建。缺省按已安装处理。 */
+  installed?: boolean
+  /** 插件启用位（false = 已停用：项目仍显示、会话可读，ask 由 bridge 前置拒绝） */
+  enabled?: boolean
 }
 
 export interface ToolErrorInfo {
@@ -3972,8 +3991,17 @@ function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: {
   // 返回 0 = 「没有发出」——这几条命令的调用方都不等回执（都走事件流的状态更新）。
   if (mobileHost() && MOBILE_UNSUPPORTED_COMMANDS.has(cmd.type)) return 0
   const id = ++cmdSeq
-  const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
   const sessionId = String(cmd.payload?.session_id || cmd.payload?.id || '')
+  // 归属取值（§4.5）：payload.workspace → 会话归属（插件 home）→ 当前活跃工作区。
+  // 不能只看 state.workspace：插件会话停在虚拟 Project 上，但用户仍可能切回真实项目
+  // （或反之）—— 只看活跃工作区会把 ask/new_session 投到**错误的项目**，而那种错投
+  // 不报错，只表现为「插件里的对话跑到项目会话里」。判定下沉到 lib/ownerPath（可单测）。
+  const ws = resolveSendWorkspace({
+    payloadWorkspace: cmd.payload?.workspace,
+    sessionId,
+    activeWorkspace: useAppStore.getState().workspace,
+    ownerOf: getSessionOwnerPath,
+  })
   pending[id] = {
     type: cmd.type,
     workspace: ws || undefined,
