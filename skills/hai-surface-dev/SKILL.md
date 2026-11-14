@@ -182,6 +182,14 @@ What they prove — and each one is a failure, not a warning:
   title equals your declared title, `pageerror` stays 0, and the ＋ menu itself is keyboard
   operable (↑↓ move, Enter opens, Esc closes and returns focus). It also re-checks after a reload.
 
+If you can spare a minute more, one command does the same with **no substitutes** — real
+installer → real Electron (temporary `HAI_DATA_DIR`) → real ＋ menu → real `hai-surface://`
+panel load (it builds `dist/` + `dist-electron/` on first run):
+
+```bash
+cd desktop/app && node e2e/verify_external_surface_electron.mjs --dir=<plugin-dir>
+```
+
 Exit codes: `0` pass, `1` your plugin is wrong, `2` the environment is wrong (port taken, or
 `--dir` has no `surface.json` / no `panel.js`) — `2` never means "your panel is fine".
 

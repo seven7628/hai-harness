@@ -36,6 +36,14 @@ import (
 var surfaceExternalDir = flag.String("dir", "",
 	"外部插件目录（含 surface.json + 入口文件）；配合 -run TestSurfaceInstallExternal 使用")
 
+// surfaceExternalHome 是可选的「装到指定 HOME」（缺省 = t.TempDir() 用完即删）。
+//
+// 它存在的唯一理由是下一步：`HAI_DATA_DIR=<HOME>` 启动真 Electron 时，桥进程的 HOME 就是
+// 这个目录（见 electron/main.ts 的多实例注释）——「装到应用真会去读的那一份」才能验
+// 「装完 → ＋ 菜单里有」。
+var surfaceExternalHome = flag.String("home", "",
+	"把插件装到这个 HOME（缺省：临时目录）；配合 HAI_DATA_DIR 启动应用时用")
+
 // TestSurfaceInstallExternal 把 `-dir` 指向的目录用真安装器装进临时 HOME。
 //
 // 不指定 -dir 时**跳过**（不失败）：这条命令属于 Creator Mode 的验收链，普通 `go test ./...`
@@ -50,8 +58,28 @@ func TestSurfaceInstallExternal(t *testing.T) {
 		t.Fatalf("-dir 解析失败：%v", err)
 	}
 
-	// 临时 HOME：安装器走 appDataDir() 的生产解析，测试不碰真实的 ~/.go-code。
-	st, root := testSurfaceStore(t)
+	// HOME：安装器走 appDataDir() 的生产解析，测试不碰真实的 ~/.go-code。
+	// 缺省临时目录（用完即删）；-home 给了就装到那里（应用随之启动的那种用法）。
+	home := strings.TrimSpace(*surfaceExternalHome)
+	var st *surfaceStore
+	var root string
+	if home == "" {
+		st, root = testSurfaceStore(t)
+	} else {
+		if err := os.MkdirAll(home, surfaceDirMode); err != nil {
+			t.Fatalf("建 -home 失败：%v", err)
+		}
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		prev := appDataDirOverride
+		appDataDirOverride = ""
+		t.Cleanup(func() { appDataDirOverride = prev })
+		st = newSurfaceStore("")
+		root = st.Dir()
+	}
+	if !strings.HasPrefix(root, filepath.Clean(home)+string(os.PathSeparator)) && home != "" {
+		t.Fatalf("store 根目录 = %q，必须在 -home 之下（否则应用读的是另一份）", root)
+	}
 
 	rec := st.Install(dir, true)
 	recJSON, err := json.MarshalIndent(rec, "", "  ")
