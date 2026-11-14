@@ -10,7 +10,7 @@
 2. **引用到会话只插草稿**，发送永远由用户按；「自动发送」留到以后，V1 不做。
 3. **`agent.run` 加载全部系统内置工具 + 全局 MCP + 全局 subAgents**；插件**不能修改**这三套集合；但**允许插件注册自定义工具**进来（只增不改）。
 4. **卸载保留插件会话**（D1）：左栏归入「已卸载插件」，只读、可手动删。
-5. **模型跟随全局、可自由切换**（D3）：插件不能指定 provider/model/密钥；用户在会话里切换与普通会话同一条路。
+5. **模型按会话独立、用户自由切换**（D3）：插件建会话时继承全局 active provider/model；用户在会话窗口用现有 `switch_model` 选择器切换，**只影响这一条会话**；插件不能指定 provider/model/密钥。
 6. **会话 ID 随机、插件可新建**（D4）：不引入 `session_key` 映射；`agent.run` 不传 `session_id` = 新建随机会话，传了就复用；插件自己把 id 存在自己的 localStorage 里。
 
 ## 1. 现状与约束（设计必须落在这上面）
@@ -54,7 +54,7 @@ fields: { id, title, plugin_id, created_at, updated_at, running, pinned? }
   - 不设 `index.json` / `session_key` 映射（D4）：会话 id 由 bridge 随机生成，列表直接扫 `sessions/*.jsonl`；「复用哪条会话」由插件自己记住 id（存它自己的 localStorage）。
 - **运行时**：`runtimePlugin` 加入 `runtimeKind`（`pluginID` 字段），登记在 `m.pluginRuntimes[pluginID]`，**不进 `m.workspaces`**（否则 `workspace_list`/reload/MCP 重放会把插件当项目遍历）。
 - **工具面**：与 `runtimeHubAgent` 同一套全局层（内置 + 用户级 MCP + 全局技能/子代理），**外加该插件自己注册的工具**。
-- **模型**：跟随全局 active provider/model，用户可在会话里自由切换（D3）；插件**不能**指定 provider、模型或密钥。
+- **模型**：建会话时继承全局 active provider/model；会话窗口的 Provider/Model 选择器走既有 `switch_model`（`useAppStore.ts:3059`，按会话独立），切换只影响这条插件会话；插件**不能**指定 provider、模型或密钥。
 
 ### 2.2 生命周期
 
@@ -259,7 +259,7 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 ## 8. UI 变更清单
 
 1. 左栏：插件会话分组（§2.4）。
-2. 会话视图：插件徽标；空态说明「该会话由插件创建，使用全局工具与模型」。
+2. 会话视图：插件徽标；顶部 Provider/Model 选择器与普通会话完全一致（按会话独立）；空态说明「该会话由插件创建，使用全局工具集与当前模型」。
 3. 设置页插件行：能力开关（agent.run / quote / tools）、当前会话数、审计入口。
 4. 安装页/回执：能力摘要（自然语言），安装前可见。
 5. 插件面板：`host.agent` / `host.composer` 的示例（SKILL 提供）。
@@ -269,7 +269,7 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 
 - **D1（已定）卸载后的插件会话**：**保留**，左栏「已卸载插件」分组，只读 + 手动删除（`plugin_session_delete`）。
 - **D2（已定）不绑定 Project，保留第三种 Session**。理由见下；绑项目的成本对比仅省 1.5–2 轮，但代价是插件拿到项目级 bash/file 工具（爆炸半径）、工具面随项目漂移、空项目用户无法使用。
-- **D3（已定）模型**：跟随全局 active provider/model，用户可自由切换；插件不能指定。
+- **D3（已定）模型**：建会话时继承全局 active；用户在会话窗口自由切换 Provider/Model（既有 `switch_model`，按会话独立，不改全局）；插件不能指定。
 - **D4（已定）随机会话 ID**：不做 `session_key` 映射；插件可新建，也可复用自己记住的 id。
 
 ### D2 备选方案的成本对比（存档）
