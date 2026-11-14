@@ -204,6 +204,7 @@ console.log('\n▶ 401：不清 token、错误可读')
   eq(seen.length, 1, '401 也合成 command_response（hubCommand 不会干等 20s）')
   eq(seen[0].ok, false, '合成帧 ok=false')
   assert(/401/.test(tr.status().lastError ?? ''), 'status().lastError 记下 401')
+  eq(tr.status().hub, 'unauthorized', 'Hub 事件流标成 unauthorized（不再每 15s 撞墙）')
 }
 
 console.log('\n▶ 网络错误：可读、不抛、不动 token')

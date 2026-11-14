@@ -219,7 +219,15 @@ export function mobileTransport(deps: MobileDeps = {}): MobileTransport {
     }
     const unauthorized = res.status === 401
     if (unauthorized) {
-      publish({ lastError: '设备凭据已失效（401），请重新配对' })
+      // 凭据被撤销：不清 token（用户要能看到「已配对但失效」，再显式重新配对覆盖）。
+      // Hub 事件流若还没连上/正在重连，直接停在 unauthorized，别再每 15s 去撞墙。
+      const hub = links.hub
+      if (hub.state !== 'open') {
+        hub.state = 'unauthorized'
+        publish({ hub: 'unauthorized', lastError: '设备凭据已失效（401），请重新配对' })
+      } else {
+        publish({ lastError: '设备凭据已失效（401），请重新配对' })
+      }
       return { ok: false, unauthorized: true, error: '设备凭据已失效（可能被撤销），请重新配对（HTTP 401）' }
     }
     if (!res.ok) {
