@@ -9,7 +9,7 @@
 |---|---|---|---|
 | P7-01 | I3：群组编辑原子化（`hub_group_edit`） | — | 单次校验 + 单次 `SaveGroup` + 一次 roster 重建；前端/ mock / 浏览器回归 |
 | P7-02 | N7：同内容指纹改为 per-target 跳过 | — | 只跳过命中的 target；其他 target 继续；全部跳过才 `waiting_human` |
-| P7-03 | 12 人群 @all 并发/429 压力回归 | — | 确定性 fake provider：11 并发、3 条 429 退避重投、不丢不重复 |
+| P7-03 | 12 人群 @all 并发/429 压力回归 | — | 确定性 fake provider：人类 @all=12 并发 / owner @all=11 并发、3 条 429 退避重投、不丢不重复 |
 | P7-04 | I1 收尾 + 小 nits | P7-01/02 | 设置保存后立即刷新状态条；已挂 run 超时热更新；429 清 timer；文案/表驱动/stat 移出锁 |
 
 执行顺序：P7-01 / P7-02 / P7-03 可并行；P7-04 在 P7-01、P7-02 合并后做，避免同文件冲突。
@@ -56,12 +56,15 @@
 
 要求：
 
-- 12 人群（1 owner + 11 成员），人类 `@all`；fake provider 记录并发峰值、每个 target 的调用次数。
+- 12 人群（1 owner + 11 成员），覆盖两条 @all 口径：
+  - **人类 @all**：sender 是人类、不在成员表 → targets = 12（owner + 11 成员），峰值 = 12；
+  - **owner 智能体 @all**：排除自己 → targets = 11，峰值 = 11。
+- fake provider 记录并发峰值、每个 target 的调用次数。
 - 断言：
-  - 峰值 = 11（不是 1，也不是 12）；所有 11 条都真的启动；
-  - 3 条 provider 返回 429（run 中途，非投递窗口），退避后重投成功；其余 8 条不受影响；
+  - 人类 @all 峰值 = 12、owner @all 峰值 = 11；所有目标都真的启动；
+  - 人类 @all 的 12 条里选 3 条 provider 返回 429（run 中途，非投递窗口），退避后重投成功；其余 9 条不受影响；
   - 账本：3 条 attempts≥2 且最终 done/running，无 failed；无重复 target、无丢 wake；
-  - 群状态条最终 `done`/队列 0；无 goroutine 泄漏（可用现有 testManager 清理路径）。
+  - 群状态条最终队列 0（本仓库没有 `done` 这个 ConversationStatus）；无 goroutine 泄漏（可用现有 testManager 清理路径）。
 - 建议文件：`desktop/bridge/hub_concurrency_stress_test.go`；测试名 `TestHubAllMembersConcurrencyAnd429`。
 - 真实 provider 压测（opencode/deepseek 等）需要凭据与费用，不在本任务自动化；在文档里保留「真实 11 并发」待人工执行。
 

@@ -2541,8 +2541,10 @@ const BASE = {
       ],
       "acceptance": "新增 hub_group_edit：一次校验（成员存在/去重/12 上限/owner 不可移除）+ 一次 SaveGroup + 一次 roster 重建；任一校验失败群逐字段不变；前端 saveGroupEdit 改调一条命令；mock 同步；成功/原子性/浏览器回归。",
       "tests": "go test ./desktop/bridge -run 'HubGroupEdit|GroupEdit'；node scripts/test-hub-group-edit.mjs；浏览器 check-hub-group-edit；tsc",
-      "commit": "—",
-      "status": "in_progress"
+      "commit": "ead72e6",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：bridge 定向 28.6s + tsc + test-hub-group-edit 87 全绿；merge 336f9af。原子性/单命令/一次 roster 重建由实现方反证。"
     },
     {
       "id": "P7-02",
@@ -2557,8 +2559,10 @@ const BASE = {
       ],
       "acceptance": "指纹命中只 skip 该 target（原因码 fingerprint_loop），其他 target 继续入队；全部跳过才 waiting_human；前端有可读文案；反证旧实现整批 exhausted。",
       "tests": "go test ./agenthub -run 'Fingerprint|Offer|Exhaust'；node scripts/test-hub-conv.mjs；tsc",
-      "commit": "—",
-      "status": "in_progress"
+      "commit": "e9e160b",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：agenthub 13.8s + tsc + test-hub-conv 151 全绿；merge 165c21e。per-target 指纹红→绿由实现方反证。"
     },
     {
       "id": "P7-03",
@@ -2570,8 +2574,10 @@ const BASE = {
       ],
       "acceptance": "12 人群 @all：并发峰值=11、11 条都启动；3 条 run 中途 429 退避后重投成功；无 failed/重复/丢 wake；账本 attempts≥2；队列最终清空。",
       "tests": "go test ./desktop/bridge -run TestHubAllMembersConcurrencyAnd429 -count=1",
-      "commit": "—",
-      "status": "in_progress"
+      "commit": "522f552",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：agenthub + desktop/bridge 整包全绿；merge 2021e97。人类 @all=12 / owner @all=11 两个子测试，3 条 429 退避重投；真实 provider 压测仍待人工。"
     },
     {
       "id": "P7-04",
@@ -3811,16 +3817,22 @@ const BASE = {
       "reviewNote": "首轮独立 Review CHANGES_REQUESTED（B1/B2 blocking、I1/I2 important、N1-N7）；修复后定向复审仅剩 N4 测试断言 blocking，已修；干净 worktree `go test -p 4 ./...` 全绿；tsc/test:hub-conv(148)/hub-p3b(295)/p4(30)/css 全绿；浏览器 conversation-bar(26)/menu-layer/group-edit/group-stream/dm-stream 全绿；merge 472bbd3。"
     },
     "P7-01": {
-      "status": "in_progress",
-      "commit": "—"
+      "status": "done",
+      "commit": "ead72e6",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：bridge 定向 28.6s + tsc + test-hub-group-edit 87 全绿；merge 336f9af。原子性/单命令/一次 roster 重建由实现方反证。"
     },
     "P7-02": {
-      "status": "in_progress",
-      "commit": "—"
+      "status": "done",
+      "commit": "e9e160b",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：agenthub 13.8s + tsc + test-hub-conv 151 全绿；merge 165c21e。per-target 指纹红→绿由实现方反证。"
     },
     "P7-03": {
-      "status": "in_progress",
-      "commit": "—"
+      "status": "done",
+      "commit": "522f552",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：agenthub + desktop/bridge 整包全绿；merge 2021e97。人类 @all=12 / owner @all=11 两个子测试，3 条 429 退避重投；真实 provider 压测仍待人工。"
     },
     "P7-04": {
       "status": "in_progress",
