@@ -82,7 +82,9 @@ declare them in `surface.json` — the host draws the menu itself, you do not in
 Rules the installer enforces (any violation = the whole install is `rejected`, nothing is written):
 `entries` ≤ 20, `id` matches `^[a-z][a-z0-9-]{1,40}$` and is unique, `title` non-empty and ≤ 64
 characters, `icon` is a path **inside** the plugin folder (a missing icon file is fine — the host
-falls back to the kind icon).
+falls back to the kind icon). `title` is either a plain string (rendered in every language) or a
+`{ "zh": "课表", "en": "Schedule" }` object — at least one language must be non-empty, each ≤ 64
+characters, and the host picks by the UI language at render time.
 
 How the host renders them (three places, all host-owned):
 
@@ -119,6 +121,43 @@ surfaces.register({ kind: 'plugin:hello', group: 'plugin', title: (tab) => title
   declared entries.
 - Disabling or uninstalling the plugin removes all entrances immediately; tabs already open turn
   into tombstones (the host does that — do not try to close them from the plugin).
+
+## Host runtime contract (storage / theme / icons / lifecycle)
+
+Four questions every plugin hits while it is being written; the answers are not visible from the
+rest of this file.
+
+**Where your code runs.** `panel.js` is imported into the app's own page — not an iframe, not a
+worker. You share its `window`, its `document.documentElement` and its web storage. Your globals,
+timers and listeners live as long as the panel stays loaded.
+
+**Storage is yours.** The host gives plugins no storage API and no file write. Keep your own data:
+`localStorage` is available and is the intended place for small state (progress ticks, the last
+selected tab). Prefix every key with your id (`course-mvp:progress:v1`) — it is the same storage the
+app uses. Two consequences: the origin differs between dev (`http://localhost:5173`) and production
+(`file://…/dist/index.html`), so data written in one is not visible in the other; and **uninstalling
+a plugin does not delete its data** — clearing it is the user's call. If `localStorage` throws
+(quota, disabled storage), fall back to in-memory state and say so in the UI instead of crashing the
+panel.
+
+**Theme is live.** `host.theme()` returns `{ mode, tokens }` for the theme *right now*. It is not a
+constant: call it **inside render**, not once in `apply` and stored — a cached palette keeps the old
+colours after the user switches light/dark. The tokens are exactly `bg, fg, border, accent, ok,
+warn, err, info`; there is no `muted` and no font token. Derive anything else from these (`fg` at
+reduced opacity) or use `currentColor`.
+
+**Icons.** Two different things share the name. `surface.json.icon` is a path inside your folder:
+the host loads it through its own protocol and uses it as the provider's fallback icon (the tab
+strip), unless your provider declares `icon`. `entries[].icon` is also a path, used by the host in
+the menu. `provider.icon` is a function `(tab?) => ReactNode` rendered at ~12 px — return an element
+from it, not a path.
+
+**Lifecycle.** The host calls `apply` once per load. On reload (file changed, plugin re-enabled,
+app restart) it first unregisters your kind, then imports the file again and calls `apply` again. So
+do all `surfaces.register` calls **inside `apply`**, never at module top level (a top-level
+registration runs before the old provider is gone and leaves a stale one), and keep `apply`
+idempotent. Anything you start must be stoppable: return a cleanup from `useEffect`, and do not
+leave a `setInterval` running after your panel unmounts.
 
 ## Forbidden (they are not style preferences)
 

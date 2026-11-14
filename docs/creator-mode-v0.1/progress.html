@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-14 10:30",
-    "current": "R16b"
+    "updated": "2026-11-14 12:40",
+    "current": "R16b + R11c 已合并；下一项待定（R08e 转码 / 插件页清除数据）"
   },
   "rounds": [
     {
@@ -943,14 +943,15 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R11"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "01fbd9a（merge）",
+      "review": "主会话复核：file 标签名整段迁入 fileSurface.title（shortName + 预览后缀，输出逐字不变）；web/plugin 合并成一条 declaredEntryTitle > provider.title > kindLabel；新增 SurfaceProvider.nativeHost?(tab,s) 能力位，web 恒 true、file 读 previewEmbedActive、缺省 false=安全侧；restored 裁决 b（保留 + 降级为运行时状态，PersistedTabSet 无此键，N26g/N11c 正面证据）。kind === ' 17 处 → 13 处，剩余逐条理由进 03 §5.4.1。19 项门禁逐项同数，right-tabs 236→238、session-tabs 38→45（+7），其余 15 项不变；3 条变异真红真复原。合并后在 main 复跑 tsc 0 / eslint 0·59 / build ✓ / go TestSurface ok",
       "perf": [],
       "acc": [
-        "03 §5.4 里标为「真 legacy」的 3 处（#4/#5 宿主判定、#7 file 标签名、#8 provider 兜底）各自有 provider 契约承载",
-        "kind === ' 从 16 行继续下降，且 14 处「标签形状/探针契约」不动",
-        "全部 RightPanel 探针逐项同数"
+        "3 处真 legacy 各有 provider 契约承载：fileSurface.title / 单一 tabTitle 策略 / nativeHost",
+        "kind === ' 16 行/17 处 → 13 行/13 处；剩下 13 处（标签形状 + data-* 探针契约）逐条理由在 03 §5.4.1",
+        "19 项门禁逐项同数（只增不减）：right-tabs 238 / session-tabs 45，其余 15 项与基线逐字相同",
+        "restored 保留的退出条件写在声明处：先给收敛性换观测点，再删字段+改写四条断言（独立 PR）"
       ],
       "rollback": "三处互相独立，各自一个 commit；宿主判定涉及 embedHide，回滚优先保留行为"
     },
@@ -1156,14 +1157,16 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R16"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "4a42456（merge，冲突解在 RightPanel.tabTitle：取 R11c 单一策略 + R16b 的 lang 实参）",
+      "review": "主会话复核 + 端到端验收：安装回执 entries/entryHint 在 applied 与 already_installed 都带；entries[].title 三处同改（Go 逐语言 ≥1 非空 ≤64 rune / surface-index 原样透传 / 渲染点 entryTitleText(useLang())），字符串写法两语言都不变；＋菜单键盘 7 条断言。用干净子智能体只读 SKILL.md 写出的课程 MVP（/tmp/creator-mvp/course-mvp）做真验收：真安装器 applied entries=3 hash fafa49d8…；浏览器探针 31 ✅（三入口/键盘/reload）；真 Electron 冒烟 ✅（真协议 hai-surface:// + 真菜单 + 面板渲染非空 + pageerror 0）。合并后 tsc 0 / eslint 0·59 / build ✓ / go TestSurface ok",
       "perf": [],
       "acc": [
-        "surface_install 回执带一句「入口在右栏 ＋ → 面板插件」（含条目数）",
-        "＋ 菜单支持 ↑↓ 移焦点 / Enter 进入 / Esc 还焦点（与 +N 溢出菜单一致）",
-        "entries[].title 支持 string | {zh,en}（三处一起改：Go 校验 / 索引 IPC / 渲染）"
+        "surface_install 回执带 entries 条数与 entryHint「right panel ＋ → Panel plugins」（applied / already_installed）",
+        "＋ 菜单 ↑↓ 移焦点 / 首项 ↑ 回绕末项 / Enter 原生激活 / Esc 关闭并回焦 ＋；aria-haspopup/expanded",
+        "entries[].title 支持 string | {zh,en}：Go 校验 / IPC 透传 / 渲染点选语言，三处一致",
+        "验收工具链两条命令可重复：test:surface-install（真安装器）+ e2e:external-surface（真 loader）；另有真 Electron 冒烟",
+        "SKILL.md 收口补「宿主运行时契约」：存储（同源 localStorage、键前缀、卸载不清数据）/ 主题（八 token、render 内现读）/ 图标（manifest 路径 vs provider.icon 函数）/ apply 生命周期（每次先 unregister 再 apply）"
       ],
       "rollback": "三条互相独立；回执文案可单独撤，不影响入口本身"
     }
