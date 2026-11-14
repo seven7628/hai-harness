@@ -3696,12 +3696,13 @@ const pending: Record<number, PendingCommand> = {}
 function bareNewSessionInFlight(): boolean {
   return Object.values(pending).some((p) => p.type === 'new_session' && !p.sessionId)
 }
-// responseWorkspaceMatches 回执归属（回显的 workspace）是不是**当前**活跃工作区。
+// responseWorkspaceMatches 这条回执是不是「发给我当前活跃工作区」的那条命令的回答。
 //
-// 与裸比较 `respWs === state.workspace` 的差别只有一处，但很关键：回显缺失时用
-// 请求时的 workspace（pending[id].workspace）兜底。虚拟 Project 的 home 由客户端归属
-// 决定，回执未必回显 `workspace`；只按回显判会把插件会话的响应当成「不是当前工作区」
-// 而**静默丢弃** —— 症状是点了没反应/历史不出现，且没有任何报错可查。
+// 与裸比较 `respWs === state.workspace` 的差别：路径取**请求时**登记的工作区
+// （pending[id].workspace），回显只兜底。两处都必须这样做，否则插件会话的响应会被
+// **静默丢弃**（症状：点了没反应 / 历史不出现，且没有任何报错可查）：
+//   · 虚拟 Project 的 home 由客户端归属决定，回执未必可靠回显 `workspace`；
+//   · 循环连发时迟到的回显可能已被后续命令改写（见 mock 的同名修复）。
 function responseWorkspaceMatches(respWs: string, meta: PendingCommand | undefined, current: string | undefined): boolean {
   // 请求时登记的工作区优先（pending[id].workspace），回显兜底 —— 与 list 的取路径同源：
   // 「这条响应回答的是发给我当前工作区的那条命令吗」，答案在发起时就确定了。
@@ -3746,8 +3747,6 @@ function disarmBrowserBusyWatchdog(): void {
   }
 }
 
-// 工作区级 git_history「加载更多」意图标记（请求前置位，响应消费后复位）由 wsHistAppend 承担；
-// Git 写操作统一入口：无 workspace / 已有在途操作时忽略；busy 标识驱动按钮禁用与 spinner。
 // isVirtualWorkspace 当前活跃项目是不是虚拟 Project（插件 home）。
 //
 // 「按工作区」的能力（git、项目层 skills/MCP、文件树刷新）一律以它判定（§4.6 第 4、5、8 条）：
@@ -3758,6 +3757,8 @@ function isVirtualWorkspace(): boolean {
   return isPluginProjectPath(st.workspace) || isVirtualProject(st.projects.find((p) => p.path === st.workspace))
 }
 
+// 工作区级 git_history「加载更多」意图标记（请求前置位，响应消费后复位）由 wsHistAppend 承担；
+// Git 写操作统一入口：无 workspace / 已有在途操作时忽略；busy 标识驱动按钮禁用与 spinner。
 function gitWriteOp(type: 'git_stage' | 'git_unstage' | 'git_discard' | 'git_commit' | 'git_checkout' | 'git_init', payload: Record<string, unknown>): void {
   const st = useAppStore.getState()
   if (!st.workspace || st.gitOpBusy || isVirtualWorkspace()) return
@@ -5552,14 +5553,14 @@ export function dispatchEvent(raw: AnyEvent): void {
         if (listWs) setState((s) => applySessionsWithOwner(s, listWs, sessions))
         if (responseWorkspaceMatches(respWs, meta, getState().workspace)) {
           let recovered = false
-          if (recoverPaths.has(respWs)) {
-            recoverPaths.delete(respWs)
+          if (recoverPaths.has(listWs)) {
+            recoverPaths.delete(listWs)
             if (sessions.length > 0) {
               // 恢复上次活跃会话（persisted lastSession），找不到则回到列表第一条。
               // sessionPending 置位：恢复 new_session 在途 → 此窗口的 ask 只缓冲、等激活后 flush
               //（防恢复期间二次自动建会话）。
               const saved = loadJSON<PersistProjects>(LS_PROJECTS)
-              const pref = saved?.lastSession && saved.lastSession.path === respWs ? saved.lastSession.id : sessions[0].id
+              const pref = saved?.lastSession && saved.lastSession.path === listWs ? saved.lastSession.id : sessions[0].id
               sessionPending = true
               recovered = true
               const recoverId = sessions.some((x) => x.id === pref) ? pref : sessions[0].id
