@@ -58,7 +58,8 @@
 
 ### 2.2 四项必须保留的资产
 
-- **`TabSet` + `scopeKey`**（`store:37/:54`）：会话级标签集、最近关闭、`restored` 标记；
+- **`TabSet` + `scopeKey`**（`store:37/:54`）：会话级标签集、最近关闭、`restored` 标记
+  （R11c 裁决：**运行时状态、不落盘** —— 语义与退出条件见 store 里 `TabSet.restored` 的注释）；
 - **持久化**（`store:1584` `persistTabsNow`，localStorage + 结构版本）：插件标签要跟着走；
 - **视图池 LRU + 休眠**（web 标签的 `viewId/pageId`、`isPendingWebTab`、`rebuildWebTab`）：这是"标签 ≠ 视图"的成熟解法，插件不得绕过；
 - **`syncTabsToRightTab` 的"单一真值源"原则**：保留"只允许一处推另一处"，但**方向反转**——`activeId`（实例）为权威，`rightTab` 降为派生值。理由：多标签并存后同 kind 可有多个实例，kind 无法定位"当前是哪一个"（见 §3.3）。

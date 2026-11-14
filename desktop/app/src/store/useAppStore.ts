@@ -122,8 +122,30 @@ export interface TabSet {
   tabs: TabInstance[]
   activeId: string | null // null = 用户把标签关光了（显示空态，不自动补默认标签）
   closed: TabInstance[] // 最近关闭（⌄ 下拉「重开」），上限 TAB_CLOSED_MAX
-  // 阶段 5：本次进程内**刚重启恢复**、还没被任何动作碰过。不持久化，用完即清。
-  // 见 syncTabsToRightTab：恢复态第一次被读到只清标记（集合不动），第二次读起什么都不做。
+  /**
+   * **运行时状态，不是持久化字段**（R11c 裁决 b：保留并降级，此前它是一条没写清归属的
+   * 一次性标记）。语义只有一句：本次进程内**刚由 loadPersistedTabs 恢复出来、还没被任何
+   * 显式标签动作碰过**。作用域 = 本进程；寿命 = 一次读。
+   *
+   * 它不是持久化字段，有三条硬证据（不是注释里的承诺）：
+   *   · `PersistedTabSet`（写盘形状）里没有这个键 —— 落盘只写 { tabs, activeId }；
+   *   · 写它的人只有 loadPersistedTabs 一处（`restored: true`），清它的人只有
+   *     syncTabsToRightTab 的一次性清理（`restored: false`）以及**显式标签动作**构造新
+   *     TabSet 时天然不带（openTab/closeTab/activateTab…）；
+   *   · 探针 N26g 直接读 localStorage 断言这个键从没出现过（scripts/test-right-panel-tabs.mjs）。
+   *
+   * 为什么裁决是「保留」而不是删掉（R11c 报告里的裁决点）：它今天唯一的读者是自己的清理
+   * 分支，看起来像自指的坏味道；但删掉它要求改写 N25/N26/N26b/N26c 四条断言（决策口径是
+   * 「不许删断言」，改写等于把被验证的对象换掉），而被它钉住的**性质**是可测且真实的产品
+   * 行为：RightPanel 每次挂载都会调 syncTabsToRightTab，若清理分支不是「一次收敛」，
+   * 就是 effect → set → effect 的自激环（N26b「第三次 sync 不 set」正是这条）。换言之
+   * 这个字段存在与否不影响 UI，但它的生命周期是**收敛性**的唯一观测点。
+   *
+   * 成本与退出条件：每次进程启动、每个恢复出来的 scope 多一次 set（≤ TABS_PERSIST_MAX_SCOPES
+   * 个）。将来若出现第二个读者，就地把它升级成正式的「恢复中」状态（改名并进 TabSet 的
+   * 公共语义）；若 N26b 那类收敛性换成别的观测点（例如直接对 set 计数），这个字段可以连同
+   * 四条断言一次性删掉。
+   */
   restored?: boolean
 }
 export const TAB_CLOSED_MAX = 10
@@ -1653,6 +1675,9 @@ type PersistedTab =
   | { id: string; kind: 'file'; path?: string; mode?: FileTabMode; toolId?: string; startLine?: number }
   | { id: string; kind: 'web'; url: string; srcPath?: string }
   | { id: string; kind: `plugin:${string}`; params?: Record<string, unknown> }
+// 写盘形状。**这里刻意没有 restored**（R11c 裁决）：TabSet.restored 是运行时状态，
+// 一旦它出现在这个 interface 里就说明有人把它当成持久化字段了 —— 那会让「本次进程刚恢复」
+// 这条语义跨进程传下去，恢复出来的标签集永远是「刚恢复」。
 interface PersistedTabSet { tabs: PersistedTab[]; activeId: string | null }
 interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
 
@@ -1875,8 +1900,10 @@ function syncTabsToRightTab(s: AppState): TabSet {
     const tab = makeTab('activity', s)
     return { tabs: [tab], activeId: tab.id, closed: [] }
   }
-  // restored 是「本次启动起还没被用户碰过」的一次性标记：只在**显式标签动作**里清
-  //（那些动作会构造新 TabSet，不带 restored），读路径不动它 —— 否则重启恢复的 N25 会转红。
+  // restored 是「本次启动起还没被用户碰过」的**运行时**标记（不是持久化字段，见 TabSet 的
+  // 声明处）：只在**显式标签动作**里清（那些动作会构造新 TabSet，不带 restored），读路径
+  // 不动它 —— 否则重启恢复的 N25 会转红。清标记的唯一读路径是 store 的
+  // syncTabsToRightTab 动作（一次性，防 effect 自激）。
   return cur
 }
 
@@ -11588,8 +11615,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   // R11b 之后这里只剩两条分支（旧的「按 rightTab 反选标签」「把派生字段纠正回激活标签」都已删）：
   //   ① 没有标签集 → 建默认集（一个 activity 标签）；
   //   ② 有标签集且带着恢复标记 → 只清标记（集合本身不动）。
-  // ② 留着是因为它是一条**可观察的**状态机（N25/N26 钉住：首次读之后标记消失、此后不再 set）；
-  // 它当初是为右栏派生字段的时序服务的，今天已没有外部读者 —— 见报告里的裁决点。
+  // ② 留着是因为它是一条**可观察的**状态机（N25/N26 钉住：首次读之后标记消失、此后不再 set），
+  // 而它钉住的正是**收敛性**：清理分支若不能一次收敛，这里就是 effect → set → effect 的自激环
+  //（N26b「第三次 sync 不 set」是这条的唯一观测点；N26g 另钉住 restored 从不落盘）。
+  // R11c 裁决：保留 restored 并降级为明确的**运行时状态**（理由与退出条件写在 TabSet 的声明处）。
   syncTabsToRightTab: () => {
     const s = get()
     const scope = tabScopeKey(s)

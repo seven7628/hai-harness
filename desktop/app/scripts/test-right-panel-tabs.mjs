@@ -891,6 +891,9 @@ async function main() {
     reset({ activeSessionId: S1 })
     useAppStore.setState({ embedNav: nav([], null) })
     st().openTab({ kind: 'web' }) // 「+ 浏览器」开的空 web 标签（没有 viewId，也没有 url）
+    // R11c（裁决 b 的正面证据）：非恢复路径构造出来的标签集**没有**这个键 —— 它不是标签集的
+    // 常驻字段，只有 loadPersistedTabs 会写它。
+    eq(st().tabsByScope[S1].restored, undefined, 'N11c 非恢复路径的标签集没有 restored（只有恢复会写它）')
     st().flushSessionTabs()
     eq(readStored().scopes[S1].tabs.filter((t) => t.kind === 'web').length, 0, 'N12 反查不到 url 的 web 标签**丢弃**（死标签不恢复）')
 
@@ -915,6 +918,11 @@ async function main() {
     // R11b 之前第一次 sync 只补派生字段、集合不动（标记因此还在）；「补派生」这件事随字段一起
     // 删掉后，第一次读就直接清标记 —— 下面 N26 钉住的就是那一次 set。
     eq(st2().tabsByScope[S1].restored, true, 'N25 恢复标记仍在（面板还没读过这个集合）')
+    // N26g：**趁标记还在**把它写一次盘 —— 断言它一个字节都不落盘。这是「运行时状态 vs
+    // 持久化字段」的正面证据（R11c 裁决 b）：若哪天有人把它加进 PersistedTabSet，下一轮启动
+    // 恢复出来的标签集就永远带着「刚恢复」，而 N26b 的收敛性断言会变成永远的「刚 set 过」。
+    st2().flushSessionTabs()
+    assert(!mem.get(LS_TABS).includes('restored'), 'N26g restored 从不落盘（写盘形状只有 tabs/activeId）')
     const refBefore = st2().tabsByScope
     st2().syncTabsToRightTab() // 面板 effect 的收口（真实链路由 RightPanel 的 effect 调用）
     const set2 = st2().tabsByScope[S1]

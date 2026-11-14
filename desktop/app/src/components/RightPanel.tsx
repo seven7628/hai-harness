@@ -9,6 +9,7 @@ import { ActivityTab } from './ActivityTab'
 import { FilePreviewTab } from './FilePreview'
 import { EditorConfirm } from './EditorConfirm'
 import { fileUrlToPath } from '../lib/filePaths'
+import { activeTabOf } from '../lib/rightPanel'
 import { getSurface, subscribeSurfaces } from '../surfaces/registry'
 import { SurfaceBoundary, SurfaceTombstone } from '../surfaces/SurfaceBoundary'
 import type { UnavailableReason } from '../surfaces/SurfaceBoundary'
@@ -18,7 +19,6 @@ import type { PluginEntryItem } from '../surfaces/plugin/entries'
 import PluginEntryIcon from '../surfaces/PluginEntryIcon'
 import type { SurfaceKind } from '../surfaces/types'
 import type {} from '../lib/fileStatus'
-import { shortName } from '../lib/shortPath'
 import { copyText } from '../lib/clipboard'
 import { useT } from '../i18n'
 import TodoPanel from './TodoPanel'
@@ -364,7 +364,17 @@ export default function RightPanel() {
   const previewEmbedActive = useAppStore((s) => s.previewEmbedActive)
   useEffect(() => {
     if (!embeddedPresentation) return
-    const nativeHost = activeTab?.kind === 'web' || (activeTab?.kind === 'file' && previewEmbedActive)
+    // 宿主判定归 provider（R11c 的 `nativeHost` 能力位，契约见 surfaces/types.ts）：
+    // 这一行此前是两条硬编码 —— 「web 恒为宿主」+「file 且预览视图在显示时也算」，
+    // RP 同时点名两个 kind 并各自解释一遍「为什么它是宿主」。现在 RP 只问「谁在当宿主」。
+    // 谓词从**当帧快照**取，不读闭包里的 activeTab：所以下面的 deps 与迁移前逐字一致
+    //（`activeTab?.kind` 只作**触发面**用 —— 回答「什么时候重算」，不参与计算）。
+    // 这不是洁癖：把整个 activeTab 放进 deps 会让 file→file{preview} 这类**同 kind** 切换
+    // 也重跑本 effect，而那时预览面板还没把 previewEmbedActive 写进来（它走 IPC），
+    // 于是闸门会先 hide 掉刚挂上的视图 —— 正是 R08b 的空白预览，只是换了个入口。
+    const s = useAppStore.getState()
+    const tab = activeTabOf(s)
+    const nativeHost = !!tab && (getSurface(tab.kind)?.nativeHost?.(tab, s) ?? false)
     if (!(rightExpanded && nativeHost)) void window.desktop?.embedHide()
   }, [embeddedPresentation, rightExpanded, activeTab?.kind, previewEmbedActive])
 
@@ -413,32 +423,22 @@ export default function RightPanel() {
   const webTabUrl = (tab: TabInstance): string =>
     tab.kind === 'web' ? (embedNav?.targets?.find((x) => x.id === tab.viewId)?.url ?? tab.url ?? '') : ''
   const tabTitle = (tab: TabInstance): string => {
-    if (tab.kind === 'file') {
-      const base = (tab.path ?? '').split('/').filter(Boolean).pop()
-      // 长文件名中间截断（保留 `_test.go` 这类尾巴）：标签最宽 168px，从尾巴截断时
-      // `conversation_router.go` 与 `conversation_router_test.go` 会长得一模一样。
-      // 完整路径在 title 里（见渲染点的 title 属性）。
-      const name = (base && shortName(base)) || kindLabel('file')
-      // mode 后缀（R08b / R08a 偏差 5）：同一个文件可以同时有 preview 与 source 两个标签
-      //（tabKeyOf 的幂等键带 mode），而标题此前只写文件名 —— 两个标签一模一样，用户分不清
-      // 点哪个。只给**非缺省**的那一侧加后缀：source 是缺省（也是绝大多数标签），给它加词
-      // 等于把全应用的标签都改宽一寸，而「预览」这种新入口才是需要被认出来的那个。
-      // diff 也有同样的问题，但那是 PR-06 之前就有的口径，本轮不动（不在验收范围内）。
-      const mode = (tab as FileTabInstance).mode
-      return mode === 'preview' ? `${name} · ${t('rp.tab.previewTag')}` : name
-    }
-    if (tab.kind === 'web') return getSurface('web')?.title(tab, t) ?? kindLabel('web')
-    // 插件 kind（PR-12 起进 store）没有 i18n 文案。
-    // R16 起**已声明的入口**由 manifest 定标题：菜单项叫「课表」而标签叫别的，用户会以为点错。
-    // 默认入口（零 entries）与插件自己 openTab 的标签仍归 provider.title —— 那两种情况下主人
-    // 是插件自己，宿主没有声明可以依据（见 surfaces/plugin/entries.ts 的 declaredEntryTitle）。
-    // provider 缺失（加载失败/已卸载）时退回 kind 本身，但**已声明入口**仍显示它的 manifest 标题
-    //（墓碑也不该叫 plugin:course-manager）。
+    // 标题的**一条**策略（R11c）：已声明的入口 > provider.title > kind 文案。
+    // 三条分支各有一套兜底的日子结束了 —— 此前 file 在 RP 里自己算 basename、web 写
+    // `?? kindLabel('web')`、plugin 写 `?? kindLabel(tab.kind)`：同一个「provider 没有就用
+    // kind 名」的意图写了三遍，而且 file 那一路压根没问 provider（标签标题因此丢掉文件名
+    // 与 mode 后缀的全部细分）。现在只有这一行，三种 kind 的差异都在各自 provider 里。
+    //
+    // 为什么 declaredEntryTitle 排在 provider 前面：R16 起**已声明的入口**由 manifest 定
+    // 标题（菜单项叫「课表」而标签叫别的，用户会以为点错）。默认入口（零 entries）与插件
+    // 自己 openTab 的标签仍归 provider.title —— 那两种情况下主人是插件自己，宿主没有声明
+    // 可以依据。非 plugin kind 它当场返回 ''（第一行就短路），不是一次查表。
     const declared = declaredEntryTitle(tab.kind, (tab as { params?: unknown }).params)
     if (declared) return declared
-    const prov = getSurface(tab.kind)
-    if (prov) return prov.title(tab, t)
-    return kindLabel(tab.kind)
+    // provider 缺失（加载失败/已卸载）时退回 kind 本身，但**已声明入口**仍显示 manifest 标题
+    //（墓碑也不该叫 plugin:course-manager）。plugin kind 的 i18n 文案不存在，t() 返回键名
+    // 本身（'rp.tab.plugin:course-manager'）—— 与 R11c 之前逐字一致。
+    return getSurface(tab.kind)?.title(tab, t) ?? kindLabel(tab.kind)
   }
 
   if (!rightExpanded) {

@@ -1424,6 +1424,33 @@ provider 兜底 1。**真正的 legacy 判别只有 3 处**（#7 标签名、#8 
    `kind === 'web'` 变成「有没有池身份」，那时再收（不要提前抽象成 `hasPoolIdentity(tab)`，
    现在只有 web 一个实现，抽象只会多一层要维护的假接口）。
 
+#### 5.4.1 R11c 收口：3 处 legacy 已消（16 行 / 17 处 → 13 行 / 13 处）
+
+R11c 只做一件事：把上表里**标着 legacy 的那三行**按「provider 能不能给」搬进 provider。上面
+那张表保留为 R11 的基线（带 R11 的行号），本小节记下今天的口径与去向。
+
+| 上表 # | R11 的写法 | 现在 | 归属 |
+|---|---|---|---|
+| 7 | `if (tab.kind === 'file')` → `basename(path)` + 「· 预览」后缀 | `fileSurface.title(tab, t)`：短文件名（`shortName` 中间截断）+ 非缺省 mode 的后缀 | `surfaces/builtin/fileSurface.tsx` |
+| 8 | `getSurface('web')?.title(...) ?? kindLabel('web')` | **一条**策略：`declaredEntryTitle ?? provider.title ?? kindLabel(kind)`（`tabTitle` 里只剩这一处兜底） | `RightPanel.tsx` 的 `tabTitle` |
+| 4+5 | `kind === 'web' \|\| (kind === 'file' && previewEmbedActive)` | `SurfaceProvider.nativeHost?: (tab, s) => boolean`：web `() => true`、file `(_t, s) => s.previewEmbedActive`，**缺省 false** | `surfaces/types.ts` + 两个 provider |
+
+`grep -c "kind === '" desktop/app/src/components/RightPanel.tsx` = **13**（13 处，全部一行一处）。
+剩下的 13 条与上表一一对应：#1#2#3#6#9#10#13#15 是 web embed 语义与 file path，#11#12 是 **e2e
+契约**（`data-mode`/`data-view`），#14 是未读交互状态，#16#17 是 file 的布局与工具栏分支。
+**一条都没改**，也不需要改 —— 它们回答的是「标签长什么样」，不是「面板是谁」。
+
+三条新口径（评审时按这三条问，不要再按 `kind` 问）：
+
+1. **标题**：标签名只经 `provider.title`。file 的 diff/source/edit/preview 四种形态的差异
+   在 `fileSurface.title` 里表达（只给 `preview` 加后缀：source 是缺省，给它加词等于把全应用
+   的标签都改宽一寸）。RP 侧的 `title` 属性仍显示**完整路径**（`tab.path`），不读标题。
+2. **兜底**：`provider.title` 缺失时退回 `kindLabel(kind)`，**只有一处**。落点是「provider 没
+   注册/被卸载」（墓碑、只 import RP 的探针页），不是 kind 判别。
+3. **原生宿主**：`nativeHost(tab, s)` 是能力位（`types.ts` 有完整契约注释）。它带 `s` 是为了
+   file ——「`mode:'preview'` 只是可能渲 pdf，真正挂上视图的是预览面板」，所以 file 的实现读
+   运行时标记 `previewEmbedActive` 而**不读自己的 mode**（R08b 的空白预览就是按 mode 判出来的）。
+
 ---
 
 ## 6. 工作量与分工
