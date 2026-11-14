@@ -34,11 +34,14 @@ var errHubGroupTargetBusy = errors.New("群会话忙：上一轮尚未结束")
 // hubConversation 懒开对话控制器。限额可被测试用 hubConvLimits 先注入（生产恒 nil）。
 // 生产不设自动接龙轮次上限：深度/同对/冷却/同内容指纹照样拦，唯独不再按「第 8 轮」停。
 func (m *manager) hubConversation() *agenthub.ConversationController {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	// P6-04：限额来自 settings.json 顶层 hub.conversation（全局，不是每群策略）。
 	// I1：按文件指纹缓存（只 stat，不每次读盘）；文件变了就热更新，无需重启。
+	// P7-04：读限额（stat + 可能读盘/解析）放在 m.mu **之外** —— 这个函数在每次群
+	// 事件、每次泵、每次状态条刷新都会走到，持着 manager 大锁做文件 I/O 会拖住整个
+	// bridge（emit/命令处理都要 m.mu）。缓存本身自带锁，锁外调用是安全的。
 	limits := loadHubConversationLimitsCached()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.hubConvLimits != nil {
 		limits = *m.hubConvLimits
 	}
@@ -58,6 +61,26 @@ func (m *manager) hubConversation() *agenthub.ConversationController {
 		m.hubConv.SetLimits(limits)
 	}
 	return m.hubConv
+}
+
+// refreshHubConversationLimits 设置保存后立即刷新状态条（P7-04 / I1 收尾）。
+//
+// 只「重播视图」，不动任何对话状态：hubConversation() 发现 settings.json 指纹变了
+// 就 SetLimits（队列/轮次/pair 计数/指纹原样保留），随后把每个**已有对话**的群视图
+// 再 emit 一次 —— 否则用户改完 pair_limit / max_depth / run_timeout 得等群里有人说
+// 一句话，状态条才显示新分母。最后按新 run_timeout 重挂仍挂着的 run 超时定时器。
+func (m *manager) refreshHubConversationLimits() {
+	if m == nil {
+		return
+	}
+	ctrl := m.hubConversation()
+	if ctrl == nil {
+		return
+	}
+	for _, gid := range ctrl.Groups() {
+		m.emitHubConversation(gid, ctrl.View(gid))
+	}
+	m.rearmHubRunTimeouts()
 }
 
 // hubConversationView 当前对话快照（从未有过对话时 Status=idle）。

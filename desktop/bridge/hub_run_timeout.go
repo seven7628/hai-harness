@@ -95,6 +95,47 @@ func (m *manager) clearHubRunTimeout(gid agenthub.GroupID, agent agenthub.AgentI
 	}
 }
 
+// rearmHubRunTimeouts run_timeout_ms 热更新后重挂仍然在跑的 run 超时（P7-04）。
+//
+// 语义（契约二选一里选「重挂」）：上限**变了**就按新值**从现在起算** —— 用户把 10
+// 分钟改成 100ms 是想立刻生效，不是等这一轮跑完 10 分钟。旧定时器由 armHubRunTimeout
+// 统一 Stop。上限没变的定时器原样保留（保存主题之类无关设置不该把倒计时重置）。
+// 账本里已经不是 running 的投递顺手清掉 —— 它们的定时器本来就迟到了，留着只会在
+// 到点时白跑一次（hubRunTimeoutFired 复核后也是这个结果，提前收掉更干净）。
+//
+// 先快照再动手：arm/clear 都要拿 hubRunTimerMu，持锁回调会自锁死。
+func (m *manager) rearmHubRunTimeouts() {
+	if m == nil {
+		return
+	}
+	ctrl := m.hubConversation()
+	if ctrl == nil {
+		return
+	}
+	timeout := ctrl.Limits().RunTimeout
+	m.hubRunTimerMu.Lock()
+	timers := make([]*hubRunTimer, 0, len(m.hubRunTimers))
+	for _, rt := range m.hubRunTimers {
+		if rt != nil {
+			timers = append(timers, rt)
+		}
+	}
+	m.hubRunTimerMu.Unlock()
+	for _, rt := range timers {
+		d, ok := ctrl.Delivery(rt.gid, rt.wakeID)
+		if !ok || d.Status != agenthub.DeliveryRunning || timeout <= 0 {
+			// 没在跑（或新上限等于关闭）：定时器没有存在意义。
+			m.clearHubRunTimeout(rt.gid, rt.agent)
+			continue
+		}
+		if rt.timeout == timeout {
+			continue // 上限没变：保留原到期时刻
+		}
+		// armHubRunTimeout 内部先换 map 再 Stop 旧定时器：键不变、时间从现在起算。
+		m.armHubRunTimeout(rt.gid, rt.agent, rt.wakeID)
+	}
+}
+
 // hubRunTimeoutFired 到点：只杀**还在 running** 的那一轮，然后让队列继续。
 func (m *manager) hubRunTimeoutFired(rt *hubRunTimer) {
 	if m == nil || rt == nil || m.hubShutdown.Load() {
