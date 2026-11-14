@@ -40,43 +40,44 @@ export const surface = {
     })
     const h2Style = (theme) => ({ color: theme.tokens.accent, fontWeight: 600, margin: '0 0 6px' })
 
-    // —— 总览：宿主能力的最小用法（host.command + host.events）——
+    // —— 总览：宿主侧的两个稳定契约（主题 + 事件订阅），数据自备 ——
+    //
+    // 09-agent-bridge **D11** 之后宿主不再开放任何只读命令（workspace_list / session_list /
+    // git_snapshot / ui_inspect 全部移除）：插件要数据只能自己存，或者让 Agent 在**它自己的
+    // 虚拟 Project** 里跑一次任务（§5.1 / §6.6 的 agent.* 命令；Go 侧已实现，渲染层的
+    // claimed API 由 P1b2 落地）。届时这里大致长这样：
+    //
+    //   const s = await host.command('agent.session', {})                 // {ok, data:{session_id}}
+    //   await host.command('agent.run', { session_id: s.data.session_id, input: '……' })
+    //   const off = host.onEvent('agent.delta', (ev) => setText((t) => t + ev.data.text))
+    //
+    // 在那之前这里**不调任何命令**：示例面板调一条注定拿到 denied 的命令，比不调更误导
+    //（模板是用户抄的第一份代码，抄一条通不了路的调用等于教错）。
     function Overview() {
       const theme = host.theme()
-      const [workspaces, setWorkspaces] = useState([])
-      const [error, setError] = useState('')
       const [tick, setTick] = useState(0)
-
-      useEffect(() => {
-        let alive = true
-        host
-          .command('workspace_list', {})
-          .then((r) => {
-            if (!alive) return
-            // 拒绝是一个**值**（ok:false + reason），不是异常 —— 照实显示，别吞掉。
-            if (!r.ok) setError(r.reason || 'denied')
-            else setWorkspaces(r.data?.workspaces || [])
-          })
-        return () => {
-          alive = false
-        }
-      }, [tick])
 
       // 已声明的 op 才能订阅（manifest.data）。这里用它做「别的地方变了 → 我也刷新」。
       useEffect(() => host.events.on('surfaces_changed', () => setTick((n) => n + 1)), [])
 
       const style = { padding: 12, color: theme.tokens.fg, font: '13px/1.6 system-ui, sans-serif' }
+      const muted = theme.tokens.muted || theme.tokens.fg
+      const ROWS = [
+        ['本月调用', '418 次'],
+        ['平均首字', '0.9s'],
+        ['预算余量', '62%'],
+      ]
       return h(
         'div',
         { style, 'data-surface': 'cost-board', 'data-entry': 'overview' },
         h('div', { style: h2Style(theme) }, '成本看板'),
-        error
-          ? h('div', { style: { color: theme.tokens.err } }, '读不到工作区：' + error)
-          : h('div', null, `工作区 ${workspaces.length} 个`),
+        h('div', { style: { color: muted, marginBottom: 6 } }, `本地示例数据 · 刷新 ${tick}`),
         h(
           'ul',
-          { style: { margin: '8px 0 0', paddingLeft: 18 } },
-          workspaces.slice(0, 8).map((w, i) => h('li', { key: w.path || i }, w.title || w.name || w.path)),
+          { style: { margin: 0, paddingLeft: 18 } },
+          ROWS.map(([k, v]) =>
+            h('li', { key: k }, h('span', { style: { color: muted } }, `${k} · `), v),
+          ),
         ),
       )
     }

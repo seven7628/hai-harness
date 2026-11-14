@@ -10,7 +10,7 @@
   "entry": "panel.js",
   "icon": "icon.svg",
   "placement": "plugin",
-  "commands": ["workspace_list", "session_list", "git_snapshot", "ui_inspect"],
+  "commands": [],
   "data": ["surfaces_changed"],
   "entries": [
     { "id": "overview", "title": "总览", "order": 10 },

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -112,15 +113,61 @@ func TestSurfaceTemplateInstalls(t *testing.T) {
 			t.Fatalf("manifest 指向的 %q 不在模板目录里: %v", rel, err)
 		}
 	}
-	if len(mf.Commands) == 0 {
-		t.Fatal("模板 manifest 没有 commands —— 示例面板至少要示范一次 host.command 的声明")
-	}
-	// 声明的每条命令都必须在宿主白名单里：模板教人声明的命令调不通，等于教错。
+	// 声明的每条命令都必须在**宿主真正放行**的集合里：模板教人声明的命令调不通，等于教错。
+	//
+	// D11 之后 surface_command 的宿主表是空的，放行集合只剩 surface_agent 的四个 name
+	// （agent.session / agent.run / agent.cancel / tool.result）。因此「一条都不声明」是
+	// 合法的（模板眼下就是这么走的：P1b2 的 claimed API 落地之前，任何 agent.* 调用都
+	// 跑不通，示例调一条注定 denied 的命令比不调更误导）—— 断言从「必须声明」改成
+	// 「声明了就必须能调通」，这条不变式才是模板真正要守的东西。
 	for _, name := range mf.Commands {
-		if _, ok := surfaceHostCommands[name]; !ok {
-			t.Fatalf("模板声明了宿主白名单之外/未实现的命令 %q（面板会拿到 denied）", name)
+		if !surfaceAgentHostCommands[name] {
+			if _, legacy := surfaceHostCommands[name]; !legacy {
+				t.Fatalf("模板声明了宿主不放行的命令 %q（面板会拿到 denied）—— 放行集合只有 %v",
+					name, surfaceOpenCommandNames())
+			}
 		}
 	}
+	// 面板代码里**实际调用**的名字同样要在放行集合里：manifest 声明得再对，代码里调一条
+	// 别的命令照样是教错（这一条替代了原来"必须有 commands"的存在性断言）。
+	for _, name := range panelCommandCalls(t, surfaceTemplatesDir) {
+		if !surfaceAgentHostCommands[name] {
+			if _, legacy := surfaceHostCommands[name]; !legacy {
+				t.Fatalf("模板 panel.js 调用了宿主不放行的命令 %q（会拿到 denied）", name)
+			}
+		}
+	}
+}
+
+// surfaceOpenCommandNames 当前真正放行的命令名（agent.* ∪ 只读表），只给失败文案用。
+func surfaceOpenCommandNames() []string {
+	out := make([]string, 0, len(surfaceAgentHostCommands)+len(surfaceHostCommands))
+	for name := range surfaceAgentHostCommands {
+		out = append(out, name)
+	}
+	for name := range surfaceHostCommands {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// panelCommandCalls 从面板源码里抠出 `host.command('x', …)` / `.command("x", …)` 的命令名。
+//
+// 用正则而不是解析 JS：模板是「单文件、无构建、只调一个宿主 API」的最小样本，
+// 正则足够，且不会因为模板里出现 React.createElement 的复杂表达式而误判。
+func panelCommandCalls(t *testing.T, dir string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "panel.js"))
+	if err != nil {
+		t.Fatalf("读模板 panel.js 失败: %v", err)
+	}
+	re := regexp.MustCompile(`\.command\(\s*['"]([^'"]+)['"]`)
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(string(raw), -1) {
+		out = append(out, m[1])
+	}
+	return out
 }
 
 // TestSurfaceTemplatePanelIsBrowserESM 模板的面板代码必须能被浏览器直接 import。
