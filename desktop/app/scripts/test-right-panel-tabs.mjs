@@ -7,8 +7,9 @@
 //   回归是「静默改变语义」：切会话不再恢复原标签、openFile 不再展开面板、focusBrowser 不再
 //   收左栏……这些都测不出来（没有断言就等于允许漂移）。本脚本把今天的语义逐条钉住：
 //
-//     · 作用域 = 会话级（`views[sid].rightTab`），顶层只是活跃会话的镜像
-//     · 未缓存会话回落默认（rightTab='activity' / rightExpanded=false）
+//     · 作用域 = 会话级（`tabsByScope[scope]`；面板 = 该 scope 激活标签的 kind，R11b 起现算）
+//     · 未缓存会话没有标签集 → 面板空态，默认集（activity）由组件 effect 建
+//       （R11b 之前是「回落默认 rightTab='activity'」——那个派生字段已删）
 //     · openFile 三件套：切 file tab + 展开 + 定位；filePreview/fileFocus 是**全局单例**
 //     · focusBrowser 收左栏、focusBrowserForPreview 不收（语义分界，2026-09 实测缺陷的修复）
 //     · rightSize 只在「首次进入/从折叠态打开」文件标签时给 60% 宽
@@ -53,7 +54,7 @@ const sent = []
 // 记录对底层视图池的调用（web 标签的切/关必须落到这里 —— 内层标签条退役后它是唯一入口）
 const calls = { activate: [], close: [], open: [] }
 global.window = {
-  innerWidth: 1600, // setRightTab('file') 的 60% 宽规则读它
+  innerWidth: 1600, // openTab(file) 的 60% 宽规则读它
   desktop: {
     command: async (line) => { sent.push(line); return { ok: true } },
     embedStatus: async () => ({ ready: true, visible: true, attached: true, url: '', title: '', activeId: null, targets: [] }),
@@ -105,7 +106,7 @@ await build({
     '.gif': 'dataurl',
   },
 })
-const { useAppStore, putFilePreview } = require(outfile)
+const { useAppStore, putFilePreview, selectRightTab } = require(outfile)
 
 const WS = '/mock/ws'
 const OTHER = '/mock/other'
@@ -118,31 +119,31 @@ const S2 = 's2'
 //（evictViews → sessionBusy 会读 runNodes，缺了就直接 TypeError）。
 const TEMPLATE = (() => {
   useAppStore.setState({ activeSessionId: '__tpl__', workspace: WS })
-  useAppStore.getState().setRightTab('activity')
+  useAppStore.getState().openTab({ kind: 'activity' })
   const v = useAppStore.getState().views['__tpl__']
   const views = { ...useAppStore.getState().views }
   delete views['__tpl__']
   useAppStore.setState({ views, activeSessionId: undefined })
   return v
 })()
-const hydrated = (rightTab, rightExpanded) => ({
+// R11b：view 里不再有「当前面板」字段 —— 面板归 tabsByScope（见 panel()）。
+const hydrated = (rightExpanded) => ({
   ...TEMPLATE,
   hydrated: true,
   blocks: [{ id: 1, role: 'user', text: 'x' }],
-  rightTab,
   rightExpanded,
   // TEMPLATE 是真实 view，带 {open:false}；只改 rightExpanded 会造出漂移态（PR-01 起布局是权威）
   rightLayout: rightExpanded ? { open: true, bias: 'even', ratio: 50 } : { open: false },
 })
 
 function reset(state = {}) {
-  const views = state.views ?? {}
-  const sid = state.activeSessionId
+  const { tab, ...rest } = state
+  const views = rest.views ?? {}
+  const sid = rest.activeSessionId
   // 顶层镜像是活跃会话 view 的镜像（真实应用里两者恒等）：给 views[active] 时必须同步，
   // 否则 setActiveSession 的「切走前回写顶层镜像」会把不一致的顶层值写回该 view。
   const mirror = sid && views[sid]
     ? {
-        rightTab: views[sid].rightTab,
         rightExpanded: views[sid].rightExpanded,
         // rightLayout 是权威、rightExpanded 是镜像（PR-01）：seed 时两个一起写，否则会造出漂移态
         rightLayout: views[sid].rightLayout ?? { open: !!views[sid].rightExpanded, bias: 'even', ratio: 50 },
@@ -159,7 +160,6 @@ function reset(state = {}) {
     tabsByScope: {},
     recentSessions: [],
     titleOverrides: {},
-    rightTab: 'activity',
     rightExpanded: false,
     rightLayout: { open: false },
     rightSize: null,
@@ -170,46 +170,55 @@ function reset(state = {}) {
     browserPages: [],
     browserShot: undefined,
     browserBusy: false,
-    ...state,
+    ...rest,
     ...mirror,
-    ...(state.rightTab !== undefined ? { rightTab: state.rightTab } : {}),
-    ...(state.rightExpanded !== undefined
+    // tab:'kind' = 「让这个 scope 有一个激活的 <kind> 标签」（旧 reset({rightTab}) 的等价物）。
+    // 只种标签集、不碰布局：展开/收起仍由用例自己决定（G 组钉的正是宽度规则与布局的耦合）。
+    ...(tab ? { tabsByScope: tabSetOf(tab, sid || WS) } : {}),
+    ...(rest.rightExpanded !== undefined
       ? {
-          rightExpanded: state.rightExpanded,
-          rightLayout: state.rightExpanded ? { open: true, bias: 'even', ratio: 50 } : { open: false },
+          rightExpanded: rest.rightExpanded,
+          rightLayout: rest.rightExpanded ? { open: true, bias: 'even', ratio: 50 } : { open: false },
         }
       : {}),
   })
 }
 const st = () => useAppStore.getState()
+// panel()：右栏「现在是哪个面板」= 激活标签的 kind（R11b：状态里那个写穿副本已删，
+// 所以断言只能现算；选择器就是产品代码读的那一份，不是测试自造的等价物）。
+const panel = () => selectRightTab(st())
+// tabSetOf(kind, scope)：一个「激活的 <kind> 标签」标签集。reset({tab}) 用它种夹具，
+// 是旧 `reset({ rightTab: kind })` 的等价物（旧路径靠「直写面板字段 + sync 建默认集」达到同一形态）。
+const tabSetOf = (kind, scope) => ({ [scope]: { tabs: [{ id: `seed_${kind}`, kind }], activeId: `seed_${kind}`, closed: [] } })
 
 async function main() {
   console.log('\n—— A. 默认态与回落 ——')
   {
     reset()
-    eq(st().rightTab, 'activity', 'A1 初始 rightTab')
+    eq(panel(), undefined, 'A1 初始：该 scope 还没有标签集 → 面板无值（默认集由 RightPanel 的 effect 建）')
     eq(st().rightExpanded, false, 'A2 初始 rightExpanded（面板默认收起）')
 
-    // 未缓存会话：isHydrated=false → resetView() 回落默认
+    // 未缓存会话：isHydrated=false → resetView() 回落默认布局
     reset({ activeSessionId: S1 })
-    st().setRightTab('git')
-    eq(st().rightTab, 'git', 'A3 有活跃会话时 setRightTab 生效')
+    st().openTab({ kind: 'git' })
+    eq(panel(), 'git', 'A3 有活跃会话时开标签即切面板')
     useAppStore.setState({ activeSessionId: S2 }) // 直接切，不经过 setActiveSession（未缓存分支的模拟）
-    eq(st().rightTab, 'git', 'A4 [已知现状] 顶层镜像不随 activeSessionId 直接赋值变化（真实切换走 setActiveSession）')
+    eq(panel(), undefined, 'A4 [已知现状] 直接改 activeSessionId 不建标签集 → 面板无值（真实切换走 setActiveSession）')
   }
 
   console.log('\n—— B. 作用域：会话级（views[sid] 才是真相源）——')
   {
     reset({ activeSessionId: S1 })
-    st().setRightTab('git')
+    st().openTab({ kind: 'git' })
     st().setRightExpanded(true)
-    eq(st().views[S1].rightTab, 'git', 'B1 写入该会话的 view（不只是顶层镜像）')
+    eq(st().tabsByScope[S1].tabs.find((t) => t.id === st().tabsByScope[S1].activeId).kind, 'git',
+      'B1 面板是**会话级**的：写在 tabsByScope[S1] 里，不是顶层镜像')
     eq(st().views[S1].rightExpanded, true, 'B2 rightExpanded 同样是会话级')
 
     // 无活跃会话：只写顶层（视图无归属）
     reset()
-    st().setRightTab('git')
-    eq(st().rightTab, 'git', 'B3 无活跃会话时 setRightTab 仍写顶层')
+    st().openTab({ kind: 'git' })
+    eq(panel(), 'git', 'B3 无活跃会话时面板挂在工作区路径下（D7）')
     eq(Object.keys(st().views).length, 0, 'B4 无活跃会话时不创建 view')
   }
 
@@ -217,25 +226,29 @@ async function main() {
   {
     reset({
       activeSessionId: S1,
-      views: { [S1]: hydrated('git', true), [S2]: hydrated('web', true) },
+      views: { [S1]: hydrated(true), [S2]: hydrated(true) },
+      // 标签集按 scope 各一套（R11b 起这是面板的唯一真相）
+      tabsByScope: { ...tabSetOf('git', S1), ...tabSetOf('web', S2) },
     })
     // 真实切换（缓存命中 → loadViewToTop）
     st().setActiveSession(S2, WS)
-    eq(st().rightTab, 'web', 'C1 切到缓存会话 → 恢复该会话自己的 rightTab')
+    eq(panel(), 'web', 'C1 切到缓存会话 → 面板是该会话自己的激活标签')
     eq(st().rightExpanded, true, 'C2 同时恢复 rightExpanded')
     st().setActiveSession(S1, WS)
-    eq(st().rightTab, 'git', 'C3 切回 → 仍是该会话自己的标签（互不串）')
+    eq(panel(), 'git', 'C3 切回 → 仍是该会话自己的标签（互不串）')
 
-    // C5：切换前把顶层镜像**回写**当前会话 view（防事件交错的中间态丢失）
-    reset({ activeSessionId: S1, views: { [S1]: hydrated('git', true), [S2]: hydrated('web', true) } })
-    useAppStore.setState({ rightTab: 'file' }) // 人为制造「顶层与 view 不一致」的中间态
+    // C5：切换前把顶层镜像**回写**当前会话 view（防事件交错的中间态丢失）。
+    // R11b：面板已不参与镜像（它不在 view 里了），同一条不变式改用布局镜像来钉。
+    reset({ activeSessionId: S1, views: { [S1]: hydrated(true), [S2]: hydrated(true) } })
+    // 人为制造「顶层与 view 不一致」的中间态：布局是权威、rightExpanded 是镜像，两个一起写
+    useAppStore.setState({ rightExpanded: false, rightLayout: { open: false } })
     st().setActiveSession(S2, WS)
-    eq(st().views[S1].rightTab, 'file', 'C5 切走前把顶层镜像回写当前会话 view')
+    eq(st().views[S1].rightExpanded, false, 'C5 切走前把顶层布局镜像回写当前会话 view')
 
-    // 未缓存会话 → resetView 回落
-    reset({ activeSessionId: S1, views: { [S1]: hydrated('git', true) } })
+    // 未缓存会话 → resetView 回落布局；面板没有标签集可回落（默认 activity 集由组件 effect 建）
+    reset({ activeSessionId: S1, views: { [S1]: hydrated(true) } })
     st().setActiveSession(S2, WS)
-    eq(st().rightTab, 'activity', 'C6 切到未缓存会话 → 回落 activity（[阶段5] 持久化后会变）')
+    eq(panel(), undefined, 'C6 切到未缓存会话 → 还没有标签集（面板空态）')
     eq(st().rightExpanded, false, 'C7 未缓存会话右栏收起（[阶段5] 持久化后会变）')
   }
 
@@ -243,14 +256,14 @@ async function main() {
   {
     reset({
       activeSessionId: S1,
-      views: { [S1]: hydrated('git', true) },
+      views: { [S1]: hydrated(true) },
       browserPages: [{ id: 1, url: 'https://a' }],
       browserBusy: true,
     })
     useAppStore.setState({ projects: [...st().projects, { path: OTHER, sessions: [{ id: 'o1', title: 'O' }] }] })
     st().setActiveSession('o1', OTHER)
     eq(st().workspace, OTHER, 'D1 工作区已切换')
-    eq(st().rightTab, 'activity', 'D2 跨工作区 → 右栏回落默认')
+    eq(panel(), undefined, 'D2 跨工作区 → 新工作区没有标签集（面板空态）')
     eq(st().browserPages.length, 0, 'D3 跨工作区 → 浏览器页列表清空（clearBrowser）')
     eq(st().browserBusy, false, 'D4 browserBusy 复位（防新会话 web tab 永久「拉取中」）')
   }
@@ -259,7 +272,7 @@ async function main() {
   {
     reset({ activeSessionId: S1, rightExpanded: false })
     st().openFile('src/a.ts')
-    eq(st().rightTab, 'file', 'E1 openFile → 切文件标签')
+    eq(panel(), 'file', 'E1 openFile → 切文件标签')
     eq(st().rightExpanded, true, 'E2 openFile → 展开右栏')
     eq(st().fileFocus?.path, 'src/a.ts', 'E3 fileFocus 指向该文件')
     eq(st().fileFocus?.seq, 1, 'E4 fileFocus.seq 每次打开递增')
@@ -291,7 +304,7 @@ async function main() {
     reset({ activeSessionId: S1, leftExpanded: true, rightExpanded: false })
     st().focusBrowserForPreview()
     eq(st().rightExpanded, true, 'F1 预览 → 展开右栏')
-    eq(st().rightTab, 'web', 'F2 预览 → 切网页标签')
+    eq(panel(), 'web', 'F2 预览 → 切网页标签')
     eq(st().leftExpanded, true, 'F3 预览 **不**收左栏（2026-09 实测缺陷的修复）')
 
     reset({ activeSessionId: S1, leftExpanded: true, rightExpanded: false })
@@ -299,32 +312,38 @@ async function main() {
     eq(st().rightExpanded, true, 'F4 Browser Use → 展开右栏')
     eq(st().leftExpanded, false, 'F5 Browser Use → 收起左栏（「接管视界」语义）')
 
-    // focusBrowserForUse：已打开（展开且在 web）时不重复
-    reset({ activeSessionId: S1, rightExpanded: true, rightTab: 'web', leftExpanded: true })
+    // focusBrowserForUse：已打开（展开且在 web）时不重复。
+    // R11b：「已在 web 标签」现在只能由**标签集**表达（右栏读的是激活标签的 kind，
+    // 旧字段的 seed 只写了一份副本，选择器看不到）。故 seed 一个激活的 web 标签，
+    // 而不是写 rightTab —— 这正是「两份真相」在探针里的样子。
+    reset({
+      activeSessionId: S1, rightExpanded: true, leftExpanded: true,
+      tabsByScope: { [S1]: { tabs: [{ id: 'tw', kind: 'web' }], activeId: 'tw', closed: [] } },
+    })
     st().focusBrowserForUse()
     eq(st().leftExpanded, true, 'F6 已在 web 标签 → 不重复触发（不收左栏）')
 
     // 收起后重开
-    reset({ activeSessionId: S1, rightExpanded: false, rightTab: 'activity', leftExpanded: true })
+    reset({ activeSessionId: S1, rightExpanded: false, tab: 'activity', leftExpanded: true })
     st().focusBrowserForUse()
-    eq(st().rightTab, 'web', 'F7 收起后再次使用 → 重新打开 web 标签')
+    eq(panel(), 'web', 'F7 收起后再次使用 → 重新打开 web 标签')
     eq(st().leftExpanded, false, 'F8 该路径仍走 focusBrowser（收左栏）')
 
     // —— F9-F11 会话收口（2026-09-20，用户口径「别在别的会话里掀开我正看的面板」）——
     // browser_* 工具启动会走这条路径（tool_run_start → focusBrowserForUse(sid)）。旧实现不按
     // 会话过滤 → 后台会话里 Agent 一开浏览器，**用户当前正在看的会话**面板也被掀开（还收左栏）。
     // 现在：只有工具所属会话 == 当前会话才展开；别的会话只留未读点/呼吸徽标（见 onEmbedAiAction）。
-    reset({ activeSessionId: S1, rightExpanded: false, rightTab: 'activity', leftExpanded: true })
+    reset({ activeSessionId: S1, rightExpanded: false, tab: 'activity', leftExpanded: true })
     st().focusBrowserForUse(S1)
     eq(st().rightExpanded, true, 'F9 本会话的 Browser 工具 → 照旧展开（§6.9「看 AI 在干什么」保留）')
 
-    reset({ activeSessionId: S1, rightExpanded: false, rightTab: 'activity', leftExpanded: true })
+    reset({ activeSessionId: S1, rightExpanded: false, tab: 'activity', leftExpanded: true })
     st().focusBrowserForUse('S-OTHER')
     eq(st().rightExpanded, false, 'F10 别的会话的 Browser 工具 → **不展开**（不掀开用户正看的面板）')
     eq(st().leftExpanded, true, 'F11 也不收左栏（F5 的「接管视界」只在本会话成立）')
 
     // 无 sid（旧版事件/无归属）：回落当前会话 → 行为与 F9 一致，不制造回归
-    reset({ activeSessionId: S1, rightExpanded: false, rightTab: 'activity', leftExpanded: true })
+    reset({ activeSessionId: S1, rightExpanded: false, tab: 'activity', leftExpanded: true })
     st().focusBrowserForUse()
     eq(st().rightExpanded, true, 'F12 无 sid 的事件 → 回落当前会话，照旧展开（向后兼容）')
   }
@@ -332,20 +351,27 @@ async function main() {
   console.log('\n—— G. rightSize：60% 宽规则只在该触发时触发 ——')
   {
     reset({ activeSessionId: S1, rightExpanded: false })
-    st().setRightTab('file')
+    st().openTab({ kind: 'file' })
     eq(st().rightSize, Math.round(1600 * 0.6), 'G1 首次进入文件标签 → 给 60% 视口宽')
 
     const before = st().rightSize
-    st().setRightTab('git')
-    st().setRightTab('file')
-    eq(st().rightSize, before, 'G2 离开再回来 → 不重置宽度（只在 rightTab!==file 或未展开时给）')
+    st().openTab({ kind: 'git' })
+    st().openTab({ kind: 'file' })
+    eq(st().rightSize, before, 'G2 离开再回来 → 不重置宽度（只在「不在 file 标签」或未展开时给）')
 
-    reset({ activeSessionId: S1, rightExpanded: true, rightTab: 'file', rightSize: 700 })
-    st().setRightTab('file')
+    // 「已在文件标签」同样只能由标签集表达（R11b）：seed 一个激活的 file 标签。
+    reset({
+      activeSessionId: S1, rightExpanded: true, rightSize: 700,
+      tabsByScope: { [S1]: { tabs: [{ id: 'tf', kind: 'file' }], activeId: 'tf', closed: [] } },
+    })
+    st().openTab({ kind: 'file' })
     eq(st().rightSize, 700, 'G3 已在文件标签且已展开 → 保持用户调过的宽度')
 
-    reset({ activeSessionId: S1, rightExpanded: false, rightTab: 'file', rightSize: 700 })
-    st().setRightTab('file')
+    reset({
+      activeSessionId: S1, rightExpanded: false, rightSize: 700,
+      tabsByScope: { [S1]: { tabs: [{ id: 'tf', kind: 'file' }], activeId: 'tf', closed: [] } },
+    })
+    st().openTab({ kind: 'file' })
     eq(st().rightSize, Math.round(1600 * 0.6), 'G4 从折叠态打开文件标签 → 重新给 60%')
   }
 
@@ -365,7 +391,9 @@ async function main() {
     const sids = Array.from({ length: 12 }, (_, i) => `k${i}`)
     for (const sid of sids) {
       useAppStore.setState({ activeSessionId: sid, workspace: WS })
-      st().setRightTab('git') // 每次都会创建/更新 views[sid]
+      // 每次都会创建/更新 views[sid]：R11b 之前标签动作会无条件 setView（那次写穿已删），
+      // 现在这里用「用户拖了右栏宽度」这条真实动作写 view（同一处 setView 收口）。
+      st().setRightLayout({ open: true, bias: 'even', ratio: 50 })
     }
     await sleep(10) // evictViews 走 queueMicrotask
     const n = Object.keys(st().views).length
@@ -377,12 +405,12 @@ async function main() {
     useAppStore.setState({
       activeSessionId: busySid,
       workspace: WS,
-      views: { [busySid]: { ...hydrated('git', true), runNodes: [{ id: 'r1', kind: 'run', status: 'running' }] } },
+      views: { [busySid]: { ...hydrated(true), runNodes: [{ id: 'r1', kind: 'run', status: 'running' }] } },
     })
     for (let i = 0; i < 12; i++) {
       const sid = `x${i}`
       useAppStore.setState({ activeSessionId: sid, workspace: WS })
-      st().setRightTab('git')
+      st().setRightLayout({ open: true, bias: 'even', ratio: 50 })
     }
     await sleep(10)
     assert(st().views[busySid], 'I2 running 会话的 view 被保活（sessionBusy → 不参与淘汰）')
@@ -407,19 +435,19 @@ async function main() {
     const scopeOf = () => st().activeSessionId || st().workspace
     const setOf = () => st().tabsByScope[scopeOf()]
 
-    // K1：setRightTab 现在等价于「打开或激活该 kind 的标签」
+    // K1：openTab({kind}) 等价于「打开或激活该 kind 的标签」
     reset({ activeSessionId: S1 })
-    st().setRightTab('git')
-    // 首次进入该 scope：标签集按 rightTab 建默认集（= [链路]，与旧默认 rightTab='activity' 等价），
-    // 随后 setRightTab('git') 再补一个 变更 标签 → 共 2 个。
+    st().openTab({ kind: 'git' })
+    // 首次进入该 scope：没有标签集 → sync 建默认集（= [链路]），随后 openTab('git') 再补一个
+    // 变更 标签 → 共 2 个（R11b 之前默认集是按面板字段造的，字段删掉后固定为 activity）。
     eq(setOf().tabs.length, 2, 'K1 默认集(链路) + 新开的 变更 = 2 个标签')
     eq(setOf().tabs[0].kind, 'activity', 'K2 默认集第一个是链路（与旧默认标签一致）')
     eq(setOf().tabs.find((t) => t.id === setOf().activeId).kind, 'git', 'K3 新开的标签即激活')
 
     // K4：幂等 —— 同类再开不新增实例（**非 file 类**的幂等键仍是 kind，阶段 1 口径不变）
-    st().setRightTab('git')
-    st().setRightTab('activity')
-    st().setRightTab('git')
+    st().openTab({ kind: 'git' })
+    st().openTab({ kind: 'activity' })
+    st().openTab({ kind: 'git' })
     eq(setOf().tabs.length, 2, 'K4 同类重复打开不新增实例（activity + git 共 2 个）')
     eq(setOf().tabs.find((t) => t.id === setOf().activeId).kind, 'git', 'K5 激活回到 git 标签')
 
@@ -473,22 +501,24 @@ async function main() {
     eq(setOf().tabs.length, 0, 'K17 空集不因 sync 而复活标签')
 
     // K18：sync 已一致时不产生新状态对象（防 effect 自激）
-    st().setRightTab('git')
+    st().openTab({ kind: 'git' })
     const before = st().tabsByScope
     st().syncTabsToRightTab()
     assert(st().tabsByScope === before, 'K18 sync 已一致 → 不 set（对象引用不变）')
 
-    // K19：直写 rightTab（e2e 复位路径）后 sync 会自愈
-    useAppStore.setState({ rightTab: 'git' })
-    st().syncTabsToRightTab()
-    eq(setOf().tabs.find((t) => t.id === setOf().activeId).kind, 'git', 'K19 直写 rightTab → sync 自愈到对应标签')
+    // K19：面板跟着**激活项**走（R11b 之前这条钉的是「直写面板字段后 sync 会自愈」——
+    // 那条路随字段一起删了，保留下来的同义事实是「面板读 activation，不读任何副本」）。
+    const gitTabId = setOf().tabs.find((t) => t.kind === 'git').id
+    st().openTab({ kind: 'activity' }) // 切到另一个实例
+    st().activateTab(gitTabId) // 再切回来
+    eq(setOf().tabs.find((t) => t.id === setOf().activeId).kind, 'git', 'K19 激活任意实例 → 面板跟着它走')
 
     // K20：标签集按 scope 隔离（切会话各自一套）
     reset({
       activeSessionId: S1,
-      views: { [S1]: hydrated('git', true), [S2]: hydrated('activity', true) },
+      views: { [S1]: hydrated(true), [S2]: hydrated(true) },
     })
-    st().setRightTab('git')
+    st().openTab({ kind: 'git' })
     const s1Tabs = st().tabsByScope[S1].tabs.map((t) => t.kind)
     st().setActiveSession(S2, WS)
     st().syncTabsToRightTab()
@@ -498,11 +528,11 @@ async function main() {
 
     // K22：无会话时 scope = 工作区路径（D7）
     reset()
-    st().setRightTab('git')
+    st().openTab({ kind: 'git' })
     assert(st().tabsByScope[WS], 'K22 无会话 → 标签集挂在工作区路径下')
     assert(st().tabsByScope[WS].tabs.some((t) => t.kind === 'git'), 'K23 该标签集含新开的 变更 标签')
     eq(st().tabsByScope[WS].tabs.find((t) => t.id === st().tabsByScope[WS].activeId).kind, 'git', 'K24 且它是激活项')
-    eq(st().rightTab, 'git', 'K25 无会话时 rightTab 仍写顶层（与旧行为一致）')
+    eq(panel(), 'git', 'K25 无会话时面板仍由工作区 scope 的标签集决定（D7）')
   }
 
   console.log('\n—— K2. openFile 的可视类分支：一个文件一个标签（2026-09 用户口径）——')
@@ -518,7 +548,7 @@ async function main() {
     st().openFile('out/report.png')
     eq(fileTabs().length, 0, 'K26 可视类文件不建 file 标签')
     eq(st().fileFocus?.path, 'out/report.png', 'K27 fileFocus 仍指向该文件（之后手动开「文件」标签看得到它）')
-    eq(st().rightTab, 'web', 'K28 可视类文件 → 落在自动预览标签（而不是文件标签）')
+    eq(panel(), 'web', 'K28 可视类文件 → 落在自动预览标签（而不是文件标签）')
     eq(st().rightExpanded, true, 'K29 仍展开右栏')
 
     // K30：文本类**行为完全不变** —— 这条是上面那批断言的护栏：不能为了「不重复」把 file 标签整体关掉
@@ -613,7 +643,7 @@ async function main() {
     eq(setOf().tabs.find((x) => x.id === setOf().activeId).kind, 'activity',
       'L2 用户停在 链路 标签 → 后台出现的页面**不抢激活**（阶段 4 的口径在此已成立）')
     // L2b：当前就在 web 标签上 → 跟随视图池的激活页（AI 切页时标签条跟着走）
-    st().setRightTab('web')
+    st().openTab({ kind: 'web' })
     st().syncWebTabs('native', [
       { key: 't1', url: 'file:///a.pdf', title: '' },
       { key: 't2', url: 'https://example.com', title: 'Example' },
@@ -627,7 +657,7 @@ async function main() {
     // L4：点「+ 浏览器」开的空标签被第一个页面**收养**（不留空标签）
     reset({ activeSessionId: S1 })
     st().syncTabsToRightTab()
-    st().setRightTab('web') // 空 web 标签（无 viewId）
+    st().openTab({ kind: 'web' }) // 空 web 标签（无 viewId）
     const genericId = setOf().tabs.find((x) => x.kind === 'web').id
     st().syncWebTabs('native', [{ key: 't9', url: 'file:///x.png', title: '' }], 't9')
     eq(webIds().join(','), 't9', 'L4 空标签被页面收养')
@@ -684,7 +714,7 @@ async function main() {
   // 用户原话：「右侧侧边栏点击加号、选择网页无效」。真机 trace（Electron + 真 bridge）：
   //   t=1882ms tabs → [activity, web:t1]（点击确实建了标签，认了池里的 t1）
   //   t=1886ms embedNav { activeId: t1, targets: [t1|about:blank] }
-  //   t=1886ms tabs → [activity]（标签被 syncWebTabs 判死删掉，rightTab 顶回 activity）
+  //   t=1886ms tabs → [activity]（标签被 syncWebTabs 判死删掉，面板被顶回 activity）
   // 即 4ms 内「菜单点了没反应」。根因：池里常驻一个 **about:blank 自举载体**且它就是 activeId，
   // 而 onEmbedNav 喂给 syncWebTabs 的 items 会**把它过滤掉**（`url && url !== 'about:blank'`）
   // —— 标签认下了 items 里永远不存在的 id，于是被当成「这个页面已经关了」。
@@ -703,14 +733,14 @@ async function main() {
     eq(webTabs().length, 1, 'L16 ＋ → 网页 建出 web 标签')
     eq(webTabs()[0].viewId, undefined,
       'L17 不认 about:blank 自举载体当身份（认了就会被下一帧 nav 事件判死）')
-    eq(st().rightTab, 'web', 'L18 面板切到网页')
+    eq(panel(), 'web', 'L18 面板切到网页')
     const madeId = webTabs()[0].id
     // 紧跟其后的 embed-nav 事件：onEmbedNav 把 about:blank 过滤掉 → items 为空
     st().syncWebTabs('native', [], null)
     eq(webTabs().length, 1, 'L19 空 items（池里只有自举载体）→ web 标签不被吃掉')
     eq(webTabs()[0].id, madeId, 'L20 还是同一个标签实例（不闪）')
     eq(st().tabsByScope[scopeOf()].activeId, madeId, 'L21 激活项仍指向它（旧实现里它被删 → 顺延回链路）')
-    eq(st().rightTab, 'web', 'L22 rightTab 不被顶回上一个标签（旧实现：4ms 内退回 activity）')
+    eq(panel(), 'web', 'L22 面板不被顶回上一个标签（旧实现：4ms 内退回 activity）')
     // 池里出现第一个真实页面 → 这个空标签认领它（不新建第二个标签）
     st().syncWebTabs('native', [{ key: 't9', url: 'file:///x.png', title: 'x.png' }], 't9')
     eq(webTabs().length, 1, 'L23 第一个真实页面出现 → 不新增标签')
@@ -722,7 +752,7 @@ async function main() {
       tabsByScope: {}, // 这个 scope 还没有标签集（首次进入 / 标签全关后重开）
       embedNav: navOf([...bootstrap, { id: 't9', url: 'https://a', title: 'A', sid: S1, visible: true, sleeping: false, restoring: false }], 't9'),
     })
-    st().setRightTab('web')
+    st().openTab({ kind: 'web' })
     eq(webTabs().length, 1, 'L26 真实页面在池里 → 建出 web 标签')
     eq(webTabs()[0].viewId, 't9', 'L27 且认的是**真实页面**（about:blank 才降级成空标签）')
   }
@@ -745,37 +775,43 @@ async function main() {
     wrap('focusBrowserForPreview')
 
     // M1/M2：缓存会话 → 恢复**它自己的**标签集与激活标签
-    reset({ activeSessionId: S1, views: { [S1]: hydrated('git', true), [S2]: hydrated('web', true) } })
-    useAppStore.setState({ tabsByScope: { [S1]: { tabs: [{ id: 'ta', kind: 'git' }, { id: 'tb', kind: 'web', viewId: 't9' }], activeId: 'tb', closed: [] } } })
+    reset({ activeSessionId: S1, views: { [S1]: hydrated(true), [S2]: hydrated(true) } })
+    useAppStore.setState({ tabsByScope: {
+      [S1]: { tabs: [{ id: 'ta', kind: 'git' }, { id: 'tb', kind: 'web', viewId: 't9' }], activeId: 'tb', closed: [] },
+      // 每个 scope 一套标签集：面板跟着**该 scope 的激活标签**走（R11b：view 里不再有面板字段）
+      [S2]: { tabs: [{ id: 'tc', kind: 'web', viewId: 't9' }], activeId: 'tc', closed: [] },
+    } })
     focusCalls.length = 0
     st().setActiveSession(S2, WS)
-    eq(st().rightTab, 'web', 'M1 切到缓存会话 → 恢复该会话自己的 rightTab')
+    eq(panel(), 'web', 'M1 切到缓存会话 → 面板是该会话自己的激活标签')
     eq(st().rightExpanded, true, 'M2 同时恢复 rightExpanded')
     eq(focusCalls.join(','), '', 'M3 切会话**不调**任何 focus*（阶段 4：绝不自动展开/切标签）')
     eq(st().tabsByScope[S1].activeId, 'tb', 'M4 走掉的那个 scope 的激活标签原样保留（不被改写）')
 
     st().setActiveSession(S1, WS)
     eq(st().tabsByScope[S1].activeId, 'tb', 'M5 切回来仍是该 scope 自己的激活标签')
-    eq(st().rightTab, 'git', 'M6 rightTab 由该 scope 的标签集恢复（git）')
+    // R11b 语义变化（有意）：旧值来自 view 里的面板镜像，与 activeId('tb'=web) **互相矛盾** ——
+    // 两份真相里更旧的那份胜出。字段删掉后面板只可能等于激活标签 → web。
+    eq(panel(), 'web', 'M6 面板由该 scope 的激活标签决定（web；旧实现读的是 view 里更旧的镜像）')
     eq(focusCalls.join(','), '', 'M7 来回切两次仍不调任何 focus*')
 
     // M8：跨工作区切换 → 回落默认（resetView + clearBrowser），同样不 focus*
-    reset({ activeSessionId: S1, views: { [S1]: hydrated('git', true) } })
+    reset({ activeSessionId: S1, views: { [S1]: hydrated(true) } })
     useAppStore.setState({ tabsByScope: { [S1]: { tabs: [{ id: 'ta', kind: 'git' }], activeId: 'ta', closed: [] } } })
     focusCalls.length = 0
     st().setActiveSession('o1', OTHER)
     eq(st().workspace, OTHER, 'M8 工作区已切换')
-    eq(st().rightTab, 'activity', 'M9 跨工作区 → 回落默认 activity')
+    eq(panel(), undefined, 'M9 跨工作区 → 新工作区还没有标签集（面板空态；默认 activity 集由组件 effect 建）')
     eq(st().rightExpanded, false, 'M10 跨工作区 → 右栏保持收起（不因上个工作区展开过就展开）')
     eq(focusCalls.join(','), '', 'M11 跨工作区**不调**任何 focus*')
     eq(st().tabsByScope[OTHER], undefined, 'M12 新工作区**不预先建**标签集（空态由组件 effect 兜）')
 
     // M13：新建会话（响应路径走同一个 setActiveSession）→ 空标签集 + 收起，不自动打开
-    reset({ activeSessionId: S1, views: { [S1]: hydrated('web', true) } })
+    reset({ activeSessionId: S1, views: { [S1]: hydrated(true) } })
     useAppStore.setState({ tabsByScope: { [S1]: { tabs: [{ id: 'ta', kind: 'web', viewId: 't1' }], activeId: 'ta', closed: [] } } })
     focusCalls.length = 0
     st().setActiveSession('brand-new', WS) // 未缓存 → resetView 回落
-    eq(st().rightTab, 'activity', 'M13 新建会话 → 回落默认 activity')
+    eq(panel(), undefined, 'M13 新建会话 → 还没有标签集（面板空态）')
     eq(st().rightExpanded, false, 'M14 新建会话 → 右栏保持收起（绝不自动打开）')
     eq(st().tabsByScope['brand-new'], undefined, 'M15 新会话**不预先建**标签集（无标签 → 空态）')
     eq(focusCalls.join(','), '', 'M16 新建会话**不调**任何 focus*')
@@ -830,7 +866,7 @@ async function main() {
     st().openFile('src/a.ts', 'tool-1') // diff 标签
     st().openFile('src/a.ts', undefined, 'source') // 同一文件的 source 标签（并存）
     st().syncWebTabs('native', [{ key: 't3', url: TARGETS[0].url, title: 'report.pdf', srcPath: TARGETS[0].srcPath }], 't3')
-    st().setRightTab('git')
+    st().openTab({ kind: 'git' })
     const gitTab = st().tabsByScope[S1].tabs.find((t) => t.kind === 'git')
     st().closeTab(gitTab.id) // closed 栈里留一条（**不应**被持久化）
     st().flushSessionTabs()
@@ -854,7 +890,7 @@ async function main() {
     // N11b：反查不到 url 的 web 标签 → 丢弃（不恢复一个点不开的死标签）
     reset({ activeSessionId: S1 })
     useAppStore.setState({ embedNav: nav([], null) })
-    st().setRightTab('web') // 「+ 浏览器」开的空 web 标签（没有 viewId，也没有 url）
+    st().openTab({ kind: 'web' }) // 「+ 浏览器」开的空 web 标签（没有 viewId，也没有 url）
     st().flushSessionTabs()
     eq(readStored().scopes[S1].tabs.filter((t) => t.kind === 'web').length, 0, 'N12 反查不到 url 的 web 标签**丢弃**（死标签不恢复）')
 
@@ -875,6 +911,11 @@ async function main() {
     eq(st2().rightExpanded, false, 'N13 恢复**不展开**右栏（恢复 ≠ 激活）')
     eq(st2().leftExpanded, true, 'N14 恢复**不收**左栏')
     eq(calls.open.length, 0, 'N15 恢复**不创建任何视图**（阶段 3 的休眠语义：视图留给用户点击那一刻）')
+    // N25 必须在第一次 sync（面板 effect 的收口）**之前**：恢复标记的定义就是「面板还没读过它」。
+    // R11b 之前第一次 sync 只补派生字段、集合不动（标记因此还在）；「补派生」这件事随字段一起
+    // 删掉后，第一次读就直接清标记 —— 下面 N26 钉住的就是那一次 set。
+    eq(st2().tabsByScope[S1].restored, true, 'N25 恢复标记仍在（面板还没读过这个集合）')
+    const refBefore = st2().tabsByScope
     st2().syncTabsToRightTab() // 面板 effect 的收口（真实链路由 RightPanel 的 effect 调用）
     const set2 = st2().tabsByScope[S1]
     eq(set2.tabs.map((t) => t.kind).join(','), 'activity,file,web', 'N16 标签集与顺序恢复')
@@ -885,30 +926,24 @@ async function main() {
     eq(set2.tabs[1].openSeq, 1, 'N21 openSeq 不入存储 → 恢复时从 1 起')
     eq(set2.tabs[2].viewId, undefined, 'N22 web 标签恢复为**待重建**态（没有视图身份）')
     eq(set2.tabs[2].url, TARGETS[0].url, 'N23 url 快照恢复（重建的唯一依据）')
-    eq(st2().rightTab, 'file', 'N24 rightTab 反向收敛到恢复的激活标签（而不是把激活标签改成 activity）')
-    // 恢复标记的含义 = 「这个 scope 的标签集自本次启动起还没被用户碰过」→ 期间标签集权威
-    //（rightTab 此刻只可能是 resetView/loadViewToTop 的默认值）。清标记的时机：已一致、或
-    // 任何显式标签动作。故这里仍在。
-    eq(set2.restored, true, 'N25 恢复标记仍在（该 scope 还没被用户碰过）')
-    const refBefore = st2().tabsByScope
-    st2().syncTabsToRightTab() // 第二次：激活标签已与 rightTab 一致 → 清标记
-    assert(st2().tabsByScope !== refBefore, 'N26 已一致 → 清掉恢复标记（一次 set）')
+    eq(selectRightTab(st2()), 'file', 'N24 面板 = 恢复的激活标签（而不是回落 activity）')
+    assert(st2().tabsByScope !== refBefore, 'N26 面板第一次读即清掉恢复标记（一次 set）')
     const refAfter = st2().tabsByScope
     st2().syncTabsToRightTab()
     assert(st2().tabsByScope === refAfter, 'N26b 第三次 sync 不 set（防 effect 自激）')
-    eq(st2().tabsByScope[S1].restored, false, 'N26c 标记已清（此后 rightTab 恢复权威）')
+    eq(st2().tabsByScope[S1].restored, false, 'N26c 标记已清（此后标签集是唯一权威）')
     // N26d：恢复标记未清的 scope 在「切走再切回」后仍保留自己的激活标签（否则切回来会被
     // 默认的 activity 顶掉 —— 恢复出来的标签集往往没有 activity 标签，sync 会给它补一个）
     const m26 = await boot(persisted({ [S1]: { tabs: [{ id: 'a1', kind: 'git' }], activeId: 'a1' } }))
     m26.useAppStore.setState({ workspace: WS, activeSessionId: S1 })
     m26.useAppStore.getState().syncTabsToRightTab()
-    eq(m26.useAppStore.getState().rightTab, 'git', 'N26d 恢复后 rightTab = 标签集的 kind（git）')
+    eq(selectRightTab(m26.useAppStore.getState()), 'git', 'N26d 恢复后面板 = 标签集的激活项 kind（git）')
     m26.useAppStore.setState({ activeSessionId: S2 })
     m26.useAppStore.getState().syncTabsToRightTab()
-    m26.useAppStore.setState({ activeSessionId: S1, rightTab: 'activity' }) // 切回（未水合会话 → resetView 默认值）
+    m26.useAppStore.setState({ activeSessionId: S1 }) // 切回（未水合会话 → resetView 只回落布局）
     m26.useAppStore.getState().syncTabsToRightTab()
     eq(m26.useAppStore.getState().tabsByScope[S1].tabs.map((t) => t.kind).join(','), 'git', 'N26e 切回来仍是该 scope 自己的标签集（没被默认 activity 顶掉）')
-    eq(m26.useAppStore.getState().rightTab, 'git', 'N26f 且 rightTab 仍跟随它')
+    eq(selectRightTab(m26.useAppStore.getState()), 'git', 'N26f 且面板仍跟随它')
 
     // N27：重启后主进程推来的**空 targets** 不得把恢复的 web 标签当「页面已关闭」删掉
     st2().syncWebTabs('native', [], null)
@@ -1057,41 +1092,44 @@ async function main() {
   //
   // 为什么必须单独钉这一块：e2e 探针里 file 标签几乎都走 `openTab(path)`，而那条路在 store
   // 内部就把 focusSpec 合进 payload 了（openTab 自己的 `full`），**完全绕过 makeTab**。
-  // makeTab 的初值只在一条路上可见：这个 scope 还**没有标签集**、按 rightTab 建默认集
-  //（syncTabsToRightTab 分支①）—— 正是「e2e 直写 rightTab 复位后 sync」那条路径，
-  // R11b 之前必须一直是好的。没有这组断言，PR-11 把 defaultSpec 写丢时 220 条全绿。
-  console.log('\n—— Q. 默认集的初值来自 provider 的 defaultSpec（makeTab 不再有 switch）——')
+  // makeTab 的初值因此在两条路上可见：① `openTab({kind:'web'})`（非 file 一律走 makeTab）；
+  // ② `openTab({kind:'file'})` 不带 path（file 分支只在 spec 自带 path 时绕过 makeTab）。
+  // R11b 之前还有第三条：这个 scope 没有标签集时「按面板字段建默认集」—— 那条路随字段删掉了。
+  // 没有这组断言，PR-11 把 defaultSpec 写丢时两百多条全绿。
+  console.log('\n—— Q. 标签初值来自 provider 的 defaultSpec（makeTab 不再有 switch）——')
   {
-    const tab0 = () => useAppStore.getState().tabsByScope[S1]?.tabs[0]
+    // 读到**刚刚 openTab 打开的那个**实例（R11b 起默认集固定是 activity，所以它不再是 tabs[0]）
+    const openedTab = () => {
+      const set0 = useAppStore.getState().tabsByScope[S1]
+      return set0?.tabs.find((t) => t.id === set0.activeId)
+    }
     // Q1/Q2：file —— payload = fileFocus（有 toolId → diff，带 startLine；openSeq=1）
-    reset({ activeSessionId: S1, rightTab: 'file', fileFocus: { path: 'src/a.ts', toolId: 'tool-1', seq: 7, startLine: 12 } })
-    st().syncTabsToRightTab()
-    eq(tab0()?.kind, 'file', 'Q1 默认集按 rightTab 建出 file 标签')
+    reset({ activeSessionId: S1, fileFocus: { path: 'src/a.ts', toolId: 'tool-1', seq: 7, startLine: 12 } })
+    st().openTab({ kind: 'file' }) // 不带 path = 「打开用户最后定位的那个文件」
+    eq(openedTab()?.kind, 'file', 'Q1 openTab(file, 无 path) 建出 file 标签')
     // 用 join 比较：本脚本的 eq 是严格相等（数组永远不等），而这里要的是「逐字段」
     eq(
-      [tab0()?.path, tab0()?.mode, tab0()?.toolId, tab0()?.startLine, tab0()?.openSeq].join('|'),
+      [openedTab()?.path, openedTab()?.mode, openedTab()?.toolId, openedTab()?.startLine, openedTab()?.openSeq].join('|'),
       'src/a.ts|diff|tool-1|12|1',
       'Q2 file 标签的 payload 逐字段来自 fileFocus（path/mode/toolId/startLine/openSeq）',
     )
     // Q3：无 toolId → source（「有 toolId 才 diff」这条判据只有一份，在 store 的 focusSpec 里）
-    reset({ activeSessionId: S1, rightTab: 'file', fileFocus: { path: 'src/b.ts', seq: 8 } })
-    st().syncTabsToRightTab()
-    eq(tab0()?.mode, 'source', 'Q3 无 toolId → source 模式')
+    reset({ activeSessionId: S1, fileFocus: { path: 'src/b.ts', seq: 8 } })
+    st().openTab({ kind: 'file' })
+    eq(openedTab()?.mode, 'source', 'Q3 无 toolId → source 模式')
     // Q4/Q5：web —— 池里有真实页面才认 viewId（about:blank 是常驻自举载体，不认）
     reset({
       activeSessionId: S1,
-      rightTab: 'web',
       embedNav: { activeId: 't9', targets: [{ id: 't9', url: 'https://q.example/' }] },
     })
-    st().syncTabsToRightTab()
-    eq([tab0()?.kind, tab0()?.viewId].join('|'), 'web|t9', 'Q4 web 标签认池里当前激活的真实页面')
+    st().openTab({ kind: 'web' })
+    eq([openedTab()?.kind, openedTab()?.viewId].join('|'), 'web|t9', 'Q4 web 标签认池里当前激活的真实页面')
     reset({
       activeSessionId: S1,
-      rightTab: 'web',
       embedNav: { activeId: 't1', targets: [{ id: 't1', url: 'about:blank' }] },
     })
-    st().syncTabsToRightTab()
-    eq([tab0()?.kind, tab0()?.viewId].join('|'), 'web|', 'Q5 about:blank 不算真实页面 → 空 web 标签')
+    st().openTab({ kind: 'web' })
+    eq([openedTab()?.kind, openedTab()?.viewId].join('|'), 'web|', 'Q5 about:blank 不算真实页面 → 空 web 标签')
   }
 
   console.log(`\n全部通过：${pass} 项断言\n`)

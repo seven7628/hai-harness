@@ -93,7 +93,6 @@ useAppStore.setState({
   activeSessionId: 'probe',
   workspace: '/tmp/probe-ws',
   rightExpanded: true,
-  rightTab: 'file',
   filePreviews: { 'demo.ts': { path: 'demo.ts', content: DEMO_SRC, lines: 4 } },
   tabsByScope: {
     probe: { tabs: [{ id: 'tp_file', kind: 'file', path: 'demo.ts', mode: 'source', openSeq: 1 }], activeId: 'tp_file', closed: [] },

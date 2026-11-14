@@ -121,7 +121,7 @@ process.on('exit', cleanup)
 const openFinalFile = (page, filePath, inline = false) => page.evaluate(async ({ p, inl }) => {
   const st = window.__store
   st.setState({
-    rightExpanded: true, rightTab: 'file', fileFocus: undefined, filePreviews: {},
+    rightExpanded: true, fileFocus: undefined, filePreviews: {},
     gitFiles: [],
     blocks: inl
       ? [{ kind: 'tool', id: 1, toolId: 't1', name: 'read_file', args: JSON.stringify({ path: p }), result: 'ok', status: 'done', startedAt: Date.now() }]

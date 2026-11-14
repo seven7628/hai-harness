@@ -46,6 +46,11 @@ import type { SignalFact } from '../lib/signalFacts'
 // store 侧保留同名 re-export —— RightPanel 等调用点的 import 路径不变（本轮零行为变化），
 // 下一轮 provider 直接从 lib 取，不再经过 store。
 import { isPendingWebTab, samePreviewTarget, webTabKey, webUrlSnapshot } from '../lib/webTab'
+// R11b：右栏「现在是哪个面板」的派生选择器（纯函数，只 type-only 依赖本文件）。
+// 与 lib/webTab 同一处置：判据下沉到 lib，store 侧保留同名 re-export 给旧 import 路径。
+// 模块名取 rightPanel（不是被删字段的名字）：它回答的是「右栏在显示什么」，
+// 而不是「rightTab 是什么」—— 后者已不存在。
+import { selectRightTab, tabScopeKey } from '../lib/rightPanel'
 // 媒体元素池的回收入口（R08c）：关标签时按标签里的 path 释放解码器/缓冲。
 // 只 import 函数、不 import 任何在模块顶层碰 document 的东西（node 单测会 import 本文件）。
 import { disposeMediaElementsForPath } from '../lib/mediaStage'
@@ -66,6 +71,9 @@ import { startUISnapshot } from '../lib/uiSnapshot'
 import { startPluginLoader, surfaceBaseUrl } from '../surfaces/plugin/loader'
 import { emitUI } from '../lib/uiBus'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
+// R11b：选择器同 webTab 系列一并 re-export —— RightPanel 等读点的 import 路径不分裂
+//（一半从 store、一半从 lib 取同一条判据，是这类判据最常见的分叉起点）。
+export { selectRightTab }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
 //
@@ -78,11 +86,15 @@ export type RightTab = 'activity' | 'git' | 'file' | 'web'
 
 // —— 右侧栏标签模型（docs/RIGHT_PANEL_TABS_PLAN.md 阶段 1）——
 //
-// 分工（PR-02 起 activeId 权威）：
-//   · tabsByScope = 权威：有哪些标签、顺序、**激活的是哪个实例**（activeId）、最近关了哪些。
-//   · rightTab    = 派生字段，只为旧读点 / 会话恢复 / e2e 兼容保留一个版本（PR-11 删）。
-//     唯一写点是 rightTabPatch（tabPatch 调它），值 = 激活标签的 kind；没有标签时保留旧值。
-//   外部直接 setState({ rightTab }) **不会**换掉用户正在看的标签；下一次标签动作会把 rightTab 重新派生。
+// **真相只有一份**：tabsByScope（有哪些标签、顺序、激活的是哪个实例、最近关了哪些）。
+// 「现在是哪个面板」不存字段，由 `selectRightTab`（lib/rightPanel）从 activeId 算出来。
+//
+// 历史：PR-02 把 activeId 定成权威时，留了一个派生字段 `AppState.rightTab`（+ 会话视图里
+// 的同名字段）当过渡，写点收在 `rightTabPatch` 一处。过渡期的实际形态是**两份真相**：
+// 会话恢复的 view 镜像、e2e/旧探针的 `setState({ rightTab })`、组件 effect 的收敛时机，
+// 都能让字段与激活标签短暂不一致，而「以哪份为准」只写在注释里。R11b 删掉字段与
+// `rightTabPatch`/`setRightTab` 兼容入口，读点全部收敛到选择器 —— 漂移不再是「有没有人
+// 记得同步」的问题，而是结构上不存在。
 export type ScopeKey = string // 会话 id；无会话时退化为工作区路径（D7）
 export type TabKind = RightTab // 复用 5 个既有取值：e2e 断言与 i18n key（rp.tab.*）都按它走
 // file 标签是**多实例**的（阶段 2）：身份 = (path, mode)，同一文件可以同时有 diff 与
@@ -111,7 +123,7 @@ export interface TabSet {
   activeId: string | null // null = 用户把标签关光了（显示空态，不自动补默认标签）
   closed: TabInstance[] // 最近关闭（⌄ 下拉「重开」），上限 TAB_CLOSED_MAX
   // 阶段 5：本次进程内**刚重启恢复**、还没被任何动作碰过。不持久化，用完即清。
-  // 见 syncTabsToRightTab：恢复态第一次读只补派生字段（rightTab），第二次读清标记。
+  // 见 syncTabsToRightTab：恢复态第一次被读到只清标记（集合不动），第二次读起什么都不做。
   restored?: boolean
 }
 export const TAB_CLOSED_MAX = 10
@@ -1116,7 +1128,8 @@ export interface SessionView {
   // focusedAgent 当前**正在查看的子智能体**（左栏树的选中项；undefined = 看主会话）。
   //
   // 为什么放在会话视图里（而不是全局）：子智能体的身份是 run_id/task_id，属于某个会话；
-  // 切到别的会话再切回来，「刚才在看哪个子智能体」应当恢复（与 rightTab 同类）。
+  // 切到别的会话再切回来，「刚才在看哪个子智能体」应当恢复（与「刚才在看哪个标签」同类，
+  // 只是后者现在归 tabsByScope 管，见文件顶部标签模型）。
   // 它只影响**展示**（叙述区渲染谁），不改变「消息发给谁」—— 输入框永远发给主会话。
   focusedAgent?: AgentFocus
   usage: UsageAgg
@@ -1170,7 +1183,9 @@ export interface SessionView {
   rightExpanded: boolean // 右侧栏是否展开（会话级，切换会话各自恢复）
   // 三态布局（PR-01）：rightExpanded 是它的派生镜像；ratio = 右栏占「除左栏外」的百分比
   rightLayout: RightLayout
-  rightTab: RightTab // 右侧栏当前 tab（会话级）
+  // 注：这里曾有 `rightTab: RightTab`（会话级的「当前面板」）。R11b 删掉了 —— 它只是
+  // `tabsByScope[scope].activeId` 的副本，而标签集**刻意不放进 SessionView**（views 有
+  // LRU 淘汰，放进去会让标签随会话被挤出缓存）。真相与缓存的生命周期不同，就不能同住一份状态。
 
   // —— 链路 tab：trace（docs/TRACE_CHAIN_REDESIGN.md）——
   // traceEvents：本会话收到的 span 类事件（白名单 TRACE_SPAN_TYPES），实时投影的数据源。
@@ -1293,7 +1308,6 @@ function emptyView(): SessionView {
     pendingQueue: [],
     rightExpanded: false,
     rightLayout: layoutCollapse,
-    rightTab: 'activity',
     traceEvents: [],
   }
 }
@@ -1355,7 +1369,6 @@ function viewFields(nv: SessionView): Partial<AppState> {
     release: nv.release,
     pendingQueue: nv.pendingQueue,
     ...layoutMirror(nv),
-    rightTab: nv.rightTab,
     traceEvents: nv.traceEvents,
     traceList: nv.traceList,
     traceListTotal: nv.traceListTotal,
@@ -1424,7 +1437,6 @@ function topViewFields(s: AppState): Partial<SessionView> {
     release: s.release,
     pendingQueue: s.pendingQueue,
     ...layoutMirror(s),
-    rightTab: s.rightTab,
     traceEvents: s.traceEvents,
     traceList: s.traceList,
     traceListTotal: s.traceListTotal,
@@ -1450,19 +1462,13 @@ function resetView(): Partial<AppState> {
 
 // —— 右侧栏标签模型 helper（阶段 1）——
 
-// scopeKeyOf：标签集的归属键。无会话（加了工作区但还没建会话）时退化为工作区路径——
-// 否则右栏在「已添加工作区、尚未建会话」这个窗口期没有归属（D7）。
-function scopeKeyOf(s: { activeSessionId?: string; workspace?: string }): ScopeKey {
-  return s.activeSessionId || s.workspace || ''
-}
-
 let tabSeq = 0
 // focusSpec：fileFocus（用户/Agent 最后一次定位的文件）→ file 标签的初始 payload。
 // mode 口径与 locateFile 一致：显式 source，或缺 toolId → 完整预览；否则 diff/操作模式。
 //
 // 阶段 2 起 fileFocus **不再是内容源**（内容按归一化路径索引，见 filePreviews），它只剩
-// 两个用途：① 无路径打开 file 标签时的初值（本函数 —— 用户点 rail 的「文件」按钮 /
-// setRightTab('file') / e2e 直接写 rightTab 后 sync）；② 左栏文件树的选中行。
+// 两个用途：① 无路径打开 file 标签时的初值（本函数 —— 用户点 rail 的「文件」按钮 / openTab
+// 一个不带 path 的 file spec）；② 左栏文件树的选中行。
 //
 // PR-11 导出：openTab 与 file provider 的 defaultSpec 两个调用点都读它 —— **实现只有这一份**
 //（在 provider 里照抄一遍条件，迟早与这里分叉：mode 的 toolId 口径、startLine 的可选性）。
@@ -1496,7 +1502,7 @@ function tabKeyOf(t: TabInstance | TabSpec, ws: string | undefined): string | un
 // items 里没有的 key，syncWebTabs 一律当「这个页面已经关了」处理。而池里**常驻**一个 about:blank
 // 自举载体（主进程建连即存在，且它就是 activeId）—— 标签一旦认了这个 id，下一次 embed-nav 事件
 // （紧跟着就来）就会把它判死删掉。用户看到的就是「点了没反应」：
-//   ＋ → 网页 / 折叠态 rail 的「网页」图标 → 空 web 标签 → 4ms 后标签消失 + rightTab 被顶回
+//   ＋ → 网页 / 折叠态 rail 的「网页」图标 → 空 web 标签 → 4ms 后标签消失 + 面板被顶回
 //   上一个标签（2026-09-21 用户报障「右侧侧边栏点击加号、选择网页无效」，真机 trace 实测）。
 // 认不出真实页面时**不认 id**：交给「空 web 标签」形态 —— 它被 syncWebTabs 的收养分支接住，
 // 池里出现第一个真实页面时复用它的标签实例（不闪、不多一个标签）。
@@ -1812,15 +1818,15 @@ function flushPendingPersistTabs(): void {
   flushPersistTabs()
 }
 
-// syncTabsToRightTab：**只负责「这个 scope 还没有标签集」时按 rightTab 建默认集**。
+// syncTabsToRightTab：**只负责「这个 scope 还没有标签集」时建默认集**（+ 清恢复标记）。
 //
-// PR-02 起 activeId 是权威：标签集存在时**不再**读 rightTab 去反向挑选标签（旧分支②③已删）。
-// 理由：那两条会让「外部改一下 rightTab」静默换掉用户正在看的标签，也会在切会话恢复时
-// 把 persisted 的 activeId 顶掉。rightTab 现在只由 tabPatch 从激活标签派生。
+// 默认集 = 一个 activity 标签。R11b 之前它是按 `rightTab` 造的（于是「把 rightTab 写成
+// file 再 sync」能间接开出一个 file 标签 —— e2e 复位路径就靠这个）。那条路已删：面板从来不是
+// 「记住用户上次选了哪个 kind」的状态，而是一个标签实例 —— 想开 file 标签就 `openTab`。
 function syncTabsToRightTab(s: AppState): TabSet {
-  const cur = s.tabsByScope[scopeKeyOf(s)]
+  const cur = s.tabsByScope[tabScopeKey(s)]
   if (!cur) {
-    const tab = makeTab(s.rightTab, s)
+    const tab = makeTab('activity', s)
     return { tabs: [tab], activeId: tab.id, closed: [] }
   }
   // restored 是「本次启动起还没被用户碰过」的一次性标记：只在**显式标签动作**里清
@@ -1828,22 +1834,26 @@ function syncTabsToRightTab(s: AppState): TabSet {
   return cur
 }
 
-// tabPatch 把新的标签集写回 state，**同时**把 rightTab 派生为激活标签的 kind
-//（有会话 → 写该会话 view；无会话 → 只写顶层，与 setRightTab 的既有口径一致）。
-// 集为空时保留原 rightTab：此时内容区由 activeTab===null 渲染空态，rightTab 只是个遗留值。
-// rightTabPatch：rightTab 的**唯一**写点（tabPatch 也走它）。只派生、不碰标签集。
-function rightTabPatch(s: AppState, kind: RightTab, layout?: RightLayout): Partial<AppState> {
-  const extra = layout ? { rightLayout: layout, rightExpanded: layout.open } : {}
+// layoutPatch：标签动作顺带改布局时（openTab 的自动展开 D-A）把 rightLayout/rightExpanded
+// 一起写进该会话的 view —— 布局是会话级的（PR-01），切回来要恢复。
+//
+// R11b 之前这段住在 rightTabPatch 里，且**无论有没有 layout 都会 setView**：于是每个标签动作
+// 都顺手把「当前会话 view → 顶层镜像」重放一遍。那是个负作用（顶层已经被后续事件更新过时，
+// 一次切标签会把顶层的 blocks/streaming 拉回旧 view 的值），探针里甚至有注释在与它周旋
+//（verify_preview_container：复位必须走 action，否则 10ms 后「自己变回去」）。字段删掉后
+// 这段只在真有布局变更时执行。
+function layoutPatch(s: AppState, layout?: RightLayout): Partial<AppState> {
+  if (!layout) return {}
   const sid = s.activeSessionId
-  if (!sid) return { rightTab: kind, ...extra }
+  if (!sid) return { rightLayout: layout, rightExpanded: layout.open }
   const v = s.views[sid] ?? emptyView()
-  return setView(s, sid, { ...v, rightTab: kind, ...extra })
+  return setView(s, sid, { ...v, rightLayout: layout, rightExpanded: layout.open })
 }
 
+// tabPatch：标签集写回 state 的**唯一**入口（8 条标签动作都过它）。它只做两件事 ——
+// 写 tabsByScope、顺带写布局；「当前是哪个面板」不再由它派生（选择器现算）。
 function tabPatch(s: AppState, scope: ScopeKey, set0: TabSet, layout?: RightLayout): Partial<AppState> {
-  const active = set0.tabs.find((t) => t.id === set0.activeId)
-  const kind: RightTab = active?.kind ?? s.rightTab
-  return { ...rightTabPatch(s, kind, layout), tabsByScope: { ...s.tabsByScope, [scope]: set0 } }
+  return { ...layoutPatch(s, layout), tabsByScope: { ...s.tabsByScope, [scope]: set0 } }
 }
 
 // 标签列表的结构等价判断：syncWebTabs 在每个 embed-nav 事件上都会跑（导航/标题变化很频繁），
@@ -1961,7 +1971,7 @@ const previewOwnedViews = new Set<string>()
 // 「Browser Use 接管视界」的语义，用在预览上是误伤）。
 function focusWebTabIfClosed(): void {
   const st = useAppStore.getState()
-  if (st.rightExpanded && st.rightTab === 'web') return
+  if (st.rightExpanded && selectRightTab(st) === 'web') return
   st.focusBrowserForPreview()
 }
 
@@ -2004,7 +2014,7 @@ function rememberPreviewView(res: { state?: unknown } | undefined, activate: boo
 // 的内存问题，启动时按存储 eager 重建等于把它原样还回去 —— 而用户很可能整个会话都不会点其中
 // 任何一个。所以恢复只把**标签**放回标签条（待重建态），视图留给真正要看它的那一刻。
 //
-// 唯一调用方 = RightPanel 的 effect（判据：面板展开 + rightTab=web + 激活标签就是待重建的那个）。
+// 唯一调用方 = RightPanel 的 effect（判据：面板展开 + 激活标签是 web 且就是待重建的那个）。
 // 为什么收口在渲染层而不是 activateTab：待重建标签成为激活标签有**两条**路径 —— 用户点它、
 // 以及「重启时它就是激活标签，用户只是把面板展开」；后者若不在渲染层兜住，用户看到的就是一个
 // 永远空的网页面板（点已激活的标签不会再触发任何东西）。两处都做则会双开视图。
@@ -2057,7 +2067,7 @@ export function rebuildWebTab(tab: WebTabInstance): void {
 //      响亮报错只属于用户显式点击。
 //
 // 为什么预览走内嵌浏览器而不是文件栏：pdf/xlsx/图片/html 在本仓库只有**一条**渲染通道 =
-// 内嵌浏览器（file:// / bridge 转 HTML）。文件栏（rightTab='file'）只能内联渲染文本
+// 内嵌浏览器（file:// / bridge 转 HTML）。文件栏（file 标签）只能内联渲染文本
 //（shiki/Markdown/CSV），承载不了这些类型。自动打开也不再切过去（那会换掉用户正在看的 tab），
 // fileFocus 只是给用户自己去看时留的定位锚。
 //
@@ -2112,7 +2122,7 @@ function scopeWorkspaceOf(s: AppState, scope: ScopeKey): string | undefined {
   }
   // 认不出归属时只给**当前** scope 兜底（它就是 s.workspace 这一侧）；其余一律不猜 ——
   // 猜错会把另一个工作区的同名文件改掉，比留一个陈旧路径更难查。
-  return scope === scopeKeyOf(s) ? s.workspace : undefined
+  return scope === tabScopeKey(s) ? s.workspace : undefined
 }
 
 // keySuffix：标签路径相对被改条目键的尾部（"/a/b.ts" 之类；非子树 → 空串）。
@@ -2371,7 +2381,7 @@ function subscribeEmbedEvents(): void {
     // 只认「激活 且 面板可见」：仅激活而面板收起（如自动打开时的顺延）不算看过 —— 否则
     // 切会话/后台动作会把未读点悄悄吃掉，用户永远不知道有产出在等他。
     const stv = useAppStore.getState()
-    if (nav.activeId && stv.rightExpanded && stv.rightTab === 'web' && stv.unreadViews.includes(nav.activeId)) {
+    if (nav.activeId && stv.rightExpanded && selectRightTab(stv) === 'web' && stv.unreadViews.includes(nav.activeId)) {
       stv.markPreviewSeen(nav.activeId)
     }
     // —— 内嵌页面 → 面板级 web 标签（阶段 1.5）——
@@ -2769,7 +2779,7 @@ function scheduleGitRefresh(sid: string, history = false): void {
     cur.loadGitSnapshot()
     if (reloadHistory) cur.loadGitHistory()
     // 变更 tab 打开时保持工作区级快照同步（双层一致性；无会话场景由 tab 自身 stale 重拉兜底）
-    if (cur.rightTab === 'git') cur.loadWsGit()
+    if (selectRightTab(cur) === 'git') cur.loadWsGit()
   }, 500)
 }
 // —— 启动水合门控（2026-08-16）：list 水合尚未完成时，首次 ask 只缓冲不自动建会话 ——
@@ -3000,7 +3010,8 @@ export interface AppState {
   leftPinned: boolean
   rightExpanded: boolean
   rightLayout: RightLayout
-  rightTab: RightTab
+  // 「现在是哪个面板」= `selectRightTab(this)`（lib/rightPanel）。R11b 之前这里有一个
+  // `rightTab: RightTab` 字段，是 activeId 的写穿副本 —— 见文件顶部「标签模型」的注释。
   rightSize: number | null // M3：期望的右侧面板宽度（null = 不强制；浏览器内嵌时按 viewport 设）
   // panelMenuOpen：右栏**面板级**下拉/右键菜单是否开着（R06c 从 RightPanel 的局部 state 上移）。
   //
@@ -3402,7 +3413,6 @@ export interface AppState {
   setRightLayoutFromDrag(rightPct: number, leftPct: number): void
   applyBias(b: 'even' | 'center' | 'right'): void
   togglePin(): void
-  setRightTab(t: RightTab): void
   // R06c：右栏面板级菜单（⌄ 重开 / ＋ 新建 / 标签右键）开合的**唯一**写点，由 RightPanel 的
   // 两个 setter 调用点镜像进来 —— 它是 WebTab 可见性仲裁的输入（见 AppState.panelMenuOpen）。
   setPanelMenuOpen(open: boolean): void
@@ -3428,7 +3438,7 @@ export interface AppState {
   closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）；**dirty 编辑标签先弹确认**
   closeTabNow(id: string): void // 真关（确认框/批量关闭用；跳过 dirty 守卫）
   reopenTab(id?: string): void // 重开最近关闭的一个（给 id 则重开指定的那个）
-  syncTabsToRightTab(): void // 建默认集 / 恢复态补派生字段（activeId 权威，不再按 rightTab 反选）
+  syncTabsToRightTab(): void // 该 scope 还没有标签集时建默认集（+ 清恢复标记）；不碰已有集合
   // 阶段 5：把防抖窗口里的标签集立即落盘（e2e/L1 断言与关窗前收尾用；正常路径靠订阅防抖写）。
   flushSessionTabs(): void
   // 内嵌页面 → 面板级 web 标签（阶段 1.5：一页一标签，浏览器内层标签条退役）。
@@ -9675,7 +9685,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   leftPinned: false,
   rightExpanded: false,
   rightLayout: layoutCollapse,
-  rightTab: 'activity',
   rightSize: null,
   // 菜单关着（与 menu/ctx 的初值一致）；RP 挂载后由两个 setter 镜像维护。
   panelMenuOpen: false,
@@ -9802,7 +9811,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         void transport.send({ id: ++cmdSeq, type: 'ui', payload: { op, data } })
       },
       t: i18nT,
-      scopeKeyOf: (s) => scopeKeyOf(s),
+      scopeKeyOf: (s) => tabScopeKey(s),
     })
     // 插件加载器（PR-14）：启动同步一次 + 每次 surfaces_changed 再同步一次。
     // 排在 startUISnapshot 之后是刻意的：快照要能立刻看到「装了什么」，而插件的
@@ -10785,7 +10794,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     //
     // 为什么放在 openFile（动作）而不是文件栏组件里（第一版就是那样，被自己的 e2e 抓出缺陷）：
     // 组件在切走时**卸载**，组件内的去重 ref 随之清空 → 用户每次切回文件栏都会被再"自动打开"
-    // 一次并弹回预览（实测 4ms 内把 rightTab 从 file 顶回 web，形成拉锯）。动作层天然只发生一次。
+    // 一次并弹回预览（实测 4ms 内把面板从 file 顶回 web，形成拉锯）。动作层天然只发生一次。
     //
     // 为什么判据是扩展名而不是 bridge 的 binary：这与产出后自动打开（autoOpenVisualFile）同一
     // 事实源（lib/visualFile.visualKindOf），文件栏随时能给出答案，不必等一次 IPC 往返；
@@ -10873,7 +10882,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cancelCloseConfirm: () => set({ closeConfirm: undefined }),
   closeFile: () => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const i = set0.tabs.findIndex((t) => t.id === set0.activeId && t.kind === 'file')
     const tabs = i < 0 ? set0.tabs : set0.tabs.map((t, k) => (
@@ -11317,11 +11326,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (v.focusedAgent?.nodeId === f?.nodeId) return
     set(setView(s, sid, { ...v, focusedAgent: f }))
   },
-  setRightTab: (t) => {
-    // 兼容入口（e2e 与既有调用点仍按 kind 切标签）：语义 = **打开或激活**该 kind 的标签。
-    // 为什么不让它直接写 rightTab：那会绕过标签集，出现「切过去了、标签条上却没有这个标签」。
-    get().openTab({ kind: t } as TabSpec, { activate: true })
-  },
   // 同值不 set：菜单开合会连带触发 RP 的两个 setter（menu 与 ctx 各一），重复写会让
   // 所有订阅者白跑一轮通知（WebTab 的可见性 effect 也挂在同一个值上）。
   setPanelMenuOpen: (open) => set((s) => (s.panelMenuOpen === open ? {} : { panelMenuOpen: open })),
@@ -11374,10 +11378,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   //   · 其余 kind → kind 本身（每类每 scope 一个实例，阶段 1 口径不变）。
   openTab: (spec, opts) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const activate = opts?.activate !== false
-    // 「无路径的 file 打开」（rail 的「文件」按钮 / setRightTab('file') / e2e 复位）：payload
+    // 「无路径的 file 打开」（rail 的「文件」按钮 / e2e 复位）：payload
     // 从 fileFocus 取 —— 语义是「打开用户最后一次定位的那个文件」。这就是 T1 之后「可视类文件
     // 不建 file 标签、但用户手动点「文件」标签仍能看到它」的那条路（fileFocus 留的定位锚）。
     const full: TabSpec = spec.kind === 'file' && !spec.path ? { ...focusSpec(s), ...spec } : spec
@@ -11423,9 +11427,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       tabs = [...tabs, t]
     }
     const next: TabSet = { tabs, activeId: activate ? id : (set0.activeId ?? id), closed: set0.closed }
-    // 文件标签的 60% 宽规则（原 setRightTab 内联）：只在「首次进入 / 从折叠态打开」时给，
+    // 文件标签的 60% 宽规则（原 setRightTab 时代内联在切标签动作里）：只在「首次进入 /
+    // 从折叠态打开」时给，
     // 已在文件标签内手动调宽后不反复重置（L1 的 G1-G4 钉住这三条口径）。
-    const shouldSizeFile = spec.kind === 'file' && (s.rightTab !== 'file' || !s.rightExpanded)
+    const shouldSizeFile = spec.kind === 'file' && (selectRightTab(s) !== 'file' || !s.rightExpanded)
     const sizePatch = shouldSizeFile && typeof window !== 'undefined'
       ? { rightSize: Math.round(window.innerWidth * 0.6) }
       : {}
@@ -11437,7 +11442,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   activateTab: (id) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     if (set0.activeId === id) return
     const tab = set0.tabs.find((t) => t.id === id)
@@ -11493,7 +11498,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   closeTabNow: (id) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const i = set0.tabs.findIndex((t) => t.id === id)
     if (i < 0) return
@@ -11519,7 +11524,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   reopenTab: (id) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const i = id ? set0.closed.findIndex((t) => t.id === id) : 0
     if (i < 0 || !set0.closed[i]) return
@@ -11531,20 +11536,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       : [...set0.tabs, tab]
     set(tabPatch(s, scope, { tabs, activeId: tab.id, closed: rest }))
   },
-  // 组件 effect 调用：把标签集收敛到 rightTab。已一致时**不 set**（返回同一引用）——
-  // 否则 effect → set → effect 会自激。
+  // 组件 effect 调用：把标签集收敛到「这个 scope 该有的样子」。已一致时**不 set**（返回同一
+  // 引用）—— 否则 effect → set → effect 会自激。
+  //
+  // R11b 之后这里只剩两条分支（旧的「按 rightTab 反选标签」「把派生字段纠正回激活标签」都已删）：
+  //   ① 没有标签集 → 建默认集（一个 activity 标签）；
+  //   ② 有标签集且带着恢复标记 → 只清标记（集合本身不动）。
+  // ② 留着是因为它是一条**可观察的**状态机（N25/N26 钉住：首次读之后标记消失、此后不再 set）；
+  // 它当初是为右栏派生字段的时序服务的，今天已没有外部读者 —— 见报告里的裁决点。
   syncTabsToRightTab: () => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const cur = s.tabsByScope[scope]
     if (!cur) return set(tabPatch(s, scope, syncTabsToRightTab(s)))
-    // activeId 权威（PR-02）：集合存在时不再按 rightTab 挑标签，只补派生字段 / 清恢复标记。
-    const active = cur.tabs.find((t) => t.id === cur.activeId)
-    const kind: RightTab = active?.kind ?? s.rightTab
-    // 派生字段落后（旧 e2e 直接 setState、或恢复响应先到）→ 纠正回激活标签，不动集合
-    if (kind !== s.rightTab) return set(rightTabPatch(s, kind))
-    if (!cur.restored) return // 非恢复态且已一致：无需收敛（旧的反向分支已删）
-    set(tabPatch(s, scope, { ...cur, restored: false })) // 恢复态且已一致 → 清标记（一次 set）
+    if (!cur.restored) return
+    set(tabPatch(s, scope, { ...cur, restored: false })) // 恢复态 → 清标记（一次 set）
   },
   flushSessionTabs: () => flushPersistTabs(),
   // 把「内嵌浏览器的页面」同步成面板级 web 标签（一页一标签）。
@@ -11553,7 +11559,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 声明式收敛一次覆盖全部路径；与旧内层标签条的数据源口径完全一致。
   syncWebTabs: (source, items, activeKey) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const live = new Set(items.map((x) => x.key))
     // ① 该数据源里已消失的页面 → 删标签；**另一数据源**的 web 标签：本数据源有数据时一并清掉
@@ -11622,7 +11628,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   // M3：使用 Browser Use 时聚焦右侧 web tab —— 收起左栏 + 展开右栏 + 切到网页 tab
   focusBrowser: () => {
     get().setRightExpanded(true)
-    get().setRightTab('web')
+    // 语义 = 打开或激活 web 标签（R11b 起 setRightTab 兼容入口已删，直接走 openTab）。
+    get().openTab({ kind: 'web' })
     set({ leftExpanded: false }) // 收起左侧：把主视界交给右侧 web tab
   },
   // 预览专用（只切右侧，不动左栏）—— 为什么单列：收起左栏是「Browser Use 接管视界」
@@ -11631,7 +11638,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 产出卡/文件栏/自动打开/```html 代码块共用，这些场景没有一个是「AI 接管浏览器」。
   focusBrowserForPreview: () => {
     get().setRightExpanded(true)
-    get().setRightTab('web')
+    get().openTab({ kind: 'web' })
   },
   // §6.9 右栏自动展开语义（产品要求）：
   //   1. 执行 Browser Use 时自动打开右侧 web 栏；
@@ -11647,7 +11654,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   focusBrowserForUse: (fromSid?: string) => {
     const st = get()
     if (fromSid && fromSid !== st.activeSessionId) return // 别的会话：不展开、不收左栏
-    if (st.rightExpanded && st.rightTab === 'web') return // 要求 2：已打开不重复
+    if (st.rightExpanded && selectRightTab(st) === 'web') return // 要求 2：已打开不重复
     st.focusBrowser() // 要求 1+3：打开或收起后重开
   },
   // §3.1（R2）预览统一入口：所有「预览本地文件」的动作都走这里 → 内嵌浏览器**新建标签**。
@@ -11693,7 +11700,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const srcPath = (opts?.srcPath ?? abs).replaceAll('\\', '/')
     // 面板切换必须**同步**发生（在任何 await 之前），与修复前的实现同序：调用方（含
     // e2e/verify_auto_open_visual.mjs 的同步状态读取、以及用户点击后的即时反馈）依赖
-    // 「调完这个 action，rightTab 已经是 web」；放到 await 之后会让它晚一次 IPC 往返生效
+    // 「调完这个 action，激活标签已经是 web」；放到 await 之后会让它晚一次 IPC 往返生效
     // （实测：e2e:auto 的「停在预览 tab」由绿转红）。activate:false 时**一律不动**面板。
     if (activate) get().focusBrowserForPreview()
     try {

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useReducer, useRef, useState, useCallback } from 'react'
 import type { ReactElement, ReactNode } from 'react'
-import { useAppStore, isPendingWebTab, rebuildWebTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
+import { useAppStore, isPendingWebTab, rebuildWebTab, selectRightTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
 import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
 import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
 import { ChangesTab } from './ChangesTab'
@@ -151,8 +151,10 @@ export default function RightPanel() {
   const t = useT()
   const allTabs = primaryTabs(t).concat(secondaryTabs(t))
   const rightExpanded = useAppStore((s) => s.rightExpanded)
-  const rightTab = useAppStore((s) => s.rightTab)
-  const setRightTab = useAppStore((s) => s.setRightTab)
+  // R11b：rail 高亮读**派生选择器**（激活标签的 kind），不再读 state 里那个写穿副本。
+  // 差异只有一处，且是修缺陷：标签关光（activeId=null）时旧字段保留最后的值，rail 会一直
+  // 高亮一个已经不在的面板；选择器此时返回 undefined → 没有一个图标亮着（与内容区空态一致）。
+  const activeKind = useAppStore(selectRightTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const toggleRight = useAppStore((s) => s.toggleRight)
   const rightLayout = useAppStore((s) => s.rightLayout)
@@ -349,9 +351,10 @@ export default function RightPanel() {
     if (!(rightExpanded && nativeHost)) void window.desktop?.embedHide()
   }, [embeddedPresentation, rightExpanded, activeTab?.kind, previewEmbedActive])
 
-  // 标签集单向收敛到 rightTab：rightTab 有多条改写路径（动作 / loadViewToTop 会话恢复 /
-  // e2e 直接 setState 复位），在渲染层收敛一处覆盖全部；已一致时 store 侧不 set（防自激）。
-  useEffect(() => { syncTabs() }, [syncTabs, rightTab, scope])
+  // 标签集收敛：这条 effect 现在只做两件事 —— 「该 scope 还没有标签集时建默认集」和「清恢复
+  // 标记」，已一致时 store 侧不 set（防自激）。R11b 之前它还要把派生字段 rightTab 拉回激活
+  // 标签，所以依赖里有 rightTab；字段删掉后没有要收敛的第二份状态，依赖只剩 scope。
+  useEffect(() => { syncTabs() }, [syncTabs, scope])
 
   // PR-10：注册表 / 禁用集变了要推动重渲染 —— 墓碑替换崩溃卡、标签条灰态、＋ 菜单剔除
   // 被禁用的 kind，全都靠这一次重渲染。订阅复用 registry.subscribeSurfaces（health 的每次
@@ -448,11 +451,18 @@ export default function RightPanel() {
               ? tabs.filter((x) => x.kind === 'web' && !!x.viewId && unreadViews.includes(x.viewId)).length
               : 0
             return (
-              <button key={tab.key} className={`rbtn ${rightTab === tab.key ? 'on' : ''}`}
+              <button key={tab.key} className={`rbtn ${activeKind === tab.key ? 'on' : ''}`}
+                // data-kind：折叠态下「现在是哪个面板」唯一的机器可读出口（展开态看标签条的
+                // data-kind）。R11b 删掉 state 里的面板字段后，rail 高亮是选择器唯一的 DOM 证人。
+                data-kind={tab.key}
                 data-tip={tab.label}
                 aria-label={tab.label}
                 onClick={() => {
-                  setRightTab(tab.key)
+                  // rail 按钮是「只有 kind、没有 payload」的标签 spec（payload 由 provider 的
+                  // defaultSpec 给：file → fileFocus，web → 池里激活的真实页面）。`as TabSpec`
+                  // 收敛在这一处：TabSpec 是联合类型，`{ kind: tab.key }`（key 是四类的并集）
+                  // 不能自动分配到某个成员上，而拆成四个 if 只会把同一件事写四遍。
+                  openTab({ kind: tab.key } as TabSpec)
                   setRightExpanded(true) // 点击图标 → 展开 + 切到该 tab（此前只切换不展开 = 点不动）
                 }}>
                 {unread > 0 && <span className="todo-badge unread-badge mono">{unread}</span>}

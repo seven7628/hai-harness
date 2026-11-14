@@ -130,10 +130,11 @@ ev({ event_type: 'tool_run_end', run_id: 'main-1', id: 'call_9', name: 'bash', r
   const st = useAppStore.getState()
   const v = st.views[SID]!
   useAppStore.setState({
-    views: { ...st.views, [SID]: { ...v, rightExpanded: true, rightTab: 'activity' } },
+    views: { ...st.views, [SID]: { ...v, rightExpanded: true } },
     rightExpanded: true,
-    rightTab: 'activity',
     rightSize: 460,
+    // R11b：面板 = 激活标签（旧的直写面板字段已删）→ seed 一个激活的 activity 标签
+    tabsByScope: { ...st.tabsByScope, [SID]: { tabs: [{ id: 'act1', kind: 'activity' }], activeId: 'act1', closed: [] } },
   })
 }
 

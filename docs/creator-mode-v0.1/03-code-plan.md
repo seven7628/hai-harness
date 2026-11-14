@@ -34,7 +34,7 @@
 ```
 desktop/app/src
   store/useAppStore.ts ────────┐
-    ├─ tabsByScope / activeId  │  activeId 权威；rightTab 由 applyTabs() 单点派生
+    ├─ tabsByScope / activeId  │  activeId 权威；「现在是哪个面板」= selectRightTab（现算，不存字段）
     ├─ rightLayout             │  三态布局真值
     └─ fileChanges             │  外部变更推送（编辑器用）
   lib/layout.ts        **新** ─┘  纯函数：state → 像素尺寸
@@ -67,7 +67,7 @@ tools/builtin
 **A. 布局与标签（纯前端）**
 
 ```
-用户动作 → store 动作 → applyTabs(单一写点) → {tabsByScope, activeId, rightTab*}
+用户动作 → store 动作 → tabPatch(单一写点) → {tabsByScope, activeId}
                     └→ rightLayout → lib/layout.ts → Group 尺寸
 RightPanel → getSurface(active.kind) → provider.render()
 ```
@@ -330,7 +330,8 @@ if (!state.rightLayout.open) state.rightLayout = expand('even')   // 内容触�
 
 ### 2.4 store 改造（关键 diff）
 
-**目标**：`activeId` 权威、`rightTab` 单点派生、标签写操作收敛到一个 helper。
+**目标**：`activeId` 权威、标签写操作收敛到一个 helper。（本节的 `rightTab` 派生字段是 R02 的
+过渡形态，R11b 已删除 —— 见本节末尾的「R11b 收口」。）
 
 ```ts
 // 1) 类型
@@ -385,13 +386,24 @@ export function dedupeKeyOf(t: SurfaceTab, s: AppState): string {
 export function kindOf(t?: SurfaceTab): RightTab | undefined { return t?.kind as RightTab }
 ```
 
-**兼容策略**：`rightTab` 保留字段但**只有 `rightTabPatch` 写它**（`tabPatch` 是唯一调用者之一）。
+**兼容策略（R02 当时的形态，已被 R11b 取代）**：`rightTab` 保留字段但**只有 `rightTabPatch` 写它**
+（`tabPatch` 是唯一调用者之一）。R11b 已把字段、`rightTabPatch`、`setRightTab` 兼容入口一起删掉，
+读点全部走 `src/lib/rightPanel.ts` 的 `selectRightTab`（纯函数，只 type-only 依赖 store）。
 
 > **实现偏差（R02）**：`syncTabsToRightTab` 没有整体删除——它退化成「无标签集时按 `rightTab` 建默认集」+「恢复态先补派生字段、再清 `restored`」两条分支；反向收敛（按 `rightTab` 改 activeId）已删。仓库里 `applyTabs` 本就存在、名为 `tabPatch`，没有另起新名。PR-02 不接自动展开（要求零行为变化）；D-A 的接线已在 PR-04 完成：`openTab` 且 `activate!==false` 且当前收起时才 `expand('even')`。
 >
 > **不变量边界**：`rightTab === kindOf(active)` 只在「标签动作」与 `syncTabsToRightTab()` 之后成立；
 > `viewFields`/`topViewFields` 的会话恢复镜像、以及旧 e2e 直接 `setState({rightTab})` 会让它短暂不一致。
-> PR-04 已把 RightPanel 的 embedHide / 待重建 / toolbar 三处改读 `activeTab.kind`（effect 依赖一起改）；标签条高亮那处留到 PR-09。
+> PR-04 已把 RightPanel 的 embedHide / 待重建 / toolbar 三处改读 `activeTab.kind`（effect 依赖一起改）；
+> 折叠态 rail 的高亮在 R11b 改读 `selectRightTab`。
+
+> **R11b 收口**：`AppState.rightTab` / `SessionView.rightTab` 已删除，「现在是哪个面板」只剩一条路：
+> `selectRightTab(s)` = `tabsByScope[tabScopeKey(s)]` 的激活实例 → kind（无集合 / 关光 / 悬空 → `undefined`，
+> **不兜底**）。随之删掉的是 `rightTabPatch`（唯一写点）、`viewFields`/`topViewFields` 的写穿、
+> `setRightTab` 兼容入口（调用点改走 `openTab`）。`syncTabsToRightTab` 只剩「建默认集（activity）/
+> 清 `restored` 标记」两条分支 —— 默认集不再按面板字段造，于是「直写面板字段 + sync 开出一个 file 标签」
+> 那条 e2e 复位路径不复存在（要开标签就 `openTab`）。`restored` 标记本身**本轮保留**（它的外部读者
+> 随字段一起消失了，但它是一条被 N25/N26 钉住的可观察状态机）。
 
 ### 2.5 `RightPanel.tsx` 新骨架
 
@@ -1349,7 +1361,7 @@ if (r.errors.length) return { status: 'failed', reason: 'build', detail: r.error
 | 数据 | 版本 | 迁移 |
 |---|---|---|
 | `localStorage` 标签集 | v1 → v2 | 旧 kind 原样读入；历史 `office` 标签迁移为 `file{mode:'preview'}`；`plugin:*` 缺省不出现；未知 kind → 墓碑 |
-| `rightTab` | 保留一个版本 | 只由 `applyTabs` 写；e2e 全绿后删除（PR-11） |
+| `rightTab` | **已删除**（R11b） | 不是磁盘数据，只在内存与探针里存在过；R11b 删字段 + 迁完 56 处 e2e 引用后不存在任何读取点。回滚 = revert 那 5 个 commit |
 | `settings.editor` | 新增 | 缺省 true；关闭后隐藏"编辑"动作（回滚开关） |
 | `~/.go-code/surfaces/index.json` | v1 | 新文件，不存在即空列表 |
 
@@ -1466,7 +1478,7 @@ provider 兜底 1。**真正的 legacy 判别只有 3 处**（#7 标签名、#8 
 **风险**：
 - `TABS_MAX_VISIBLE` 是**死常量**（无消费者），标签条实际 `overflow-x:auto` —— **PR-09 的地盘，R06 不许顺手接**。
 - 待重建标签与活标签的键空间不同（url 快照 vs `t7`），若 provider 的 `dedupeKey` 把身份压成单一字符串 → 会开重复标签。
-- `unreadViews` 清除是「activeId + rightExpanded + rightTab==='web'」三条件耦合，**不得在 provider 里重算**。
+- `unreadViews` 清除是「nav.activeId + rightExpanded + 激活标签是 web」三条件耦合，**不得在 provider 里重算**（R11b 起第三项由 `selectRightTab` 现算）。
 
 **门禁现状（R-14）**：`e2e:pdf / container / scoping / session-tabs / auto / browser` **都不在 `npm test` 链里**，R06 只能手跑；统一 runner 是 OP-4，推迟到 PR-15。R06c 必须手跑这五个并贴输出。
 
