@@ -27,13 +27,24 @@
  * 盖住 composer」；改成变量后，夹具只要把 --m-safe-bottom 覆写成 34px，就能量到
  * composer 真的抬起来了。取值语义与 env() 完全一致（不支持 env 的浏览器走 0px）。
  *
- * 只在这里定义一次：.m-app 负责整页内边距，抽屉/toast 在 .m-app 内是 fixed，
- * 见文件末尾的 data-mvv 规则（有 visualViewport 时它们相对 .m-app 的 padding box）。 */
+ * 只在这里定义一次：.m-app 负责整页内边距；抽屉/toast 是 fixed，但有 visualViewport
+ * 时 .m-app 的 transform 会把它们收进自己的 padding box（padding box 含 padding 区），
+ * 所以抽屉/toast 仍各自保留 safe padding —— 不会双倍，也不会被 home 条盖住。 */
 :root {
   --m-safe-top: env(safe-area-inset-top, 0px);
   --m-safe-right: env(safe-area-inset-right, 0px);
   --m-safe-bottom: env(safe-area-inset-bottom, 0px);
   --m-safe-left: env(safe-area-inset-left, 0px);
+}
+
+/* 表单控件/滚动条/输入法候选条跟随主题（meta[name=color-scheme] 只认系统偏好，
+   这里用 data-theme 覆盖；ink/paper 由 applyTheme 写在 <html> 上）。 */
+html[data-theme='ink'] {
+  color-scheme: dark;
+}
+
+html[data-theme='paper'] {
+  color-scheme: light;
 }
 
 html,
@@ -341,6 +352,95 @@ body {
   font-size: 13px;
 }
 
+/* —— Hub 会话面收敛到 runtime 调色板（P8-03a）——
+ *
+ * .hub-demo 自带一套暖灰 demo 色板（深色 #0b0b0a / 浅色 #f2ede3…），与桌面 runtime
+ * 的冷黑/暖纸不是一套：手机列表与抽屉吃 runtime 令牌，会话面吃 demo 变量，拼在一起
+ * 能看出接缝（MOBILE-UI-REUSE §0.3 要求手机 Hub 收敛到 ink/paper）。
+ * 这里只重指变量，不改任何组件规则；值全部来自 runtime-palette / runtime-tokens，
+ * 不新增颜色。选择器带 [data-theme] 是为了压过 demo.css 的
+ * .hub-demo[data-theme='light']（同特指度，靠加载顺序本来也能赢，写明更稳）。 */
+.m-conv .hub-demo[data-theme] {
+  --bg: var(--paper);
+  --chat: var(--paper);
+  --surface: var(--paper-2);
+  --surface-2: var(--paper-3);
+  --surface-3: color-mix(in srgb, var(--ink) 9%, var(--paper-2));
+  --border: var(--line);
+  --border-strong: var(--line-2);
+  --text: var(--ink);
+  --muted: var(--ink-2);
+  --muted-2: var(--ink-3);
+  /* 注意不能写 var(--accent)：那是同一个变量，自引用会失效。基色直接用 palette 的
+     三支（--cinnabar/--crimson/--ochre/--bamboo），与 runtime-tokens 的别名同源。 */
+  --accent: var(--cinnabar);
+  --accent-soft: var(--accent-weak);
+  --danger: var(--crimson);
+  --warn: var(--ochre);
+  --success: var(--bamboo);
+  --focus: var(--cinnabar-2);
+  --owner: var(--ink);
+  --user-bubble: var(--hub-user-bubble);
+  --user-text: var(--hub-user-ink);
+  --header-bg: color-mix(in srgb, var(--paper) 86%, transparent);
+  --sans: var(--font-ui);
+  --mono: var(--font-mono);
+  /* 圆角四档也对齐 runtime（demo 的 9/13/18/26 比 app 大一号）。 */
+  --radius-s: var(--r-sm);
+  --radius-m: var(--r-md);
+  --radius-l: var(--r-lg);
+  --radius-xl: var(--r-xl);
+}
+
+/* demo.css 里少数写死的暖色（不是变量）在 ink/paper 下会失真 —— 最典型的是
+   tool 事件卡 rgba(21,20,18,.62) 的深底：浅色主题下变成深底深字。 */
+.m-conv .hub-demo .event-card--tool {
+  background: color-mix(in srgb, var(--surface) 82%, var(--paper));
+}
+
+.m-conv .hub-demo .event-card--approval {
+  border-color: color-mix(in srgb, var(--warn) 24%, transparent);
+  background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--warn) 4%, transparent));
+}
+
+.m-conv .hub-demo .event-card--approval .event-icon {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.m-conv .hub-demo .event-card--artifact .event-icon {
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.m-conv .hub-demo .handoff-card {
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.m-conv .hub-demo .event-status.ok {
+  border-color: color-mix(in srgb, var(--success) 22%, transparent);
+}
+
+.m-conv .hub-demo .event-status.wait {
+  border-color: color-mix(in srgb, var(--warn) 26%, transparent);
+}
+
+.m-conv .hub-demo .agent-tag.reply {
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.m-conv .hub-demo .btn.danger {
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.m-conv .hub-demo .composer:focus-within {
+  border-color: var(--accent-border);
+}
+
+.m-conv .hub-demo ::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 /* —— 列表 —— */
 
 .m-hub-list {
@@ -528,6 +628,8 @@ body {
    由 useComposerAutoGrow 按 line-height/padding 真值算，不靠写死 rows）。 */
 .m-conv .hub-demo .composer {
   padding: 4px 6px 4px 8px;
+  /* demo 是 19px；对齐 runtime 的 --r-lg（16px），与主会话页 composer 的 14px 同族。 */
+  border-radius: var(--r-lg);
 }
 
 .m-conv .hub-demo .composer > textarea {

@@ -11,6 +11,7 @@ import ReactDOM from 'react-dom/client'
 import { applyNarrativeSkin } from '../lib/narrativeSkin'
 import { applyTheme } from '../lib/theme'
 import { setHubTransport } from '../transport/host'
+import { installThemeColor } from './chrome'
 import MobileApp from './MobileApp'
 import { sharedMobileTransport } from './transport/mobile'
 import { readThemePref } from './theme'
@@ -33,6 +34,9 @@ applyTheme(readThemePref())
 // 软键盘：把 visualViewport 的可见高度/偏移写到 --m-vv-*（见 visual-viewport.ts）。
 // 必须在首帧前装好，否则 composer 会先按 100dvh 画一帧再被键盘顶掉。
 installVisualViewport()
+
+// 浏览器 UI（状态栏/地址栏）颜色跟随 ink/paper，含 system 跟随的实时切换。
+installThemeColor()
 
 // 中文字体首帧后异步注入（与桌面同源，避免首屏阻塞）。
 function injectCJKFonts(): void {
