@@ -4,6 +4,9 @@ export {}
 
 declare global {
   interface Window {
+    /** 手机入口（mobile.html）在 main.tsx 里置位：getTransport() 据此分流到 mobileTransport。
+     *  桌面/浏览器入口不置位，行为不变。 */
+    __HAI_MOBILE__?: boolean
     desktop?: {
       startupMark: (phase: string) => Promise<boolean>
       pickWorkspace: () => Promise<string | null>
