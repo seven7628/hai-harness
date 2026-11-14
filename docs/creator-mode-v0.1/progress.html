@@ -52,6 +52,7 @@
   .pill.changes{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent)}
   .pill.done{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
   .pill.blocked{color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent);border-color:transparent}
+  .pill.dropped{color:var(--dim);text-decoration:line-through}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
   th{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim2);font-weight:600;position:sticky;top:0;background:var(--panel)}
@@ -205,8 +206,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-14 12:40",
-    "current": "R16b + R11c 已合并；下一项待定（R08e 转码 / 插件页清除数据）"
+    "updated": "2026-11-14 13:05",
+    "current": "24 PR 序列全部收口（R08e 用户裁掉）；待定：插件页清除数据 / uiSnapshot.titleOf 去重"
   },
   "rounds": [
     {
@@ -828,9 +829,9 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R08c"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "dropped",
+      "commit": "—（裁掉）",
+      "review": "用户 2026-11-14 决定：ffmpeg 转码与缩略图暂时不需要。文档侧已由 R08b/R08d 覆盖（pdf/docx/pptx/xlsx + LibreOffice kit），媒体侧由 R08i 的原生解码 + hai-media Range 覆盖，没有功能空洞。裁掉不记技术债；将来要缩略图，按新轮次重开，不复活本条。",
       "perf": [
         "P13"
       ],
@@ -1653,7 +1654,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
 const D = JSON.parse(document.getElementById('data').textContent);
 const $ = (s, r = document) => r.querySelector(s);
 const el = (t, c, h) => { const n = document.createElement(t); if (c) n.className = c; if (h != null) n.innerHTML = h; return n; };
-const STATUS = { todo: '待开始', doing: '进行中', review: '待评审', changes: '评审退回', done: '完成', blocked: '阻塞' };
+const STATUS = { todo: '待开始', doing: '进行中', review: '待评审', changes: '评审退回', done: '完成', blocked: '阻塞', dropped: '不做' };
 const REVIEW = { PASS: 'done', CHANGES: 'changes', BLOCKED: 'blocked' };
 
 // ---- meta ----
@@ -1662,7 +1663,7 @@ $('#m-wt').textContent = D.meta.worktree;
 $('#m-upd').textContent = D.meta.updated;
 $('#m-foot').textContent = '当前 ' + D.meta.current + ' · ' + new Date().getFullYear();
 const done = D.rounds.filter(r => r.status === 'done').length;
-const doable = D.rounds.filter(r => r.pr !== '（缓冲）').length;
+const doable = D.rounds.filter(r => r.pr !== '（缓冲）' && r.status !== 'dropped').length;
 $('#m-bar').style.width = (done / doable * 100).toFixed(1) + '%';
 
 // ---- kpis ----
