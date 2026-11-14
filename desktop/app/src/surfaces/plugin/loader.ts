@@ -25,6 +25,7 @@ import type { ReactNode } from 'react'
 import { subscribeUI } from '../../lib/uiBus'
 import { t as i18nT } from '../../i18n'
 import { registerSurface, unregisterSurface } from '../registry'
+import { noteSurfaceVersion } from '../health'
 import { setSurfaceEntryIndex } from './entries'
 import { clearSurfaceLoadError, setSurfaceLoadError } from './status'
 import type { SurfaceIndex, SurfaceIndexItem, SurfaceCommandReply } from '../../transport/types'
@@ -372,6 +373,10 @@ async function syncOnce(index: SurfaceIndex, baseUrl: SurfaceBaseUrl, deps: Plug
       continue
     }
     try {
+      // R-20：**换版本 = 干净重来**。放在 apply 之前是刻意的 —— 新版本连 import 都过不去
+      // 时，旧版本留下的「3 次失败 → 自动禁用」会继续挂在墓碑上，用户看到的是「装了新版
+      // 还是坏的」。真正的坏版本由 status.ts 的 load error 报告，不走这套计数。
+      noteSurfaceVersion(pluginKindOf(id), item.hash)
       const p = await applyManifest(item, baseUrl, deps)
       loaded.set(id, p)
       clearSurfaceLoadError(p.kind)

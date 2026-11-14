@@ -23,6 +23,7 @@
 //   T6 卸载：index 去掉 → provider 消失、标签变墓碑（PR-10 机制）、事件订阅被清理。
 //   T7 变更/重装：hash 变 → 重新 import（模块求值 +1）；标签恢复渲染。
 //   T8 host.command：未声明 → {ok:false,reason:'denied'} 且**不抛**；声明了 → 走 IPC。
+//   T13 **R-20**：同 hash 继续累计；hash 一变 → 整条健康记录清空，标签恢复渲染。
 //   T9 全程零 pageerror。
 //   T10 **真模板**（templates/surface）经 loader 注册并在 RightPanel 里渲染 + 用 host.command 取数。
 //
@@ -190,6 +191,7 @@ const { listSurfaceLoadErrors } = await import('../../src/surfaces/plugin/status
 // 只把字节来源换成同源静态目录（见 loader.ts 的 setPluginBaseUrlForTest 注释）。
 const { setPluginBaseUrlForTest } = await import('../../src/surfaces/plugin/loader')
 setPluginBaseUrlForTest((id) => \`/e2e/_pluginprobe_run/plugins/\${id}\`)
+const health = await import('../../src/surfaces/health')
 const { subscribeUI } = await import('../../src/lib/uiBus')
 const { useAppStore } = await import('../../src/store/useAppStore')
 
@@ -202,6 +204,19 @@ w.__probe = {
   store: useAppStore,
   surfaceIndexCalls: () => surfaceIndexCalls.length,
   setIndex: (items: unknown[]) => { pluginIndex = { version: 1, items } },
+  // 健康度（R17a 的 R-20 判据）：探针只调生产函数，不自己拼 surface.disabled 的 JSON。
+  health: {
+    fail: (k: string) => health.recordMountFailure(k as never, new Error('mount boom（e2e 的 fixture）')),
+    record: (k: string) => health.getSurfaceHealth(k as never) ?? null,
+    disabled: () => health.listDisabled(),
+  },
+  // T15 专用：直接调**生产入口** syncPlugins 演「不权威 index」那一档。
+  // store 的 start() 只能走权威那条（探针的 window.desktop.surfaceIndex 是真的），
+  // 而这一档要证的恰恰是「拿不到权威 index 时什么都不许动」。
+  sync: (items: unknown[], authoritative: boolean | 'default') =>
+    authoritative === 'default'
+      ? syncPluginsForTest({ version: 1, items } as never, undefined as never)
+      : syncPluginsForTest({ version: 1, items } as never, undefined as never, {}, { authoritativeIndex: authoritative }),
   inject: (line: string) => feeds.forEach((f) => f(line)),
   // 快照类的读：只从 sent 里挑 ui 信封（断言不接触内部实现）。
   snapshots: () =>
@@ -457,6 +472,47 @@ try {
   check('那次调用真的走到了 surfaceCommand（id 正确）',
     tplCalls.some((c) => c.id === tplManifest.id && c.name === 'workspace_list'), JSON.stringify(tplCalls.slice(-3)))
   check('模板没有引入页面错误', errs.length === 0, errs.join(' | '))
+
+  // ---- T13 R-20：按版本重置 ----
+  console.log('\nT13 R-20：同 hash 继续累计，hash 一变整条清空')
+  await setIndex([item('demo', 'h3'), tplItem]) // 重新启用（hash 未变）
+  await injectChanged()
+  await page.waitForFunction(() => window.__probe.surfaces.has('plugin:demo'), null, { timeout: 8000 }).catch(() => {})
+  await page.evaluate(() => { for (let i = 0; i < 3; i += 1) window.__probe.health.fail('plugin:demo') })
+  const rec13a = await page.evaluate(() => window.__probe.health.record('plugin:demo'))
+  check('3 次失败 → count=3 且 disabled:true', rec13a?.count === 3 && rec13a?.disabled === true, JSON.stringify(rec13a))
+  check('记录盖的是 h3', typeof rec13a?.hash === 'string' && rec13a.hash.startsWith('h3'), JSON.stringify(rec13a?.hash))
+  // 同 hash 的**重新应用**（停用 → 启用：provider 真的走一次 unload + apply）：
+  // 版本没变 → 记录与禁用态都不许动。这条是「换版本才清」的另一半，也是变异
+  // 「hash 相同也清」的杀手（那种实现会在这里把整条记录删掉，面板凭空复活）。
+  // 注：只发一次 surfaces_changed 不够 —— 同 hash 会走 skipped 分支，根本不进
+  // noteSurfaceVersion，测不到那一行（第一次写这条断言时就踩了这个假绿）。
+  await setIndex([{ ...item('demo', 'h3'), enabled: false }, tplItem])
+  await injectChanged()
+  await page.waitForFunction(() => !window.__probe.surfaces.has('plugin:demo'), null, { timeout: 5000 }).catch(() => {})
+  await setIndex([item('demo', 'h3'), tplItem])
+  await injectChanged()
+  await page.waitForFunction(() => window.__probe.surfaces.has('plugin:demo'), null, { timeout: 8000 }).catch(() => {})
+  await page.waitForTimeout(300)
+  const rec13b = await page.evaluate(() => window.__probe.health.record('plugin:demo'))
+  check('同 hash 重新应用（停用→启用）：记录还在、仍是禁用态',
+    rec13b?.disabled === true && typeof rec13b?.hash === 'string' && rec13b.hash.startsWith('h3'), JSON.stringify(rec13b))
+
+  const runsBefore13 = await page.evaluate(() => window.__probe.moduleRuns('demo'))
+  await setIndex([item('demo', 'h4'), tplItem]) // 换版本
+  await injectChanged()
+  await page.waitForFunction((n) => window.__probe.moduleRuns('demo') > n, runsBefore13, { timeout: 8000 }).catch(() => {})
+  check('新版本真的被 import 了（模块求值 +1）',
+    (await page.evaluate(() => window.__probe.moduleRuns('demo'))) > runsBefore13,
+    `before=${runsBefore13} after=${await page.evaluate(() => window.__probe.moduleRuns('demo'))}`)
+  const rec13c = await page.evaluate(() => window.__probe.health.record('plugin:demo'))
+  check('换 hash → 整条记录被清（count/disabled/lastError 一起）', rec13c === null, JSON.stringify(rec13c))
+  check('也不再出现在禁用集里',
+    !((await page.evaluate(() => window.__probe.health.disabled())) ?? []).includes('plugin:demo'))
+  await page.evaluate(() => window.__probe.open('plugin:demo'))
+  await page.waitForSelector('[data-plugin="demo"]', { timeout: 5000 }).catch(() => {})
+  check('新版可挂载：面板内容真的画出来了（不是墓碑 / 禁用卡）',
+    await page.evaluate(() => !!document.querySelector('[data-plugin="demo"]')))
 
   // ---- T9 全程零 pageerror ----
   console.log('\nT9 全程零 pageerror')

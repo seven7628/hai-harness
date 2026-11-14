@@ -17,6 +17,21 @@ import { notifySurfacesChanged } from './registry'
 import type { SurfaceKind } from './types'
 
 export const SURFACE_HEALTH_KEY = 'surface.disabled'
+
+/**
+ * 「每个 kind 现在跑的是哪个版本」（`{ [kind]: hash }`）。
+ *
+ * 为什么健康记录里的 `hash` 还不够、非要再存一份：一条记录是**失败那一刻**诞生的，
+ * 而那一刻没人告诉 health「这是哪一版」。只在 noteSurfaceVersion 里补值有个死角 ——
+ * 插件 v3 加载成功（此时还没有记录，补不上），随后渲染失败 3 次，记录诞生（没有 hash），
+ * 用户跨重启装上 v4：noteSurfaceVersion 看到「记录没有 hash」按规则只能补值不清计数，
+ * 于是 R-20 原样复发。所以**应用版本要独立于记录存在**：成功加载就记下来，失败时盖戳，
+ * 升级时就能比出「这条账是 v3 的」。
+ *
+ * 它有意的取舍：只在 localStorage 里存活（与 `surface.disabled` 同一份真相源纪律，
+ * 不引入内存缓存 —— 见文件头的 PR-10 踩坑记录）。
+ */
+export const SURFACE_VERSIONS_KEY = 'surface.versions'
 /** 连续失败到这个数就自动禁用。一次偶发失败不该让面板消失，三次连续则基本可以断定是坏的。 */
 export const AUTO_DISABLE_AFTER = 3
 
@@ -31,6 +46,14 @@ export interface SurfaceHealth {
   disabled: boolean
   /** 是否是「连续失败自动禁用」（墓碑据此选文案；手动禁用不算） */
   auto?: boolean
+  /**
+   * 这条计数属于**哪个版本**（插件 = index 里的 sha256；内置 provider 没有，留空）。
+   *
+   * 为什么必须有（R-20）：键只有 kind 的时候，插件修好发新版本、装上、第一帧又错一次 →
+   * `count` 从 3 直接到 4，立刻再次自动禁用。用户看到的是「装了新版还是坏的」，
+   * 而真相是**旧版本**的账还在。判据见 noteSurfaceVersion：**换版本 = 干净重来**。
+   */
+  hash?: string
 }
 
 type Store = Record<string, SurfaceHealth>
@@ -55,6 +78,37 @@ function narrow(key: string, v: unknown): SurfaceHealth | null {
     at: o.at,
     disabled: o.disabled,
     ...(o.auto === true ? { auto: true } : {}),
+    // 老记录（R17a 之前写的）没有 hash：照常读，noteSurfaceVersion 会把它补上。
+    ...(typeof o.hash === 'string' && o.hash ? { hash: o.hash } : {}),
+  }
+}
+
+/** 版本表的读：坏行只丢它自己，任何异常都退化成「不知道版本」（= 不清任何计数）。 */
+function readVersions(): Record<string, string> {
+  const next: Record<string, string> = {}
+  try {
+    const raw = typeof localStorage === 'undefined' ? null : localStorage.getItem(SURFACE_VERSIONS_KEY)
+    if (!raw) return next
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return next
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === 'string' && v) next[k] = v
+    }
+  } catch {
+    // 隐私模式 / 坏 JSON → 当没有这张表（下一次 noteSurfaceVersion 会重建）。
+  }
+  return next
+}
+
+/**
+ * 版本表的写：**不** notifySurfacesChanged —— 它不改变任何渲染结果（只给下一次失败盖戳），
+ * 通知它等于每轮 sync 都让右栏与快照重算一次。
+ */
+function writeVersions(next: Record<string, string>): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(SURFACE_VERSIONS_KEY, JSON.stringify(next))
+  } catch {
+    // 写不进去 → 只是这一次的版本没记住（最坏结果是多累计一次），绝不因此白屏。
   }
 }
 
@@ -100,6 +154,8 @@ function writeStore(next: Store) {
 export function recordMountFailure(kind: SurfaceKind, err: unknown): SurfaceHealth {
   const store = readStore()
   const prev = store[kind]
+  // 记录这一刻盖的版本章：已经有章的跟着走；没有章的（这条是刚诞生的）从版本表取。
+  const version = prev?.hash ?? readVersions()[kind] ?? ''
   const count = (prev?.count ?? 0) + 1
   const wasDisabled = prev?.disabled === true
   const nowAutoDisable = !wasDisabled && count >= AUTO_DISABLE_AFTER
@@ -110,6 +166,9 @@ export function recordMountFailure(kind: SurfaceKind, err: unknown): SurfaceHeal
     at: Date.now(),
     disabled: wasDisabled || nowAutoDisable,
     ...(prev?.auto === true || nowAutoDisable ? { auto: true } : {}),
+    // 版本标记跟着记录走：丢了它，下一次 noteSurfaceVersion 会以为「没有版本」而只补值，
+    // 于是升级后的第一次失败仍然从旧 count 往上加 —— R-20 原封不动地回来。
+    ...(version ? { hash: version } : {}),
   }
   writeStore({ ...store, [kind]: entry })
   return entry
@@ -143,17 +202,74 @@ export function disableSurface(kind: SurfaceKind): void {
       at: prev?.at ?? Date.now(),
       disabled: true,
       auto: false,
+      ...(prev?.hash ? { hash: prev.hash } : {}),
     },
   })
 }
 
-/** 重新启用：整条记录删掉（count / lastError / at / disabled 一起清）。 */
-export function enableSurface(kind: SurfaceKind): void {
+/**
+ * noteSurfaceVersion 告诉健康度「这个 kind 现在跑的是哪个版本」（loader 应用 provider 时调）。
+ *
+ * 语义（R-20 的裁决，改之前先读）：
+ *   · 有记录且 `hash` **不同** → **整条删掉**：换版本 = 干净重来。count / disabled /
+ *     lastError / at 一起清 —— 半清（只清 count 不清 disabled）等于新版照样被禁，
+ *     那正是这条缺陷的症状本身。
+ *   · 相同 → 只补值，**不动 count**：同一个版本反复挂载失败仍然累计（否则 3 次自动禁用
+ *     永远触发不了，那才是把「可见的坏」换成「不可见的坏」）。
+ *   · 没有记录 → 什么都不做（用不着为「从没失败过的插件」占一条记录，prune 也会扔掉它）。
+ *   · `hash` 为空（老调用点 / 内置 provider）→ 不动记录：宁可继续累计，也不要因为
+ *     拿不到版本就把用户的失败计数无端清零。
+ */
+export function noteSurfaceVersion(kind: SurfaceKind, hash: string | undefined): void {
+  const h = typeof hash === 'string' ? hash.trim() : ''
+  if (!h) return
+  // 先记「现在跑的是这一版」：即使这一刻还没有健康记录（正常插件就是这样），
+  // 这张表也要先有值 —— 否则记录诞生时盖不上戳，跨重启的升级就比不出新旧（R-20）。
+  const versions = readVersions()
+  if (versions[kind] !== h) writeVersions({ ...versions, [kind]: h })
+  const store = readStore()
+  const prev = store[kind]
+  if (!prev) return
+  if (prev.hash && prev.hash !== h) {
+    const next = { ...store }
+    delete next[kind]
+    writeStore(next)
+    return
+  }
+  if (prev.hash === h) return
+  writeStore({ ...store, [kind]: { ...prev, hash: h } })
+}
+
+/**
+ * forgetSurfaceVersion 忘掉一个 kind 的版本（插件数据清理时调：kind 都没了，版本也没意义）。
+ * 与 clearSurfaceHealth 分开是因为语义不同 —— 「重新启用」不该抹掉版本表（下一次 sync 会再写回来）。
+ */
+export function forgetSurfaceVersion(kind: SurfaceKind): void {
+  const versions = readVersions()
+  if (!(kind in versions)) return
+  const next = { ...versions }
+  delete next[kind]
+  writeVersions(next)
+}
+
+/**
+ * 整条记录删掉（count / lastError / at / disabled / hash 一起清）。
+ *
+ * 两个调用点共用这一条：`enableSurface`（墓碑的「重新启用」）与插件数据清理
+ * （`plugin/storage.ts` —— kind 已经不存在了，禁用记录留着的唯一效果是「同名插件重装
+ * 后一上来就是禁用态」）。**不**在这里做「只清一半」的事：半清状态没有消费者。
+ */
+export function clearSurfaceHealth(kind: SurfaceKind): void {
   const store = readStore()
   if (!(kind in store)) return
   const next = { ...store }
   delete next[kind]
   writeStore(next)
+}
+
+/** 重新启用：整条记录删掉（count / lastError / at / disabled 一起清）。 */
+export function enableSurface(kind: SurfaceKind): void {
+  clearSurfaceHealth(kind)
 }
 
 export function isSurfaceDisabled(kind: SurfaceKind | undefined): boolean {
