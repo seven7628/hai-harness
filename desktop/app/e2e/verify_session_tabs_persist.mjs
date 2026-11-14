@@ -316,30 +316,39 @@ try {
   const back = await snap()
   check('切回 S1 → 仍是 S1 自己的（两套互不串，且没被默认 activity 顶掉）', back.kinds === 'git' && back.tab === 'git', JSON.stringify({ kinds: back.kinds, tab: back.tab }))
 
-  // —— P8：kind 白名单（PR-11 起 = 注册表的 BUILTIN_KINDS，store 不再自持 TAB_KINDS）——
+  // —— P8：kind 白名单（内置四类 = 注册表的 BUILTIN_KINDS；plugin:<id> = PR-14c 的独立判定）——
   //
-  // 为什么这条必须在**真实恢复链路**上：单测钉住的是 isBuiltinKind 这个纯函数；而
-  // 「loadPersistedTabs 真的用了它」只有 reload 一次才看得见（改回 `typeof r.kind === 'string'`
-  // 这样的写法，单测全绿，症状却是重启后 plugin:/office 幽灵标签复活 —— 没有 provider 的空白面板）。
-  console.log('P8 恢复时丢弃 plugin: 与未知 kind（白名单 = 注册表的 BUILTIN_KINDS）')
+  // 为什么这条必须在**真实恢复链路**上：单测钉住的是 isBuiltinKind/正则这两个纯函数；而
+  // 「loadPersistedTabs 真的用了它们」只有 reload 一次才看得见（改回 `typeof r.kind === 'string'`
+  // 这样的写法，单测全绿，症状却是重启后 office 幽灵标签复活 —— 没有 provider 的空白面板）。
+  //
+  // PR-14c 改了 plugin: 的口径：**合法的 `plugin:<id>` 现在要被恢复**（重启后标签还在，
+  // provider 缺失时是墓碑），而非法 id / 未知 kind 仍然丢弃。这一条由本探针守住「内置四类
+  // 逐字节不变」这个反方向：k1..k4 的恢复行为一个字节都没动。
+  console.log('P8 恢复时保留合法 plugin:<id>、丢弃非法 id 与未知 kind')
   await load(JSON.stringify({ v: 1, scopes: { S1: { tabs: [
     { id: 'k1', kind: 'activity' },
     { id: 'k2', kind: 'git' },
     { id: 'k3', kind: 'file', path: '/w/src/a.ts', mode: 'source' },
     { id: 'k4', kind: 'web', url: 'https://ok.example/a' },
-    { id: 'k5', kind: 'plugin:dummy', params: { a: 1 } }, // 插件标签要等 R11b/PR-14
+    { id: 'k5', kind: 'plugin:dummy', params: { a: 1 } }, // PR-14c：合法 id → 恢复（没有 provider → 墓碑）
     { id: 'k6', kind: 'office' }, // 03 §5.1 里迁移掉的历史 kind
     { id: 'k7', kind: 42 }, // 非字符串：老版本/手改的存储
+    { id: 'k8', kind: 'plugin:Bad_ID' }, // 非法 plugin id（大写 + 下划线）
   ], activeId: 'k5' } } }))
   await page.evaluate(() => window.__store.getState().setRightExpanded(true)) // 标签条只在展开态存在
   await page.waitForTimeout(400)
   const kinds8 = await snap()
-  check('四个内置 kind 全部恢复、且顺序不变', kinds8.kinds === 'activity,git,file,web', JSON.stringify(kinds8.kinds))
-  check('plugin: / 未知 kind 一条都没恢复（标签条上也不出现）',
-    kinds8.rows.length === 4 && kinds8.rows.every((r) => ['activity', 'git', 'file', 'web'].includes(r.kind)),
+  check('四个内置 kind 全部恢复、且顺序不变（plugin 排在它们之后）', kinds8.kinds === 'activity,git,file,web,plugin:dummy', JSON.stringify(kinds8.kinds))
+  check('未知 kind（office / 非字符串）与非法 plugin id 一条都没恢复（标签条上也不出现）',
+    kinds8.rows.length === 5 && kinds8.rows.every((r) => ['activity', 'git', 'file', 'web', 'plugin:dummy'].includes(r.kind)),
     JSON.stringify(kinds8.rows.map((r) => r.kind)))
-  // activeId 指向被丢掉的那条 → 按 sanitizePersistedTabSet 的口径回落到第一个幸存标签
-  check('activeId 指向被丢掉的标签 → 回落到第一个幸存标签', kinds8.activeKind === 'activity', JSON.stringify({ activeKind: kinds8.activeKind }))
+  // 注意 PR-14c 起 activeId 指向的 plugin 标签**不再被丢掉** → 它是激活项（墓碑态，面板照常
+  // 渲染占位而不是空白）；这条同时守住「恢复后 activeId 不会指向一条不存在的记录」。
+  check('activeId 指向 plugin 标签 → 它是激活项（墓碑态：provider 缺失时 reason=missing）',
+    kinds8.activeKind === 'plugin:dummy'
+      && (await page.evaluate(() => document.querySelector('.surface-tombstone[data-reason="missing"]')?.getAttribute('data-kind') ?? '')) === 'plugin:dummy',
+    JSON.stringify({ activeKind: kinds8.activeKind }))
 
 
   check('全程无页面错误', errs.length === 0, errs.join('; '))
