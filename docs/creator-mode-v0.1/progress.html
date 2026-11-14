@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 14:05",
-    "current": "R14b"
+    "updated": "2026-11-13 18:40",
+    "current": "R15"
   },
   "rounds": [
     {
@@ -1043,23 +1043,36 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     {
       "id": "R14b",
       "pr": "PR-14b",
-      "title": "PluginsPage：列表 / 禁用 / 卸载 / 权限与 audit 对照（UI 半边）",
+      "title": "面板插件页（列表 / 启用开关 / 卸载 / 调用记录）+ 写路径",
       "type": "新增",
       "est": 1.0,
       "deps": [
         "R14"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "19c09b8",
+      "review": "主会话复核：go vet（干净检出）/ TestSurface 全绿 / tsc 0 / eslint 56 / build / 新探针 51 项（端口 5230）/ plugin-loader 50 / plugin-tab-persist 33 / session-tabs 38 / tabbar 89 / surface-boundary 82。读码确认：index 的写点仍只有 surfaceStore 一份（主进程与页面都只转发）；SetEnabled 只翻 enabled 一个字段；ReadAudit 从尾部收且坏行 continue；墓碑的「重新启用」await 完 index 才清本地禁用集",
       "perf": [],
       "acc": [
-        "插件页展示已装列表（source 只显示 basename，不暴露用户目录）",
-        "禁用/卸载走 surface_disable/surface_remove，失败有可读原因",
-        "manifest 声明的 commands 与 audit.jsonl 实际调用逐条对照",
-        "卸载后标签变墓碑；重启后仍可见（若 R14 决定持久墓碑）"
+        "写路径补上：surface_set_enabled {id,enabled} / surface_remove {id} / surface_audit {limit?}，与 ui、surface_command 同层级（不进 28 类事件、不落盘会话）",
+        "SetEnabled：flock 读 → 找不到 id rejected 且 index 一个字节不改 → 否则只翻 enabled（hash/installedAt/source/version 逐字不动）→ 先 .bak 再原子写 → audit 一行 {action:enable|disable} → 推 surfaces_changed",
+        "ReadAudit：audit.jsonl 尾部最多 limit 行（≤0=50，上限 200），时间正序；坏行/空行跳过；文件不存在 = 空列表 + nil error",
+        "卸载走 PR-13 的 Remove（目录进 .trash，不删）；同一份 store.Remove 被工具与 IPC 共用",
+        "页面：列表（id / 版本 / 8 位 hash / 开关 / commands 与 data chip / error 徽标+原因）+ 卸载 ConfirmModal + audit 50 行表格（最新在上）+ 空态 + 每行可读失败原因（不 alert）",
+        "动作后重拉 index + audit；surfaces_changed 让 loader 重算 provider（禁用 → 卸载、启用 → 注册）",
+        "plugin: 墓碑的「重新启用」先 surfaceSetEnabled(id,true) 再 enableSurface(kind)；内置 kind 字节不变；无 IPC 时退回旧路径",
+        "设置里新导航项 surfaces，与既有 plugin（MCP/浏览器引擎/ego）分列；PluginTab 一行未动；i18n zh+en 同步",
+        "门禁：go vet / 定向 go test / tsc / eslint 56 / vite build / 6 个 e2e 全绿",
+        "裁决：写路径只走 Go（命令），主进程与页面都不碰 index —— 否则「谁有权改 index」变两处判定",
+        "裁决：surface_disable 改名 surface_set_enabled（一个命令两个方向）；卸载新增同名命令与工具共用 store.Remove",
+        "裁决：enabled 缺省当 bad_request（不当 false，避免静默禁用）；reason 封闭为 unknown_id/bad_request/error(+denied)",
+        "裁决：索引里的 enabled:false 仍走 PR-14c 的墓碑（reason=missing，无重新启用按钮），恢复入口在设置页 —— 待裁决是否改成「墓碑 + 重新启用」",
+        "裁决：audit 用平表不按 id 分组（插件数量个位数，先看时间线）—— 待裁决",
+        "缺口：source 没有渲染（R14 的索引 IPC 不回这个字段；要显示得改磁盘协议）",
+        "变异 4 条真红并复原：开关传反值 3 红 / 卸载不确认直接发 5 红 / SetEnabled 不写 .bak 1 红 / ReadAudit 坏行整段失败 1 红",
+        "测试提交是刻意的红（a7aecd5 引用还不存在的生产 API），下一提交 75943df 转绿 —— 与 R14c 的顺序一致"
       ],
-      "rollback": "整页可移除，不影响已装插件的运行（loader 与工具独立）"
+      "rollback": "整页与三条命令可移除（删 SurfacesPage / settings 的一行导航 / 三条 case）；已装插件的运行不依赖它们（loader 与工具独立），回滚后禁用只能手改 index.json"
     },
     {
       "id": "R14c",
