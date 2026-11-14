@@ -44,20 +44,23 @@ var mobileAllowedCommands = map[Command]bool{
 	// （store 的 flushPending → ask_batch），不是单条 ask。它与 ask 是**同一个能力**
 	// （把用户消息投进会话 inbox，payload 带 workspace/session_id 归属），不放行的话
 	// 手机上点发送只会拿 403 —— 而「发消息」本来就在白名单里。
-	CmdAskBatch:        true,
-	CmdInterrupt:       true,
-	CmdApprove:         true,
-	CmdAnswerQuestion:  true,
-	CmdBlocksPage:      true,
-	CmdWorkspaceList:   true,
-	CmdWorkspaceAdd:    true,
-	CmdWorkspaceRemove: true,
-	CmdWorkspaceSync:   true,
-	CmdWorkspacePick:   true,
-	CmdWorkspaceUpdate: true,
-	CmdSessionRename:   true,
-	CmdSessionPin:      true,
-	CmdDeleteSession:   true,
+	CmdAskBatch:       true,
+	CmdInterrupt:      true,
+	CmdApprove:        true,
+	CmdAnswerQuestion: true,
+	CmdBlocksPage:     true,
+	CmdWorkspaceList:  true,
+	// plugin_projects_list：手机左栏也要能列出插件虚拟 Project（09 §4.6 第 9 点）。
+	// 只读清单，与 workspace_list 同级；开会话仍走 new_session（workspace = 虚拟路径）。
+	CmdPluginProjectsList: true,
+	CmdWorkspaceAdd:       true,
+	CmdWorkspaceRemove:    true,
+	CmdWorkspaceSync:      true,
+	CmdWorkspacePick:      true,
+	CmdWorkspaceUpdate:    true,
+	CmdSessionRename:      true,
+	CmdSessionPin:         true,
+	CmdDeleteSession:      true,
 	// 子智能体（子 Session）：列表由 new_session.agents 带回，下面是查看与对话
 	CmdAgentHistory:  true,
 	CmdAgentSend:     true,

@@ -2939,16 +2939,26 @@ func (m *manager) dispatch(c command) {
 		if a, ok := c.Payload["attempt"].(float64); ok {
 			attempt = int64(a)
 		}
-		bs, err := m.create(ws, id, "") // 进程内已存在 → 复用；新从磁盘载入 → 恢复有效上下文
+		// 插件虚拟 Project：createOpts 会硬拒绝（09 §4.4 第 1 条），这里走显式入口。
+		var bs *bridgeSession
+		var err error
+		if isPluginHomePath(ws) {
+			bs, err = m.createPluginSession(ws, id, "")
+		} else {
+			bs, err = m.create(ws, id, "") // 进程内已存在 → 复用；新从磁盘载入 → 恢复有效上下文
+		}
 		if err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
 		}
 		respData := map[string]any{
 			"session_id": id,
-			"sessions":   m.listSessions(ws),
-			"todos":      bs.s.TodoItems(), // 恢复会话时带当前待办（宿主 TODO 面板）
-			"live":       wasLive,          // true=进程内复用，后台运行态仍有效；false=磁盘冷恢复
+			// owner path 的回执源（09 §4.5）：前端据此把 sid 的归属钉在这个 workspace 上，
+			// 之后 send() 不需再猜（虚拟 Project 与项目会话同形，多一个字段不影响旧前端）。
+			"workspace": ws,
+			"sessions":  m.listSessions(ws),
+			"todos":     bs.s.TodoItems(), // 恢复会话时带当前待办（宿主 TODO 面板）
+			"live":      wasLive,          // true=进程内复用，后台运行态仍有效；false=磁盘冷恢复
 		}
 		// 当前轮已产出、但还没进 blocks 的文本：中途打开会话或 WS 重连时，
 		// 手机靠它把「正在流的那一轮」补上（blocks 只到上一个轮次边界）。
@@ -3100,6 +3110,13 @@ func (m *manager) dispatch(c command) {
 		m.resp(c, true, "", respData)
 
 	case CmdAsk:
+		// 插件停用/卸载后前置拒绝（09 §4.2）：run 一旦跑起来，读全局 MCP/技能到一半
+		// 才发现插件已停用，用户看到的是「发了消息没反应」。code=denied（§4.2 的用词），
+		// data.reason 给封闭集合 plugin_disabled / plugin_uninstalled。
+		if reason := m.pluginAskDenyReason(ws); reason != "" {
+			m.respCode(c, false, "插件已停用或卸载，不能发起对话", "denied", map[string]any{"reason": reason})
+			return
+		}
 		bs := m.get(ws, sid)
 		if bs == nil {
 			m.respCode(c, false, "session not found", "session_not_found", nil)
@@ -3116,6 +3133,12 @@ func (m *manager) dispatch(c command) {
 		m.resp(c, true, "", nil)
 
 	case CmdAskBatch:
+		// 插件停用/卸载后前置拒绝：与 CmdAsk 同一条闸门（ask_batch 是同一个能力，
+		// 手机端与暂存队列都走它 —— 只拦 ask 等于留了一条旁路）。
+		if reason := m.pluginAskDenyReason(ws); reason != "" {
+			m.respCode(c, false, "插件已停用或卸载，不能发起对话", "denied", map[string]any{"reason": reason})
+			return
+		}
 		// 批量推送用户输入（客户端暂存队列一次性推送）。每条输入是一条 user 消息，
 		// 消息 = 内容块数组（对齐 core.Content：text / image，图文可混排，可携带文件/图片附件）。
 		// 逐条经 Session.Ask 入 inbox —— 下一轮 takeBatch / 插话 Poll 一起成批消费，
@@ -4590,6 +4613,12 @@ func (m *manager) dispatch(c command) {
 	case "delete_workspace": // 删除工作区：停全部会话 + 删 harness 元数据（skills.json；用户文件与项目配置保留）
 		if ws == "" {
 			m.resp(c, false, "workspace 为空", nil)
+			return
+		}
+		// 插件虚拟 Project 不是工作区（09 §4.4）：这里会 RemoveAll plugin-sessions/<id>，
+		// 而「卸载不删会话」是设计前提。要清会话用 delete_session。
+		if isPluginHomePath(ws) {
+			m.respCode(c, false, "插件虚拟 Project 不是工作区，不能用 delete_workspace 删除（会话请用 delete_session）", "plugin_workspace_invalid", nil)
 			return
 		}
 		m.deleteWorkspace(ws)
