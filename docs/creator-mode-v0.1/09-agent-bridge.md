@@ -9,6 +9,9 @@
 1. **插件任务会话必须进左栏会话树**，且是**第三种简单形态**：不绑 Project、不是智能体/群组会话，只知道「自己这个 Session」。
 2. **引用到会话只插草稿**，发送永远由用户按；「自动发送」留到以后，V1 不做。
 3. **`agent.run` 加载全部系统内置工具 + 全局 MCP + 全局 subAgents**；插件**不能修改**这三套集合；但**允许插件注册自定义工具**进来（只增不改）。
+4. **卸载保留插件会话**（D1）：左栏归入「已卸载插件」，只读、可手动删。
+5. **模型跟随全局、可自由切换**（D3）：插件不能指定 provider/model/密钥；用户在会话里切换与普通会话同一条路。
+6. **会话 ID 随机、插件可新建**（D4）：不引入 `session_key` 映射；`agent.run` 不传 `session_id` = 新建随机会话，传了就复用；插件自己把 id 存在自己的 localStorage 里。
 
 ## 1. 现状与约束（设计必须落在这上面）
 
@@ -42,22 +45,22 @@
 ```
 kind: plugin
 owner: plugin:<id>
-fields: { id, title, plugin_id, session_key, created_at, updated_at, running, pinned? }
+fields: { id, title, plugin_id, created_at, updated_at, running, pinned? }
 没有: project / workspace 绑定、agent profile、group 成员、项目技能层、项目 MCP 层
 ```
 
-- **存储**：`~/.go-code/plugin-sessions/<id>/{home,sessions,events,index.json}`（0700）。
+- **存储**：`~/.go-code/plugin-sessions/<id>/{home,sessions,events}`（0700）。
   - `home/`：该插件的虚拟工作目录，bash/file 工具的根（等价 `hubAgentHome`，与代码目录物理分开）。
-  - `index.json`：`session_key -> {session_id, title, created_at, updated_at}` 的原子索引。
+  - 不设 `index.json` / `session_key` 映射（D4）：会话 id 由 bridge 随机生成，列表直接扫 `sessions/*.jsonl`；「复用哪条会话」由插件自己记住 id（存它自己的 localStorage）。
 - **运行时**：`runtimePlugin` 加入 `runtimeKind`（`pluginID` 字段），登记在 `m.pluginRuntimes[pluginID]`，**不进 `m.workspaces`**（否则 `workspace_list`/reload/MCP 重放会把插件当项目遍历）。
 - **工具面**：与 `runtimeHubAgent` 同一套全局层（内置 + 用户级 MCP + 全局技能/子代理），**外加该插件自己注册的工具**。
-- **模型**：跟随全局 active provider/model；插件**不能**指定 provider、模型或密钥。
+- **模型**：跟随全局 active provider/model，用户可在会话里自由切换（D3）；插件**不能**指定 provider、模型或密钥。
 
 ### 2.2 生命周期
 
 - 懒创建：第一次 `agent.run` 或用户从插件面板点「打开会话」时创建 runtime。
-- 会话 key：`agent.run({ session_key })`；同一 `(plugin_id, session_key)` 复用同一会话，避免每跑一次就在左栏多一条。
-- 插件卸载：**停止 runtime、取消所有在跑的 run**；会话记录**保留**，左栏归入「已卸载插件」分组，只读可删（见 §9 待定项 D1）。
+- 会话创建：`agent.run` 不带 `session_id` → 新建一条随机 id 的会话；带 `session_id` → 复用。插件想「一个功能一条会话」，就在第一次拿到的 id 存进自己的 localStorage，后续带上；想每次新开就都不带。宿主不替它记映射。
+- 插件卸载：**停止 runtime、取消所有在跑的 run**；会话记录**保留**（D1），左栏归入「已卸载插件」分组，只读可删。
 - 插件停用（enabled=false）：runtime 不装配；已有会话可读，不能继续跑。
 - 插件升级（hash 变）：runtime 重启；会话保留。
 
@@ -86,8 +89,8 @@ fields: { id, title, plugin_id, session_key, created_at, updated_at, running, pi
 
 ```ts
 host.agent = {
-  session(opts?: { key?: string; title?: string }): Promise<{ sessionId: string; key: string }>
-  run(req: AgentRunRequest): AgentRunHandle
+  session(opts?: { title?: string }): Promise<{ sessionId: string }>
+  run(req: AgentRunRequest): AgentRunHandle   // 不传 session_id = 新建随机会话
   cancel(runId: string): void
 }
 
@@ -100,7 +103,7 @@ host.tools = {
 }
 ```
 
-- `AgentRunHandle`：`{ runId, sessionId, on(type, fn), cancel() }`；事件 `delta | tool | usage | done | error`。
+- `AgentRunHandle`：`{ runId, sessionId, on(type, fn), cancel() }`；事件 `delta | tool | usage | done | error`。`sessionId` 在 `run()` 返回时即已确定（新建或复用），插件据此决定要不要持久化。
 - `host.tools.register` 必须在 manifest `tools[]` 里声明过；未声明直接抛（与 `events.on` 同口径）。
 - 所有返回值恒为对象，不抛传输错误；`reason` 见 §6 错误码。
 
@@ -146,8 +149,8 @@ bridge --event surface_agent_event--> main --webContents.send--> loader --路由
 
 | 命令 | 载荷 | 回执 |
 |---|---|---|
-| `surface_agent_session` | `{plugin_id, key?, title?}` | `{ok, session_id, key}` |
-| `surface_agent_run` | `{plugin_id, run_id, session_id, input, instructions?, schema?, tools:"global"\|"none"}` | `{ok, run_id, session_id}`（立即回，流式走事件） |
+| `surface_agent_session` | `{plugin_id, title?}` | `{ok, session_id}`（随机 id） |
+| `surface_agent_run` | `{plugin_id, run_id, session_id?, input, instructions?, schema?, tools:"global"\|"none"}` | `{ok, run_id, session_id}`（`session_id` 缺省 = 新建；立即回，流式走事件） |
 | `surface_agent_cancel` | `{plugin_id, run_id}` | `{ok}` |
 | `surface_tool_result` | `{call_id, ok, result?, error?}` | `{ok}` |
 | `plugin_session_list` | `{}` | `{plugins:[{id,name,enabled,sessions:[...]}]}` |
@@ -262,12 +265,24 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 5. 插件面板：`host.agent` / `host.composer` 的示例（SKILL 提供）。
 6. Composer：来源 chip + 删除；不自动发送。
 
-## 9. 待定项（开工前需要拍板）
+## 9. 决策记录
 
-- **D1 卸载后的插件会话**：保留（只读、可手动删）还是随卸载删除？倾向**保留**——它是用户可见的对话历史，与 localStorage 数据不同；删除入口放设置页。
-- **D2 插件工具的项目会话范围**：默认只在插件会话可用；是否允许用户授权后在项目会话使用？倾向允许（显式开关）。
-- **D3 插件会话的模型**：跟随全局 active provider/model（插件不能选）。确认。
-- **D4 会话 key 的默认值**：`agent.run` 未传 `session_key` 时用 `"main"`（一插件一会话）还是每次新会话？倾向 `"main"`，避免左栏被任务刷屏。
+- **D1（已定）卸载后的插件会话**：**保留**，左栏「已卸载插件」分组，只读 + 手动删除（`plugin_session_delete`）。
+- **D2（已定）不绑定 Project，保留第三种 Session**。理由见下；绑项目的成本对比仅省 1.5–2 轮，但代价是插件拿到项目级 bash/file 工具（爆炸半径）、工具面随项目漂移、空项目用户无法使用。
+- **D3（已定）模型**：跟随全局 active provider/model，用户可自由切换；插件不能指定。
+- **D4（已定）随机会话 ID**：不做 `session_key` 映射；插件可新建，也可复用自己记住的 id。
+
+### D2 备选方案的成本对比（存档）
+
+| | 第三种 Plugin Session（选定） | 绑定 Project |
+|---|---|---|
+| 实现成本 | 多 1.5–2 轮（runtime kind + 命令解析 + 左栏分组 + 空态） | 复用现有 workspace runtime |
+| 工具根 | 插件自己的 home（沙盒） | **用户项目目录**（bash/read/write 全开） |
+| 工具面 | 内置 + 全局 MCP + 全局 subAgents（确定） | 额外叠项目技能/MCP/hooks（随项目变） |
+| 使用门槛 | 装完即用 | 必须先有 Project |
+| 卸载/清理 | 独立分组，归属清晰 | 混在项目会话里，需额外区分 |
+
+**折中（V2，不阻塞）**：plugin session 默认无项目；`agent.run({ workspace })` 显式申请一次项目上下文，宿主弹确认「插件 X 想读取项目 Y」，用户同意才把文件工具根切过去。
 
 ## 10. 分阶段与工作量
 
@@ -286,7 +301,7 @@ P2 完成才有「用户在项目会话里说一句，PDF 面板自己更新」�
 1. 何时需要 Agent：引用 vs 跑任务 vs 供工具；一张决策表。
 2. manifest 声明示例 + 安装页会展示什么。
 3. `host.composer.quote` recipe（含来源字段、上限、不自动发送）。
-4. `host.agent.run` recipe（session_key、schema、delta/done/error、取消）。
+4. `host.agent.run` recipe（新建/复用 session_id、schema、delta/done/error、取消；id 存插件自己的 localStorage）。
 5. `host.tools.register` recipe（manifest 对齐、read_only、requires_panel、超时、结果上限）。
 6. 错误码表 + 额度表。
 7. 反例：不要伪造数据、不要假装宿主会持久化、不要试图改全局工具集。
