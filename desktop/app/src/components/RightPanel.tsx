@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useReducer, useRef, useState, useCallback } from 'react'
 import type { ReactElement, ReactNode } from 'react'
-import { useAppStore, isPendingWebTab, rebuildWebTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
+import { useAppStore, isPendingWebTab, rebuildWebTab, selectRightTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
 import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
 import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
 import { ChangesTab } from './ChangesTab'
@@ -151,7 +151,10 @@ export default function RightPanel() {
   const t = useT()
   const allTabs = primaryTabs(t).concat(secondaryTabs(t))
   const rightExpanded = useAppStore((s) => s.rightExpanded)
-  const rightTab = useAppStore((s) => s.rightTab)
+  // R11b：rail 高亮读**派生选择器**（激活标签的 kind），不再读 state 里那个写穿副本。
+  // 差异只有一处，且是修缺陷：标签关光（activeId=null）时旧字段保留最后的值，rail 会一直
+  // 高亮一个已经不在的面板；选择器此时返回 undefined → 没有一个图标亮着（与内容区空态一致）。
+  const rightTab = useAppStore(selectRightTab)
   const setRightTab = useAppStore((s) => s.setRightTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const toggleRight = useAppStore((s) => s.toggleRight)

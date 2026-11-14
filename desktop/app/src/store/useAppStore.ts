@@ -46,6 +46,9 @@ import type { SignalFact } from '../lib/signalFacts'
 // store 侧保留同名 re-export —— RightPanel 等调用点的 import 路径不变（本轮零行为变化），
 // 下一轮 provider 直接从 lib 取，不再经过 store。
 import { isPendingWebTab, samePreviewTarget, webTabKey, webUrlSnapshot } from '../lib/webTab'
+// R11b：右栏「现在是哪个面板」的派生选择器（纯函数，只 type-only 依赖本文件）。
+// 与 lib/webTab 同一处置：判据下沉到 lib，store 侧保留同名 re-export 给旧 import 路径。
+import { selectRightTab, tabScopeKey } from '../lib/rightTab'
 // 媒体元素池的回收入口（R08c）：关标签时按标签里的 path 释放解码器/缓冲。
 // 只 import 函数、不 import 任何在模块顶层碰 document 的东西（node 单测会 import 本文件）。
 import { disposeMediaElementsForPath } from '../lib/mediaStage'
@@ -66,6 +69,9 @@ import { startUISnapshot } from '../lib/uiSnapshot'
 import { startPluginLoader, surfaceBaseUrl } from '../surfaces/plugin/loader'
 import { emitUI } from '../lib/uiBus'
 export { isPendingWebTab, samePreviewTarget, webTabKey }
+// R11b：选择器同 webTab 系列一并 re-export —— RightPanel 等读点的 import 路径不分裂
+//（一半从 store、一半从 lib 取同一条判据，是这类判据最常见的分叉起点）。
+export { selectRightTab }
 
 // 右栏 = 会话**审阅面**：链路 / 变更 / 文件 / 网页。
 //
@@ -1450,12 +1456,6 @@ function resetView(): Partial<AppState> {
 
 // —— 右侧栏标签模型 helper（阶段 1）——
 
-// scopeKeyOf：标签集的归属键。无会话（加了工作区但还没建会话）时退化为工作区路径——
-// 否则右栏在「已添加工作区、尚未建会话」这个窗口期没有归属（D7）。
-function scopeKeyOf(s: { activeSessionId?: string; workspace?: string }): ScopeKey {
-  return s.activeSessionId || s.workspace || ''
-}
-
 let tabSeq = 0
 // focusSpec：fileFocus（用户/Agent 最后一次定位的文件）→ file 标签的初始 payload。
 // mode 口径与 locateFile 一致：显式 source，或缺 toolId → 完整预览；否则 diff/操作模式。
@@ -1818,7 +1818,7 @@ function flushPendingPersistTabs(): void {
 // 理由：那两条会让「外部改一下 rightTab」静默换掉用户正在看的标签，也会在切会话恢复时
 // 把 persisted 的 activeId 顶掉。rightTab 现在只由 tabPatch 从激活标签派生。
 function syncTabsToRightTab(s: AppState): TabSet {
-  const cur = s.tabsByScope[scopeKeyOf(s)]
+  const cur = s.tabsByScope[tabScopeKey(s)]
   if (!cur) {
     const tab = makeTab(s.rightTab, s)
     return { tabs: [tab], activeId: tab.id, closed: [] }
@@ -2112,7 +2112,7 @@ function scopeWorkspaceOf(s: AppState, scope: ScopeKey): string | undefined {
   }
   // 认不出归属时只给**当前** scope 兜底（它就是 s.workspace 这一侧）；其余一律不猜 ——
   // 猜错会把另一个工作区的同名文件改掉，比留一个陈旧路径更难查。
-  return scope === scopeKeyOf(s) ? s.workspace : undefined
+  return scope === tabScopeKey(s) ? s.workspace : undefined
 }
 
 // keySuffix：标签路径相对被改条目键的尾部（"/a/b.ts" 之类；非子树 → 空串）。
@@ -9802,7 +9802,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         void transport.send({ id: ++cmdSeq, type: 'ui', payload: { op, data } })
       },
       t: i18nT,
-      scopeKeyOf: (s) => scopeKeyOf(s),
+      scopeKeyOf: (s) => tabScopeKey(s),
     })
     // 插件加载器（PR-14）：启动同步一次 + 每次 surfaces_changed 再同步一次。
     // 排在 startUISnapshot 之后是刻意的：快照要能立刻看到「装了什么」，而插件的
@@ -10873,7 +10873,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cancelCloseConfirm: () => set({ closeConfirm: undefined }),
   closeFile: () => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const i = set0.tabs.findIndex((t) => t.id === set0.activeId && t.kind === 'file')
     const tabs = i < 0 ? set0.tabs : set0.tabs.map((t, k) => (
@@ -11374,7 +11374,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   //   · 其余 kind → kind 本身（每类每 scope 一个实例，阶段 1 口径不变）。
   openTab: (spec, opts) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const activate = opts?.activate !== false
     // 「无路径的 file 打开」（rail 的「文件」按钮 / setRightTab('file') / e2e 复位）：payload
@@ -11437,7 +11437,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   activateTab: (id) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     if (set0.activeId === id) return
     const tab = set0.tabs.find((t) => t.id === id)
@@ -11493,7 +11493,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   closeTabNow: (id) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const i = set0.tabs.findIndex((t) => t.id === id)
     if (i < 0) return
@@ -11519,7 +11519,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   reopenTab: (id) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const i = id ? set0.closed.findIndex((t) => t.id === id) : 0
     if (i < 0 || !set0.closed[i]) return
@@ -11535,7 +11535,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 否则 effect → set → effect 会自激。
   syncTabsToRightTab: () => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const cur = s.tabsByScope[scope]
     if (!cur) return set(tabPatch(s, scope, syncTabsToRightTab(s)))
     // activeId 权威（PR-02）：集合存在时不再按 rightTab 挑标签，只补派生字段 / 清恢复标记。
@@ -11553,7 +11553,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 声明式收敛一次覆盖全部路径；与旧内层标签条的数据源口径完全一致。
   syncWebTabs: (source, items, activeKey) => {
     const s = get()
-    const scope = scopeKeyOf(s)
+    const scope = tabScopeKey(s)
     const set0 = syncTabsToRightTab(s)
     const live = new Set(items.map((x) => x.key))
     // ① 该数据源里已消失的页面 → 删标签；**另一数据源**的 web 标签：本数据源有数据时一并清掉
