@@ -664,6 +664,730 @@ body {
   background: var(--paper-3);
 }
 
+/* ─────────── 主会话页（P8-02） ───────────
+ *
+ * 会话面本身**一行都不重画**：Narrative / ApprovalPanel / AskUserQuestionPanel /
+ * Composer 全部是桌面同一份（见 components/CenterPanel.tsx）。这里只补三件事：
+ *   1. 桌面三栏布局里由 index.css 给的结构（.center / .narrative-wrap / .narrative /
+ *      .composer-wrap）—— 手机不引 index.css（13k 行 + tailwind），所以要自己写；
+ *   2. 单列 + 100dvh + 安全区：叙述区自己滚、composer 贴底；
+ *   3. 触控尺寸与 iOS 字号（<16px 的输入框在 iOS 上聚焦会整页放大）。
+ * 颜色/字号/圆角全部沿用令牌层（runtime-palette/tokens + runtime-skin），不另起一套视觉。
+ */
+
+/* —— 入口条：Hub / 会话（只在列表层出现）—— */
+
+.m-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 8px;
+}
+
+.m-tab {
+  flex: 1 1 0;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm, 8px);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.m-tab.is-on {
+  background: var(--card);
+  border-color: var(--accent-border, var(--line));
+  color: var(--ink);
+}
+
+/* —— 会话列表 —— */
+
+.m-sess-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--paper);
+}
+
+.m-sess-ws {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 12px 8px;
+}
+
+.m-sess-ws-label {
+  font-size: 12px;
+  color: var(--ink-3);
+  flex: 0 0 auto;
+}
+
+.m-sess-ws-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm, 8px);
+  background: var(--card);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.m-sess-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.m-sess-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.m-sess-row:active {
+  background: var(--paper-3);
+}
+
+.m-sess-row-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.m-sess-row-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-sess-pin {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.m-sess-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.m-sess-run {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: m-run-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes m-run-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.m-sess-row-chev {
+  flex: 0 0 auto;
+  color: var(--ink-3);
+  font-size: 18px;
+}
+
+.m-sess-empty {
+  margin: 0;
+  padding: 20px 16px;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.m-sess-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.m-sess-error-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.m-sess-retry {
+  flex: 0 0 auto;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm, 8px);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.m-sess-foot {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+}
+
+/* —— 会话页外壳 —— */
+
+.m-session {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+
+.m-session-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 10px 0 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.m-session-back {
+  margin-right: 0;
+}
+
+.m-session-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.m-session-ws {
+  flex: 0 1 auto;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.m-session-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* CenterPanel：桌面是「三栏里的中栏（height:100%）」，手机是「整屏单列」。
+   .center 的 height:100% 在 flex 容器里会把 composer 顶出屏幕，所以这里改 flex:1。 */
+.m-session .center {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.m-session .narrative-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 叙述区自己滚（桌面同一条规则，去掉 800px 限宽与桌面留白）。 */
+.m-session .narrative {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 12px 14px 6px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-anchor: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* composer 贴底：桌面是 max-width:800 居中的一块，手机铺满 + 吃安全区。 */
+.m-session .composer-wrap {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 6px 10px calc(8px + env(safe-area-inset-bottom));
+}
+
+/* 输入框的解剖（index.css 的 .composer .input-wrap / .input-hl / .input）：
+   Composer 的真实文字是**透明**的 textarea，可见字形由底下的 .input-hl overlay 画
+   （这样命令/引用徽章能着色而不改文本流）。少了这几条，textarea 会露出浏览器默认边框
+   和黑字 —— 与 overlay 叠成双层文字。 */
+.m-session .composer .input-wrap {
+  position: relative;
+}
+
+.m-session .composer .input-hl {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: var(--ink);
+  font-family: inherit;
+}
+
+.m-session .composer .input {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  color: transparent; /* 可见文字在 overlay 上；这里只保留光标 */
+  caret-color: var(--ink);
+  font-family: inherit;
+}
+
+/* 底部控件行：手机只剩发送/停止，恒贴右（桌面是「模式在左、其余在右」两簇）。 */
+.m-session .composer .row2 {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.m-session .composer .row2-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 运行态条（composer 上方那行「Agent 运行中 · Ns」）与暂存队列（运行中再发一条
+   会进队列，服务端消费后才进对话页）。两块都在 index.css 里，手机上按原样补结构。 */
+.m-session .agent-running-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 24px;
+  padding: 2px 12px;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  user-select: none;
+}
+
+.m-session .agent-running-logo {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+  opacity: 0.92;
+}
+
+.m-session .agent-running-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.m-session .agent-running-label {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.m-session .agent-running-ms {
+  color: var(--ink-3);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.m-session .pending-queue {
+  border-top: 1px solid var(--line);
+  padding: 8px 12px 6px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.m-session .pq-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-bottom: 6px;
+}
+
+.m-session .pq-sub {
+  color: var(--ink-3);
+}
+
+.m-session .pq-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.m-session .pq-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+
+.m-session .pq-no {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.m-session .pq-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 输入框 16px：iOS 对 <16px 的输入框聚焦会整页放大。
+   透明 textarea 与高亮 overlay 必须同字号（overlay 逐字对齐），所以两处一起改。 */
+.m-session .composer .input,
+.m-session .composer .input-hl {
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.m-session .composer .input {
+  min-height: 64px;
+  max-height: 40vh;
+  padding: 10px 12px;
+}
+
+.m-session .composer .input-hl {
+  padding: 10px 12px;
+}
+
+/* 发送/停止：44px 触控目标（桌面 26px；runtime 皮肤给的是 28px）。
+   选择器要盖过 runtime-skin 的 `html[data-skin='runtime'] .row2 .send-btn`
+   （0,3,1），所以这里多带一层 .row2 —— 否则尺寸被皮肤层按回去，触控目标只有 28px。 */
+.m-session .composer .row2 .send-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+}
+
+.m-session .composer .row2 .send-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.m-session .composer .row2 {
+  padding: 6px 8px 8px;
+}
+
+.m-session .composer .row2-right {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+
+/* 正文：桌面 13.5px 在手机上偏小；行高按 runtime 皮肤的 1.7 保持。 */
+.m-session .msg .body {
+  font-size: 14.5px;
+}
+
+.m-session .msg {
+  margin-bottom: 16px;
+}
+
+/* 骨架屏（切换会话时）：桌面的 .ss-* 在 index.css 里，手机补一层最小可见度，
+   否则加载期间是一块没有反馈的空白。 */
+.m-session .session-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  padding: 14px;
+  background: var(--paper);
+}
+
+.m-session .session-skeleton .ss-bar {
+  display: block;
+  border-radius: 4px;
+  background: var(--line);
+  opacity: 0.5;
+}
+
+.m-session .session-skeleton .ss-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* 审批/提问停靠区：桌面 .dock 自带上下留白，手机把横向留白收窄到 composer 的边距。 */
+.m-session .dock {
+  flex: 0 0 auto;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+/* ── 复用组件的「壳」样式补齐（P8-02）──
+ *
+ * 为什么只有这两块需要补：会话页里**大部分**组件的样式跟着组件自己的 CSS 走
+ * （Narrative 的 turn.css/work-fold.css、Composer 的 pop/fan/caps.css、提问面板的
+ * ask-runtime.css 都是组件 import 的，随会话 chunk 一起加载），皮肤层 runtime-skin.css
+ * 又在 mobile.css 顶部 @import。只有**审批卡 + composer 外壳 + .btn** 这几样住在
+ * index.css 里（13k 行，手机不引），所以在这里按原样补最小的结构，不另起视觉。
+ */
+.m-session .composer {
+  background: color-mix(in srgb, var(--surface) 96%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--border-strong) 76%, transparent);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 18%);
+  position: relative;
+}
+
+/* 停靠区外壳（审批卡/提问面板共用）：桌面是 max-width:800 居中的一块。 */
+.m-session .dock {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0 10px 8px;
+}
+
+.m-session .dock .dock-box,
+.m-session .dock .card {
+  width: auto;
+  max-width: none;
+  background: var(--elevated, var(--card));
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 8px 26px rgb(0 0 0 / 22%);
+}
+
+/* 标题条 = 收起/展开开关（点行头折叠，与工具行同一套语言）。 */
+.m-session .dock .dock-hd,
+.m-session .dock .appr-hd {
+  cursor: pointer;
+  user-select: none;
+  margin: -4px -6px 4px;
+  padding: 4px 6px;
+  border-radius: 7px;
+}
+
+.m-session .dock .chev {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.m-session .dock .dock-fold-hint,
+.m-session .dock .appr-fold-hint {
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.m-session .dock .dock-countdown {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.m-session .dock h3 {
+  font-size: 14px;
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.m-session .dock.folded .dock-box,
+.m-session .dock.folded .card {
+  padding: 8px 12px;
+}
+
+.m-session .dock.folded .dock-hd,
+.m-session .dock.folded .appr-hd {
+  margin: 0;
+}
+
+.m-session .dock .q-list {
+  max-height: min(34vh, 300px);
+}
+
+.m-session .dock .appr-scroll {
+  max-height: 26vh;
+}
+
+.m-session .appr-args-toggle {
+  display: block;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 2px 10px;
+}
+
+.m-session .dock .appr-args {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.m-session .dock .appr-args .param {
+  color: var(--ink-3);
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.m-session .dock .appr-args textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 120px;
+  max-height: 40vh;
+  resize: vertical;
+  background: var(--paper);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  line-height: 1.55;
+  padding: 8px 10px;
+}
+
+.m-session .dock .appr-args-hd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.m-session .dock .appr-mode {
+  background: none;
+  border: 1px solid var(--border-strong);
+  color: var(--ink-2);
+  border-radius: 5px;
+  font-size: 12px;
+  padding: 1px 8px;
+  cursor: pointer;
+  font-family: var(--font-mono, monospace);
+}
+
+.m-session .dock .acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.m-session .dock .timeout {
+  font-size: 11px;
+  color: var(--warning, var(--accent));
+  margin-left: auto;
+  align-self: center;
+}
+
+/* 按钮基类（index.css 的 .btn）：审批的拒绝/批准、提问的提交都用它。 */
+.m-session .dock .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.m-session .dock .btn.primary {
+  background: var(--accent-solid, var(--accent));
+  border-color: var(--accent-solid, var(--accent));
+  color: #fff;
+}
+
+.m-session .dock .btn.danger {
+  color: var(--red, #ff7386);
+}
+
+.m-session .dock .btn:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* 决策按钮的触控尺寸：桌面（runtime 皮肤）的审批按钮 25px 高、提问选项 ~32px 高，
+   手机上按 WCAG 2.5.8 一律抬到 44px。只改尺寸，配色/层级/文案全部沿用组件本身。 */
+.m-session .dock .btn,
+.m-session .dock .appr-mode,
+.m-session .dock .appr-args-toggle,
+.m-session .dock .ask-opt,
+.m-session .dock .ask-btn {
+  min-height: 44px;
+}
+
+.m-session .dock .btn {
+  min-width: 44px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .m-icon-btn,
   .m-btn {
@@ -671,6 +1395,10 @@ body {
   }
 
   .m-drawer {
+    animation: none;
+  }
+
+  .m-sess-run {
     animation: none;
   }
 }

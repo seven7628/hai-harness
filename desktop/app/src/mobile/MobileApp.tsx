@@ -7,15 +7,23 @@
 //   · transport 走 transport/host.ts 的注册（main.tsx 里 setHubTransport），
 //     i18n 走 host/lang.tsx（这里把手机语言下发）。
 //
-// 导航模型：**Hub store 的 open + 选中目标就是「会话页」**。
-//   · 点列表行 → store.openAgent/openGroup 置 open=true → 本壳渲染 ConversationScreen；
-//   · 返回（44px 按钮 / Android 返回键 / Esc）→ closeHub() → open=false → 回列表。
-// 这样搜索命中、深链、告警跳转等所有「打开 Hub」的入口在手机上自动落到会话页，
-// 不需要在每个入口上再挂一遍导航回调。
+// 导航模型（两级，各自独立）：
+//   1) **Hub**：store 的 open + 选中目标就是「Hub 会话页」。
+//      · 点列表行 → store.openAgent/openGroup 置 open=true → 本壳渲染 ConversationScreen；
+//      · 返回（44px 按钮 / Android 返回键 / Esc）→ closeHub() → open=false → 回 Hub 列表。
+//      这样搜索命中、深链、告警跳转等所有「打开 Hub」的入口在手机上自动落到会话页，
+//      不需要在每个入口上再挂一遍导航回调。
+//   2) **主会话**（P8-02）：壳自己持有 { ws, sid }，列表屏只调 onOpenSession 上报。
+//      · 返回 → 回**会话列表**（不是 Hub 列表）；Hub 的返回永远回 Hub 列表。
+//      · Hub 任务卡的「打开会话」走 host/panels 的 openProjectSession → 同一个落点
+//        （先 closeHub 再开会话页，于是返回栈不会串）。
+//   两条栈共用**一条** history 记录（下面的 detail 状态机）：栈里永远最多一条
+//   「详情页」记录，从 Hub 直接跳到会话页时不会再压一层，Android 返回键一次到位。
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { HostLang } from '../host/lang'
 import { MobileHostPanelsProvider } from '../host/panels-mobile'
 import { attachHubEvents, useHubStore } from '../hub/useHubStore'
+import { useT } from '../i18n'
 import { applyTheme, type ThemePref } from '../lib/theme'
 import { readLangPref, writeLangPref } from './lang'
 import { sharedMobileTransport, type MobileLinkState, type MobileStatus, type MobileTransport } from './transport/mobile'
@@ -26,6 +34,11 @@ import { readThemePref, writeThemePref } from './theme'
 const HubListScreen = lazy(() => import('./screens/HubListScreen'))
 const ConversationScreen = lazy(() => import('./screens/ConversationScreen'))
 const InspectorDrawer = lazy(() => import('./screens/InspectorDrawer'))
+// 主会话（P8-02）：这两个屏要复用桌面 CenterPanel（Narrative/Composer/审批/提问），
+// 代价是会带进桌面 store —— 所以**必须**按需加载：Hub 首屏 chunk 里不能出现
+// useAppStore / mock / electron（见 scripts/test-host-seams.mjs 的边界断言）。
+const SessionListScreen = lazy(() => import('./screens/SessionListScreen'))
+const SessionScreen = lazy(() => import('./screens/SessionScreen'))
 
 type PingState = { state: 'idle' | 'checking' | 'ok' | 'fail'; paired?: boolean; error?: string }
 
@@ -64,6 +77,13 @@ export default function MobileApp() {
   const [theme, setTheme] = useState<ThemePref>(() => readThemePref())
   const [lang, setLang] = useState<HostLang>(() => readLangPref())
   const [toast, setToast] = useState<{ id: number; msg: string; kind: 'ok' | 'error' } | null>(null)
+  const t = useT()
+  // 顶部两个并列入口：Hub（智能体/群组）与「会话」（工作区会话）。配对后默认 Hub
+  // （P8-01b 的既有入口不变），点「会话」才切过去。
+  const [tab, setTab] = useState<'hub' | 'sessions'>('hub')
+  // 主会话页：壳只记「哪个工作区的哪个会话」，激活/恢复全在 SessionScreen 里走 store。
+  // title 只是首帧占位（列表已知标题时不用等 store 水合）。
+  const [sess, setSess] = useState<{ ws: string; sid: string; title?: string } | null>(null)
 
   const paired = token !== ''
   // 会话页 = Hub 已打开且选中了 DM/群（见文件头的导航模型）。
@@ -112,29 +132,53 @@ export default function MobileApp() {
     void st.loadGroups()
   }, [paired])
 
-  // Android 返回键 / 浏览器后退：会话页压一条 history，popstate 回列表。
-  // 用 ref 记住「这条记录是我们压的」，应用内返回按钮走 history.back() 消费它，
-  // 避免栈里留下一条永远退不掉的记录。
+  // Android 返回键 / 浏览器后退：详情页（Hub 会话 / 主会话）压一条 history，
+  // popstate 回列表。用 ref 记住「这条记录是我们压的」，应用内返回按钮走
+  // history.back() 消费它，避免栈里留下一条永远退不掉的记录。
+  //
+  // 两条详情栈**共用一条记录**：detail 从 hub 切到 session（任务卡打开会话）时
+  // detailOpen 不变 → 不再压栈；popstate 一次就把两个状态都清掉。
+  // 分开压栈的话「Hub → 任务卡 → 会话 → 返回 → 返回」会出现一次按了没反应的返回。
+  const detail = sess ? 'session' : convOpen ? 'hub' : ''
+  const detailOpen = detail !== ''
   const pushedRef = useRef(false)
   useEffect(() => {
-    if (!convOpen) return
-    const prev = window.history.state
-    window.history.pushState({ ...(prev && typeof prev === 'object' ? prev : {}), haiHubConv: true }, '')
-    pushedRef.current = true
+    if (!detailOpen) {
+      pushedRef.current = false
+      return
+    }
     const onPop = (): void => {
       pushedRef.current = false
+      setSess(null)
       useHubStore.getState().closeHub()
     }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [convOpen])
+  }, [detailOpen])
+  useEffect(() => {
+    if (!detailOpen || pushedRef.current) return
+    const prev = window.history.state
+    window.history.pushState({ ...(prev && typeof prev === 'object' ? prev : {}), haiDetail: true }, '')
+    pushedRef.current = true
+  }, [detailOpen])
 
+  // 返回列表：有我们压的记录就消费它（走 popstate 统一清理），否则直接清状态。
   const back = useCallback(() => {
     if (pushedRef.current) {
-      window.history.back() // 触发 popstate → closeHub
+      window.history.back()
       return
     }
+    setSess(null)
     useHubStore.getState().closeHub()
+  }, [])
+
+  // 打开主会话（列表行 / Hub 任务卡 / setActiveSession 都落到这里）。
+  // closeHub 是刻意的：返回栈分开 —— 会话页返回回会话列表，不回刚才那个 Hub 会话。
+  const openSession = useCallback((ws: string, sid: string, title?: string) => {
+    if (!ws || !sid) return
+    useHubStore.getState().closeHub()
+    setTab('sessions')
+    setSess({ ws, sid, title })
   }, [])
 
   // Esc 回列表（桌面 Hub 的 Esc 只关菜单/弹层，见 useHeaderMenu；这里是手机导航）。
@@ -147,6 +191,19 @@ export default function MobileApp() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [convOpen, back])
+
+  // 会话页的 Esc = 返回列表；焦点在输入框/可编辑区时不劫持（用户可能只是在退补全）。
+  useEffect(() => {
+    if (!sess) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      const el = e.target as HTMLElement | null
+      if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable)) return
+      back()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [sess, back])
 
   useEffect(() => {
     if (!toast) return
@@ -177,14 +234,21 @@ export default function MobileApp() {
     setToast({ id: Date.now(), msg, kind })
   }, [])
 
+  // 全屏页（Hub 会话 / 主会话）自己带 44px 头部，壳的头/入口条/底栏都让位。
+  const fullScreen = convOpen || Boolean(sess)
   return (
-    <MobileHostPanelsProvider lang={lang} onToast={showToast}>
+    <MobileHostPanelsProvider
+      lang={lang}
+      onToast={showToast}
+      workspace={sess?.ws ?? ''}
+      onOpenSession={openSession}
+    >
       <div className="m-app" data-testid="mobile-shell">
-        {convOpen ? null : (
+        {fullScreen ? null : (
           <header className="m-head">
             <div className="m-brand">
               <span className="m-brand-name">HAI</span>
-              <span className="m-brand-tag">hub</span>
+              <span className="m-brand-tag">{tab === 'hub' ? 'hub' : 'session'}</span>
             </div>
             <div className="m-head-actions">
               <button
@@ -209,7 +273,33 @@ export default function MobileApp() {
           </header>
         )}
 
-        <main className={convOpen ? 'm-main m-main--flush' : 'm-main'}>
+        {/* 两个并列入口（P8-02）：Hub / 会话。只在列表层出现 —— 详情页有自己的返回。 */}
+        {fullScreen || pairing || !paired ? null : (
+          <nav className="m-tabs" role="tablist" aria-label={t('mobile.tabs.aria')}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'hub'}
+              className={tab === 'hub' ? 'm-tab is-on' : 'm-tab'}
+              onClick={() => setTab('hub')}
+              data-testid="mobile-tab-hub"
+            >
+              {t('mobile.tab.hub')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'sessions'}
+              className={tab === 'sessions' ? 'm-tab is-on' : 'm-tab'}
+              onClick={() => setTab('sessions')}
+              data-testid="mobile-tab-sessions"
+            >
+              {t('mobile.tab.sessions')}
+            </button>
+          </nav>
+        )}
+
+        <main className={fullScreen ? 'm-main m-main--flush' : 'm-main'}>
           {pairing || !paired ? (
             <PairCard
               transport={transport}
@@ -222,13 +312,21 @@ export default function MobileApp() {
               }}
             />
           ) : (
-            <Suspense fallback={<p className="m-loading" role="status">加载 Hub…</p>}>
-              {convOpen ? <ConversationScreen onBack={back} /> : <HubListScreen hubLink={status.hub} />}
+            <Suspense fallback={<p className="m-loading" role="status">{t('mobile.loading')}</p>}>
+              {sess ? (
+                <SessionScreen ws={sess.ws} sid={sess.sid} title={sess.title} onBack={back} />
+              ) : convOpen ? (
+                <ConversationScreen onBack={back} />
+              ) : tab === 'sessions' ? (
+                <SessionListScreen onOpenSession={openSession} />
+              ) : (
+                <HubListScreen hubLink={status.hub} />
+              )}
             </Suspense>
           )}
         </main>
 
-        {pairing || !paired || convOpen ? null : (
+        {pairing || !paired || fullScreen ? null : (
           <footer className="m-foot">
             <span className={`m-link m-tone-${linkTone(status.hub)}`} data-testid="mobile-hub-link">
               <span className="m-link-dot" aria-hidden="true" />
