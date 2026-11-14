@@ -2340,7 +2340,7 @@
       "commit": "a91b35c",
       "status": "done",
       "review": "passed",
-      "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 150 + mobile session 98 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-session 390/430 42 条 + check:mobile-hub 38 条全绿；桌面 collapse/group-edit/taskcard/markdown 56 全 PASS；Go mobile 定向 25s 绿。merge ab1a380。"
+      "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 150 + mobile session 98 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-session 390/430 42 条 + check:mobile-hub 38 条全绿；桌面 collapse/group-edit/taskcard/markdown 56 全 PASS；全量 desktop/bridge 182.3s 绿。merge ab1a380。"
     },
     {
       "id": "P8-03",
@@ -3558,7 +3558,7 @@
       "commit": "a91b35c",
       "merge": "ab1a380",
       "review": "passed",
-      "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 150 + mobile session 98 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-session 390/430 42 条 + check:mobile-hub 38 条全绿；桌面 collapse/group-edit/taskcard/markdown 56 全 PASS；Go mobile 定向 25s 绿。merge ab1a380。"
+      "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 150 + mobile session 98 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-session 390/430 42 条 + check:mobile-hub 38 条全绿；桌面 collapse/group-edit/taskcard/markdown 56 全 PASS；全量 desktop/bridge 182.3s 绿。merge ab1a380。"
     },
     "P8-03": {
       "status": "blocked",
