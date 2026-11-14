@@ -1,5 +1,5 @@
-// 手机端主题偏好：沿用旧手机页的 localStorage key（desktop/bridge/mobile_web/app.js
-// 的 LS.theme = 'hai.theme'，取值 system/ink/paper），升级到新页不掉档。
+// 手机端主题偏好：沿用 P8 之前手机页的 localStorage key（'hai.theme'，
+// 取值 system/ink/paper），升级到新页不掉档。
 // 桌面端主题不走 localStorage（settings.json + lib/appearance.ts），所以这里是手机侧
 // 自己的映射：ink ↔ dark、paper ↔ light。
 import type { ThemePref } from '../lib/theme'

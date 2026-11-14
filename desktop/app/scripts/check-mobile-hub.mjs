@@ -169,8 +169,12 @@ function json(res, code, body) {
   res.end(JSON.stringify(body))
 }
 
+// 根路径：mobile:embed 会把 mobile.html 改名 index.html（bridge 的 /m/ 就是这么兜底的），
+// 只跑过 mobile:build 时还是 mobile.html —— 两种产物都认。
+const INDEX = existsSync(join(DIST, 'index.html')) ? '/index.html' : '/mobile.html'
+
 async function serveStatic(res, pathname) {
-  const rel = pathname === '/' ? '/mobile.html' : pathname
+  const rel = pathname === '/' ? INDEX : pathname
   const full = join(DIST, rel)
   if (!full.startsWith(DIST)) {
     res.writeHead(403)
@@ -693,8 +697,8 @@ async function runViewport(browser, baseURL, vp, theme) {
 }
 
 async function main() {
-  if (!existsSync(join(DIST, 'mobile.html'))) {
-    throw new Error(`没有 ${DIST}/mobile.html —— 先跑 npm run mobile:build`)
+  if (!existsSync(join(DIST, 'mobile.html')) && !existsSync(join(DIST, 'index.html'))) {
+    throw new Error(`没有 ${DIST}/mobile.html 或 index.html —— 先跑 npm run mobile:build`)
   }
   mkdirSync(SHOTS, { recursive: true })
   const { server, port } = await startServer()

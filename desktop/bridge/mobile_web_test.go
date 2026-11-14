@@ -16,7 +16,7 @@ import (
 )
 
 // P8-03b：/m/ 默认页面是新的 Vite 产物（dist-mobile → mobile_web.zip）。
-// 旧的无构建页（mobile_web/app.js 等）已退役 —— 这里的断言同时防回归：
+// 旧的无构建手写页（P8 之前的 app.js/hub_model.js 那套）已退役 —— 这里的断言同时防回归：
 // 新页必须在 /m/ 根直接可服务、assets 相对路径能取到、旧文件不再出现。
 
 var (

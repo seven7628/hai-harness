@@ -11,7 +11,7 @@
 //   · 深链：复制按钮与 URL 同一行且贴住 URL 行尾（不再是右上角浮着）
 //   · 侧栏小节标题（智能体 / 工作区）in k/paper 对比度都 ≥4.5（AA 正文口径）
 //   · 640/760/900：@、发送、上下文/更多、事件触发入口、侧栏筛选 chip、任务状态筛选
-//     的最小边都在 32–36px（桌面指针精度；移动 44 在 mobile_web/style.css）
+//     的最小边都在 32–36px（桌面指针精度；移动 44 在 src/mobile/mobile.css）
 //   · AgentEditor 1280：宽度 ≤720 且水平居中；640：仍按 92vw 收窄；删除按钮只在 footer
 //   · ?hubFixture=needs：提问卡解析出输入框后不再铺原始 JSON
 //   · system 主题：setTheme('system') 后跟随 emulateMedia(colorScheme) 双向切 ink/paper

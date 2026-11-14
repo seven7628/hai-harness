@@ -24,8 +24,8 @@
 import type { Transport, AppSettings } from '../../transport/types'
 import type { BridgeCommand } from '../../store/events'
 
-// 凭据 key：旧手机页（desktop/bridge/mobile_web/app.js 的 LS.token）用 `hai.token`，
-// 沿用它是为了「旧页配对过 → 新页不用再扫一次码」；`hai.mobile.token` 是备用 key。
+// 凭据 key：P8 之前的手机页用 `hai.token` 存配对令牌，沿用它是为了
+// 「升级前配对过的手机不用再扫一次码」；`hai.mobile.token` 是备用 key。
 export const TOKEN_KEYS = ['hai.token', 'hai.mobile.token'] as const
 export const SETTINGS_KEY = 'hai.mobile.settings'
 // 旧手机页的主题偏好 key（app.js LS.theme：system/ink/paper）。新手机页沿用同一个

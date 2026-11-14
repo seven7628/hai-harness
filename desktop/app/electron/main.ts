@@ -364,10 +364,10 @@ function bridgeEnv(): NodeJS.ProcessEnv {
   // 探测逻辑见 node-path.ts（pathForNode/augmentPathWithNode，纯函数可单测）。
   const augmented = augmentPathWithNode(env.PATH)
   if (augmented !== env.PATH) env.PATH = augmented
-  // dev 下手机端页面（/m/）直接读仓库 mobile_web/：改 CSS/JS 只需手机刷新，
-  // 不用 go build + 重启 bridge（页面资产是 go:embed 进二进制的）。
-  // 打包态不设该变量 → 仍用内置资产。
-  if (!app.isPackaged) env.HAI_MOBILE_WEB_DIR = path.join(APP_ROOT, '..', 'bridge', 'mobile_web')
+  // dev 下手机端页面（/m/）直接读 dist-mobile/：`npm run mobile:embed` 之后手机刷新
+  // 就是新产物，不用重打 zip + go build（交付态资产是 go:embed 进二进制的 zip）。
+  // 打包态不设该变量 → 仍用内置 zip。
+  if (!app.isPackaged) env.HAI_MOBILE_WEB_DIR = path.join(APP_ROOT, 'dist-mobile')
   return env
 }
 
