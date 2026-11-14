@@ -43,6 +43,30 @@ export default function InspectorDrawer() {
     panelRef.current?.focus()
   }, [rightExpanded])
 
+  // 页签条的溢出状态（P8-03a）：5 个页签在 390 下本来刚好排满，badge/字体一宽就
+  // 截断。把「左/右还有没有内容」量出来写到 data-overflow，CSS 只在真的溢出时
+  // 挂边缘渐隐；滚动时实时更新，滚到尽头渐隐自动消失。
+  useEffect(() => {
+    if (!rightExpanded) return
+    const nav = panelRef.current?.querySelector<HTMLElement>('.hub-inspector-tabs')
+    if (!nav) return
+    const update = (): void => {
+      const max = nav.scrollWidth - nav.clientWidth
+      const start = max > 1 && nav.scrollLeft > 1
+      const end = max > 1 && nav.scrollLeft < max - 1
+      nav.dataset.overflow = !start && !end ? 'none' : start && end ? 'both' : start ? 'start' : 'end'
+    }
+    update()
+    nav.addEventListener('scroll', update, { passive: true })
+    // 抽屉宽度随视口/字体变化（横竖屏、系统字号）：重开不一定发生，得跟着量。
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update)
+    ro?.observe(nav)
+    return () => {
+      nav.removeEventListener('scroll', update)
+      ro?.disconnect()
+    }
+  }, [rightExpanded])
+
   if (!rightExpanded) return null
 
   return (

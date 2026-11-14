@@ -261,7 +261,10 @@ console.log('\n4) 静态边界：会话页复用桌面组件 + 按需加载')
   for (const [re, why] of [
     [/\.m-session \.center \{/, 'CenterPanel 单列容器'],
     [/\.m-session \.narrative \{/, '叙述区自己滚'],
-    [/\.m-session \.composer-wrap \{[\s\S]{0,200}env\(safe-area-inset-bottom\)/, 'composer 贴底 + 吃安全区'],
+    // P8-03a：安全区先落到 --m-safe-* 变量（夹具可覆写成 34px 验证 home 条），
+    // 由 .m-app 统一让位；composer-wrap 不再重复吃 env()（否则 iPhone 上双倍内边距）。
+    [/:root \{[\s\S]{0,400}--m-safe-bottom: env\(safe-area-inset-bottom, 0px\)/, '安全区落到 --m-safe-* 变量'],
+    [/\.m-session \.composer-wrap \{[\s\S]{0,200}padding: 6px 10px 8px/, 'composer 贴底（安全区不重复吃）'],
     [/\.m-session \.composer \.input,\s*\n\.m-session \.composer \.input-hl \{\s*\n\s*font-size: 16px/, 'iOS 输入 16px（不缩放）'],
     [/\.m-session \.composer \.row2 \.send-btn \{[\s\S]{0,80}width: 44px/, '发送/停止 44px'],
     [/\.m-session \.dock \.btn,[\s\S]{0,200}min-height: 44px/, '审批/提问按钮 44px'],

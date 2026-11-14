@@ -21,6 +21,21 @@
   box-sizing: border-box;
 }
 
+/* 安全区（刘海 / home 条）先落到自定义属性上，再由各层引用。
+ *
+ * 为什么不直接写 env()：env() 在桌面 Chromium 里恒为 0，夹具无法验证「home 条不会
+ * 盖住 composer」；改成变量后，夹具只要把 --m-safe-bottom 覆写成 34px，就能量到
+ * composer 真的抬起来了。取值语义与 env() 完全一致（不支持 env 的浏览器走 0px）。
+ *
+ * 只在这里定义一次：.m-app 负责整页内边距，抽屉/toast 在 .m-app 内是 fixed，
+ * 见文件末尾的 data-mvv 规则（有 visualViewport 时它们相对 .m-app 的 padding box）。 */
+:root {
+  --m-safe-top: env(safe-area-inset-top, 0px);
+  --m-safe-right: env(safe-area-inset-right, 0px);
+  --m-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --m-safe-left: env(safe-area-inset-left, 0px);
+}
+
 html,
 body {
   margin: 0;
@@ -46,8 +61,7 @@ body {
   flex-direction: column;
   overflow: hidden;
   /* 刘海/home 条：内容躲开安全区，背景铺满（padding 在容器上，背景仍在 body 上）。 */
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-    env(safe-area-inset-left);
+  padding: var(--m-safe-top) var(--m-safe-right) var(--m-safe-bottom) var(--m-safe-left);
 }
 
 .m-head {
@@ -335,7 +349,11 @@ body {
   /* 桌面是「左栏里限高 38vh 的一段」，手机是整页：吃掉剩余高度，滚动留给内部列表。 */
   flex: 1 1 auto;
   max-height: none;
-  margin: 0;
+  margin: 0 auto;
+  /* 640（平板竖屏）：列表行不被拉成整屏宽的一条 —— 单列内容最宽 640 居中，
+     和 .m-main 的桌面表单屏同一把尺子。390/430 下等于铺满，视觉零变化。 */
+  width: 100%;
+  max-width: 640px;
   border-bottom: 0;
   background: var(--paper);
 }
@@ -373,7 +391,8 @@ body {
 }
 
 .m-hub-list .hub-side-results {
-  padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  /* 安全区由 .m-app 统一让位（列表在它的 padding box 里），这里只留呼吸位。 */
+  padding-bottom: 12px;
 }
 
 .m-hub-list .hub-search-hit {
@@ -440,10 +459,13 @@ body {
 }
 
 /* demo.css 的 `.hub-demo .main` 是 100dvh（整页 demo）；手机这里要的是「填满剩余」，
-   否则 composer 会被顶到视口外。只改高度来源，不动内部解剖。 */
+   否则 composer 会被顶到视口外。只改高度来源，不动内部解剖。
+   640 上限 + 居中：平板竖屏下会话面不再被拉成 900px 宽的一列（见 .m-hub-list .hub-side）。 */
 .m-conv .hub-demo.main {
   height: 100%;
   width: 100%;
+  max-width: 640px;
+  margin-inline: auto;
   min-height: 0;
 }
 
@@ -494,10 +516,10 @@ body {
   margin-bottom: 0;
 }
 
-/* composer 底部安全区：home 条不能盖住发送键（.m-app 已有 padding，这里再兜一层
-   —— 附件条/提示行会把 composer 顶高一档，实际贴底的是它自己的 padding）。 */
+/* composer 底部留白：home 条由 .m-app 的 padding 统一让位（子元素再吃一次 env()
+   会变成双倍内边距，iPhone 上 composer 离底边 68px），这里只给 8px 视觉间距。 */
 .m-conv .hub-demo .composer-wrap {
-  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  padding-bottom: 8px;
 }
 
 /* —— 详情抽屉（Context / 任务 / Needs / 会话 / 概览）—— */
@@ -519,15 +541,17 @@ body {
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(88vw, 400px);
+  /* 92vw（不是 88）：390 下 5 个页签 + 关闭按钮原本只剩 0px 余量，系统字体稍宽
+     就把 Context 截成「Conte›」。多出的 4vw 给页签条留出可滚动的呼吸位。 */
+  width: min(92vw, 400px);
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--paper-2);
   border-left: 1px solid var(--line);
   box-shadow: -16px 0 40px rgb(0 0 0 / 35%);
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-top: var(--m-safe-top);
+  padding-bottom: var(--m-safe-bottom);
   animation: m-drawer-in 0.18s ease-out;
 }
 
@@ -544,18 +568,68 @@ body {
 
 /* 抽屉里的触控目标：页签与关闭按钮原本是 24px 的桌面密度。 */
 .m-drawer .hub-inspector-head {
-  padding: 4px 6px;
+  gap: 2px;
+  padding: 2px 2px 2px 4px;
+}
+
+/* 页签条：5 个页签 + 关闭按钮在 343px 抽屉里本来刚好排满（390 下 0px 余量），
+   badge 变两位数或系统字体略宽就截断。这里改成**可横向滚动 + 两端渐隐**：
+   · 每个页签仍 ≥44×44，Tab 逐格聚焦时浏览器自动滚进可视区；
+   · 溢出只发生在页签条内部（overflow-x:auto），不会把整页撑出横向滚动条；
+   · data-overflow 由 InspectorDrawer 量 scrollWidth/clientWidth 后写入，
+     只在真的溢出时才挂 mask —— 没溢出时页签边缘不会莫名其妙变淡。 */
+.m-drawer .hub-inspector-tabs {
+  gap: 2px;
+  padding: 2px 6px;
+  scroll-snap-type: x proximity;
+  scroll-padding-inline: 6px;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.m-drawer .hub-inspector-tabs[data-overflow='end'] {
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 18px), transparent 100%);
+}
+
+.m-drawer .hub-inspector-tabs[data-overflow='start'] {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 18px, #000 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 18px, #000 100%);
+}
+
+.m-drawer .hub-inspector-tabs[data-overflow='both'] {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 18px,
+    #000 calc(100% - 18px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 18px,
+    #000 calc(100% - 18px),
+    transparent 100%
+  );
 }
 
 .m-drawer .hub-inspector-tabs button[role='tab'] {
   min-height: 44px;
   min-width: 44px;
-  /* 5 个页签 + 关闭按钮要在 343px 的抽屉里排下（min-width 44 是触控底线，
-     省下来的宽度从横向内边距出）：否则 Context 会被截成「Conte›」。 */
-  padding: 0 6px;
+  /* 44 是触控底线，省下来的宽度从横向内边距出：5 个页签 + 关闭按钮在 390 下排得下。 */
+  padding: 0 8px;
+  scroll-snap-align: start;
+  scroll-margin-inline: 6px;
+}
+
+.m-drawer .hub-inspector-tabs button[role='tab']:focus-visible {
+  outline: 2px solid var(--accent, var(--cinnabar-2, currentColor));
+  outline-offset: -2px;
 }
 
 .m-drawer .hub-inspector-close {
+  flex: 0 0 44px;
   width: 44px;
   height: 44px;
 }
@@ -634,7 +708,7 @@ body {
 .m-toast {
   position: fixed;
   left: 50%;
-  bottom: calc(20px + env(safe-area-inset-bottom));
+  bottom: calc(20px + var(--m-safe-bottom));
   transform: translateX(-50%);
   z-index: 90;
   max-width: calc(100vw - 32px);
@@ -657,7 +731,7 @@ body {
   position: fixed;
   left: 12px;
   right: 12px;
-  bottom: calc(8px + env(safe-area-inset-bottom));
+  bottom: calc(8px + var(--m-safe-bottom));
   z-index: 85;
   padding: 8px 12px;
   border-radius: var(--r-sm, 8px);
@@ -943,13 +1017,14 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
-/* composer 贴底：桌面是 max-width:800 居中的一块，手机铺满 + 吃安全区。 */
+/* composer 贴底：桌面是 max-width:800 居中的一块，手机铺满；home 条由 .m-app 的
+   padding 让位（不要在这里再吃 env()，否则双倍内边距）。 */
 .m-session .composer-wrap {
   flex: 0 0 auto;
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 6px 10px calc(8px + env(safe-area-inset-bottom));
+  padding: 6px 10px 8px;
 }
 
 /* 输入框的解剖（index.css 的 .composer .input-wrap / .input-hl / .input）：
@@ -1388,7 +1463,21 @@ body {
   min-width: 44px;
 }
 
+/* 减少动态偏好（P8-03a）：手机壳与复用组件里所有「非必要动画」一次关掉 ——
+   抽屉滑入、骨架/运行点、状态条、hover/active 过渡都不承载信息，不该让前庭敏感
+   用户等它们跑完。demo.css 自己有一条 .hub-demo 的同类规则，这里覆盖壳层与
+   抽屉（HubInspector 不在 .hub-demo 里）。 */
 @media (prefers-reduced-motion: reduce) {
+  .m-app,
+  .m-app *,
+  .m-app *::before,
+  .m-app *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
   .m-icon-btn,
   .m-btn {
     transition: none;
