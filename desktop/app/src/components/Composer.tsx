@@ -26,6 +26,7 @@ import {
   type HistoryImageFingerprint, type HistoryNavigation, type InputHistoryItem,
 } from '../lib/inputHistory'
 import { getTransport } from '../transport'
+import { subscribeUI } from '../lib/uiBus'
 import {
   acceptImages, dataUrlBytes, fmtBytes,
   MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_DATA_URL_BYTES,
@@ -64,6 +65,14 @@ const NO_ATTACHMENTS: QueuedContent[] = []
 type HistoryDraft = { text: string; refs: DocRef[]; attachments: QueuedContent[] }
 /** 回填后的状态签名：用于区分「历史回填触发的渲染」与「用户真的改了输入」。 */
 type HistoryShown = { text: string; refsKey: string; imagesKey: string }
+/**
+ * 插件面板引用进来的一段文本（`composer.quote`，09-agent-bridge §6.2 / D7）。
+ *
+ * key = `来源 id ␀ 文本`：同一来源的同一段文本**只挂一个 chip**（连点/面板重挂载的重复
+ * 投递在这里被吃掉）。chips 按 draftKey 存 —— 引用属于那份草稿，切会话不应该跟着漂。
+ */
+type DraftQuote = { key: string; title: string; text: string }
+const NO_QUOTES: DraftQuote[] = []
 /** 「添加文件」/拖拽目标的类型过滤（引用不复制，所以放宽到常用文档而非全类型）。 */
 const DOC_ACCEPT = 'image/*,.pdf,.docx,.xlsx,.xlsm,.xls,.pptx,.csv,.html,.htm,.txt,.md,.json'
 /** DOC_ACCEPT 的扩展名部分（原生对话框 filters 用；不带 * 与点）。 */
@@ -286,6 +295,9 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   // 图片附件（模型支持图片输入时允许上传；随消息一起发送，块结构对齐 ask_batch image 块）
   const [draftAttachments, setDraftAttachments] = useState<Record<string, QueuedContent[]>>({})
   const attachments = draftAttachments[draftKey] ?? NO_ATTACHMENTS
+  // 插件引用的来源 chips（与上面几份草稿同构：按 draftKey 分域，切会话各自恢复）。
+  const [draftQuotes, setDraftQuotes] = useState<Record<string, DraftQuote[]>>({})
+  const quotes = draftQuotes[draftKey] ?? NO_QUOTES
   // 停止态 = 主 run 运行中（且草稿为空——防误触：有草稿时按钮是「发送」，点按不中断）
   // 或压缩中：压缩时同样允许终止（用户此前只要求压缩期间禁止【输入】，并未禁止
   // 【终止】——不提供停止会把 5 分钟超时的压缩卡死）。
@@ -549,14 +561,48 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [widgetReply, clearWidgetReply, draftKey])
 
+  // 插件面板的引用 → 当前草稿（09-agent-bridge §6.2，D7：**只插草稿，绝不自动发送**）。
+  //
+  // 到达路径：插件 `host.command('composer.quote', {text, source})` → loader 校验
+  // （8 KiB / 非空 / 有无活动会话）→ `emitUI('composer_quote', …)` → 这里。
+  // 订阅只建一次：回调经 ref 转一手，才能每次渲染都拿到**当前**的 draftKey/setText
+  //（直接在 effect 里捕获会写进挂载那一刻的草稿，切会话后串台）。
+  const quoteRef = useRef<(data: unknown) => void>(() => {})
+  quoteRef.current = (data: unknown) => {
+    const d = (data && typeof data === 'object' ? data : {}) as { text?: unknown; source?: { id?: string; title?: string } }
+    const body = typeof d.text === 'string' ? d.text.trim() : ''
+    if (!body) return
+    const src = d.source
+    const title = src && typeof src.title === 'string' && src.title ? src.title : t('composer.quote.source')
+    const key = `${src?.id ?? ''}\u0000${body}`
+    // 去重（与 receiveWidgetReply 同一条思路）：同一来源的同一段文本已经在草稿里/已有 chip
+    // ⇒ 这次投递是重复动作（连点 / 面板重挂载），什么都不做。
+    if (text.includes(body)) {
+      setDraftQuotes((all) => (all[draftKey] ?? NO_QUOTES).some((q) => q.key === key)
+        ? all
+        : { ...all, [draftKey]: [...(all[draftKey] ?? NO_QUOTES), { key, title, text: body }] })
+      return
+    }
+    // 追加到末尾（与 widgetReply 同一条语义：绝不覆盖用户已经打了一半的字）。
+    setText((prev) => prev.includes(body) ? prev : prev + (prev && !/\s$/.test(prev) ? '\n\n' : '') + body)
+    setDraftQuotes((all) => (all[draftKey] ?? NO_QUOTES).some((q) => q.key === key)
+      ? all
+      : { ...all, [draftKey]: [...(all[draftKey] ?? NO_QUOTES), { key, title, text: body }] })
+    requestAnimationFrame(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(el.value.length, el.value.length)
+    })
+  }
+  useEffect(() => subscribeUI('composer_quote', (data) => quoteRef.current(data)), [])
+
   useEffect(() => {
     // 会话切换时关闭只对原草稿有意义的临时面板；草稿正文和附件由 draftKey 自动恢复。
     setCmdMenu(false)
     setAtOpen(false)
     setAttachmentNotice('')
-  }, [draftKey])
-
-  // 历史作用域切换（切会话 / 从主会话点进子智能体）→ 立刻退出历史浏览：
+  }, [draftKey])  // 历史作用域切换（切会话 / 从主会话点进子智能体）→ 立刻退出历史浏览：
   // 否则继续按 ↑ 会把主会话的历史条目插进子智能体的输入框（作用域串台）。
   useEffect(() => {
     histNavRef.current = null
@@ -1493,7 +1539,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             )}
           </div>
         )}
-        {(docRefs.length > 0 || (!rt && attachments.length > 0)) && (
+        {(docRefs.length > 0 || quotes.length > 0 || (!rt && attachments.length > 0)) && (
           <div className="attach-strip" role="list" aria-label={t('composer.attach.strip')}>
             {!rt &&
               attachments.map((a, i) =>
@@ -1519,6 +1565,26 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                   className="attach-x"
                   onClick={() => setDocRefs((prev) => prev.filter((_, j) => j !== i))}
                   aria-label={t('composer.attach.docRemove')}
+                >×</button>
+              </div>
+            ))}
+            {/* 插件面板引用进来的文本（composer.quote）：只标来源，**不重复正文**
+                （正文已经在输入框里，用户可以照常编辑）。× 只摘 chip、不动正文 ——
+                删用户可能已经改过的文字比留一个多余的标更糟。 */}
+            {quotes.map((q) => (
+              <div
+                className="attach-chip doc-chip quote-chip"
+                role="listitem"
+                key={`quote-${q.key}`}
+                data-quote-chip={q.title}
+                title={`${q.title}\n${t('composer.quote.hint')}`}
+              >
+                <span className="doc-chip-name">{q.title}</span>
+                <button
+                  className="attach-x"
+                  onClick={() => setDraftQuotes((all) => ({ ...all, [draftKey]: (all[draftKey] ?? NO_QUOTES).filter((x) => x.key !== q.key) }))}
+                  aria-label={t('composer.quote.remove')}
+                  title={t('composer.quote.remove')}
                 >×</button>
               </div>
             ))}

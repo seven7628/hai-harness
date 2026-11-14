@@ -679,6 +679,10 @@ const zh: Record<string, string> = {
   'composer.attach.docRemove': '移除文件引用',
   'composer.attach.docDupe': '该文件已引用，未重复添加',
   'composer.attach.docFailed': '添加文件失败，请重试',
+  // 插件面板引用（composer.quote）：只插草稿、绝不代发（09-agent-bridge D7）
+  'composer.quote.source': '插件引用',
+  'composer.quote.hint': '来自插件面板的引用：已插进草稿，不会自动发送',
+  'composer.quote.remove': '移除引用标记（不删正文）',
   'composer.mic.hint': '语音输入（按住说话，松手转写）',
   'composer.mic.stop': '停止录音并转写',
   'composer.mic.transcribing': '正在转写…',
@@ -2862,6 +2866,10 @@ const en: Record<string, string> = {
   'composer.attach.docRemove': 'Remove file reference',
   'composer.attach.docDupe': 'Already referenced; not added twice',
   'composer.attach.docFailed': 'Failed to add file, please retry',
+  // Plugin panel quote (composer.quote): inserts into the draft only — never sends (D7)
+  'composer.quote.source': 'Plugin quote',
+  'composer.quote.hint': 'Quoted from a plugin panel: inserted into the draft, not sent',
+  'composer.quote.remove': 'Remove the quote marker (keeps the text)',
   'composer.mic.hint': 'Voice input (hold to talk, release to transcribe)',
   'composer.mic.stop': 'Stop recording and transcribe',
   'composer.mic.transcribing': 'Transcribing…',
