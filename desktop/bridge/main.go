@@ -2577,25 +2577,27 @@ func (m *manager) dispatch(c command) {
 	sid := str(c.Payload, "session_id")
 	// 插件虚拟 Project 的 dispatch 前置（09 §4.2 / §4.3 / §4.4）。
 	//
-	// 两件事，顺序不能换：
-	//  1. 形状不对 → 拒绝（虚拟 home 反解不出 pluginID 时，任何按 workspace 解析的
-	//     handler 都只能拿到 nil runtime）；
-	//  2. 形状对了 → **显式装配**。m.runtime 按设计只判定不装配（未命中插件表返回 nil，
-	//     绝不回落项目装配），所以「谁先把它装起来」必须有唯一答案：命令入口。
-	//     装配后整条 switch 里所有 m.runtime(ws) 都命中同一个 runtimePlugin，不存在
-	//     nil 解引用，也不会因为某个 handler 顺手 m.runtime 而造出项目 runtime。
+	//  1. 形状不对 → 拒绝：虚拟 home 反解不出 pluginID 时，任何按 workspace 解析的
+	//     handler 都只能拿到 nil runtime。
+	//  2. **只有 new_session 会按需装配运行态**（「打开会话 = 装配」）。其余命令一律
+	//     不动运行态：装配意味着建 home/sessions 目录、连 MCP、起探活 goroutine，
+	//     「打开技能页/插件页看一眼」不该产生这种副作用（09 §4.1 同一条纪律）。
+	//     未装配时各入口由自己的前置判空拒绝（respPluginNotReady：denied/plugin_not_ready），
+	//     读类命令（list/trace/session_rename/session_pin）走磁盘回退照常可用。
 	//
-	// 不做「允许命令白名单」：会话类命令（list/new_session/ask/switch_model/
-	// delete_session/blocks_page/approve/…）都必须能用（09 §4.1「签名不变」），而拒绝
-	// 该拒绝的东西是各自的语义（ask 看启停、delete_workspace 看虚拟路径）。
+	// 关键点：m.runtime 对插件 home **只判定不装配**，所以「谁装配」必须有唯一答案。
+	// 答案就是 new_session（以及 pluginRuntimeForHome 的显式调用点），其余路径拿到 nil
+	// 后必须判空 —— 绝不因为某个 handler 顺手 m.runtime 就造出项目 runtime。
 	if isPluginHomePath(ws) {
 		if pluginIDFromHomePath(ws) == "" {
 			m.respCode(c, false, "workspace 不是合法的插件虚拟 Project 路径", "plugin_workspace_invalid", nil)
 			return
 		}
-		if _, perr := m.pluginRuntimeForHome(ws); perr != nil {
-			m.respCode(c, false, perr.Error(), "plugin_workspace_invalid", nil)
-			return
+		if c.Type == CmdNewSession {
+			if _, perr := m.pluginRuntimeForHome(ws); perr != nil {
+				m.respCode(c, false, perr.Error(), "plugin_workspace_invalid", nil)
+				return
+			}
 		}
 	}
 	switch c.Type {
@@ -4018,6 +4020,11 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
+		// 插件虚拟 Project 未装配 → 明确拒绝（skillList 要读运行态技能注册表）。
+		if m.runtime(ws) == nil {
+			m.respPluginNotReady(c)
+			return
+		}
 		// 带 session_id 时按该会话的**选中模型**给出能力面：面板能标出「当前模型用不了」
 		// 及其原因（而不是把所有技能都显示成可用、等用户点了才发现加载失败）。
 		// 不带（老前端/技能页未选会话）→ nil = 不过滤，与历史行为一致。
@@ -4098,7 +4105,13 @@ func (m *manager) dispatch(c command) {
 		}
 		name := str(c.Payload, "name")
 		on := boolVal(c.Payload["enabled"])
-		if err := m.runtime(ws).skills.SetEnabled(name, on); err != nil {
+		// 插件虚拟 Project 未装配 → 明确拒绝（绝不在命令路径里顺手造 runtime）。
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
+		if err := rt.skills.SetEnabled(name, on); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
 		}
@@ -4110,7 +4123,12 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
-		s, err := m.runtime(ws).skills.Skill(str(c.Payload, "name"))
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
+		s, err := rt.skills.Skill(str(c.Payload, "name"))
 		if err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
@@ -4265,6 +4283,13 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "命令为空", nil)
 			return
 		}
+		// 插件虚拟 Project 未装配 → 拒绝：本 case 的每个分支都要读技能/子代理注册表
+		// （/reload_skills、/技能名），没有运行态时只能拒绝，不能顺手造一个。
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
 		var cmdErr error
 		switch raw {
 		case "summary": // 会话摘要 = 压缩（自动/主动压缩统一 LLMCompressor）
@@ -4274,8 +4299,8 @@ func (m *manager) dispatch(c command) {
 		case "reload_skills": // 重扫工作区技能目录 + 自定义 subagent 目录 + 重建会话 loop（新增/修改无需重启生效）
 			m.rebuildSkills(ws)
 			m.rebuildSubagents(ws)
-			n := len(m.runtime(ws).skills.All())
-			na := len(m.runtime(ws).subagents.List())
+			n := len(rt.skills.All())
+			na := len(rt.subagents.List())
 			bs.emit(&events.CommandResult{
 				Name:      "reload_skills",
 				Result:    fmt.Sprintf("已重载技能与子代理注册表（全局 ~/.agents/skills + ~/.go-code/skills + 工作区 .agents/skills + .go-code/skills + 全局 ~/.agents/agents + ~/.go-code/agents + ~/.claude/agents + 工作区 .agents/agents + agents + .claude/agents），技能 %d 个、子代理 %d 个", n, na),
@@ -4295,7 +4320,7 @@ func (m *manager) dispatch(c command) {
 				// 自行处理（如经 load_skill 工具加载技能后执行正文）。
 				return bs.s.Ask(context.Background(), core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: str(c.Payload, "line")}))
 			}
-			if _, skerr := m.runtime(ws).skills.Skill(name); skerr == nil {
+			if _, skerr := rt.skills.Skill(name); skerr == nil {
 				cmdErr = bs.s.Command(context.Background(), "skills", "load "+name)
 				if cmdErr != nil {
 					// 加载失败（禁用技能等）→ 文本回退，不报错死局
@@ -4322,8 +4347,14 @@ func (m *manager) dispatch(c command) {
 			m.resp(c, false, "workspace 为空", nil)
 			return
 		}
+		// 插件虚拟 Project 未装配 → 拒绝；已装配时读它自己的（全局层）MCP 状态。
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
 		servers := []map[string]any{}
-		for _, st := range m.runtime(ws).mcp.Status() {
+		for _, st := range rt.mcp.Status() {
 			servers = append(servers, map[string]any{
 				"name": st.Name, "type": st.Type, "command": st.Command,
 				"enabled": st.Enabled, "state": st.State,
@@ -4352,7 +4383,12 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		name := str(c.Payload, "name")
-		if err := m.runtime(ws).mcp.Refresh(context.Background(), name); err != nil {
+		rt := m.runtime(ws)
+		if rt == nil {
+			m.respPluginNotReady(c)
+			return
+		}
+		if err := rt.mcp.Refresh(context.Background(), name); err != nil {
 			m.resp(c, false, err.Error(), nil)
 			return
 		}
@@ -4364,6 +4400,11 @@ func (m *manager) dispatch(c command) {
 		// 只作用于该工作区（项目层本就是每工作区独立）。
 		if ws == "" {
 			m.resp(c, false, "workspace 为空", nil)
+			return
+		}
+		// 插件虚拟 Project 未装配 → 拒绝（reloadMCP 要读运行态分层，见 mcpLayerStates 同款）。
+		if m.runtime(ws) == nil {
+			m.respPluginNotReady(c)
 			return
 		}
 		m.reloadMCP(ws)
@@ -5053,7 +5094,7 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 				continue
 			}
 			seen[id] = true
-			path := filepath.Join(ws.storeDir, name)
+			path := filepath.Join(storeDir, name)
 			// 标题缓存按文件 mtime+size 失效；Info() 对符号链接返回链接自身，
 			// 测试/迁移目录里会话文件可能是软链 → 再 Stat 一次跟随到真实 inode。
 			var modNs, size int64
@@ -5304,7 +5345,13 @@ func buildSubagentRegistry(ws string) *subagent.DefinitionRegistry {
 // 面板要能区分「用户禁用」和「当前模型用不了」—— 后者写成"已禁用"会让用户
 // 去技能面板反复开关，而真正要换的是模型。nil = 旧口径（只看启用集）。
 func (m *manager) skillList(wsPath string, caps *skills.Capabilities) []map[string]any {
-	reg := m.runtime(wsPath).skills
+	wsRT := m.runtime(wsPath)
+	if wsRT == nil {
+		// 插件虚拟 Project 未装配：命令层已前置拒绝（respPluginNotReady），这里是纵深防御
+		// ——本函数也被 /command 与面板复用，任何一条路径都不该在这里 nil 解引用。
+		return []map[string]any{}
+	}
+	reg := wsRT.skills
 	src := m.remoteSources()
 	out := []map[string]any{}
 	for _, d := range reg.AllFor(caps) {
@@ -5340,7 +5387,11 @@ func (m *manager) sessionSkillCapabilities(wsPath, sid string) *skills.Capabilit
 // 写盘失败（目录权限等）只记日志：开关本身已生效，不该因为持久化问题回滚用户操作；
 // 但必须可见——静默失败会让「禁用」在重启后失效且无从排查。
 func (m *manager) persistSkillsDisabled(wsPath string) {
-	reg := m.runtime(wsPath).skills
+	wsRT := m.runtime(wsPath)
+	if wsRT == nil {
+		return // 未装配：没有可持久化的注册表状态（命令层已前置拒绝）
+	}
+	reg := wsRT.skills
 	var disabled []string
 	for _, d := range reg.All() {
 		if !d.Enabled {
@@ -5375,6 +5426,9 @@ func (m *manager) remoteSources() map[string]string {
 // rebuildSkills 重建单工作区技能注册表 + 会话 loop（工作区作用域安装/卸载后生效）。
 func (m *manager) rebuildSkills(wsPath string) {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 插件虚拟 Project 未装配：没有注册表可重建（见 respPluginNotReady）
+	}
 	ws.mu.Lock()
 	ws.skills = buildSkillsRegistry(wsPath)
 	ws.mu.Unlock()
@@ -5385,6 +5439,9 @@ func (m *manager) rebuildSkills(wsPath string) {
 // （工作区新增/修改定义文件后生效，/reload_skills 触发）。
 func (m *manager) rebuildSubagents(wsPath string) {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 同上：未装配的虚拟 Project 没有可重建的定义表
+	}
 	ws.mu.Lock()
 	ws.subagents = buildSubagentRegistry(wsPath)
 	ws.mu.Unlock()
@@ -6390,6 +6447,12 @@ func (m *manager) rebuildLoop(bs *bridgeSession) {
 	if ws == nil {
 		ws = m.runtime(bs.workspace) // 兜底：本提交之前创建的会话没有 runtime 快照
 	}
+	if ws == nil {
+		// 插件虚拟 Project 未装配（已停用/卸载后运行态被摘除）：没有装配输入可重建。
+		// 保留旧 loop —— 会话已不在运行态，下一次 createPluginSession 会重新装配。
+		fmt.Fprintf(os.Stderr, "· rebuildLoop: %s 的运行态未装配，跳过重建\n", bs.workspace)
+		return
+	}
 	prov, model, effort := bs.modelCfg()
 	loop, effortRef, caps := m.buildLoop(ws, bs.id, prov, model, effort,
 		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, ws.skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
@@ -7046,6 +7109,9 @@ func (m *manager) autoEnablePlugins(ws *workspaceRuntime) {
 func (m *manager) autoEnablePluginsAsync(wsPath string) {
 	ctx := context.Background()
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		return // 运行态已摘除（关闭/删除）：没有插件要自动恢复
+	}
 	restored := false
 	for _, cap := range ws.plugins.List() {
 		we, ok := cap.(interface{ WasEnabled() bool })
@@ -7093,6 +7159,11 @@ func (m *manager) autoEnablePluginsAsync(wsPath string) {
 // rebuildWorkspace 重建单个工作区的全部会话 loop（mcp_refresh 后工具集/连接状态更新）。
 func (m *manager) rebuildWorkspace(wsPath string) {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		// 插件虚拟 Project 未装配（已停用/已卸载）：没有会话 loop 可重建。
+		// 这里**不**顺手装配 —— rebuild 是「让已存在的运行态跟上新配置」，不是打开会话。
+		return
+	}
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {

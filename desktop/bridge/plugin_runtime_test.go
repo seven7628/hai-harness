@@ -29,6 +29,8 @@ import (
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/cron"
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/im"
+	implugin "github.com/seven7628/hai-harness/plugin/im"
 	"github.com/seven7628/hai-harness/session"
 	"github.com/seven7628/hai-harness/skills"
 	"github.com/seven7628/hai-harness/subagent"
@@ -684,12 +686,151 @@ func TestPluginToolDenylist(t *testing.T) {
 	}
 }
 
+// ---- ⑨ IM 事件桥按 kind 硬排除（复核项 1）----
+
+func TestPluginSessionNotWiredToIMBridge(t *testing.T) {
+	m, buf := pluginManager(t)
+	fakeSurface(t, m, "demo", true, nil)
+	home := pluginHomePath("demo")
+
+	// 装一个**真实的**事件桥（空配置：没有镜像 → OnSessionEvent 直接返回，不会真的发消息）。
+	// 用假 rt 会留下 nil 解引用风险（teardown 时 SessionClosed 会走 OnSessionEvent）。
+	rt := &implugin.Runtime{Router: im.NewRouter(im.Config{}), Security: im.NewSecurity(im.Config{}, "")}
+	m.setIMBridge(newIMBridge(rt))
+
+	// 正对照：项目会话照旧挂上事件桥（本改动不得影响项目/Hub 行为）
+	proj := t.TempDir()
+	projSid := newSessionID(t, m, buf, proj)
+	projBS := m.get(proj, projSid)
+	if projBS == nil || projBS.im == nil {
+		t.Fatalf("项目会话没有挂上 IM 事件桥（正对照失败）：%v", projBS)
+	}
+
+	// 插件虚拟 Project：**硬排除**（不能只靠「随机 sid 没有 mirror」兜底）
+	sid := newSessionID(t, m, buf, home)
+	bs := m.get(home, sid)
+	if bs == nil {
+		t.Fatalf("插件会话 %s 不在运行态", sid)
+	}
+	if bs.im != nil {
+		t.Fatalf("插件会话挂上了 IM 事件桥（事件会外发到用户手机）：%v", bs.im)
+	}
+	// 再确认一次：即使桥存在、且会话是新建的，装配分支也不会把它接上。
+	if m.imBridgeRef() == nil {
+		t.Fatal("测试装置失效：IM 桥应仍非 nil")
+	}
+}
+
+// ---- ⑩ 运行态未装配：读/改类的命令前置拒绝（复核项 2）----
+
+func TestPluginCommandsDenyWhenRuntimeNotAssembled(t *testing.T) {
+	m, buf := pluginManager(t)
+	fakeSurface(t, m, "demo", true, nil)
+	home := pluginHomePath("demo")
+
+	// 前置：只有 surface index，没有运行态（也没建过目录）。
+	if m.pluginRuntimeIfExists("demo") != nil {
+		t.Fatal("测试装置失效：运行态已被装配")
+	}
+
+	type probe struct {
+		typ     string
+		payload map[string]any
+	}
+	probes := []probe{
+		{"skills", map[string]any{"workspace": home}},
+		{"skill_toggle", map[string]any{"workspace": home, "name": "x", "enabled": false}},
+		{"skill_get", map[string]any{"workspace": home, "name": "x"}},
+		{"mcp_list", map[string]any{"workspace": home}},
+		{"mcp_refresh", map[string]any{"workspace": home, "name": "srv"}},
+		{"mcp_reload", map[string]any{"workspace": home}},
+		{"plugin_list", map[string]any{"workspace": home}},
+		{"browser_status", map[string]any{"workspace": home}},
+	}
+	for i, pr := range probes {
+		resp := pluginResp(t, m, buf, 100+i, pr.typ, pr.payload)
+		if resp["ok"] != false {
+			t.Fatalf("%s：未装配时不该成功：%v", pr.typ, resp)
+		}
+		if code := str(resp, "code"); code != pluginNotReadyCode {
+			t.Fatalf("%s：code = %q, want %q", pr.typ, code, pluginNotReadyCode)
+		}
+		if reason := str(pluginRespData(t, resp), "reason"); reason != pluginNotReadyReason {
+			t.Fatalf("%s：reason = %q, want %q", pr.typ, reason, pluginNotReadyReason)
+		}
+	}
+	// 拒绝不得留下副作用：虚拟路径没进 m.workspaces、也没被顺手装配
+	m.mu.Lock()
+	_, leaked := m.workspaces[home]
+	projectCount := len(m.workspaces)
+	m.mu.Unlock()
+	if leaked || projectCount != 0 {
+		t.Fatalf("拒绝路径顺手套出了项目 runtime：%v", m.workspaces)
+	}
+	if m.pluginRuntimeIfExists("demo") != nil {
+		t.Fatal("拒绝路径顺手套出了插件 runtime（只读命令不得有装配副作用）")
+	}
+
+	// 斜杠命令：没有会话时与项目路径同答复（session_not_found），关键是**不 panic**、
+	// 也不顺手套运行态。这是"未装配 + 有会话"不可达的诚实口径 —— 会话活在 runtime 里，
+	// 没有 runtime 就没有会话；handler 内部的 plugin_not_ready 判空是纵深防御。
+	respCmd := pluginResp(t, m, buf, 150, "command", map[string]any{
+		"workspace": home, "session_id": "s-x", "line": "/reload_skills",
+	})
+	if respCmd["ok"] != false || str(respCmd, "code") != "session_not_found" {
+		t.Fatalf("未装配时的斜杠命令 = %v, want ok:false/session_not_found", respCmd)
+	}
+	if m.pluginRuntimeIfExists("demo") != nil {
+		t.Fatal("斜杠命令顺手套出了插件运行态")
+	}
+
+	// 读类命令在未装配时照常可用（磁盘回退，不依赖运行态）
+	for i, typ := range []string{"list", "trace"} {
+		resp := pluginResp(t, m, buf, 200+i, typ, map[string]any{"workspace": home, "session_id": "s-x"})
+		if resp["ok"] != true {
+			t.Fatalf("%s 应在未装配时也能读（磁盘回退）：%v", typ, resp)
+		}
+	}
+
+	// 装配后同两条命令正常工作（技能清单 / MCP 状态读的是插件自己的全局层）
+	if _, err := m.pluginRuntimeForHome(home); err != nil {
+		t.Fatalf("装配插件运行态: %v", err)
+	}
+	resp := pluginResp(t, m, buf, 300, "skills", map[string]any{"workspace": home})
+	if resp["ok"] != true {
+		t.Fatalf("装配后 skills 应成功：%v", resp)
+	}
+	if _, ok := pluginRespData(t, resp)["skills"].([]any); !ok {
+		t.Fatalf("skills 回执缺 skills 数组：%#v", pluginRespData(t, resp))
+	}
+	resp = pluginResp(t, m, buf, 301, "mcp_list", map[string]any{"workspace": home})
+	if resp["ok"] != true {
+		t.Fatalf("装配后 mcp_list 应成功：%v", resp)
+	}
+	if _, ok := pluginRespData(t, resp)["servers"].([]any); !ok {
+		t.Fatalf("mcp_list 回执缺 servers 数组：%#v", pluginRespData(t, resp))
+	}
+	// skill_toggle 装配后生效（读类之后这条是「改」的正对照）
+	resp = pluginResp(t, m, buf, 302, "skill_get", map[string]any{"workspace": home, "name": "nope"})
+	if resp["ok"] != false {
+		t.Fatalf("skill_get 未知技能应报错（而不是 denied）：%v", resp)
+	}
+	if code := str(resp, "code"); code == pluginNotReadyCode {
+		t.Fatalf("装配后不该再报 plugin_not_ready：%v", resp)
+	}
+}
+
 // ---- ⑧ 负向守卫：虚拟路径永不进 workspaces.json ----
 
 func TestPluginWorkspaceGuards(t *testing.T) {
 	m, buf := pluginManager(t)
 	fakeSurface(t, m, "demo", true, nil)
 	home := pluginHomePath("demo")
+	// 先把运行态装配起来：这样「delete_workspace 拒绝」这条断言才有可观察的后果
+	//（目录必须还在），否则 plugin-sessions/<id> 根本没建过，测试会空真通过。
+	if _, err := m.pluginRuntimeForHome(home); err != nil {
+		t.Fatalf("装配插件运行态: %v", err)
+	}
 	wsRegPath := filepath.Join(appDataDir(), "workspaces.json")
 
 	// workspace_add：硬拒绝

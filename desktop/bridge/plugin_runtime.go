@@ -321,6 +321,26 @@ const (
 	pluginReasonUninstalled = "plugin_uninstalled" // index 里没有（卸载 / id 未知）
 )
 
+// 插件虚拟 Project **运行态未装配**时的封闭拒绝（命令路径）。
+//
+// 与 pluginReasonDisabled/Uninstalled 分工：那两个回答「插件还能不能用」，
+// 这个回答「这条按 workspace 解析的命令现在有没有可操作的运行态」。取值刻意与
+// §4.2 的 denied 一致（前端只认一套"被拒"语义），细节在 data.reason。
+const (
+	pluginNotReadyCode   = "denied"
+	pluginNotReadyReason = "plugin_not_ready"
+)
+
+// respPluginNotReady 命令回执：ok:false, code=denied, data.reason=plugin_not_ready。
+//
+// 为什么是拒绝而不是「顺手装配」：这些命令（skills/mcp/skill_*）都是**读或改运行态**，
+// 在只读路径里创建 runtime 会让「打开设置页」产生副作用（09 §4.1）；而造出的若是
+// kind=runtimeProject 的 runtime，就更把插件 home 当成了项目（§4.4 第 1 条）。
+func (m *manager) respPluginNotReady(c command) {
+	m.respCode(c, false, "插件虚拟 Project 运行态未装配（重新打开插件会话后重试）",
+		pluginNotReadyCode, map[string]any{"reason": pluginNotReadyReason})
+}
+
 // pluginRunDenyReason 该插件当前是否允许发起新 run（"" = 允许）。
 //
 // 判据必须来自 surface 注册表（安装期与启用状态的**唯一**真相源），不看内存里的 runtime：

@@ -18,7 +18,11 @@ func (m *manager) imPluginOf(ws string) *implugin.Plugin {
 		return m.imPlugin
 	}
 	// 回退：从 workspace registry 取（测试注入场景）
-	plg := m.runtime(ws).plugins
+	wsRT := m.runtime(ws)
+	if wsRT == nil {
+		return nil // 插件虚拟 Project 未装配：没有注册表可回退（IM 是进程级单例，不该走这里）
+	}
+	plg := wsRT.plugins
 	if cap, ok := plg.Get(implugin.ID); ok {
 		if p, ok := cap.(*implugin.Plugin); ok {
 			return p

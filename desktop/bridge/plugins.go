@@ -85,6 +85,11 @@ type configProvider interface{ Configurable() bool }
 // enabled 为运行时事实（IsEnabled）：State 的 update-available 会掩盖 enabled，
 // UI 需要「运行中」事实来决定启用/禁用按钮与升级编排。
 func pluginSnapshot(plg *plugin.Registry, ctx context.Context) []map[string]any {
+	// nil 注册表 = 该 workspace 没有运行态（插件虚拟 Project 未装配）：空快照，
+	// 不 panic。事件类入口已提前返回，这里是给命令/诊断路径的纵深防御。
+	if plg == nil {
+		return []map[string]any{}
+	}
 	caps := []map[string]any{}
 	for _, cap := range plg.List() {
 		st := cap.State(ctx)
@@ -214,12 +219,16 @@ func (m *manager) asyncPluginOp(c command, ws, id, op string, fn func() error) {
 // emitPluginStatusError 发带单插件错误信息的 plugin_status 事件（UI 在对应插件行下展示；
 // 无错误的后续事件自然覆盖清除）。
 func (m *manager) emitPluginStatusError(ws, id, msg string) {
+	reg := m.pluginRegistryOf(ws)
+	if reg == nil {
+		return // 运行态未装配：没有插件清单可推（错误信息本身随消息回执给到调用方）
+	}
 	ctx := context.Background()
 	m.out.writeLine(map[string]any{
 		"event_type": "plugin_status",
 		"workspace":  ws,
 		"data": map[string]any{
-			"plugins": pluginSnapshot(m.runtime(ws).plugins, ctx),
+			"plugins": pluginSnapshot(reg, ctx),
 			"error":   map[string]any{"id": id, "message": msg},
 		},
 	})
@@ -227,12 +236,26 @@ func (m *manager) emitPluginStatusError(ws, id, msg string) {
 
 // emitPluginStatus 发 plugin_status 事件（插件状态快照；UI 据此刷新插件 tab）。
 func (m *manager) emitPluginStatus(ws string) {
+	reg := m.pluginRegistryOf(ws)
+	if reg == nil {
+		return // 运行态未装配（插件虚拟 Project 未打开/已停用）：不推空快照冒充「没有插件」
+	}
 	ctx := context.Background()
 	m.out.writeLine(map[string]any{
 		"event_type": "plugin_status",
 		"workspace":  ws,
-		"data":       map[string]any{"plugins": pluginSnapshot(m.runtime(ws).plugins, ctx)},
+		"data":       map[string]any{"plugins": pluginSnapshot(reg, ctx)},
 	})
+}
+
+// pluginRegistryOf 取该 workspace 的插件注册表；运行态未装配（插件虚拟 Project 的
+// home 还没打开 / 已停用卸载）→ nil。pluginSnapshot 对 nil 注册表返回空快照，
+// 所以事件类路径（emitPluginStatus*）用它不需要额外分支。
+func (m *manager) pluginRegistryOf(wsPath string) *plugin.Registry {
+	if ws := m.runtime(wsPath); ws != nil {
+		return ws.plugins
+	}
+	return nil
 }
 
 // handlePluginCommand plugin_* 桥接命令（通用，按 id 寻址，与具体插件解耦）。
@@ -244,7 +267,13 @@ func (m *manager) handlePluginCommand(c command) {
 		return
 	}
 	ctx := context.Background()
-	plg := m.runtime(ws).plugins
+	// 插件虚拟 Project 未装配 → 拒绝（本 case 下面全部读/改注册表）。
+	rt := m.runtime(ws)
+	if rt == nil {
+		m.respPluginNotReady(c)
+		return
+	}
+	plg := rt.plugins
 	id := str(c.Payload, "id")
 	// 归属：plugin_list/enable/disable 的「启用状态」是**按归属**的（IM 首次落地）。
 	// 没有归属时不猜：IM 的启停会明确报错，其它插件行为不变（它们本来就是按工作区实例）。
@@ -341,7 +370,11 @@ func (m *manager) handlePluginCommand(c command) {
 // 内嵌端点已启动并注入（Enable 才连内嵌视图；否则 serverArgs 无 --ws-endpoint →
 // chrome-devtools-mcp 回退自启系统 Chrome）。plugin_enable 命令与升级恢复共用。
 func (m *manager) enablePlugin(ctx context.Context, wsPath, id string) error {
-	plg := m.runtime(wsPath).plugins
+	ws := m.runtime(wsPath)
+	if ws == nil {
+		return fmt.Errorf("%w: 插件虚拟 Project 运行态未装配（%s）", errPluginWorkspace, wsPath)
+	}
+	plg := ws.plugins
 	if id == browser.ID {
 		if cap, ok := plg.Get(browser.ID); ok {
 			if bp, ok2 := cap.(*browser.Plugin); ok2 && bp.Config().Presentation == browser.PresentationEmbedded {
@@ -435,7 +468,11 @@ func (m *manager) imBridgeActionSink() func(im.GatewayAction) {
 // 插件经 autoEnablePlugins 自动恢复启用，此时点「升级」必命中该拒绝，UI 表现为闪烁后无反应。
 // 编排范围为发起命令的工作区注册表（多工作区共享同一组件目录；v1 桌面单活跃工作区）。
 func (m *manager) installPluginUpgrade(ctx context.Context, wsPath, id string) error {
-	plg := m.runtime(wsPath).plugins
+	ws := m.runtime(wsPath)
+	if ws == nil {
+		return fmt.Errorf("%w: 插件虚拟 Project 运行态未装配（%s）", errPluginWorkspace, wsPath)
+	}
+	plg := ws.plugins
 	cap, ok := plg.Get(id)
 	if !ok {
 		return fmt.Errorf("插件 %q 不存在", id)
@@ -534,7 +571,13 @@ func (m *manager) handleBrowserCommand(c command) {
 	}
 
 	ctx := context.Background()
-	plg := m.runtime(ws).plugins
+	// 插件虚拟 Project 未装配 → 拒绝（browser_* 全部要经注册表拿插件实例）。
+	rt := m.runtime(ws)
+	if rt == nil {
+		m.respPluginNotReady(c)
+		return
+	}
+	plg := rt.plugins
 	cap, ok := plg.Get(browser.ID)
 	if !ok {
 		m.resp(c, false, "browser 插件不存在", nil)

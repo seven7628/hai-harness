@@ -284,6 +284,10 @@ func (m *manager) syncMCPLayers(ws *workspaceRuntime, base map[string]mcp.Server
 // 返回是否发生变化。
 func (m *manager) reloadMCP(wsPath string) bool {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		// 插件虚拟 Project 未装配（已停用/已卸载）：没有分层可应用，也没有 loop 可重建。
+		return false
+	}
 	if !m.syncMCPLayers(ws, nil, "", mcpConfigLayers(wsPath)...) {
 		return false
 	}
@@ -294,6 +298,11 @@ func (m *manager) reloadMCP(wsPath string) bool {
 // mcpLayerStates 该工作区最近一次分层加载状态（mcp_list 展示；未创建运行态 → nil）。
 func (m *manager) mcpLayerStates(wsPath string) []mcp.LayerState {
 	ws := m.runtime(wsPath)
+	if ws == nil {
+		// 注释原本就写着「未创建运行态 → nil」，但实现一直在解引用（项目路径恒非 nil
+		// 让这个洞没被踩到）。插件虚拟 home 未装配时会真的走到这里。
+		return nil
+	}
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	return ws.mcpLayers
