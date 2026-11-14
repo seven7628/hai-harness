@@ -1,7 +1,10 @@
-import { useAppStore } from './store/useAppStore'
+import { getHostLang, useHostLang } from './host/lang'
 
-// 轻量 i18n：zh（默认）/ en 字典 + useT() hook（组件响应式）+ t()（非组件代码，读 store 当前 lang）。
+// 轻量 i18n：zh（默认）/ en 字典 + useT() hook（组件响应式）+ t()（非组件代码，读 host 当前 lang）。
 // 未翻译 key → 回退 zh（渐进翻译：本次只铺核心界面，其余后续）。
+//
+// 语言来源是 host/lang.tsx（P8-01b）：桌面 provider 读 settings.lang，手机 provider 读
+// 手机设置。**这里不能 import useAppStore** —— 手机包复用 Hub 组件时会把桌面 store 拉进去。
 export type Lang = 'zh' | 'en'
 
 const zh: Record<string, string> = {
@@ -4178,19 +4181,18 @@ const en: Record<string, string> = {
 }
 
 export function useT(): (key: string) => string {
-  const lang = useAppStore((s) => s.settings.lang)
+  const lang = useHostLang()
   const table = lang === 'en' ? en : zh
   return (key: string) => table[key] ?? zh[key] ?? key
 }
 
 // 组件用：当前语言（大数/日期等本地化格式随语言切换，不引第三方 i18n 库）
 export function useLang(): Lang {
-  return useAppStore((s) => s.settings.lang) === 'en' ? 'en' : 'zh'
+  return useHostLang()
 }
 
 // 非组件代码（store）用：读当前 lang，不订阅
 export function t(key: string): string {
-  const lang = useAppStore.getState().settings.lang
-  const table = lang === 'en' ? en : zh
+  const table = getHostLang() === 'en' ? en : zh
   return table[key] ?? zh[key] ?? key
 }
