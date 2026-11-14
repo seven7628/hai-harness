@@ -86,6 +86,29 @@ export interface SurfaceProvider<T extends SurfaceTab = SurfaceTab> {
    */
   icon?: (tab?: T) => ReactNode
   badge?: (tab: T, s: AppState) => number
+  /**
+   * 原生宿主判定（R11c）：这个标签此刻是不是**一块原生视图的宿主** ——
+   * 即面板里贴着 Electron 的 WebContentsView，右栏收起 / 换到别的标签时必须把它 hide 掉。
+   *
+   * 为什么是 provider 声明的能力位，而不是 RightPanel 里的 `kind === 'web' || (kind ===
+   * 'file' && …)`：判定权属于 provider（只有它知道自己渲的是什么）。RP 只问「谁在当宿主」，
+   * 不认识任何 kind。将来插件面板要挂原生视图，加一条实现即可，RP 一行不改。
+   *
+   * 为什么不叫 `isNative` / `embedsNativeView`：语义是「**宿主**」（谁负责让原生视图可见，
+   * 与 hide 的分工成对），不是「这个标签里有原生内容」—— file{mode:'preview'} 只对
+   * pdf/图片这类渲染器成立，而判定落点必须是一个布尔闸门，不是「大概有」。
+   *
+   * 入参带 `s`（与 badge 同款）：宿主要看**运行时状态**，不能只看标签形状。file 的
+   * `mode:'preview'` 只说明「可能渲 pdf」；真正把视图挂上去的是预览面板（它把
+   * `previewEmbedActive` 写进 store），而且父级 effect 晚于子级 effect 跑 —— 只看 mode 会在
+   * 面板还没挂载时就宣称「我是宿主」，闸门随即不 hide，症状是 pdf 预览一片空白、视图却
+   * 在池里（R08b 实测）。所以 file 的实现读这个运行时标记，**不**读自己的 mode。
+   *
+   * 缺省 = false：未声明 / provider 缺失（加载失败、墓碑态）/ 被禁用的面板都不当宿主。
+   * 这条缺省是「面板白屏」的安全侧：宁可我方多 hide 一次（幂等），也不要让一个无人认领的
+   * 原生视图浮在界面上（后台会话触发 Browser Use 时的白屏事故）。
+   */
+  nativeHost?: (tab: T, s: AppState) => boolean
 
   singleton?: boolean
   allowDuplicate?: boolean
