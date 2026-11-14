@@ -2359,7 +2359,7 @@
       "acceptance": "三主题 390/430/640；safe-area/visualViewport；测试改写为 DOM/行为断言；旧 app.js/hub_model.js 删除；/m/ 默认走新页。",
       "tests": "test:mobile-390；test:mobile-hub；tokens_sync；check-mobile-*；tsc",
       "commit": "—",
-      "status": "blocked"
+      "status": "in_progress"
     }
   ],
   "deferred": [
@@ -3561,7 +3561,7 @@
       "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 150 + mobile session 98 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-session 390/430 42 条 + check:mobile-hub 38 条全绿；桌面 collapse/group-edit/taskcard/markdown 56 全 PASS；全量 desktop/bridge 182.3s 绿。merge ab1a380。"
     },
     "P8-03": {
-      "status": "blocked",
+      "status": "in_progress",
       "commit": "—"
     },
     "P8-01a": {
@@ -3577,6 +3577,11 @@
       "merge": "ab5a01f",
       "review": "passed",
       "reviewNote": "手机 Hub 列表/群/DM + 抽屉；transport/lang/markdown 三个 seam；能力收窄；390/430 38 条浏览器断言。"
+    },
+    "P8-03a": {
+      "status": "in_progress",
+      "commit": "—",
+      "reviewNote": "手机主题/布局/键盘收口（不退役旧页）"
     }
   },
   "reviewGate": {
