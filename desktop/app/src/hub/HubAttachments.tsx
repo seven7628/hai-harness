@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { useAppStore } from '../store/useAppStore'
+import { useHostPanelsActions } from '../host/panels'
 import { copyText } from '../lib/clipboard'
 import { copyImageDataUrl, normalizeAttachments } from './attachments'
 import { HubImageLightbox } from './AttachmentStrip'
@@ -34,7 +34,7 @@ function AttachmentsBody({
   list: HubAttachment[]
   onCopyImage?: (a: HubAttachment) => Promise<{ ok: boolean; error?: string }>
 }) {
-  const showToast = useAppStore((s) => s.showToast)
+  const { showToast } = useHostPanelsActions()
   const [zoom, setZoom] = useState<number | null>(null)
   const images = list.filter((a) => a.kind === 'image')
   const files = list.filter((a) => a.kind === 'file')

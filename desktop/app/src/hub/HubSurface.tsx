@@ -3,7 +3,7 @@ import CollapsibleMarkdown from './CollapsibleMarkdown'
 import { AccessIcon, Bot, ImageIcon, LayersIcon, MoreIcon, PaperclipIcon, Plus, SendIcon, TerminalIcon } from '../components/icons'
 import { useLang, useT } from '../i18n'
 import { useHubStore } from './useHubStore'
-import { useAppStore } from '../store/useAppStore'
+import { useHostPanels } from '../host/panels'
 import { alertSeverity } from './alerts'
 import GroupView from './GroupView'
 import HubErrorBanner from './HubErrorBanner'
@@ -61,8 +61,7 @@ export default function HubSurface() {
   const closeHub = useHubStore((s) => s.closeHub)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
-  const setRightExpanded = useAppStore((s) => s.setRightExpanded)
-  const rightExpanded = useAppStore((s) => s.rightExpanded)
+  const { setRightExpanded, rightExpanded } = useHostPanels()
   // 右栏折叠时，中栏的 Context / composer「+」也必须把右栏展开 —— 只改 inspector
   // 会让内容落在 44px 图标条后面（用户看不到任何变化）。
   // 折叠态下 Context 是「打开」而不是「关掉已选中的 Context」。

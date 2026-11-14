@@ -3,7 +3,7 @@ import { useLang, useT } from '../i18n'
 import { GitBranch, ImageIcon, MoreIcon, PaperclipIcon, SendIcon, TerminalIcon } from '../components/icons'
 import { useResolvedTheme } from '../lib/useTheme'
 import { useHubStore } from './useHubStore'
-import { useAppStore } from '../store/useAppStore'
+import { useHostPanels } from '../host/panels'
 import { hubCommand } from './api'
 import { GroupBubble } from './MessageBubble'
 import { DayDivider } from './ConversationMessage'
@@ -89,8 +89,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
   const copyDeepLink = useHubStore((s) => s.copyDeepLink)
   const inspector = useHubStore((s) => s.inspector)
   const setInspector = useHubStore((s) => s.setInspector)
-  const setRightExpanded = useAppStore((s) => s.setRightExpanded)
-  const rightExpanded = useAppStore((s) => s.rightExpanded)
+  const { setRightExpanded, rightExpanded } = useHostPanels()
   // P4-01 性能 memo 的启动期快照：localStorage['hub.perfMemo']='0' 后重载即关闭。
   // 只读一次（不在每次 render 访问 storage）；支持回滚不需要发版，见 perfFlags.ts。
   const [perfMemo] = useState(() => hubPerfMemoEnabled())

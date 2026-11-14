@@ -15,16 +15,8 @@ import { formatClockTime } from './conversation'
 import { ALL_MENTION_ID, linkifyMentions, type MentionAgent } from './mentions'
 import { parseTaskResult } from './taskCard'
 import { useHubStore } from './useHubStore'
-import { useAppStore } from '../store/useAppStore'
+import { useHostPanelsActions } from '../host/panels'
 import { highlightClass, seqDataAttr } from './seqJump'
-
-// workspace 结果卡属于一个 Project 会话（不是发起者的 DM）：点开 = 退出 Hub、切到那个
-// 会话 —— 与左栏点会话同一条路径（setActiveSession 自带跨项目切换）。
-// 用 getState 而不是订阅：这是点击时的一次性动作，不该让卡片跟着工作区重渲。
-function openProjectSession(workspace: string, sessionId: string): void {
-  useHubStore.getState().closeHub()
-  useAppStore.getState().setActiveSession(sessionId, workspace || undefined)
-}
 
 // 群消息（handoff 卡、审批占位、路由回执只在人类 UI 出现；
 // routing_receipt 的落盘文本是 targets=ag_x，按名册还原成可读动作行）。
@@ -93,6 +85,10 @@ export function GroupBubble({
   highlightSeq,
 }: GroupBubbleProps) {
   const t = useT()
+  // workspace 结果卡属于一个 Project 会话（不是发起者的 DM）：点开 = 退出 Hub、切到那个
+  // 会话 —— 与左栏点会话同一条路径（桌面实现见 host/panels-desktop.tsx）。
+  // 取 host seam 而不是直接读 store：手机复用这张卡时不能把桌面 store 拉进包。
+  const { openProjectSession } = useHostPanelsActions()
   const taskId = msg.kind === 'task_result' ? String(msg.refs?.task_id ?? '') : ''
   // 任务卡派发者必须来自账本（origin.kind/agent_id）：bridge 写的结果卡 sender
   // 就是执行者本人，按 sender 推会得到「Writer → Writer」（B5）。
