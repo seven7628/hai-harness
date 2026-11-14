@@ -2,7 +2,7 @@
 
 > 背景：P8 之前手机端是独立无构建 PWA（`desktop/bridge/mobile_web/app.js` 3657 行 + `hub_model.js` 957 行 + tokens.css 副本），
 > 已与桌面 runtime V2 / Hub 组件漂移。用户要求：**不再单独实现一套，复用桌面现有能力，只做手机布局**。
-> **P8-03b 已退役旧页**：`/m/` 默认托管 Vite 新页（内置 `mobile_web.zip`），旧 `mobile_web/**` 已删除。
+> **P8-03b 已退役旧页**：`/m/` 默认托管 Vite 新页；新页和桌面渲染页一样是**一个磁盘目录**（dev `dist-mobile` / 打包 `Resources/mobile-web`），不 embed、不 zip、无运行时解压缓存。旧 `mobile_web/**` 已删除。
 > 审计结论见本文 §1；进度只认 [`PROGRESS.html`](./PROGRESS.html)。
 
 ## 0. 决策（主 Session 拍板，可被用户否决）
@@ -59,7 +59,7 @@ desktop/app/scripts/build-mobile.mjs（或 npm script）
 - `transport/index.ts`：`window.__HAI_MOBILE__` → `mobileTransport()`。
 - `transport/types.ts`：如需要，给 mobile 的 `send/onEvent` 最小接口（不要改桌面语义）。
 - `hub/GroupView.tsx`、`hub/HubSurface.tsx`、`hub/HubInspector.tsx`、`hub/HubInlineNeeds.tsx`、`hub/HubAttachments.tsx`、`hub/MessageBubble.tsx`：`useAppStore` 的 6 处改为 `host/panels.ts`（桌面实现不变）。
-- `vite.config.ts`：多入口 `main` + `mobile`；`mobile:build` 输出 `dist-mobile`，`mobile:embed` 再打成 `desktop/bridge/mobile_web.zip`。
+- `vite.config.ts`：多入口 `main` + `mobile`；`mobile:build` 输出 `dist-mobile` 并把 `mobile.html` 改名 `index.html`；`electron-builder.extraResources` 把 `dist-mobile` 复制成 `Resources/mobile-web`。
 - `mobile_server.go`：P8-03b 起 `/m/` 默认解压内置 zip；`HAI_MOBILE_WEB_DIR` 仅开发态覆盖（`electron/main.ts` 的 dev 分支指向 `dist-mobile`）。
 - `package.json`：`mobile:build` / `mobile:dev`。
 
@@ -96,7 +96,7 @@ Hub 屏幕要求：
 ### P8-03 落地记录（2026-11-13，P8-03a `233dfa7` / merge `359efeb`；P8-03b `6d63a3d` / merge `ec05e1d`）
 
 - **P8-03a**：390/430/640 × ink/paper 三档两主题；抽屉 5 tab 横向滚动 + 边缘渐隐、单头 + 浮动返回键、composer 收紧、`visualViewport` 键盘、safe-area、`prefers-reduced-motion`、审批 JSON 壳；补手机包缺失的派生令牌。
-- **P8-03b**：`mobile:embed` 把 `dist-mobile` 打成确定性 `desktop/bridge/mobile_web.zip`（5.27MB，`zip -X -D`，固定 mtime，SHA-256 `7ae504c6…c008c63`）；`mobile_web.go` 用 `go:embed` + 缓存解压（`~/Library/Caches/hai/mobile-web/<sha>`，只读 HOME 回退临时目录），`/m/` 默认新页；`HAI_MOBILE_WEB_DIR` 降级为 dev-only 覆盖。
+- **P8-03b（方案 A）**：手机页只保留一个目录 —— dev = `desktop/app/dist-mobile`，打包 = `Contents/Resources/mobile-web`（`extraResources` 从 `dist-mobile` 复制）；`mobile:build` 把 `mobile.html` 改名 `index.html`；`mobile_server.go` 的 `/m/` 只服务 `HAI_MOBILE_WEB_DIR` 指向的磁盘目录，目录缺失/无 `index.html` 时返回 500 + 明确原因。没有 zip、没有 hash 缓存、没有 LRU；`go:embed mobile_web.zip` 与 `mobile_web.go` 已删除。
 - 旧 `desktop/bridge/mobile_web/**`（app.js/hub_model.js/style.css/tokens.css/fonts/...）已删除；`test:mobile-hub`/`test:mobile-390` 下线，改为 `test:mobile-static` + `check:mobile-hub/session`；`tokens_sync_test.go`/`mobile_hub_web_test.go` 由 `mobile_web_test.go` 与静态同源断言替代。
 
 ## 4. 测试
@@ -105,7 +105,7 @@ Hub 屏幕要求：
 - 浏览器：390/430/640 × ink/paper，`check:mobile-hub` 180 条、`check:mobile-session` 162 条；覆盖列表→群/DM、抽屉 5 tab、会话流式/工具/审批/提问、键盘/safe-area/对比度/无横向溢出。
 - 桌面回归：`npx tsc --noEmit`、`test:css`、`test:turn-layout`、`test:hub-conv`、`test:hub-p3b`、`test:right-tabs`、`check-hub-*` 关键脚本。
 - Go：`go test ./desktop/bridge -run 'Mobile|Web|Embed'`（`mobile_web_test.go` 断言 `/m/` 200、assets、磁盘覆盖、解压复用/并发/越界/失败不静默）；全量 `desktop/bridge` 189.6s 绿。
-- 构建：`npm run mobile:embed` 生成确定性 `mobile_web.zip`（SHA-256 固定）；`npm run build` 会先跑 embed 再 `go build`。
+- 构建：`npm run mobile:build` 生成 `dist-mobile/index.html`；`npm run build` 先跑 mobile:build，再 Vite/Electron/`go build`；`npm run dist:mac` 由 electron-builder 把 `dist-mobile` 复制到 `Resources/mobile-web`。
 - 不占 5173/5180；用 52xx。
 
 ## 5. 子智能体契约

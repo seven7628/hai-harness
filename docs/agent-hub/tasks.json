@@ -2353,18 +2353,18 @@
         "desktop/app/src/mobile/mobile.css",
         "desktop/app/src/mobile/visual-viewport.ts",
         "desktop/app/src/mobile/chrome.ts",
-        "desktop/app/scripts/build-mobile-embed.mjs",
+        "desktop/app/scripts/mobile-dist-index.mjs",
         "desktop/app/scripts/test-mobile-static.mjs",
-        "desktop/bridge/mobile_web.go",
-        "desktop/bridge/mobile_web.zip",
+        "desktop/app/package.json",
+        "desktop/app/electron/main.ts",
         "desktop/bridge/mobile_server.go"
       ],
       "acceptance": "三主题 390/430/640；safe-area/visualViewport；测试改写为 DOM/行为断言；旧 app.js/hub_model.js 删除；/m/ 默认走新页。",
-      "tests": "test:mobile-static；check:mobile-hub/session；mobile:embed；go test ./desktop/bridge -run 'Mobile|Web|Embed'；tsc",
-      "commit": "6d63a3d",
+      "tests": "test:mobile-static；check:mobile-hub/session；mobile:build；npm run build；go test ./desktop/bridge -run 'Mobile|Web|Embed'；tsc",
+      "commit": "f158b84",
       "status": "done",
       "review": "passed",
-      "reviewNote": "主 Session 复验：tsc + mobile-static 12 + host-seams 57 + mobile transport 154 + mobile session 120 + css + turn-layout 42 + hub-conv 160 + hub-p3b 295 + right-tabs 236 + hub-avatar 77 全绿；mobile:build + check:mobile-hub 180 + check:mobile-session 162（390/430/640 × ink/paper）全绿；Go 定向 24.8s + 全量 desktop/bridge 189.6s 绿；npm run build 后 zip SHA 仍 7ae504c6…c008c63。merge ec05e1d。"
+      "reviewNote": "方案 A 复验：tsc + mobile-static 14 + host-seams 57 + mobile transport 154 + mobile session 120 + css + turn-layout 42 + hub-conv 160 + hub-p3b 295 + right-tabs 236 + hub-avatar 77 全绿；mobile:build + check:mobile-hub 180 + check:mobile-session 162（390/430/640 × ink/paper）全绿；Go 定向 23.2s + 全量 desktop/bridge 171.9s 绿；npm run build 成功，electron-builder --dir 产出 Resources/mobile-web/index.html。merge b0deed4。"
     },
     {
       "id": "P8-04",
@@ -3584,10 +3584,10 @@
     },
     "P8-03": {
       "status": "done",
-      "commit": "6d63a3d",
-      "merge": "ec05e1d",
+      "commit": "f158b84",
+      "merge": "b0deed4",
       "review": "passed",
-      "reviewNote": "主 Session 复验：tsc + mobile-static 12 + host-seams 57 + mobile transport 154 + mobile session 120 + css + turn-layout 42 + hub-conv 160 + hub-p3b 295 + right-tabs 236 + hub-avatar 77 全绿；mobile:build + check:mobile-hub 180 + check:mobile-session 162（390/430/640 × ink/paper）全绿；Go 定向 24.8s + 全量 desktop/bridge 189.6s 绿；npm run build 后 zip SHA 仍 7ae504c6…c008c63。merge ec05e1d。"
+      "reviewNote": "方案 A 复验：tsc + mobile-static 14 + host-seams 57 + mobile transport 154 + mobile session 120 + css + turn-layout 42 + hub-conv 160 + hub-p3b 295 + right-tabs 236 + hub-avatar 77 全绿；mobile:build + check:mobile-hub 180 + check:mobile-session 162（390/430/640 × ink/paper）全绿；Go 定向 23.2s + 全量 desktop/bridge 171.9s 绿；npm run build 成功，electron-builder --dir 产出 Resources/mobile-web/index.html。merge b0deed4。"
     },
     "P8-01a": {
       "status": "done",
@@ -3619,10 +3619,10 @@
     },
     "P8-03b": {
       "status": "done",
-      "commit": "6d63a3d",
-      "merge": "ec05e1d",
+      "commit": "f158b84",
+      "merge": "b0deed4",
       "review": "passed",
-      "reviewNote": "确定性 zip 嵌入 /m/ + 缓存解压 + 旧 mobile_web 退役；Go/浏览器/build 全绿。"
+      "reviewNote": "方案 A：dist-mobile 目录随包分发（Resources/mobile-web），/m/ 只服务磁盘目录；删除 zip/解压缓存/旧页；Go/浏览器/build/打包全绿。"
     }
   },
   "reviewGate": {
