@@ -3,7 +3,8 @@
 // 桌面会话页的组合是 Narrative + ApprovalPanel + AskUserQuestionPanel + Composer
 // （见 components/CenterPanel.tsx）。手机要的历史 / 流式 / 工具折叠 / Markdown /
 // 审批 / 提问 / 发送 / 停止全在里面 —— 所以这里一行转录渲染都不写，只做三件事：
-//   1. 接线：start()（wire 事件流，幂等）+ setActiveSession(sid, ws) + connectChat(ws, sid)；
+//   1. 接线：ensureStoreStarted()（wire 事件流，整个进程只做一次）+ setActiveSession(sid, ws)
+//      + connectChat(ws, sid)；
 //   2. 导航：44px 返回 + 当前会话标题（CenterPanel 自己的 RecentBar 在手机上隐藏，
 //      标题只能由这一层给）；
 //   3. 版面：`.m-session` 撑满 100dvh，composer 贴底（见 mobile.css 的会话段）。
