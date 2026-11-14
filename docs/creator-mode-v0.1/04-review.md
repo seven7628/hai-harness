@@ -872,3 +872,58 @@ PR-11 开工第一件事是**核它自己的判据**，结果两条都过期了�
 6. worktree 里的 `node_modules` 是软链、随 worktree 删除，主工作区零改动。
 
 **本轮最值钱的发现**（已进 F67）：`makeTab` 的初值只有「scope 还没有标签集、按 rightTab 建默认集」这一条路看得到 —— 14 项 e2e 全绿也证明不了 `defaultSpec` 有效，因为 `openTab` 自己就把 payload 合好了。**变异必须先证明「现有探针能红」，否则补探针。**
+
+---
+
+### F69（R11b）—— 删掉「两份真相」的代价可数：3 处行为差异、2 个覆盖缺口、1 个待裁决
+
+`rightTab` 从 PR-02 起就是 `activeId` 的写穿副本。这一轮把它删掉，工作的形状不是「删字段」而是
+**先把读点收口，再删**（选择器 → 6 处读点 → 删字段/兼容入口 → 迁 56 处 e2e → 迁 114 处 scripts）。
+顺序错了就会在同一提交里夹带语义改动，红了也说不清是哪一步。
+
+**① 判据对照（派单给的 vs 实测）**
+
+| 派单写的 | 实测 | 说明 |
+|---|---|---|
+| `grep -rn rightTab desktop/app/src` = 0 代码引用 | 16 行，**全是注释** | 含模块路径改名（`lib/rightTab.ts` → `lib/rightPanel.ts`），否则 import 路径也带 `rightTab` 子串 |
+| `grep -rn rightTab desktop/app/e2e/*.mjs` = 0 | 0（迁移前 **56 处 / 16 文件**） | 02 写「55 / 15」，少算了一个截图脚本 |
+| 19 项门禁逐项同数 | 19/19 同数 | 另加 `preview_container 88 / subagent-style 46 / activeid 32` 三个链外探针 |
+
+**② 三处行为差异（有意，都写在原地）**
+1. 标签关光（`activeId=null`）后 rail 不再高亮一个已不存在的面板 —— 旧字段会「保留最后的值」。
+2. 标签动作不再无条件 `setView`。旧 `rightTabPatch` 每次都把「会话 view → 顶层镜像」重放一遍，
+   顶层已被后续事件更新过时，**一次切标签会把 blocks/streaming 拉回旧值**。`verify_preview_container`
+   里那两条与这个负作用周旋的注释（「复位 10ms 后 tab 自己变回去」）现在只剩历史价值。
+3. 「直写面板字段 + sync」这条 e2e 复位路径随字段消失（`syncTabsToRightTab` 的默认集固定为 activity）。
+   这是 PR-02 定的方向：面板从来不是「记住用户上次选了哪个 kind」，而是一个标签实例。
+
+**③ 两个覆盖缺口（先补证人，再让变异红了才算数）**
+
+第一次跑三条变异，有两条**全绿** —— 和 F67 同一个形状：探针走了旁路。
+
+| 变异 | 第一次跑 | 补了证人之后 |
+|---|---|---|
+| 选择器只认内置四类（`plugin:*` → undefined） | 33 条 plugin 探针全绿（探针自己从 `tabsByScope` 算 activeKind） | plugin 探针的 `tabs()` 增 `kind: selectRightTab(s)` → 红 |
+| rail 读一个恒定值（模拟「仍读旧字段」） | 全绿（**没有任何断言看 rail 的高亮**） | rail 按钮加 `data-kind` + session-tabs 的 `railOn` → 红 |
+| 悬空 activeId 兜底 `'web'` | 单测红；`test:right-tabs` 全绿（它只覆盖 `activeId=null`） | 泛化成「任何无值都兜底」时 right-tabs A1 / activeid D3 也红 |
+
+> **教训（第二次了）**：迁移类 PR 的变异要先问「**现有探针里有没有人读产品读的那个东西**」。
+> 探针自己算一份等价物，等于把被测物替换成了测试自造的副本 —— F53 记过一次，这次是同一个坑的
+> 变体：不是「另建等价物」，而是「从未问过产品的那份」。rail 更极端：生产代码读了，测试里没人看。
+
+**④ 语义变化清单（断言数一条没变，但有三处「期望值」变了）**
+- `test-right-panel-tabs` M6：旧期望 `git` 来自 view 里的面板镜像，而同一 scope 的 `activeId` 是 `web`
+  —— 两份真相互相矛盾时，更旧的那份胜出。现在只可能等于激活标签。
+- A4/C6/D2/M9/M13：「回落 activity」改成「还没有标签集 → 面板空态」（默认集由组件 effect 建，
+  K1/K2 与 `test:activeid` E1b/E2 仍钉住那条路径）。
+- N25/N26：`restored` 标记以前在第一次 sync 时「只补派生字段、不动集合」所以还在；派生随字段删掉后，
+  第一次读就直接清标记 —— N25 前移到 sync 之前，N26 改钉「第一次读即清（一次 set）」。
+- `test:activeid` B 组：「外部直写面板字段不会换掉激活标签」这条**不可表达**了，改成同义事实
+  「sync 与任何非标签写入都不碰 activeId」。
+
+**⑤ 待裁决**：`TabSet.restored` 现在的唯一读者是它自己的清理分支（外部读者原本就是右栏派生字段）。
+本轮**保留**：它是一条被 N25/N26 钉住的可观察状态机，删它属于另一个决定（改状态机）而不是本轮的
+「删字段」。建议与 R11c 一起收，届时 N25/N26 一并改写而不是删除。
+
+**⑥ 方法备注**：worktree 的 `node_modules` 用 APFS clone（`cp -c -R`，7s / 745M 共享块）而不是软链 ——
+主工作区零改动，且 `vite build` 的缓存放本 worktree 自己的副本里（软链会让缓存写回主工作区）。
