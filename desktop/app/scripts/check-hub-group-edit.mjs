@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-// 群组编辑弹层（P6-17）：右栏入口 + 编辑模式 UI + 保存/移除/转让 + Esc。
+// 群组编辑弹层（P6-17 / P7-01）：右栏入口 + 编辑模式 UI + 保存/移除/转让 + Esc。
+//
+// P7-01/I3：保存走**一条** hub_group_edit（name/mode/owner + 成员增删原子提交）。
+// 第 3 段专门走「加人 + 转让群主」同一次保存 —— 那是旧实现最容易留下半改状态的路径。
 //
 // 前置（**不要用 5173/5180**）：
 //   VITE_PORT=5222 npx vite
@@ -11,6 +14,7 @@
 //   · 群主那一行：勾选框锁定 + 「群主」chip（不可移除）
 //   · 移除一个普通成员 → 保存 → 弹层关闭、右栏成员数减少（服务端状态刷新）
 //   · 群名 + 协作模式一起保存 → 头部副标题显示新模式
+//   · 加人 + 转让群主同一次保存 → 弹层关闭、右栏成员 +1、群主变成新人
 //   · Esc 关闭弹层
 //   · 640 宽：弹层不溢出视口
 import { chromium } from 'playwright'
@@ -109,7 +113,36 @@ await openEditor()
   log(`保存：成员 ${beforeCount}→${afterCount}，名称/模式已刷新`)
 }
 
-// —— 3) Esc 关闭 ——
+// —— 3) 加人 + 转让群主：一次保存（一条 hub_group_edit，原子路径） ——
+{
+  const beforeCount = await page.locator('.hub-ov-member').count()
+  await openEditor()
+  const rows = modal().locator('.hub-group-member')
+  const total = await rows.count()
+  let addRow = null
+  for (let i = 0; i < total; i++) {
+    const row = rows.nth(i)
+    if (!(await row.locator('input[type="checkbox"]').isChecked())) { addRow = row; break }
+  }
+  check(!!addRow, '有可添加的成员（roster 里还有没入群的人）')
+  const newName = addRow ? (await addRow.locator('.hub-group-member-name').innerText()).trim() : ''
+  if (addRow) await addRow.locator('input[type="checkbox"]').click({ timeout: 4000 })
+  const ownerSelect = modal().locator('select').first()
+  const opt = ownerSelect.locator('option').filter({ hasText: newName }).first()
+  const value = await opt.getAttribute('value').catch(() => null)
+  check(!!value, `群主下拉里有刚加入的成员（got=${value}）`)
+  if (value) await ownerSelect.selectOption(value)
+  await modal().locator('.hub-modal-foot .hub-primary').click({ timeout: 4000 })
+  await page.waitForTimeout(900)
+  check((await page.locator('.hub-group-modal').count()) === 0, '加人 + 转让保存后弹层关闭')
+  const afterCount = await page.locator('.hub-ov-member').count()
+  check(afterCount === beforeCount + 1, `右栏成员数 +1（${beforeCount} → ${afterCount}）`)
+  const ownerName = (await page.locator('.hub-session-info dd').nth(1).innerText()).trim()
+  check(ownerName === newName, `群主已转让（got=${ownerName} want=${newName}）`)
+  log(`原子编辑：加人 + 转让（${newName} 成为群主）`)
+}
+
+// —— 4) Esc 关闭 ——
 {
   await openEditor()
   await page.keyboard.press('Escape')
@@ -117,7 +150,7 @@ await openEditor()
   check((await page.locator('.hub-group-modal').count()) === 0, 'Esc 关闭编辑弹层')
 }
 
-// —— 4) 640 宽：弹层不溢出 ——
+// —— 5) 640 宽：弹层不溢出 ——
 {
   await page.setViewportSize({ width: 640, height: 760 })
   await page.waitForTimeout(300)

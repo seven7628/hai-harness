@@ -166,6 +166,17 @@ func (m *manager) enrichHubGroupSpec(ctx context.Context, st agenthub.Store, spe
 	return nil
 }
 
+// hubRosterRefreshHook 仅测试用：名册重建入口被调用一次记一次（生产恒 nil）。
+// 用来证明 hub_group_edit 是「一次重建」，不是逐成员循环。
+var hubRosterRefreshHook func(gid agenthub.GroupID)
+
+// hubRosterRefreshBarrier 读钩子时取一次快照（同其它 barrier 惯例）。
+func hubRosterRefreshBarrier(gid agenthub.GroupID) {
+	if hook := hubRosterRefreshHook; hook != nil {
+		hook(gid)
+	}
+}
+
 // refreshHubGroupRoster 名册变化（加入/移除成员、角色/owner 转让、群改名）后，重建该群
 // 每个**已装配**群会话的 loop —— 名册在 system prompt L2 里，不换 loop 的话下一次唤醒
 // 看到的还是旧名册。
@@ -176,6 +187,7 @@ func (m *manager) refreshHubGroupRoster(groupID agenthub.GroupID) error {
 	if m == nil || groupID == "" {
 		return nil
 	}
+	hubRosterRefreshBarrier(groupID)
 	ctx := context.Background()
 	st, err := m.hubStore()
 	if err != nil {

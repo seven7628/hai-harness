@@ -99,9 +99,13 @@ const (
 	CmdHubGroupDelete       Command = "hub_group_delete"
 	CmdHubGroupMemberAdd    Command = "hub_group_member_add"
 	CmdHubGroupMemberRemove Command = "hub_group_member_remove"
-	CmdHubGroupHistory      Command = "hub_group_history"
-	CmdHubGroupActivity     Command = "hub_group_activity"
-	CmdHubGroupSend         Command = "hub_group_send"
+	// CmdHubGroupEdit 群组编辑的原子命令（P7-01/I3）：name/mode/owner 字段级 patch 与
+	// add_members/remove_members 在**一次** LoadGroup → 全量校验 → SaveGroup 里完成。
+	// 旧命令（update/member_add/member_remove）保留给其他路径与旧客户端。
+	CmdHubGroupEdit     Command = "hub_group_edit"
+	CmdHubGroupHistory  Command = "hub_group_history"
+	CmdHubGroupActivity Command = "hub_group_activity"
+	CmdHubGroupSend     Command = "hub_group_send"
 	// CmdHubGroupAssign 人从群 UI 把一条可追踪任务派给成员（P3b-07a，§6.7.9）：
 	// 与智能体 assign_task 同一条路径，但 Origin=human、指派消息 Sender=human。
 	CmdHubGroupAssign Command = "hub_group_assign"

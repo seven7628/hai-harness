@@ -13,7 +13,8 @@ import type { HubGroup } from './types'
 // 编辑模式（传 group）：成员表的勾选是**增删的唯一入口** ——
 //   · 原本在群里、取消勾选 = 移除（群主不可取消，先转让）；
 //   · 原本不在群里、勾上 = 添加；
-//   · 保存时按 diff 走 hub_group_member_add/remove + hub_group_update（store.saveGroupEdit）。
+//   · 保存时把 name/mode/owner + 增删 diff 合成**一条** hub_group_edit（store.saveGroupEdit），
+//     bridge 先全量校验再单次落盘：任一项不合法，群保持原样（P7-01/I3）。
 // 这样「加人/移人/转让」三个动作在一张表里完成，不需要三套子界面。
 //
 // 键盘：Esc 关闭（捕获阶段监听，不会被 Hub 自己的快捷键先吃掉）；Tab 按浏览器默认

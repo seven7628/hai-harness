@@ -743,3 +743,18 @@ export interface SurfaceCommandReply {
   reason?: string
   data?: unknown
 }
+
+/**
+ * hub_group_edit（P7-01/I3）的 wire payload：群名/模式/群主是**字段级 patch**（不传 =
+ * 不改），成员增删一次提交。bridge 先全量校验再单次落盘，任一失败群逐字段不变 ——
+ * 前端不要退化成多条命令的序列（那正是 I3 修掉的半改状态）。
+ */
+export interface HubGroupEditPayload {
+  group_id: string
+  name?: string
+  mode?: string
+  /** 新群主 agent_id（必须出现在最终成员表里；不能与 remove_members 重叠） */
+  owner?: string
+  add_members?: string[]
+  remove_members?: string[]
+}
