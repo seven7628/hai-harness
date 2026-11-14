@@ -99,11 +99,12 @@ func TestEmitEnvelopeSessionIDExactlyOnce(t *testing.T) {
 // 的删除分支真的跑了；负控（只注入不删 → 2 份）钉住这个判断不是空真。
 //
 // 不可达分支（不伪造覆盖）：
-//   · Envelope/ForceKeys 的失败回退：入参来自 json.Marshal（恒为合法对象、键名恒为
-//     结构体 tag 的普通 ASCII），RemoveField 只会在「非对象/结构异常」时返回 nil；
-//     emit 这条路上两者都不可能，故该回退**不可达**，没有 emit 级测试能覆盖它
-//     （原语层由 jsonwire_test.go 的 TestEnvelope_Fallback 等覆盖）。
-//   · 丢行分支（ForceKeys 也失败）：同上不可达。
+//
+//	· Envelope/ForceKeys 的失败回退：入参来自 json.Marshal（恒为合法对象、键名恒为
+//	  结构体 tag 的普通 ASCII），RemoveField 只会在「非对象/结构异常」时返回 nil；
+//	  emit 这条路上两者都不可能，故该回退**不可达**，没有 emit 级测试能覆盖它
+//	  （原语层由 jsonwire_test.go 的 TestEnvelope_Fallback 等覆盖）。
+//	· 丢行分支（ForceKeys 也失败）：同上不可达。
 func TestEmitTodoSnapshotExactlyOnce(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	m, buf := newManagerWithAppData(t, t.TempDir())
