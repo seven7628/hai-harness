@@ -228,9 +228,7 @@
     "protocols": [
       {
         "name": "Agent Hub Deep Link",
-        "schemes": [
-          "hub"
-        ]
+        "schemes": ["hub"]
       }
     ],
     "files": [
