@@ -10,15 +10,20 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { applyNarrativeSkin } from '../lib/narrativeSkin'
 import { applyTheme } from '../lib/theme'
+import { setHubTransport } from '../transport/host'
 import MobileApp from './MobileApp'
+import { sharedMobileTransport } from './transport/mobile'
 import { readThemePref } from './theme'
 import './mobile.css'
 
-// getTransport() 的分流开关（transport/index.ts）。置位必须在首次渲染前：
-// 静态 import 只会「求值」模块，getTransport() 是渲染时调用的，所以这里置位够早。
-// 注意：手机壳自己直接 import mobile/transport/mobile（不经过 transport/index.ts），
-// 免得把 mock/electron 两个 transport 打进手机包；两边通过 sharedMobileTransport()
-// 拿到同一个实例。
+// Hub transport seam（P8-01b）：Hub 的 store/命令/附件只认 transport/host.ts。
+// 手机壳注册自己的 transport —— **不 import transport/index.ts**，否则 electron/mock
+// 会被静态边拉进手机包。sharedMobileTransport() 是进程内单例，壳与 Hub 拿到同一个实例。
+setHubTransport(() => sharedMobileTransport())
+
+// getTransport() 的分流开关（transport/index.ts）：手机包不 import 它，但浏览器里若
+// 有模块误引（未来的共享组件），这个开关能保证分流仍落到手机 transport 而不是 mock。
+// 置位必须在首次渲染前：getTransport() 是渲染/动作时调用的，静态 import 只求值模块。
 window.__HAI_MOBILE__ = true
 
 applyNarrativeSkin('runtime')

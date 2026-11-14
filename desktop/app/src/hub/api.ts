@@ -1,4 +1,4 @@
-import { getTransport } from '../transport'
+import { getHubTransport } from '../transport/host'
 import type { BridgeCommand } from '../store/events'
 
 // Hub 命令出入口。
@@ -21,7 +21,7 @@ export interface HubResult<T> {
 }
 
 export function hubCommand<T>(type: string, payload: Record<string, unknown>, timeoutMs = 20_000): Promise<HubResult<T>> {
-  const transport = getTransport()
+  const transport = getHubTransport()
   const id = ++hubCmdSeq
   return new Promise<HubResult<T>>((resolve) => {
     let settled = false
