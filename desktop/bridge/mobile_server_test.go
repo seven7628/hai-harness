@@ -297,8 +297,36 @@ func TestMobileCmdAllowsSessionManagement(t *testing.T) {
 	}
 }
 
-func TestPickPairURLPrefersTailscale(t *testing.T) {
-	// 同 Wi-Fi 时两者都能用；在外面只有 100.x 能用 → 二维码必须选它
+// P8-02：手机主会话页复用桌面 Composer → 发送走「暂存队列整队推送」ask_batch。
+// 白名单里原本只有单条 ask，手机点发送会 403（用户看到消息停在「待发送」）。
+// 两者是同一个能力（用户消息进会话 inbox），所以 ask_batch 必须一起放行；
+// 真正的越权面（switch_model / skill_install / mcp_set）继续拒绝。
+func TestMobileCmdAllowsAskBatch(t *testing.T) {
+	s, ts := testMobileServer(t)
+	code, _ := s.pair.newCode(time.Now())
+	token, _, err := s.pair.pair(code, "", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{"ask", "ask_batch", "interrupt", "approve", "answer_question"} {
+		if !mobileAllowedCommands[Command(cmd)] {
+			t.Fatalf("%s 应在手机白名单里（P8-02 主会话页的发送/停止/审批/提问）", cmd)
+		}
+	}
+	// 越权面回归：这几条仍然默认拒绝。
+	for _, cmd := range []string{"switch_model", "command", "skills", "compact", "fs_list"} {
+		if mobileAllowedCommands[Command(cmd)] {
+			t.Fatalf("%s 不该在手机白名单里", cmd)
+		}
+	}
+	r := postJSON(t, ts.URL+"/api/cmd", map[string]any{"cmd": "ask_batch", "payload": map[string]any{}}, token)
+	defer r.Body.Close()
+	if r.StatusCode == http.StatusForbidden {
+		t.Fatalf("ask_batch 被拒绝（403）：手机端无法发消息")
+	}
+}
+
+func TestPickPairURLPrefersTailscale(t *testing.T) { // 同 Wi-Fi 时两者都能用；在外面只有 100.x 能用 → 二维码必须选它
 	got := pickPairURL([]string{"http://192.168.1.7:47800/m/", "http://100.101.102.103:47800/m/"})
 	if got != "http://100.101.102.103:47800/m/" {
 		t.Fatalf("应优先 Tailscale，得到 %q", got)

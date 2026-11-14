@@ -38,9 +38,14 @@ const (
 
 // mobileAllowedCommands 手机能调的**全部**命令。默认拒绝：新增能力要显式加进来。
 var mobileAllowedCommands = map[Command]bool{
-	CmdList:            true,
-	CmdNewSession:      true,
-	CmdAsk:             true,
+	CmdList:       true,
+	CmdNewSession: true,
+	CmdAsk:        true,
+	// ask_batch：P8-02 手机主会话页复用桌面 Composer，发送走的是「暂存队列整队推送」
+	// （store 的 flushPending → ask_batch），不是单条 ask。它与 ask 是**同一个能力**
+	// （把用户消息投进会话 inbox，payload 带 workspace/session_id 归属），不放行的话
+	// 手机上点发送只会拿 403 —— 而「发消息」本来就在白名单里。
+	CmdAskBatch:        true,
 	CmdInterrupt:       true,
 	CmdApprove:         true,
 	CmdAnswerQuestion:  true,

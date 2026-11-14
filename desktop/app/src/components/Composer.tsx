@@ -130,8 +130,18 @@ function highlightInput(text: string, commands: string[]): React.ReactNode {
   )
 }
 
-export default function Composer() {
+export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' | 'mobile' } = {}) {
   const t = useT()
+  // 手机（P8-02）：会话面整体复用，但**桌面专属入口按能力隐藏** —— 不是 CSS 藏起来
+  // 留一个点得动的死按钮，而是不渲染：
+  //   · 模型/思考强度/模式芯片 → 手机 bridge 的 allowlist 没有 switch_model/mode/effort，
+  //     点了只会 403（desktop/bridge/mobile_server.go）；
+  //   · 上下文环（→ 压缩确认）与斜杠命令菜单 → 走 compact / command，同样未放行；
+  //   · 图片/文件选择器 → 手机 transport 的 pickFsFiles 返回空（没有 Electron 对话框）；
+  //     粘贴图片仍可用（onPaste 与按钮无关）；
+  //   · @ 文件引用面板 → 走 fs_list，未放行。
+  // 保留：输入、发送、停止、暂存队列、粘贴附件、运行态条 —— 这些是 allowlist 内的能力。
+  const mobile = variant === 'mobile'
   // 正在看子智能体时：输入框照常发**主会话**（协议上子智能体的通道是 agent_send，只有模型
   // 会用它）。这个提示存在的唯一理由：避免用户在子会话视角里输入后，惊讶于"回答来自主 agent"。
   const focused = useAppStore((s) => s.focusedAgent)
@@ -699,7 +709,7 @@ export default function Composer() {
   const filtered = slashCommands.filter((c) => c.toLowerCase().startsWith(firstToken.toLowerCase()))
   // 只有存在匹配项且仍在输入命令前缀时显示补全菜单；未知的 /path
   //（例如 /api-test/xxx）保持普通文本，不显示“未识别 command”。
-  const cmdOpen = cmdMenu && completing && filtered.length > 0
+  const cmdOpen = cmdMenu && completing && filtered.length > 0 && !mobile
   // 弹层里的搜索框：镜像第一行已输入的 `/x`，改它就是改正文（单一数据源）
   const slashQuery = firstToken.slice(1)
   const [slashActive, setSlashActive] = useState(0)
@@ -1401,7 +1411,7 @@ export default function Composer() {
             )
           )}
         </div>
-        {atOpen && workspace && (
+        {!mobile && atOpen && workspace && (
           <div ref={refPanelRef}>
             <FileRefPanel
               workspace={workspace}
@@ -1492,7 +1502,7 @@ export default function Composer() {
             name="message"
             className="input"
             rows={1}
-            placeholder={compressing ? t('composer.compressing.wait') : queueFull ? t('composer.queueFull').replace('{n}', String(QUEUE_CAP)) : t('composer.placeholder')}
+            placeholder={compressing ? t('composer.compressing.wait') : queueFull ? t('composer.queueFull').replace('{n}', String(QUEUE_CAP)) : t(mobile ? 'composer.placeholderMobile' : 'composer.placeholder')}
             value={text}
             readOnly={queueFull || compressing}
             disabled={compressing}
@@ -1502,7 +1512,7 @@ export default function Composer() {
               const pos = e.target.selectionStart ?? v.length
               histNavRef.current = null // 用户开始编辑 → 退出历史浏览（当前文本成为新草稿）
               setText(v)
-              if (v.trim().startsWith('/')) {
+              if (!mobile && v.trim().startsWith('/')) {
                 if (!cmdMenu) fetchSkills() // 命令列表数据源：技能清单（启用过滤；仅首开拉取）
                 setCmdMenu(true)
               } else {
@@ -1514,7 +1524,7 @@ export default function Composer() {
               // 新增：面板关闭后回删 token 中间（@./doc → @./do）也重新唤醒
               //（旧实现只认光标紧贴 @，删除场景无法重开）。
               const m = v.slice(0, pos).match(/(^|[\s])@([^\s]*)$/)
-              if (m) {
+              if (m && !mobile) {
                 const atIdx = pos - (m[2]?.length ?? 0) - 1 // @ 恒在 token 前 1 位（(^|[\s]) 前导不影响索引）
                 if (!atOpen || atStart !== atIdx) setAtStart(atIdx)
                 setAtFilter(m[2] ?? '')
@@ -1638,14 +1648,16 @@ export default function Composer() {
         </div>
         <div className="row2">
           {/* 模式恒在最左（P 布局决策）；模型/思考强度/上下文/发送归右组 */}
-          <ChipMenu
-            className="mode-chip"
-            label={<><span className="compact-chip-icon"><AccessIcon size={14} /></span><span className="chip-full-label"><span style={{ color: 'var(--text-3)' }}>{t('composer.mode')}</span> <span className="mono">{modes.find((m) => m.key === mode)?.label ?? mode}</span></span></>}
-            items={modes}
-            value={mode}
-            onSelect={compressing ? () => undefined : switchMode}
-          />
-          {rt && capsOpen && (
+          {!mobile && (
+            <ChipMenu
+              className="mode-chip"
+              label={<><span className="compact-chip-icon"><AccessIcon size={14} /></span><span className="chip-full-label"><span style={{ color: 'var(--text-3)' }}>{t('composer.mode')}</span> <span className="mono">{modes.find((m) => m.key === mode)?.label ?? mode}</span></span></>}
+              items={modes}
+              value={mode}
+              onSelect={compressing ? () => undefined : switchMode}
+            />
+          )}
+          {!mobile && rt && capsOpen && (
             <CapsPop
               onClose={() => setCapsOpen(false)}
               onInsertSkill={(cmd) => {
@@ -1656,6 +1668,10 @@ export default function Composer() {
             />
           )}
           <div className="row2-right">
+            {/* 手机不渲染这一整段（模型/Effort/能力/上下文环）：allowlist 里没有
+                switch_model/effort/mode 与 compact，点了只会 403 —— 见函数头的 variant 注释。 */}
+            {!mobile && (
+              <>
             <div
               ref={chipRef}
               className="model-chip"
@@ -1836,9 +1852,11 @@ export default function Composer() {
                 />
               )}
             </div>
+              </>
+            )}
             {/* 图片上传 / 添加文件：图片走内联 data URL（当前模型支持 image 才显示按钮）；
                 其他类型一律走 @引用（不复制）——引用与模型输入类型无关，所以「添加文件」恒可见。 */}
-            {canImage && (
+            {!mobile && canImage && (
               <>
                 <input
                   ref={fileInputRef}
@@ -1860,17 +1878,19 @@ export default function Composer() {
               </>
             )}
             {/* 添加文件（本地文件引用）：原生多选对话框 → @引用进消息，不复制、不上传 */}
-            <button
-              className="attach-btn doc-btn"
-              onClick={() => void pickDocFiles()}
-              disabled={queueFull || compressing}
-              title={t('composer.attach.docHint')}
-              aria-label={t('composer.attach.addFile')}
-            >
-              <PaperclipIcon size={15} />
-            </button>
+            {!mobile && (
+              <button
+                className="attach-btn doc-btn"
+                onClick={() => void pickDocFiles()}
+                disabled={queueFull || compressing}
+                title={t('composer.attach.docHint')}
+                aria-label={t('composer.attach.addFile')}
+              >
+                <PaperclipIcon size={15} />
+              </button>
+            )}
             {/* 语音输入（话筒）：设置里配置了语音模型才显示；按住说话 → 松手转写 → 文字入输入框 */}
-            {sttEnabled && (
+            {!mobile && sttEnabled && (
               <button
                 className={`mic-btn ${recording ? 'recording' : ''}`}
                 onClick={() => void toggleRecording()}

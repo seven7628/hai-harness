@@ -336,9 +336,13 @@ export default function HubSidebar({ variant = 'desktop' }: { variant?: 'desktop
           ) : agents.length === 0 ? (
             <div className="hub-side-empty">
               <p>{t('hub.noAgents')}</p>
-              <button className="hub-side-empty-add" onClick={() => openEditor(null)}>
-                <Plus size={12} /> {t('hub.newAgent')}
-              </button>
+              {/* 空态的新建入口与列表头那颗 + 是同一个能力（hub_agent_create）——
+                  手机白名单没放行，所以同样受 agentEditor 控制（P8-02 补齐）。 */}
+              {capabilities.agentEditor ? (
+                <button className="hub-side-empty-add" onClick={() => openEditor(null)}>
+                  <Plus size={12} /> {t('hub.newAgent')}
+                </button>
+              ) : null}
             </div>
           ) : (
             <div className="hub-side-list">

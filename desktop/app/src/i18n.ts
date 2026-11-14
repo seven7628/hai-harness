@@ -129,6 +129,18 @@ const zh: Record<string, string> = {
   'mobile.disabled': '手机端未启用（启动时设置了 HAI_MOBILE=off）。',
   'mobile.loading': '正在读取…',
   'mobile.security': '默认只监听本机回环地址；跨公网请用 Tailscale。手机不能删会话、改设置或安装技能。',
+  // ===== 手机壳：主会话列表（P8-02）=====
+  // 入口条（Hub / 会话）的文案**不在这里**：手机壳首屏静态引 i18n 会把整份字典
+  // 拉进 Hub chunk（实测 +215KB），所以那两格就地写（见 mobile/MobileApp.tsx）。
+  'mobile.session.back': '返回会话列表',
+  'mobile.sessions.workspace': '工作区',
+  'mobile.sessions.loading': '正在读取会话…',
+  'mobile.sessions.loadFailed': '读取失败',
+  'mobile.sessions.retry': '重试',
+  'mobile.sessions.refresh': '刷新',
+  'mobile.sessions.noWorkspace': '这台电脑上还没有工作区。先在桌面端添加一个工作区，手机会自动看到。',
+  'mobile.sessions.noSession': '这个工作区还没有会话。在桌面端或 Hub 里开始一个对话后，这里会列出来。',
+  'mobile.sessions.running': '运行中',
   'settings.memory': '项目记忆',
   'settings.memory.desc': 'Project Memory：跨会话记住这个项目的历史决策与踩坑记录。会话启动时注入记忆索引，模型用标准文件工具按需读取与写入。',
   'settings.memory.enable': '启用项目记忆',
@@ -573,6 +585,9 @@ const zh: Record<string, string> = {
   'tool.promoted': '后台运行中',
   // 输入
   'composer.placeholder': '输入消息…（@ 引用文件/目录 · / 开头为命令：/技能名、/summary、/clear）',
+  // 手机（P8-02）：@ 引用与斜杠命令在手机上不可用（见 Composer 的 variant 注释），
+  // 占位符不能再承诺它们 —— 否则用户打一个 / 什么都不出现。
+  'composer.placeholderMobile': '输入消息…（Enter 发送，Shift+Enter 换行）',
   'composer.expanding': '正在展开引用…',
   'composer.queueFull': '排队已满（最多 {n} 条）· 正在依次处理',
   'composer.send': '发送',
@@ -2379,6 +2394,16 @@ const en: Record<string, string> = {
   'mobile.disabled': 'Mobile is disabled (HAI_MOBILE=off at startup).',
   'mobile.loading': 'Loading…',
   'mobile.security': 'Listens on loopback only by default; use Tailscale across networks. A phone cannot delete sessions, change settings or install skills.',
+  // ===== Mobile shell: session list (P8-02) =====
+  'mobile.session.back': 'Back to sessions',
+  'mobile.sessions.workspace': 'Workspace',
+  'mobile.sessions.loading': 'Loading sessions…',
+  'mobile.sessions.loadFailed': 'Failed to load',
+  'mobile.sessions.retry': 'Retry',
+  'mobile.sessions.refresh': 'Refresh',
+  'mobile.sessions.noWorkspace': 'No workspaces on this computer yet. Add one on the desktop and it shows up here.',
+  'mobile.sessions.noSession': 'No sessions in this workspace yet. Start a conversation on the desktop or in the Hub and it will be listed here.',
+  'mobile.sessions.running': 'running',
   'settings.memory': 'Project memory',
   'settings.memory.desc': 'Project Memory: remembers this project\'s past decisions and pitfalls across sessions. The memory index is injected at session start; the model reads and writes it with the standard file tools.',
   'settings.memory.enable': 'Enable project memory',
@@ -2722,6 +2747,7 @@ const en: Record<string, string> = {
   'tool.promote.fail': 'Move to background failed: tool already finished or task not found, please retry',
   'tool.promoted': 'Running in background',
   'composer.placeholder': 'Type a message… (@ reference files/folders · / for commands: /skill, /summary, /clear)',
+  'composer.placeholderMobile': 'Message… (Enter to send, Shift+Enter for a new line)',
   'composer.expanding': 'Expanding references…',
   'composer.queueFull': 'Queue full (max {n}) · processing in order',
   'composer.send': 'Send',

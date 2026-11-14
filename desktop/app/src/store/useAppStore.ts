@@ -3850,7 +3850,42 @@ const OWNER_SCOPED_COMMANDS = new Set<string>([
   'im_route_del',
 ])
 
+// 手机壳（P8-02）的**能力闸门**：下面这些命令在手机 bridge 的白名单外
+// （desktop/bridge/mobile_server.go 的 mobileAllowedCommands 默认拒绝），而且手机上
+// 也没有对应入口 —— 模型/模式/Effort 芯片、上下文环（compact）、斜杠命令菜单（skills）、
+// git 面板（git_*）、使用统计页（metrics）都不渲染（见 components/Composer.tsx 的 variant）。
+//
+// 但桌面 store 会在切会话时**顺手**发它们：setActiveSession → refreshGit（git_*）、
+// applySessionPrefs（switch_*）、空会话图表 ensureMetrics（metrics）。不挡的话每开一个
+// 会话就是 8 条 403：devtools 一片红、bridge 日志一片拒绝，而用户看不到任何变化 ——
+// 典型「看不见的坏味道」。挡在发之前：不发、不报错、不产生任何可见状态。
+//
+// 判据是 mobile/main.tsx 在首帧前置位的 window.__HAI_MOBILE__（桌面恒 false →
+// 桌面行为零变化；transport/index.ts 的 getTransport 分流用的同一个开关）。
+const MOBILE_UNSUPPORTED_COMMANDS = new Set([
+  'git_snapshot',
+  'git_history',
+  'git_branch_list',
+  'git_file_diff',
+  'git_commit_diff',
+  'switch_mode',
+  'switch_effort',
+  'switch_persona',
+  'switch_model',
+  'skills',
+  'compact',
+  'context_breakdown',
+  'metrics',
+])
+
+function mobileHost(): boolean {
+  return typeof window !== 'undefined' && window.__HAI_MOBILE__ === true
+}
+
 function send(cmd: Omit<BridgeCommand, 'id'>, navigation = false, onResp?: (r: { ok: boolean; error?: string }) => void, onData?: (r: { ok: boolean; error?: string; code?: string; data?: unknown }) => void): number {
+  // 手机：白名单外的命令直接不发（见 MOBILE_UNSUPPORTED_COMMANDS 的注释）。
+  // 返回 0 = 「没有发出」——这几条命令的调用方都不等回执（都走事件流的状态更新）。
+  if (mobileHost() && MOBILE_UNSUPPORTED_COMMANDS.has(cmd.type)) return 0
   const id = ++cmdSeq
   const ws = String(cmd.payload?.workspace || useAppStore.getState().workspace || '')
   const sessionId = String(cmd.payload?.session_id || cmd.payload?.id || '')
