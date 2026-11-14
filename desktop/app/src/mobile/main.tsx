@@ -14,6 +14,7 @@ import { setHubTransport } from '../transport/host'
 import MobileApp from './MobileApp'
 import { sharedMobileTransport } from './transport/mobile'
 import { readThemePref } from './theme'
+import { installVisualViewport } from './visual-viewport'
 import './mobile.css'
 
 // Hub transport seam（P8-01b）：Hub 的 store/命令/附件只认 transport/host.ts。
@@ -28,6 +29,10 @@ window.__HAI_MOBILE__ = true
 
 applyNarrativeSkin('runtime')
 applyTheme(readThemePref())
+
+// 软键盘：把 visualViewport 的可见高度/偏移写到 --m-vv-*（见 visual-viewport.ts）。
+// 必须在首帧前装好，否则 composer 会先按 100dvh 画一帧再被键盘顶掉。
+installVisualViewport()
 
 // 中文字体首帧后异步注入（与桌面同源，避免首屏阻塞）。
 function injectCJKFonts(): void {

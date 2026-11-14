@@ -40,23 +40,29 @@ html,
 body {
   margin: 0;
   padding: 0;
+  height: 100%;
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font, var(--font-ui, system-ui, sans-serif));
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
-  /* 手机端不允许整页横向滚动：单列布局的硬约束（溢出会被 e2e 抓成 scrollWidth > 视口）。 */
-  overflow-x: hidden;
+  /* 手机端不允许整页滚动：单列布局的硬约束（溢出会被 e2e 抓成 scrollWidth > 视口）。
+     纵向也锁住 —— 消息区/列表自己滚，整页滚会把 composer 和键盘对不齐。 */
+  overflow: hidden;
 }
 
 #root {
-  min-height: 100dvh;
+  height: 100dvh;
 }
 
 .m-app {
   /* 固定一屏高：会话页的消息区自己滚、composer 贴底（min-height 会让 composer 跑到
-     首屏之外，手机上没有「滚动到输入框」这种直觉）。 */
-  height: 100dvh;
+     首屏之外，手机上没有「滚动到输入框」这种直觉）。
+     软键盘（P8-03a）：visualViewport 把可见高度/偏移写到 html 变量上，见
+     mobile/visual-viewport.ts。没有该接口时回落 100dvh，与 P8-02 行为一致。
+     translateY 让 iOS 为露出焦点上滚页面时整壳跟着可见区走。 */
+  height: var(--m-vv-height, 100dvh);
+  transform: translateY(var(--m-vv-offset, 0px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -418,6 +424,7 @@ body {
 /* —— 会话 —— */
 
 .m-conv {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -425,30 +432,46 @@ body {
   background: var(--paper-2);
 }
 
+/* 返回键浮在共享 chat-header 的左上角（P8-03a 单头）：外层头不再占一行，
+   也不重复画标题/「⋯」。pointer-events:none 让其余区域照常点到底下的头像/标题；
+   只有 44px 的返回按钮接事件。 */
 .m-conv-head {
-  flex: 0 0 auto;
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* .chat-header 自己是一层（z-index:50，见 hub.css 的菜单穿透修复）——
+     返回键必须压在它上面，否则被 header 的背景整块盖住。 */
+  z-index: 60;
+  width: 56px;
+  height: 56px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 48px;
-  padding: 0 6px;
-  border-bottom: 1px solid var(--line);
-  background: var(--paper);
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
 }
 
-.m-conv-back,
-.m-conv-inspector {
-  margin-right: 0;
+.m-conv-back {
+  margin: 0;
+  pointer-events: auto;
+  /* 半透明底：头像/名字从按钮底下经过时图标仍可辨（不新增颜色，复用纸面）。 */
+  background: color-mix(in srgb, var(--paper) 72%, transparent);
+  backdrop-filter: blur(6px);
 }
 
+/* 视觉隐藏的标题：内层 .chat-title 已经显示同一个名字，这里只留给 e2e/读屏。 */
 .m-conv-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .m-conv-body {
@@ -469,12 +492,29 @@ body {
   min-height: 0;
 }
 
-/* 手机上的会话头收紧一档：桌面 64px 是为三栏留呼吸，手机每像素都算消息区。 */
+/* 手机上的会话头收紧一档：桌面 64px 是为三栏留呼吸，手机每像素都算消息区。
+   左边让出 56px 给浮动的返回键（.m-conv-head），其余解剖不动。 */
 .m-conv .hub-demo .chat-header {
   min-height: 56px;
   height: auto;
-  padding: 6px 10px;
+  padding: 6px 6px 6px 56px;
   gap: 8px;
+}
+
+/* 头里的「上下文（抽屉）/更多」也要 44px：桌面是 30px 的图标密度。 */
+.m-conv .hub-demo .chat-header .icon-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+}
+
+.m-conv .hub-demo .chat-header .header-actions {
+  gap: 0;
+}
+
+/* 菜单锚在 56px 头下方：44px 按钮的底边是 50px，38px 会盖住按钮。 */
+.m-conv .hub-demo .chat-header .header-menu {
+  top: 52px;
 }
 
 /* 输入框 16px（iOS 聚焦不放大）。textareas 全部命中：DM/群 composer 与派任务表单。 */
@@ -482,14 +522,37 @@ body {
   font-size: 16px;
 }
 
+/* composer 高度（P8-03a）：桌面 34px 输入行 + 18px meta 行 + 24px 内边距 = 100px，
+   手机上 meta 行是空的（键盘提示与「它看到了什么」在 ≤900 都已被 demo.css 隐藏），
+   整块空白。这里把 DM 的空 meta 行拿掉、输入行压到 28px（4 行封顶 88px，自动增高
+   由 useComposerAutoGrow 按 line-height/padding 真值算，不靠写死 rows）。 */
 .m-conv .hub-demo .composer {
-  padding: 6px 6px 6px 8px;
+  padding: 4px 6px 4px 8px;
+}
+
+.m-conv .hub-demo .composer > textarea {
+  height: 28px;
+  min-height: 28px;
+  max-height: 88px;
+  padding: 4px 2px;
+  line-height: 20px;
 }
 
 .m-conv .hub-demo .composer .icon-btn {
   width: 44px;
   height: 44px;
   margin-bottom: 0;
+}
+
+/* DM 的 meta 行只有「Enter 发送 / 它看到了什么」——触屏上两项都不显示，留着的
+   只是一个 18px 的空行。群 composer 的 meta 行有「对话/派任务」切换，不能隐藏。 */
+.m-conv .hub-dm .composer-meta {
+  display: none;
+}
+
+.m-conv .hub-group-view .composer-meta {
+  margin-top: 4px;
+  min-height: 0;
 }
 
 /* 群 composer 的「对话 / 派任务」切换：桌面是 28px 的小 tab，手机要 44px 才点得准。 */
@@ -519,7 +582,7 @@ body {
 /* composer 底部留白：home 条由 .m-app 的 padding 统一让位（子元素再吃一次 env()
    会变成双倍内边距，iPhone 上 composer 离底边 68px），这里只给 8px 视觉间距。 */
 .m-conv .hub-demo .composer-wrap {
-  padding-bottom: 8px;
+  padding: 6px 10px 8px;
 }
 
 /* —— 详情抽屉（Context / 任务 / Needs / 会话 / 概览）—— */
@@ -1183,14 +1246,17 @@ body {
   line-height: 1.5;
 }
 
+/* 输入区高度（P8-03a）：桌面 64px 是为了三行草稿，手机单列里太高、下方 row2 再占
+   44px，composer 整块 ~130px。压到 48px 起步（两行）、32vh 封顶，键盘弹出时消息区
+   仍留得下内容；overlay 与 textarea 的 padding 必须逐字一致，否则双层文字错位。 */
 .m-session .composer .input {
-  min-height: 64px;
-  max-height: 40vh;
-  padding: 10px 12px;
+  min-height: 48px;
+  max-height: 32vh;
+  padding: 8px 12px;
 }
 
 .m-session .composer .input-hl {
-  padding: 10px 12px;
+  padding: 8px 12px;
 }
 
 /* 发送/停止：44px 触控目标（桌面 26px；runtime 皮肤给的是 28px）。
@@ -1208,7 +1274,7 @@ body {
 }
 
 .m-session .composer .row2 {
-  padding: 6px 8px 8px;
+  padding: 4px 8px 6px;
 }
 
 .m-session .composer .row2-right {

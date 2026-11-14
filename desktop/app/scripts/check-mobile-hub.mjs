@@ -265,7 +265,9 @@ async function waitFor(fn, timeout = 6000, step = 30) {
 // 手机壳的导航、列表行、tab、搜索框、composer、抽屉页签与关闭。
 const TOUCH_SELECTORS = [
   '[data-testid="mobile-back"]',
-  '[data-testid="mobile-inspector-open"]',
+  // P8-03a：外层「⋯」撤掉，抽屉入口 = 共享 chat-header 的「上下文」按钮；
+  // 头里两个 icon-btn（上下文/更多）都必须是 44px。
+  '.m-conv .chat-header .icon-btn',
   '[data-testid="mobile-lang"]',
   '[data-testid="mobile-theme"]',
   '[data-testid="mobile-pair-submit"]',
@@ -412,7 +414,7 @@ async function runViewport(browser, baseURL, vp) {
   await measure(page, 'DM 会话（发送后）', vp)
 
   // 4) 详情抽屉：Context / 任务 / Needs
-  await page.click('[data-testid="mobile-inspector-open"]')
+  await page.locator('.m-conv .chat-header .icon-btn[aria-label="上下文"]').first().click()
   await waitFor(() => page.locator('[data-testid="mobile-inspector-drawer"]').count())
   const drawerTabs = await page.locator('.m-drawer .hub-inspector-tabs button').allInnerTexts()
   for (const label of ['概览', '任务', 'Needs', 'Context']) {
@@ -469,7 +471,7 @@ async function runViewport(browser, baseURL, vp) {
   console.log('  ✅ 群发消息：乐观气泡出现 + hub_group_send')
 
   // 9) 群会话里打开抽屉的 Context（只读、手机不渲染提示词分层）
-  await page.locator('.hub-group-view .chat-header .icon-btn').first().click()
+  await page.locator('.hub-group-view .chat-header .icon-btn[aria-label="上下文"]').first().click()
   await waitFor(() => page.locator('[data-testid="mobile-inspector-drawer"]').count())
   await waitFor(async () => (await page.locator('.m-drawer').innerText()).includes('消息上下文'))
   assert(!(await page.locator('.m-drawer').innerText()).includes('提示词分层'), '手机不应渲染提示词分层（allowlist 未放行）')

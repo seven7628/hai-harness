@@ -3,8 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover：刘海/底部 home 条区域交给 env(safe-area-inset-*) 处理（mobile.css）。
+         interactive-widget=resizes-content：Android Chrome 的键盘让 layout viewport 跟着缩，
+         与 iOS 的 visualViewport 路径（src/mobile/visual-viewport.ts）落到同一个结果。
          不写 user-scalable=no —— 允许双指放大是无障碍底线。 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#0b0c0e" />
     <meta name="color-scheme" content="dark light" />
     <title>HAI</title>
