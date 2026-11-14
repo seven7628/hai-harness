@@ -2617,7 +2617,8 @@ const BASE = {
       "acceptance": "390/430：列表→群/DM→发消息/流式/任务卡/Needs；新 mobile transport 合成 command_response；host seam 桌面行为零变化；新页可通过 HAI_MOBILE_WEB_DIR 托管，旧 /m/ 不回归。",
       "tests": "npx tsc --noEmit；node mobile transport 单测；浏览器 390/430 截图；桌面 check-hub-* 关键脚本",
       "commit": "—",
-      "status": "in_progress"
+      "status": "in_progress",
+      "note": "P8-01a 已合并（094d6ad）；P8-01b 列表/群/DM 屏幕进行中。"
     },
     {
       "id": "P8-02",
@@ -3849,6 +3850,13 @@ const BASE = {
     "P8-03": {
       "status": "blocked",
       "commit": "—"
+    },
+    "P8-01a": {
+      "status": "done",
+      "commit": "f79dbe6",
+      "merge": "094d6ad",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：tsc + mobile transport 131 + css + hub-conv 151 + right-tabs 225 全绿；手机包 157KB/51KB gzip，边界断言无 useAppStore/mock/electron。"
     }
   },
   "reviewGate": {
