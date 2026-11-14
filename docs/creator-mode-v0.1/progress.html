@@ -205,7 +205,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 13:05",
+    "updated": "2026-11-13 18:50",
     "current": "R14b"
   },
   "rounds": [
@@ -1070,15 +1070,19 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R14"
       ],
-      "status": "todo",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "c3b6ac5",
+      "review": "主会话复核：tsc 0 / eslint 56（同基线）/ vite build；新探针 verify_plugin_tab_persist 33 项、plugin-loader 50 / session-tabs 38 / tabbar 89 / boundary 82 / ui 31 逐项同数；test:right-tabs 236（N52..N62 新增 11 条）。读码确认：plugin 分支在 toPersistedTab 的 switch 之前（落进 default 会静默变空白网页）；恢复期白名单是纯形状判定、不查 index（查 index 就是本轮 bug 的成因）；内置四类判据与落盘字节未动（session-tabs P8 守住反方向）。变异 3 条真红并复原：删写侧分支 16 红 / params 不往返 2 红 / 恢复侧当 web 重建 14 红",
       "perf": [],
       "acc": [
-        "sanitizePersistedTab 接受 plugin:*（且只接受 index 里存在的 id），内置四类行为不变",
-        "装一个插件 → 开标签 → reload → 标签恢复且面板渲染（e2e 走真 store）",
-        "插件被卸载后重启：标签不复活（或变墓碑，按 R14b 的墓碑持久化结论）",
-        "rightTab 的 `as RightTab` 断言要么去掉要么收窄（与 R11b 合并处理）"
+        "sanitizePersistedTab 接受合法 plugin:<id>（纯形状判定；**不查 index** —— 恢复时插件还没加载，查 index 必然丢标签），内置四类行为字节不变",
+        "装一个插件 → 开标签 → reload → 标签恢复且面板渲染（e2e 走真 store + 真 RightPanel；gate 住 surfaceIndex 确定性复现「标签已恢复、provider 未注册」那一瞬）",
+        "插件被卸载后重启：标签**仍在**但是墓碑（missing / disabled），绝不退化成空白 web 标签；零 pageerror",
+        "params 往返：{a:1} 经 localStorage → reload → 面板 render 读到的仍是 {a:1}",
+        "裁决：params > 4 KiB 写侧「整条不持久化」、读侧「只丢 params」——两侧刻意相反（前者是别画错面板，后者是别丢用户的标签）",
+        "裁决：卸载/禁用后墓碑**留记录**（标签地址不依赖插件活着）；从标签条上消失等于用户的东西被第三方卸掉了",
+        "裁决：不升 TABS_PERSIST_VERSION（加一种标签，旧数据天然兼容；升版本会让老用户标签集整体丢弃）",
+        "rightTab 的 `as RightTab` 断言本轮不动（并入 R11b 的派生字段删除）"
       ],
       "rollback": "白名单放行是可独立回滚的一处判据；回滚后 plugin 标签退化为「重启丢失」"
     },

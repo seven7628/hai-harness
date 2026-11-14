@@ -48,6 +48,9 @@ import { disposeMediaElementsForPath } from '../lib/mediaStage'
 // 反向的 builtin provider → store 更早就存在（webSurface 读 embedNav），两者不构成环：
 //   builtin → {store, registry}，store → registry，registry 谁都不 import。
 import { getSurface, isBuiltinKind } from '../surfaces/registry'
+// 只 import 类型（BuiltinKind）：持久化的 kind 白名单要写「内置四类 | plugin:<id>」这个联合，
+// 而内置四类的名字**不在本文件**重复列举（PR-11 起唯一真相是注册表的 BUILTIN_KINDS）。
+import type { BuiltinKind } from '../surfaces/types'
 // PR-12 `ui` 通道：渲染层 → 桥的 UI 快照（lib/uiSnapshot）+ 桥 → 渲染层的 ui 信封（lib/uiBus）。
 // 两者都不进事件流：`ui` 不是 28 类 agent 事件（不落盘、不重放、不进 transcript）。
 import { startUISnapshot } from '../lib/uiSnapshot'
@@ -1540,15 +1543,57 @@ export const TABS_PERSIST_MAX_SCOPES = 40
 // HTML** 编进 url，可达数百 KB —— 存进 localStorage 会顶到配额，而它是「当时那一段内容」的
 // 快照，跨重启没有意义（内容源在对话里，用户想看会重新点一次）。
 const TABS_PERSIST_URL_MAX = 2048
+// plugin 标签（PR-14c）的 kind 形状：`plugin:<id>`，id = manifest 的 id（小写字母开头，
+// 可含数字与连字符，2~41 个字符）。
+//
+// 为什么这里自己写一份正则、**不**去问注册表「认得这个 kind 吗」：持久化是**离线**判定 ——
+// 恢复发生在模块加载那一刻，而插件 provider 要等 startPluginLoader（异步、在 bridge running
+// 之后）才注册。那一刻问注册表，答案永远是「不认得」，症状正是本 PR 要修的「重启丢标签」。
+// 白名单因此分成互不重叠的两半：内置四类归注册表的 BUILTIN_KINDS（PR-11 的唯一真相），
+// `plugin:` 归这条正则 —— 不存在 registry.ts 注释里警告的「两处枚举分叉」。
+const PLUGIN_KIND_RE = /^plugin:[a-z][a-z0-9-]{1,40}$/
+// params 的序列化上限（字节）。超限的**读/写两侧处置刻意相反**（各自调用点写了理由）：
+// 写侧整条不持久化，读侧只丢 params。两者不是笔误。
+const TABS_PERSIST_PARAMS_MAX = 4096
+
+/** 序列化后的**字节数**（不是字符数：一个中文字符 3 字节，用 length 会放过 3 倍大的东西）。 */
+function jsonByteSize(v: unknown): number | undefined {
+  try {
+    const s = JSON.stringify(v)
+    return typeof s === 'string' ? new TextEncoder().encode(s).length : undefined
+  } catch {
+    // 循环引用 / BigInt：不可序列化 = 不可持久化（抛出去会打断整个标签集的写入）
+    return undefined
+  }
+}
+
+/** 「普通对象」判据：字面量与 JSON.parse 的产物（排除数组 / null / 类实例 / Date 等）。 */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false
+  const proto = Object.getPrototypeOf(v)
+  return proto === Object.prototype || proto === null
+}
+
+/** `plugin:<id>` 且 id 合法（见 PLUGIN_KIND_RE）。做成谓词是为了让收窄落在调用点。 */
+function isPluginKind(x: unknown): x is `plugin:${string}` {
+  return typeof x === 'string' && PLUGIN_KIND_RE.test(x)
+}
+
 // 写入防抖：标签集变化常成串发生（syncWebTabs 在每个 embed-nav 事件上都会跑；打开一个文件
 // 会同时动标签集与激活项）→ 攒一攒再整体序列化一次，而不是每个 action 都 stringify 整表。
 const TABS_PERSIST_DEBOUNCE_MS = 300
 
-// 持久化形态：标签实例**剥掉运行时字段**（viewId / pageId / openSeq），web 换成 url 快照。
+// 持久化形态：标签实例**剥掉运行时字段**（viewId / pageId / openSeq / unavailable），web 换成
+// url 快照，plugin 换成 (kind, params)。
+//
+// PR-14c 给 plugin 加了一种**标签**（不是升版本）：旧数据里没有 plugin 项，新数据里的 plugin 项
+// 老版本读不到也只有「被白名单丢弃」这一种结果 —— 两个方向都天然兼容，故 TABS_PERSIST_VERSION
+// 仍是 1（升版本会让所有老用户的标签集被整体丢弃，代价与收益不成比例）。
 type PersistedTab =
   | { id: string; kind: 'activity' | 'git' }
   | { id: string; kind: 'file'; path?: string; mode?: FileTabMode; toolId?: string; startLine?: number }
   | { id: string; kind: 'web'; url: string; srcPath?: string }
+  | { id: string; kind: `plugin:${string}`; params?: Record<string, unknown> }
 interface PersistedTabSet { tabs: PersistedTab[]; activeId: string | null }
 interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
 
@@ -1560,6 +1605,23 @@ interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
 // （按 pageId）。反查不到就**丢弃**（池里已被 LRU 关掉/从未导航成功）——宁可不恢复，
 // 也不要恢复一个点不开的死标签。
 function toPersistedTab(t: TabInstance, s: AppState): PersistedTab | undefined {
+  // PR-14c：plugin 必须在 switch **之前**分流 —— `default:` 是 web 的兜底分支，把它写在那里
+  // 不会报任何错（类型也过得去），症状是「重启后插件标签变成一张空白网页」。回归探针 T4 钉住。
+  if (isPluginKind(t.kind)) {
+    // params 不在 TabInstance 的类型里（PR-12 的口径：store 只当 kind 是字符串，语义归
+    // 注册表）→ 这里按插件实例的形状读一次，不做类型层的联合扩展（那会让全仓的 kind switch
+    // 多出一个不可达分支）。
+    const params = (t as unknown as { params?: unknown }).params
+    if (params === undefined || params === null) return { id: t.id, kind: t.kind }
+    // 写侧：**任何存不下来的 params 都让整条标签不持久化**，而不是丢掉 params 字段。
+    // 身份 = (kind, params)（见 PluginTabInstance）：用一份少了/变了内容的 params 把它恢复
+    // 出来，等于对着用户的旧标签画一个**别的**面板，比少一个标签更难排查 —— 「重启后少一个
+    // 标签」是可见、可解释、点一下就回来的。
+    if (!isPlainObject(params)) return undefined
+    const bytes = jsonByteSize(params)
+    if (bytes === undefined || bytes > TABS_PERSIST_PARAMS_MAX) return undefined
+    return { id: t.id, kind: t.kind, params }
+  }
   switch (t.kind) {
     case 'activity': case 'git':
       return { id: t.id, kind: t.kind }
@@ -1582,15 +1644,20 @@ function toPersistedTab(t: TabInstance, s: AppState): PersistedTab | undefined {
 }
 
 // fromPersistedTab：存储形态 → 运行时标签（**新的 id**，见 loadPersistedTabs 的注释）。
-// web → 待重建态（只带 url/srcPath 快照，不带池身份）；file 的 openSeq 从 1 起。
+// web → 待重建态（只带 url/srcPath 快照，不带池身份）；file 的 openSeq 从 1 起；
+// plugin → 带 params 的插件实例（provider 缺失时由 RightPanel 渲染墓碑，见 unavailableReason）。
 function fromPersistedTab(p: PersistedTab, id: string): TabInstance {
   switch (p.kind) {
     case 'activity': case 'git':
       return { id, kind: p.kind }
     case 'file':
       return { id, kind: 'file', ...(p.path ? { path: p.path } : {}), ...(p.mode ? { mode: p.mode } : {}), ...(p.toolId ? { toolId: p.toolId } : {}), ...(p.startLine != null ? { startLine: p.startLine } : {}), openSeq: 1 }
-    default:
+    case 'web':
       return { id, kind: 'web', url: p.url, ...(p.srcPath ? { srcPath: p.srcPath } : {}) }
+    default:
+      // plugin：TabInstance 联合里没有这个成员（理由同 toPersistedTab）→ 结构上它就是
+      // PluginTabInstance。**断言只此一处**，并且注释说明为什么不在类型层扩展。
+      return { id, kind: p.kind, ...(p.params ? { params: p.params } : {}) } as unknown as TabInstance
   }
 }
 
@@ -1599,14 +1666,26 @@ function fromPersistedTab(p: PersistedTab, id: string): TabInstance {
 function sanitizePersistedTab(raw: unknown): PersistedTab | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const r = raw as Record<string, unknown>
-  // kind 白名单**不在本文件**（PR-11）：注册表的 BUILTIN_KINDS 是唯一真相，这里只是读它。
-  // 今天 plugin:* 与任意未知 kind 都为 false —— 插件标签要等 R11b/PR-14 再放开
-  //（届时放开的是注册表那一份清单，恢复路径自动跟上，不会再出现「两处枚举分叉」）。
-  const kind = isBuiltinKind(r.kind) ? r.kind : undefined
-  if (!kind) return undefined // 非法 kind（含旧版本枚举 / plugin:*）→ 丢弃这一条
+  // kind 白名单分两半（PR-11 / PR-14c）：内置四类读注册表的 BUILTIN_KINDS（唯一真相），
+  // plugin:<id> 读本文件的 PLUGIN_KIND_RE（理由见常量注释：恢复时插件还没注册，
+  // 问注册表必然「不认得」，那正好是「重启丢标签」这个 bug 的成因）。
+  const kind: BuiltinKind | `plugin:${string}` | undefined = isBuiltinKind(r.kind)
+    ? r.kind
+    : (isPluginKind(r.kind) ? r.kind : undefined)
+  if (!kind) return undefined // 非法 kind（含旧版本枚举 / 形状不对的 plugin id）→ 丢弃这一条
   const id = typeof r.id === 'string' && r.id ? r.id : newTabId()
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
   const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+  if (isPluginKind(kind)) {
+    // params 读侧：**只丢字段、不丢标签** —— 与写侧刻意相反。理由：面板少参数最坏退化成
+    // 「空/默认」形态（用户看得见，点一下就能重开），而丢标签是把用户打开过的东西从标签条上
+    // 抹掉；何况手改 localStorage / 老版本写坏的代价不该是「标签消失」。这条口径同样适用
+    // 于超限 params：宁可面板退化，也不让标签凭空少一条。
+    const params = isPlainObject(r.params) ? r.params : undefined
+    const bytes = params !== undefined ? jsonByteSize(params) : undefined
+    const keep = bytes !== undefined && bytes <= TABS_PERSIST_PARAMS_MAX
+    return { id, kind, ...(keep ? { params } : {}) }
+  }
   if (kind === 'file') {
     // mode 非法 → 归一化成缺省（缺省 = source 完整预览，与 focusSpec/tabKeyOf 的口径一致），
     // 而不是丢掉整个标签：路径还在，用户点开还能看到内容。

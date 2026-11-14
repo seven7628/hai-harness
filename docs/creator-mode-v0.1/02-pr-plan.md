@@ -413,6 +413,31 @@ skill requires 双向生效、panel.js 无 JSX / 无裸模块 import）。
 
 ---
 
+### PR-14c 落地（R14c）—— 插件标签持久化，与上面条款的口径差
+
+原立项写的是「`sanitizePersistedTab` 接受 `plugin:*`（且**只接受 index 里存在的 id**）」。
+后者被推翻，理由是本轮的 bug 本身：**恢复发生在模块加载那一刻**，而插件 provider 要等
+`startPluginLoader`（异步、bridge running 之后）才注册 —— 恢复期问「index 里有没有」只能
+得到「没有」，症状正是「重启丢标签」。白名单因此改成**纯形状判定**（离线可判）。
+
+| 项 | 计划里的写法 | 落地 | 为什么 |
+|---|---|---|---|
+| 白名单口径 | `isBuiltinKind` 一份清单 + 「index 里存在的 id」 | 内置四类仍读注册表的 `BUILTIN_KINDS`；`plugin:` 用 `^plugin:[a-z][a-z0-9-]{1,40}$` 判形状，**不查 index** | 恢复时插件还没加载（见上）。两半判据互不重叠，不存在 registry.ts 注释里警告的「两处枚举分叉」 |
+| 存储版本 | 「加一种标签」可能被理解为升版本 | `TABS_PERSIST_VERSION` **仍是 1** | 旧数据没有 plugin 项 → 天然兼容；新数据落到老版本 → 仍是被白名单丢弃。升版本会让所有老用户的标签集被整体丢弃 |
+| params 超 4 KiB（**写侧**） | 未写 | 整条标签**不持久化**（`toPersistedTab` 回 undefined） | 身份 = `(kind, params)`。用一份截断/变过的 params 恢复，等于对着旧标签画**别的**东西；「重启后少一个标签」是可见、可解释、点一下就回来的 |
+| params 非对象 / 超 4 KiB（**读侧**） | 未写 | **只丢 params 字段、标签照恢复** | 与写侧刻意相反：面板缺参数最坏退化成空/默认形态（看得见、点一下能重开），丢标签是用户打开过的东西没了；手改 localStorage / 老写法的代价也不该是标签消失 |
+| 卸载 / 禁用后重启 | 「（或变墓碑，按 R14b 的墓碑持久化结论）」 | 标签**留记录**、恢复成墓碑（`missing` / `disabled`），不退化成空白 web 标签 | 标签是「用户打开过的东西」，它的地址（kind+params）不依赖插件活着。卸载即从标签条上消失，等于用户的东西被第三方卸掉了。R14b 的插件页与这里口径一致 |
+| 恢复时序（墓碑 → 面板） | 未写 | **不改代码**：复用 PR-10 的 `subscribeSurfaces` 一条订阅 | `registerSurface` → `emit` → RightPanel 重算 `activeUnavailable`。新探针用「gate 住 surfaceIndex」把那一瞬确定性地复现出来（不靠 sleep 赌时序），放行后面板自己出现 |
+| `rightTab` 的 `as RightTab` | 「要么去掉要么收窄」 | 本轮**不动**（并入 R11b） | 派生字段的删除是 R11b 的范围；本轮恢复出来的 plugin 标签让它暂时仍是一个 string 断言，`rightTab` 的读点在 R11b 一起收口 |
+
+**证据**：`e2e/verify_plugin_tab_persist.mjs`（33 项，端口 5229：写入形态 / reload 恢复 /
+墓碑 → 面板 / params 往返 / 超限不恢复 / 卸载后墓碑 / 零 pageerror）、
+`scripts/test-right-panel-tabs.mjs` 的 N52..N62（11 项，走真 boot 路径，覆盖读/写两侧不对称）、
+`e2e/verify_session_tabs_persist.mjs` P8（内置四类断言逐字未动，总数仍 38）。
+变异 3 条真红并复原：删写侧 plugin 分支 16 红 / params 不往返 2 红 / 恢复侧当 web 重建 14 红。
+
+---
+
 ### PR-15 收口
 
 - 回写 `docs/DESKTOP.md` §5.7（⌘S、右栏三态、多标签）；

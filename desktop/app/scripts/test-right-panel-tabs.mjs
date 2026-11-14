@@ -1000,6 +1000,57 @@ async function main() {
     const scopes8 = JSON.parse(mem.get(LS_TABS)).scopes
     eq(Object.keys(scopes8).length, 40, 'N50 持久化的 scope 数封顶 40')
     assert('sess44' in scopes8, 'N51 最近用过的会话优先保留')
+
+    // —— N52..：plugin 标签（PR-14c）——
+    //
+    // 为什么单列一组：plugin 是**第五种**标签，但它在 store 里只是「kind 是字符串」的实例
+    //（TabInstance 联合刻意没有它，语义归注册表/loader）。持久化是唯一必须自己看 kind 的
+    // 地方 —— 而这里最容易写歪的两处是：
+    //   ① 分支顺序：写进 `default:`（web 的兜底分支）不会报错，症状是「重启后插件标签变成
+    //      一张空白网页」；
+    //   ② params 的读/写**不对称**：写侧宁可不存（存半截参数 = 用一个错参数把面板画出来），
+    //      读侧宁可丢 params（丢标签 = 用户丢了他打开的东西）。下面各自钉住。
+    reset({ activeSessionId: S1 })
+    st().openTab({ kind: 'plugin:demo', params: { a: 1, s: '中文' } })
+    st().flushSessionTabs()
+    const pTab = readStored().scopes[S1].tabs.find((t) => t.kind === 'plugin:demo')
+    eq(pTab?.kind, 'plugin:demo', 'N52 plugin 标签按原 kind 落盘（没被当成 web）')
+    eq(JSON.stringify(pTab?.params), JSON.stringify({ a: 1, s: '中文' }), 'N53 params 原样落盘（含非 ASCII）')
+    assert(pTab && !('url' in pTab), 'N54 没有退化成 web 形态（不带 url 快照）')
+
+    // 写侧的三条「不持久化」：非法 id / params 非普通对象 / params 超 4 KiB
+    reset({ activeSessionId: S1 })
+    st().openTab({ kind: 'plugin:Bad_ID' }) // 非法 id（大写 + 下划线）
+    st().openTab({ kind: 'plugin:a' }) // 非法 id（太短：{1,40} 至少 2 个字符）
+    st().openTab({ kind: 'plugin:arr', params: [1, 2] }) // params 是数组（非普通对象）
+    st().openTab({ kind: 'plugin:big', params: { blob: 'x'.repeat(5000) } }) // 序列化 > 4096 字节
+    st().flushSessionTabs()
+    // 注意第一条 openTab 会给这个 scope 补一个默认 activity（阶段 1 的既有语义）—— 它照常落盘，
+    // 所以这里断言的是「四条 plugin 一条都没落盘」，不是「存储为空」。
+    eq(readStored().scopes[S1].tabs.map((t) => t.kind).join(','), 'activity',
+      'N55 非法 plugin id / params 非普通对象 / params 超 4 KiB → 四条 plugin 都不落盘（内置照常）')
+
+    // 恢复侧：合法 plugin 恢复；params 非对象或超限 → 丢 params、标签仍在；非法 id → 整条丢
+    const bootP = await boot(persisted({
+      [S1]: { tabs: [
+        { id: 'p1', kind: 'plugin:demo', params: { a: 1 } },
+        { id: 'p2', kind: 'plugin:noparams' },
+        { id: 'p3', kind: 'plugin:arr', params: [1, 2] },
+        { id: 'p4', kind: 'plugin:big', params: { blob: 'x'.repeat(5000) } },
+        { id: 'p5', kind: 'plugin:Bad_ID' },
+        { id: 'p6', kind: 'git' },
+      ], activeId: 'p1' },
+    }))
+    bootP.useAppStore.setState({ workspace: WS, activeSessionId: S1 })
+    const setP = bootP.useAppStore.getState().tabsByScope[S1]
+    eq(setP.tabs.map((t) => t.kind).join(','), 'plugin:demo,plugin:noparams,plugin:arr,plugin:big,git',
+      'N56 合法 plugin id 全部恢复，非法 id（大写/下划线）整条丢弃')
+    eq(JSON.stringify(setP.tabs[0].params), '{"a":1}', 'N57 恢复出来的实例带 params（面板靠它渲染）')
+    eq(setP.tabs[1].params, undefined, 'N58 源数据没有 params → 恢复成没有 params（不造假字段）')
+    eq(setP.tabs[2].params, undefined, 'N59 params 非普通对象 → **丢 params 字段**、标签仍恢复（丢标签比丢参数更糟）')
+    eq(setP.tabs[3].params, undefined, 'N60 params 超 4 KiB → 同上（面板可能退化，但标签还在）')
+    eq(setP.tabs[0].id, setP.activeId, 'N61 激活的 plugin 标签恢复为激活项')
+    eq(setP.tabs[0].url, undefined, 'N62 恢复的 plugin 标签不带 web 字段（kind 没被改写）')
   }
 
   // —— Q. makeTab 的初值来自 provider 的 defaultSpec（PR-11）——
