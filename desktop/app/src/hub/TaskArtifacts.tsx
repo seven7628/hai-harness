@@ -1,4 +1,5 @@
 import { useT } from '../i18n'
+import { useHostCapabilities } from '../host/panels'
 import { useHubStore } from './useHubStore'
 import type { HubTaskArtifact } from './types'
 
@@ -30,6 +31,9 @@ export default function TaskArtifacts({
 }) {
   const t = useT()
   const openArtifactPreview = useHubStore((s) => s.openArtifactPreview)
+  // 手机（P8-01b）：hub_task_artifact_preview 不在 mobile_server 的 allowlist 内 →
+  // 产物行退回纯展示（不放假按钮、点了不 403）。桌面能力全开，行为不变。
+  const canPreview = useHostCapabilities().artifactPreview
   if (artifacts.length === 0) return null
 
   const row = (a: HubTaskArtifact, i: number) => {
@@ -52,7 +56,7 @@ export default function TaskArtifacts({
       </>
     )
     const key = `${path || name}-${i}`
-    const previewable = Boolean(taskId && path)
+    const previewable = canPreview && Boolean(taskId && path)
     if (!previewable) {
       return (
         <div className="artifact-line" key={key} title={path || name}>

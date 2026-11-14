@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { AlertIcon, Bot, CheckList, LayersIcon, PanelRight, PencilIcon } from '../components/icons'
 import { useT } from '../i18n'
-import { useHostPanels } from '../host/panels'
+import { useHostCapabilities, useHostPanels } from '../host/panels'
 import AgentSigil from './AgentSigil'
 import AgentStack from './AgentStack'
 import { stateResolver } from './avatar'
@@ -122,6 +122,8 @@ function isTerminal(status?: string): boolean {
 
 function OverviewPanel() {
   const t = useT()
+  // 手机（P8-01b）：群组写与智能体编辑器不在 mobile_server 的 allowlist 内 → 不渲染入口。
+  const capabilities = useHostCapabilities()
   const activeId = useHubStore((s) => s.activeId)
   const profile = useHubStore((s) => s.profile)
   const agents = useHubStore((s) => s.agents)
@@ -228,15 +230,18 @@ function OverviewPanel() {
         </div>
         <RecentTasks tasks={recentTasks} onOpen={() => setPanel('tasks')} />
         <footer className="hub-ov-actions">
-          {/* 编辑群组（P6-17）：群名/协作模式/群主/成员增删都在同一个弹层里保存。 */}
-          <button
-            className="hub-btn"
-            onClick={() => openGroupEditor(group.id)}
-            disabled={group.deleted}
-            title={group.deleted ? '群已删除，不能编辑' : '编辑群名 / 协作模式 / 群主 / 成员'}
-          >
-            编辑群组
-          </button>
+          {/* 编辑群组（P6-17）：群名/协作模式/群主/成员增删都在同一个弹层里保存。
+              手机不渲染：hub_group_edit 不在 mobile_server 的 allowlist 内。 */}
+          {capabilities.groupAdmin ? (
+            <button
+              className="hub-btn"
+              onClick={() => openGroupEditor(group.id)}
+              disabled={group.deleted}
+              title={group.deleted ? '群已删除，不能编辑' : '编辑群名 / 协作模式 / 群主 / 成员'}
+            >
+              编辑群组
+            </button>
+          ) : null}
           <button className="hub-btn" onClick={() => void copyDeepLink('group', group.id)}>复制链接</button>
         </footer>
       </section>
@@ -295,12 +300,19 @@ function OverviewPanel() {
         <dt>Needs</dt><dd>{needs.length}</dd>
       </dl>
       <RecentTasks tasks={recentTasks} onOpen={() => setPanel('tasks')} />
-      <p className="hub-muted hub-ov-note">人格、工具、记忆与模型参数在「编辑」里；本页只读。</p>
-      <footer className="hub-ov-actions hub-ov-foot">
-        <button className="hub-btn primary" onClick={() => openEditor(agent)}>
-          <PencilIcon size={12} /> {t('hub.editAgent')}
-        </button>
-      </footer>
+      {/* 手机不渲染「编辑」：AgentEditor 弹层没有手机实现（P8-02 之后再说），
+          且智能体 CRUD 不在 mobile_server 的 allowlist 内。指向「编辑」的说明也一起去掉，
+          否则手机上一句话指向一个不存在的按钮。 */}
+      {capabilities.agentEditor ? (
+        <p className="hub-muted hub-ov-note">人格、工具、记忆与模型参数在「编辑」里；本页只读。</p>
+      ) : null}
+      {capabilities.agentEditor ? (
+        <footer className="hub-ov-actions hub-ov-foot">
+          <button className="hub-btn primary" onClick={() => openEditor(agent)}>
+            <PencilIcon size={12} /> {t('hub.editAgent')}
+          </button>
+        </footer>
+      ) : null}
     </section>
   )
 }
