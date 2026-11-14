@@ -21,6 +21,7 @@ package agenthub
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -410,6 +411,25 @@ func (c *ConversationController) Limits() ConversationLimits {
 	return c.limits
 }
 
+// Groups 返回控制器里**已有对话状态**的群 id（升序，便于逐条比对/稳定输出）。
+//
+// 只给 bridge 的「设置保存后立即刷新状态条」用（P7-04）：限额变了要把每个群的
+// 视图重播一遍，否则用户改完设置得等群里有人说一句话才看到新分母。不暴露内部
+// map，也不顺手建状态 —— 没有对话的群不该因为一次设置保存而多出一段空对话。
+func (c *ConversationController) Groups() []GroupID {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	out := make([]GroupID, 0, len(c.convs))
+	for gid := range c.convs {
+		out = append(out, gid)
+	}
+	c.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // SetLimits 热更新全局对话限额（I1）：设置保存后**无需重启**即可生效。
 //
 // 只换限额，不动任何对话状态（队列/轮次/深度/pair 计数/指纹/账本原样保留）——
@@ -631,7 +651,6 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 	// 换代路由（§1.1/§1.5）：旧 generation 的 @ 丢弃，不进入新对话；它的 pair 计数
 	// 留在旧代（这里什么都不加），新代额度一条都不消耗。
 	if req.ConversationID != "" && conv.id != "" && req.ConversationID != conv.id {
-		skipped := 0
 		for _, target := range targets {
 			w := Wake{GroupID: group, ConversationID: conv.id, Sender: req.Sender, Human: req.Human,
 				Target: target, Text: text, Depth: req.Depth, TriggerSeq: req.TriggerSeq, RoundID: req.RoundID}
@@ -642,7 +661,6 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 				RoundID: req.RoundID, Status: DeliverySkipped, Reason: DeliveryReasonStale,
 				Note: "上一轮对话已结束，这条 @ 不再路由", EnqueuedAt: now, UpdatedAt: now,
 			})
-			skipped++
 		}
 		conv.deliveries.prune()
 		return nil, nil
