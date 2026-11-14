@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-14 03:30",
-    "current": "R11b（已收口）"
+    "updated": "2026-11-13 17:30",
+    "current": "R16"
   },
   "rounds": [
     {
@@ -298,7 +298,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-04",
       "title": "file → SurfaceProvider（多实例身份）",
       "type": "迁移",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R03"
       ],
@@ -360,7 +360,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-05b",
       "title": "内嵌编辑器（零依赖 textarea + 行号 + 冲突三分支 + dirty，F32）",
       "type": "新增",
-      "est": 2.0,
+      "est": 2,
       "deps": [
         "R04",
         "R05a"
@@ -405,7 +405,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "—",
       "title": "前端测试资产转正（53 e2e + 7 electron + 7 类红修/分流）",
       "type": "卫生",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R05a"
       ],
@@ -526,7 +526,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-08a",
       "title": "转换服务收口 conversion（内容寻址缓存/并发2/60s/512MiB LRU）",
       "type": "新增",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R08b"
       ],
@@ -546,7 +546,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-08b",
       "title": "pdf/docx/pptx/xlsx 渲染器 + 预览入口 + csv/md 探针入链",
       "type": "新增",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R08a"
       ],
@@ -691,7 +691,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-06",
       "title": "web → SurfaceProvider（拆三轮 R06a/b/c 全部完成）",
       "type": "迁移",
-      "est": 2.0,
+      "est": 2,
       "deps": [
         "R05b"
       ],
@@ -736,7 +736,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-08a",
       "title": "原计划·转换服务（准入/限额/内容寻址缓存/输出保留）",
       "type": "新增",
-      "est": 2.0,
+      "est": 2,
       "deps": [
         "R08"
       ],
@@ -780,7 +780,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-08c",
       "title": "原计划·媒体渲染器（hai-media:// Range + ffprobe + 播放器）",
       "type": "新增",
-      "est": 2.0,
+      "est": 2,
       "deps": [
         "R08"
       ],
@@ -802,7 +802,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-08d",
       "title": "LibreOffice kit（下载/探测/校验 + profile 隔离 + soffice→PDF + renderImages）",
       "type": "新增",
-      "est": 3.0,
+      "est": 3,
       "deps": [
         "R08a"
       ],
@@ -824,7 +824,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-08e",
       "title": "（可选）ffmpeg 转码 + 缩略图",
       "type": "可选",
-      "est": 2.0,
+      "est": 2,
       "deps": [
         "R08c"
       ],
@@ -845,7 +845,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-09",
       "title": "标签条：溢出 / 右键菜单 / ⌃⇥ / 空态能力面板",
       "type": "交互",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R04"
       ],
@@ -869,7 +869,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-10",
       "title": "Tombstone + Boundary + 3 次自动禁用",
       "type": "健壮性",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R09"
       ],
@@ -979,7 +979,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-13",
       "title": "安装器（index/manifest/install/remove/audit）",
       "type": "新增",
-      "est": 2.0,
+      "est": 2,
       "deps": [
         "R12"
       ],
@@ -1046,7 +1046,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-14b",
       "title": "面板插件页（列表 / 启用开关 / 卸载 / 调用记录）+ 写路径",
       "type": "新增",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R14"
       ],
@@ -1098,7 +1098,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "pr": "PR-15",
       "title": "验收收口：e2e 补全 + 文档回写",
       "type": "收尾",
-      "est": 1.0,
+      "est": 1,
       "deps": [
         "R14"
       ],
@@ -1117,19 +1117,26 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     },
     {
       "id": "R16",
-      "pr": "（缓冲）",
-      "title": "修复与打磨",
-      "type": "缓冲",
-      "est": 2.0,
-      "deps": [],
-      "status": "todo",
+      "pr": "PR-16",
+      "title": "插件入口闭环：manifest entries + ＋菜单/空态/设置页三处入口",
+      "type": "新增",
+      "est": 1,
+      "deps": [
+        "R14b"
+      ],
+      "status": "doing",
       "commit": "",
       "review": "",
       "perf": [],
       "acc": [
-        "按实际缺陷定"
+        "surface.json 支持 entries[]（≤20、id/title/icon 校验，非法则安装 rejected 且 index 不变）",
+        "＋ 菜单「面板插件」分组 + 空态能力面板 + 设置页「打开」= 三处入口",
+        "一个插件仍只注册一个 kind；每个 entry = 一个标签实例，params.entry 指页面",
+        "零 entries 的插件至少有一个默认入口（不允许「加载成功但看不见」）",
+        "禁用/卸载入口立即消失；已开标签变墓碑",
+        "reload 后标签、标题、页面都恢复"
       ],
-      "rollback": "—"
+      "rollback": "entries 是 manifest 可选字段；老插件无 entries 走默认入口，回滚不影响已装插件"
     }
   ],
   "perf": [
