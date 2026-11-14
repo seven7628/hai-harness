@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
 import Sel from './Sel'
+import { realProjects } from '../lib/pluginProjects'
 
 // IM 绑定确认弹窗：陌生 IM 聊天首次发消息时弹出（bridge 发 im_bind_confirm_requested）。
 // 用户选择目标 workspace 后确认（写路由表 Chat→workspace）或拒绝。
@@ -19,7 +20,7 @@ export default function IMBindConfirmModal() {
   // 候选 workspace：当前工作区优先，其次已打开的项目
   const candidates = Array.from(new Set([
     ...(workspace ? [workspace] : []),
-    ...projects.map((p) => p.path),
+    ...realProjects(projects).map((p) => p.path), // 虚拟 Project 不是工作区（§4.6 第 10 条）
   ].filter(Boolean)))
 
   return (

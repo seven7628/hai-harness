@@ -25,6 +25,7 @@ import type {
   IMRouteCfg,
 } from '../transport/types'
 import Sel from './Sel'
+import { realProjects } from '../lib/pluginProjects'
 
 // IM 集成设置编辑器（设置弹窗「IM 集成」tab）。
 // 设计（docs/IM_INTEGRATION.md §9）：每个 Gateway 自带配置 Schema（im_schema_list 返回），
@@ -595,7 +596,7 @@ function RouteAddRow({ gatewayId, gatewayType, cfg, save, onDone, initial }: Rou
 
   const candidates = Array.from(new Set([
     ...(workspace ? [workspace] : []),
-    ...projects.map((p) => p.path),
+    ...realProjects(projects).map((p) => p.path), // 虚拟 Project 不是路由目标（§4.6 第 3/10 条）
   ].filter(Boolean)))
 
   // 群列表：打开时拉取（无缓存或缓存空）

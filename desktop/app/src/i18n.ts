@@ -321,6 +321,14 @@ const zh: Record<string, string> = {
   'left.newFolder': '新建文件夹…',
   'left.noProjects': '暂无项目',
   'left.noSessions': '暂无会话',
+  // 插件分组（虚拟 Project，docs/creator-mode-v0.1/09-agent-bridge.md §9）：
+  // 两个子组只在「同时存在已安装与已卸载」时才带标题（只有一组时分组头已够）。
+  'left.plugins': '插件',
+  'left.pluginsInstalled': '已安装',
+  'left.pluginsUninstalled': '已卸载',
+  'left.pluginBadge': '插件',
+  'left.collapse': '收起',
+  'left.expand': '展开',
   // ===== Agent Hub（§8.2 rail + §8.4 DM）=====
   'hub.title': '智能体',
   'hub.agents': '智能体列表',
@@ -2508,6 +2516,12 @@ const en: Record<string, string> = {
   'left.newFolder': 'New Folder…',
   'left.noProjects': 'No projects',
   'left.noSessions': 'No sessions',
+  'left.plugins': 'Plugins',
+  'left.pluginsInstalled': 'Installed',
+  'left.pluginsUninstalled': 'Uninstalled',
+  'left.pluginBadge': 'Plugin',
+  'left.collapse': 'Collapse',
+  'left.expand': 'Expand',
   // ===== Agent Hub =====
   'hub.title': 'Agents',
   'hub.agents': 'Agents',

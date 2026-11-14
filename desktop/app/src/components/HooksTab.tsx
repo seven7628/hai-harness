@@ -14,6 +14,7 @@ import { FolderIcon, Gear, HookIcon } from './icons'
 import { DetailHead, FlagRow, SourceCard, Switch } from './SettingsGroups'
 import { ownerValid } from '../lib/owner'
 import Sel from './Sel'
+import { realProjects } from '../lib/pluginProjects'
 
 // ─── 钩子设置页（2026-09-21 新增：全局 × 项目两级 + 二级详情面板）───
 //
@@ -77,7 +78,8 @@ export function HooksTab() {
   const fetchHooks = useAppStore((s) => s.fetchHooks)
   const [sel, setSel] = useState<string | null>(null) // null=列表；'user'；'claude-user'；项目路径
 
-  const paths = useMemo(() => projects.map((p) => p.path), [projects])
+  // 虚拟 Project（插件 home）不是工作区：项目层 hooks 的绑定列表里不出现（§4.6 第 8 条）。
+  const paths = useMemo(() => realProjects(projects).map((p) => p.path), [projects])
   const pathsKey = paths.join('\u0000')
   useEffect(() => {
     fetchHooks(paths)
