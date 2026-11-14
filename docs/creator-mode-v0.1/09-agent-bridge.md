@@ -20,7 +20,7 @@
 | D8 | 工具面 | 内置 + 全局 MCP + 全局 subAgents；**denylist** 见 §7；允许 `memory_dream`；插件只能**新增**自己的工具，不能改既有集合 |
 | D9 | Agent 事件 | 独立 IPC 通道，按插件/run 过滤；不复用全局 `onEvent` |
 | D10 | 插件工具范围 | **只在它自己的虚拟 Project/会话内生效**；不注册到任何真实 Project 会话，也不跨插件 |
-| D11 | 旧只读命令 | `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect` **全部禁用**（防碰 Project）；surface 相关命令/工具全禁 |
+| D11 | 旧只读命令 | `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect` **全部禁用**（防碰 Project）；`surface_*` 命令/工具全禁（含只读 `surface_list`） |
 
 ---
 
@@ -38,6 +38,7 @@
 - 插件代点审批、自动发送引用、自动重试扣额度。
 - 插件指定 provider / model / API key。
 - 插件装卸其它插件、操作真实 git 仓库、向其它会话发消息。
+- 插件工具进入任何项目会话或其它插件会话（D10）。
 - 真正的进程级沙箱（iframe / 独立 WebContents）——列为 V2 加固。
 
 ---
@@ -201,7 +202,7 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 
 未在 manifest `commands[]` 声明 → `not_declared`；声明了但不在宿主表 → `denied`。
 
-**旧只读命令（`workspace_list` / `session_list` / `git_snapshot` / `ui_inspect`）已移除**（D11）：它们能读到真实项目/会话元数据，与「插件不碰 Project」冲突。manifest 里声明这些名字 → 安装时按未知命令拒绝（给出明确 reason），运行时即使绕过也 `denied` 并审计。P1 同步更新模板与 SKILL。
+**旧只读命令（`workspace_list` / `session_list` / `git_snapshot` / `ui_inspect`）已移除**（D11）：它们能读到真实项目/会话元数据，与「插件不碰 Project」冲突。manifest 里声明这些名字 → 安装时按未知命令拒绝（给出明确 reason，安装页标「需要更新」），运行时即使绕过也 `denied` 并审计，不做静默降级。P1 同步更新模板与 SKILL。
 
 ### 5.2 `onEvent` 清单
 
@@ -318,13 +319,13 @@ host.onEvent('tool.call', async (ev) => {
 
 ### 7.1 允许（插件会话）
 
-内置 file / bash / edit / glob / grep / run_python / todo / ask_user / agent_spawn 系列 / codemode / office / artifact_read / **memory_dream**；全局 MCP；全局 subAgents；插件自己的工具。**所有这些只在插件自己的虚拟 Project 内可用**（D10）。
+内置 file / bash / edit / glob / grep / run_python / todo / ask_user / agent_spawn 系列 / codemode / office / artifact_read / **memory_dream**；全局 MCP；全局 subAgents；**仅在本插件会话内**，插件自己的工具。**所有这些只在插件自己的虚拟 Project 内可用**（D10）。
 
 ### 7.2 denylist（能操作宿主/其它会话/其它插件的一律不给）
 
 | 工具 | 是什么 | 为什么剔除 |
 |---|---|---|
-| `surface_install` / `surface_remove` / `surface_list` | 面板插件安装/卸载/清单 | 插件能装卸插件 = 权限升级；prompt injection 可装恶意面板 |
+| `surface_install` / `surface_remove` / `surface_list` | 面板插件安装/卸载/清单 | 插件能装卸插件 = 权限升级；prompt injection 可装恶意面板；**含只读 `surface_list` 也全禁**（D11） |
 | `session_send` / `session_list` | Session Mesh：给其它会话/节点发消息 | 跨会话注入、内容外发 |
 | `workspace_create` | 创建真实工作区 | 插件能批量建项目污染 `workspaces.json` |
 | `session_create` / `assign_task` / `handoff` / `handoff_ack` / `group_*` / `task_*` / `agent_status` | Hub 多智能体/任务板 | 插件不该编排 Hub、改写任务状态 |
@@ -339,7 +340,7 @@ host.onEvent('tool.call', async (ev) => {
 - manifest `tools[]` 声明即注册；模型侧名 `plugin__<id>__<name>`。
 - 冲突（与任何已有工具同名）→ 安装即拒绝。
 - 调用走 `tool.call` / `tool.result`；插件侧无 register API。
-- 子 agent 继承主引擎 → 插件工具对子 agent 可用。
+- 子 agent 继承主引擎 → 插件工具对同一插件会话内的子 agent 可用；子 agent 若被派到别的会话，不继承。
 - **只在插件自己的虚拟 Project/会话内注册**（D10）：不进入任何真实 Project 会话，不跨插件；没有"授权到项目会话"这个开关。
 - 插件工具不能修改工具集、注册 MCP、定义 subagent、读别的工具的 schema/结果。
 
@@ -392,7 +393,7 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 1. 左栏：插件分组（虚拟 Project），图标 + 「插件」徽标；空则隐藏；「新建会话」「删除会话」「停止」。
 2. 已卸载插件分组：只读、可删。
 3. 会话视图：插件徽标；Provider/Model 选择器与普通会话一致（D3）；空态说明。
-4. 设置页插件行：命令/事件/工具授权开关、会话数、审计入口。
+4. 设置页插件行：命令/事件开关、工具清单（只读，显示"仅本插件会话"）、会话数、审计入口。
 5. 安装页/回执：能力摘要（自然语言）。
 6. Composer：引用 chip（可删），不自动发送。
 
@@ -441,7 +442,7 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | dev HMR 二次 claim | 页面 reload 会重跑 preload；模块热替换极端场景可能拿不到 | dev 用注入 fake；生产以门禁为准 |
 | 插件工具误入项目会话 | 设计上不存在（D10） | 装配点只对 `runtimePlugin` 注册；门禁断言项目会话看不到 `plugin__*` |
 | 旧插件使用已移除的只读命令 | 会 `not_declared` / 安装拒绝 | P1 更新模板与 SKILL；安装回执给出明确 reason |
-| `surface_list` 是否放行 | 暂禁 | 若需要只读清单，单独评审 |
+| `surface_list` 是否放行 | 禁（D11） | 不开口子；需要清单走宿主 UI |
 | 工具 denylist 随版本漂移 | 新工具默认拒绝（白名单式装配） | 装配时用 allowlist，新增工具需显式放行 |
 
 ---
@@ -452,6 +453,6 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 2. **runtime 分支不全** → §4.3 七点分流表。
 3. **缺负向守卫** → §4.4 四道硬拒绝；虚拟路径永不进 `workspaces.json` 为后端不变式。
 4. **D3 语义** → 与普通会话一致（切模型更新全局 active）。
-5. **工具越权** → §7.2 denylist；Hub/mesh/surface/cron/git_worktree 全部剔除，`memory_dream` 保留。
+5. **工具越权** → §7.2 denylist；Hub/mesh/surface（含 surface_list）/cron/git_worktree/四条旧只读命令全部剔除，`memory_dream` 保留；插件工具只在本插件会话（D10）。
 6. **事件/身份** → §6.1–6.3 独立通道、token 派生、payload 不带 plugin_id。
 7. **API 收敛** → 只有 `command` + `onEvent`（D5）；具名 API 全部取消。
