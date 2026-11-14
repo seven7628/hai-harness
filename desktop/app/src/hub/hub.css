@@ -2956,8 +2956,8 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
    口径：**桌面 32–36 / 移动 44**。
    · 桌面（这里 ≤900 的窄窗也按桌面指针精度算）：可点元素的最小边 ≥32px，
      上限 36px —— 再大一档就会把 composer / 消息头撑高，破坏 demo 的行高节奏。
-   · 移动（desktop/bridge/mobile_web，390 手机页）：44px 触控下限，那边
-     style.css 里单独实现，本文件不重复（hub.css 只服务桌面渲染进程）。
+   · 移动（P8 手机新页 src/mobile/mobile.css）：44px 触控下限，那边单独实现，
+     本文件不重复（hub.css 的组件样式手机也 import，但触控尺寸由 mobile.css 覆盖）。
 
    审计实测（640 桌面窗口，P4-UI-11 前）：@ 28×28、发送 31×31、上下文/更多 30×30、
    事件触发入口 41×15、侧栏筛选 chip 35×18、任务状态筛选 65×23。全部 < 32。

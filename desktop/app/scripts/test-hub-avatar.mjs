@@ -297,50 +297,25 @@ const assert = (cond, m) => { if (!cond) throw new Error(`断言失败: ${m}`); 
   assert(calls > 0, '至少扫描到一个 AgentSigil 调用点')
 }
 
-// 11) 手机端 avatar_model.js 与桌面 avatar.ts 同 seed 对照（防两套算法漂移）。
+// 11) 头像算法只有一份：src/hub/avatar.ts。
+//     旧手机页的 avatar_model.js（同 seed 逐字复制的第二套实现）随 P8-03b 退役；
+//     手机新页目前不画 sigil，将来要画必须 import 这个模块 —— 不许再复制一套算法。
 {
-  const require = createRequire(import.meta.url)
-  const mobile = require(join(__dirname, '..', '..', 'bridge', 'mobile_web', 'avatar_model.js'))
-  assert(JSON.stringify(mobile.SHAPES) === JSON.stringify(mod.SHAPES), '手机/桌面 8 形状路径逐字一致')
-  assert(JSON.stringify(mobile.HUES) === JSON.stringify(mod.HUES), '手机/桌面 8 色相（dark/light）逐字一致')
-  assert(JSON.stringify(mobile.TRAITS) === JSON.stringify(mod.TRAITS), '手机/桌面 4 内侧标记逐字一致')
-  assert(JSON.stringify(mobile.SIGIL_SIZES) === JSON.stringify(mod.SIGIL_SIZES), '手机/桌面尺寸档位一致（24/32/48）')
-
-  let mismatch = 0
-  for (let i = 0; i < 300; i++) {
-    const id = i % 11 === 0 ? '' : `agt_drift_${i}`
-    const resp = `职责 ${i % 13}`
-    const a = mod.deriveSigil(id, resp)
-    const b = mobile.deriveSigil(id, resp)
-    if (a.shape !== b.shape || a.hue !== b.hue || a.trait !== b.trait ||
-      a.shapeId !== b.shapeId || a.hueId !== b.hueId || a.traitId !== b.traitId) mismatch++
-  }
-  assert(mismatch === 0, `手机/桌面 300 个 seed 推导完全一致（mismatch=${mismatch}）`)
-
-  let stackMismatch = 0
-  const pool = ['idle', 'working', 'needs_attention', 'offline']
-  for (let n = 0; n <= 6; n++) {
-    const members = Array.from({ length: n }, (_, i) => ({
-      id: `agt_stack_${i}`, responsibility: `r${i}`, state: pool[i % 4],
-    }))
-    for (const groupRunning of [false, true]) {
-      const a = mod.planStack(members, { groupRunning })
-      const b = mobile.planStack(members, { groupRunning })
-      if (a.state !== b.state || a.more !== b.more || a.total !== b.total ||
-        a.members.length !== b.members.length ||
-        a.members.some((m, i) => m.id !== b.members[i].id || m.state !== b.members[i].state ||
-          m.withStatus !== b.members[i].withStatus)) stackMismatch++
+  const APP = join(__dirname, '..')
+  const SCAN = [join(APP, 'src'), join(APP, '..', 'bridge')]
+  const DEF = /export\s+(?:const|function)\s+(SHAPES|HUES|TRAITS|SIGIL_SIZES|deriveSigil|planStack|resolveAgentState)\b/
+  const dupes = []
+  const walk = (dir) => {
+    for (const name of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, name.name)
+      if (name.isDirectory()) { walk(full); continue }
+      if (!/\.(ts|tsx|js|mjs)$/.test(name.name)) continue
+      if (full === entry) continue
+      if (DEF.test(readFileSync(full, 'utf8'))) dupes.push(full)
     }
   }
-  assert(stackMismatch === 0, `手机/桌面 planStack（0–6 成员 × 群运行）完全一致（mismatch=${stackMismatch}）`)
-
-  for (const input of [
-    {}, { running: true }, { deleted: true }, { pending: true },
-    { pending: true, deleted: true, running: true }, { deleted: true, running: true },
-  ]) {
-    assert(mobile.resolveAgentState(input) === mod.resolveAgentState(input),
-      `手机/桌面状态映射一致：${JSON.stringify(input)}`)
-  }
+  for (const dir of SCAN) walk(dir)
+  assert(dupes.length === 0, `头像算法只有一份（无第二份 SHAPES/HUES/deriveSigil）${dupes.join(', ')}`)
 }
 
 console.log(`\n✅ hub avatar 纯逻辑：${pass} 项全部通过`)

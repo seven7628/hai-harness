@@ -389,7 +389,7 @@ const eq = (got, want, m) => assert(got === want, `${m}（got=${JSON.stringify(g
 // —— 9c) ContextPanel 接线：群作用域必须把群 id 传下去（源码守卫）——
 // 纯函数再准，接线漏一处就回到「群作用域显示 DM 变体」：面板里 loadPromptPreview
 // 有两个调用点（进面板的 effect、↻ 重新读取），两处都要带第三个实参 promptGroupId。
-// 用源码 grep 钉住（与 test-mobile-hub 的静态约束同一套路，不需要浏览器）。
+// 用源码 grep 钉住（与 test-mobile-static 的静态约束同一套路，不需要浏览器）。
 {
   const src = readFileSync(join(hubDir, 'ContextPanel.tsx'), 'utf8')
   const calls = [...src.matchAll(/loadPrompt\(([^)]*)\)/g)].map((m) => m[1])

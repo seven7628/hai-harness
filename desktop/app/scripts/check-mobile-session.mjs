@@ -23,6 +23,8 @@ import { auditContrast, installFakeVisualViewport, installTheme } from './mobile
 
 const APP = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(APP, 'dist-mobile')
+// mobile:embed 之后是 index.html，只跑过 mobile:build 时是 mobile.html。
+const INDEX = existsSync(join(DIST, 'index.html')) ? '/index.html' : '/mobile.html'
 const SHOTS = '/tmp/p8-polish'
 const PAIR_CODE = '123456'
 
@@ -171,7 +173,7 @@ function json(res, status, body) {
 }
 
 async function serveStatic(res, pathname) {
-  const rel = pathname === '/' || pathname === '' ? '/mobile.html' : pathname
+  const rel = pathname === '/' || pathname === '' ? INDEX : pathname
   const file = join(DIST, rel)
   if (!file.startsWith(DIST) || !existsSync(file)) {
     res.writeHead(404)
@@ -672,8 +674,8 @@ async function runViewport(browser, baseURL, vp, theme) {
 }
 
 async function main() {
-  if (!existsSync(join(DIST, 'mobile.html'))) {
-    throw new Error(`没有 ${DIST}/mobile.html —— 先跑 npm run mobile:build`)
+  if (!existsSync(join(DIST, 'mobile.html')) && !existsSync(join(DIST, 'index.html'))) {
+    throw new Error(`没有 ${DIST}/mobile.html 或 index.html —— 先跑 npm run mobile:build`)
   }
   mkdirSync(SHOTS, { recursive: true })
   const { server, port } = await startServer()
