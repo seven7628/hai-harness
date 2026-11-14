@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from 'react'
 import { ctxEstimatedOf, ctxTokensOf, ctxWindowOf } from '../lib/ctxScope'
-import { useAppStore, modelWindowOf, QUEUE_CAP, queuedText, queuedHasAttach, modelSupportsImage, inputTypesForProvider, BUILTIN_SLASH, mainRunActive, isSubAgentRun } from '../store/useAppStore'
+import { useAppStore, modelWindowOf, QUEUE_CAP, queuedText, queuedHasAttach, modelSupportsImage, inputTypesForProvider, BUILTIN_SLASH, mainRunActive, isSubAgentRun, agentQueueKey } from '../store/useAppStore'
 import type { QueuedContent } from '../store/useAppStore'
+import { agentRunStateFromView } from '../lib/agentTree'
+import type { ViewAgentBlock, ViewRunNode } from '../lib/agentTree'
+import { useScopedCompression } from './sessionScope'
 import { SendIcon, StopIcon, ChevronDown, ChevronLeft, ChevronRight, ImageIcon, AccessIcon, EffortIcon, Sparkles, MicIcon, PaperclipIcon, FileIcon, LayersIcon } from './icons'
 import { CtxRing, fmtTokens, ChipMenu } from './ui'
 import CompactConfirm from './CompactConfirm'
@@ -142,33 +145,26 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   //   · @ 文件引用面板 → 走 fs_list，未放行。
   // 保留：输入、发送、停止、暂存队列、粘贴附件、运行态条 —— 这些是 allowlist 内的能力。
   const mobile = variant === 'mobile'
-  // 正在看子智能体时：输入框照常发**主会话**（协议上子智能体的通道是 agent_send，只有模型
-  // 会用它）。这个提示存在的唯一理由：避免用户在子会话视角里输入后，惊讶于"回答来自主 agent"。
+  // 正在看子智能体时：输入走 agent_send（后台任务 inbox），不再发主会话。
+  // 只有同步子智能体（没有 task_id、协议上没有独立收件箱）会明确提示「无独立通道」，
+  // 绝不静默改道主会话 —— 那正是用户看到「发了没反应」的原因。
   const focused = useAppStore((s) => s.focusedAgent)
   const sendToAgent = useAppStore((s) => s.sendToAgent)
   const agentSendError = useAppStore((s) => s.agentSendError)
   const clearAgentSendError = useAppStore((s) => s.clearAgentSendError)
   const focusAgent = useAppStore((s) => s.focusAgent)
-  // 提示条里显示子智能体的**名字**（不是 task id）：用户认的是名字
-  const focusedLabel = useAppStore((s) => {
-    const f = s.focusedAgent
-    if (!f) return ''
-    const b = s.blocks.find((x) => x.kind === 'agent' && x.runId === f.runId)
-    return b?.kind === 'agent' ? b.label : (f.taskId ?? '')
-  })
   const ask = useAppStore((s) => s.ask)
   const interrupt = useAppStore((s) => s.interrupt)
-  // 流式 = 有 LLM 流式（主会话正在产出）→ 发送钮变「停止」。不把后台子 agent
-  //（agent_spawn 派生的异步任务，脱离主 run 存活）算进来 —— 否则 abort 主 run 后
-  // 子 agent 仍在跑时发送钮卡「停止」、主会话无法输入。停止子 agent 走其 AgentCard。
-  const streaming = useAppStore((s) => s.streaming)
+  const interruptTask = useAppStore((s) => s.interruptTask)
   // 主 run 运行中（agent_start→agent_end 全程：流式/工具/压缩/审批/重试）。
   // 与 AgentRunningBar 同源（mainRunActive）：停止按钮与运行指示共用同一事实源。
   // 排除 aborted：点击停止后 interrupt() 乐观置位 aborted，按钮立即回「发送」态
   //（不等 agent_end 往返）；agent_end(abort) 到达后幂等覆盖。
   const runActive = useAppStore((s) => (s.activeSessionId ? mainRunActive(s.views[s.activeSessionId]) && !s.views[s.activeSessionId]?.aborted : false))
-  // 压缩态：主会话的压缩才阻塞输入（子会话压缩它自己的上下文，不该卡住主会话的输入框）。
-  const compressing = useAppStore((s) => Boolean(s.activeSessionId && s.views[s.activeSessionId]?.compressing))
+  // 压缩态：按**当前作用域**取 —— 子会话压缩它自己的上下文，不能拿主会话的 compressing
+  // 卡住子会话输入，也不能反过来让子会话的压缩显示在主会话。
+  const scopedComp = useScopedCompression()
+  const compressing = scopedComp.active
   // 当前上下文占用：**看谁报谁** —— 聚焦子智能体时用那个 run 自己的轮与窗口
   //（用户 2026-10 报障：子会话里显示的窗口/占比是主智能体的）
   const ctxTokens = useAppStore(ctxTokensOf)
@@ -177,6 +173,23 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   const usage = useAppStore((s) => s.usage) // 会话累计用量（缓存命中率两个口径都取它 + turns）
   const turns = useAppStore((s) => s.turns) // 每轮指标（llm_end 一条）：当前上下文命中率取末条
   const activeView = useAppStore((s) => (s.activeSessionId ? s.views[s.activeSessionId] : undefined))
+  // 子会话当前这一轮：焦点 runId 在 agent_resume 后会过期，按 taskId 解析最新卡。
+  // 停止/运行态/队列/标签都以它为准，不读主会话的 runActive。
+  const focusedRun = useMemo(() => {
+    if (!focused || !activeView) return undefined
+    return agentRunStateFromView(
+      [...activeView.blocks, ...(activeView.agentDetached ?? [])].filter((b) => b.kind === 'agent') as ViewAgentBlock[],
+      activeView.runNodes as ViewRunNode[],
+      focused,
+    )
+  }, [focused, activeView])
+  const focusedRunning = Boolean(focused && focusedRun?.running)
+  const focusedIsAgent = Boolean(focusedRun?.isAgent)
+  // 后台工具任务（tooltask-*）不是子智能体：没有 agent_send 收件箱。把 taskId 置空，
+  // 走「无独立通道」提示，而不是让输入框看起来能发给一个工具任务。
+  const focusedTaskId = focusedRun?.isAgent ? (focusedRun.taskId || focused?.taskId) : undefined
+  // 提示条里显示子智能体的**名字**（不是 task id）：用户认的是名字
+  const focusedLabel = focusedRun?.label || focused?.taskId || ''
   const effort = useAppStore((s) => s.effort)
   const switchEffort = useAppStore((s) => s.switchEffort)
   // Effort 菜单项：'none' 的说明文案走 i18n（其余为英文品牌名，无需翻译）
@@ -187,14 +200,34 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   const switchMode = useAppStore((s) => s.switchMode)
   const model = useAppStore((s) => s.model)
   const switchModel = useAppStore((s) => s.switchModel)
-  const pendingQueue = useAppStore((s) => s.pendingQueue) // 暂存队列（未推送 / 已推送待确认；逐条可编辑）
-  const pendingQueueError = useAppStore((s) => s.pendingQueueError) // 推送失败提示（ask_batch ok:false 回滚，问题十）
-  const updatePending = useAppStore((s) => s.updatePending)
-  const removePending = useAppStore((s) => s.removePending)
+  const mainPendingQueue = useAppStore((s) => s.pendingQueue) // 暂存队列（未推送 / 已推送待确认；逐条可编辑）
+  const mainPendingQueueError = useAppStore((s) => s.pendingQueueError) // 推送失败提示（ask_batch ok:false 回滚，问题十）
+  const updateMainPending = useAppStore((s) => s.updatePending)
+  const removeMainPending = useAppStore((s) => s.removePending)
   // 【立即发送】= 不打断正在跑的工具，把暂存队列立刻推到服务端 inbox。
   // 与「默认排队」走同一个 flushPending：区别只是**什么时候**推，不是推什么。
-  const flushPending = useAppStore((s) => s.flushPending)
+  const flushMainPending = useAppStore((s) => s.flushPending)
+  // 子会话自己的队列（agent_send 逐条 inbox），与主会话 ask_batch 队列完全分开。
+  const agentQueues = useAppStore((s) => s.agentQueues)
+  const agentQueueErrors = useAppStore((s) => s.agentQueueErrors)
+  const updateAgentPending = useAppStore((s) => s.updateAgentPending)
+  const removeAgentPending = useAppStore((s) => s.removeAgentPending)
+  const flushAgentPending = useAppStore((s) => s.flushAgentPending)
   const activeSid = useAppStore((s) => s.activeSessionId)
+  const agentQueue = focusedTaskId && activeSid ? (agentQueues[agentQueueKey(activeSid, focusedTaskId)] ?? []) : []
+  const pendingQueue = focused ? agentQueue : mainPendingQueue
+  const pendingQueueError = focused
+    ? (focusedTaskId && activeSid ? (agentQueueErrors[agentQueueKey(activeSid, focusedTaskId)] || agentSendError) : agentSendError)
+    : mainPendingQueueError
+  const updatePending = focusedTaskId
+    ? (id: number, next: string) => updateAgentPending(focusedTaskId, id, next)
+    : updateMainPending
+  const removePending = focusedTaskId
+    ? (id: number) => removeAgentPending(focusedTaskId, id)
+    : removeMainPending
+  const flushPending = focusedTaskId
+    ? (_sid?: string) => flushAgentPending(focusedTaskId)
+    : flushMainPending
   const queueFull = pendingQueue.length >= QUEUE_CAP
   // 队列里还有没推送的消息 → 显示【立即发送】（已推送的等待下一轮消费，催也没用）
   const hasUnpushed = pendingQueue.some((q) => !q.pushed)
@@ -226,10 +259,13 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   const workspace = useAppStore((s) => s.workspace) ?? ''
   // 草稿属于 session，而不是 Composer 组件。Composer 在切换会话时不会卸载，因此用
   // session key 保存各自的文本和附件；尚未创建会话时则按 workspace 隔离。
-  const draftKey = activeSessionId ? `session:${workspace}\0${activeSessionId}` : `workspace:${workspace}`
-  // 输入历史作用域：主会话按会话隔离；正在看**有独立收件箱**的子智能体时再分一份
+  // 子会话再分一层：主会话的草稿不能出现在子智能体输入框里，反之亦然（用户 2026-11
+  // 报障的「组件不一致」之一）。
+  const focusKey = focused ? `agent:${focused.taskId || focused.runId}` : ''
+  const draftKey = `${activeSessionId ? `session:${workspace}\0${activeSessionId}` : `workspace:${workspace}`}${focusKey ? `\0${focusKey}` : ''}`
+  // 输入历史作用域：主会话按会话隔离；正在看子智能体时按 taskId/runId 再分一份
   //（发给子智能体的消息不该出现在主会话的 ↑ 里，反之亦然）。
-  const historyScope = inputHistoryScope(workspace, activeSessionId, focused?.taskId)
+  const historyScope = inputHistoryScope(workspace, activeSessionId, focused?.taskId || focused?.runId)
   const [draftTexts, setDraftTexts] = useState<Record<string, string>>({})
   const text = draftTexts[draftKey] ?? ''
   const setText = (next: string | ((prev: string) => string)) => {
@@ -254,7 +290,18 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   // 或压缩中：压缩时同样允许终止（用户此前只要求压缩期间禁止【输入】，并未禁止
   // 【终止】——不提供停止会把 5 分钟超时的压缩卡死）。
   // 回车永远走 submit()（入暂存队列，不中断）；Abort 只经「草稿为空时的停止按钮」。
-  const stopping = (runActive && !text.trim() && attachments.length === 0) || compressing
+  // 停止态按**当前作用域**：看子会话时只停子智能体（interrupt_task），
+  // 草稿为空才显示停止；同步子智能体没有 task_id → 不提供停止，绝不停主会话。
+  const stopping = focused
+    ? (focusedRunning && !text.trim() && attachments.length === 0) || (compressing && Boolean(focusedTaskId))
+    : (runActive && !text.trim() && attachments.length === 0) || compressing
+  const stopCurrent = () => {
+    if (focused) {
+      if (focusedTaskId) interruptTask(focusedTaskId)
+      return
+    }
+    interrupt()
+  }
   const setAttachments = (next: QueuedContent[] | ((prev: QueuedContent[]) => QueuedContent[])) => {
     setDraftAttachments((drafts) => {
       const current = drafts[draftKey] ?? []
@@ -709,7 +756,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   const filtered = slashCommands.filter((c) => c.toLowerCase().startsWith(firstToken.toLowerCase()))
   // 只有存在匹配项且仍在输入命令前缀时显示补全菜单；未知的 /path
   //（例如 /api-test/xxx）保持普通文本，不显示“未识别 command”。
-  const cmdOpen = cmdMenu && completing && filtered.length > 0 && !mobile
+  const cmdOpen = cmdMenu && completing && filtered.length > 0 && !mobile && !focused
   // 弹层里的搜索框：镜像第一行已输入的 `/x`，改它就是改正文（单一数据源）
   const slashQuery = firstToken.slice(1)
   const [slashActive, setSlashActive] = useState(0)
@@ -1116,10 +1163,14 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
     }
     // —— 子会话：这条消息发给**正在看的那个子智能体**（用户 2026-10 要求）——
     //
-    // 只在它有 task_id 时才能发：agent_send 的决策锚是后台任务 id（Registry 的键），
-    // 同步子智能体（in-loop，没有后台任务）在协议上没有独立的收件箱 —— 那种情况仍发给
-    // 主会话，由主模型转达。这个区别要在提示条里说清楚，不能静默改道。
-    if (focused?.taskId) {
+    // agent_send 的决策锚是后台任务 id（Registry 的键）。同步子智能体（in-loop，
+    // 没有后台任务）在协议上没有独立收件箱 —— 这时明确提示「无独立通道」，
+    // **绝不静默改道主会话**（那正是「子会话里发了没反应」的根因）。
+    if (focused) {
+      if (!focusedTaskId) {
+        setAttachmentNotice(t('composer.agent.noChannel'))
+        return
+      }
       // 子智能体通道（agent_send）只收文本：历史也只记**实际发出去的正文**（含 @引用）。
       // 图片不在这个通道上，不能记进历史 —— 否则 ↑ 会回填一张从没发出去的附件。
       const body = withDocRefs(raw)
@@ -1128,7 +1179,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
         if (attachments.length) setAttachmentNotice(t('composer.agent.textOnly'))
         return
       }
-      sendToAgent(focused.taskId, body)
+      sendToAgent(focusedTaskId, body)
       const items = recordInputHistory(historyScope, { text: body })
       void getTransport().inputHistorySet(historyScope, items).catch(() => { /* keep local */ })
       histNavRef.current = null
@@ -1185,7 +1236,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
       {focused && (
         <div className="composer-target-hint" role="status">
           <span>
-            {focused.taskId
+            {focusedTaskId
               ? t('agentTree.composerToSub').replace('{name}', focusedLabel)
               : t('agentTree.composerNoChannel')}
           </span>
@@ -1202,7 +1253,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
       <div
         className={`composer${compressing ? ' compressing' : ''}${dragActive ? ' drag-active' : ''}`}
         // 设计 .prompt-box[data-live]：跑起来时盒子自己会呼吸（两道 4.6s 的环，错开 2.3s）
-        data-live={runActive ? '' : undefined}
+        data-live={focused ? (focusedRunning ? '' : undefined) : (runActive ? '' : undefined)}
         aria-busy={compressing}
         onDragEnter={onDragEnter}
         onDragOver={onDragOver}
@@ -1232,7 +1283,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             <div className={`pq-head ${queueFull ? 'full' : ''}`}>
               <span>{t('composer.pending')} {pendingQueue.length}/{QUEUE_CAP}</span>
               <span className="pq-tail">
-                <span className="pq-sub">{queueFull ? t('composer.pq.full') : t('composer.pq.busy')}</span>
+                <span className="pq-sub">{queueFull ? t('composer.pq.full') : focused ? t('composer.agent.queued') : t('composer.pq.busy')}</span>
                 {/* 只在**还没推上去**的时候出现：推完就没什么可催的了（下一轮起点自动带进去）。 */}
                 {hasUnpushed && (
                   <button
@@ -1248,7 +1299,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             </div>
             {pendingQueueError && (
               <div className="pq-error" role="alert" style={{ color: 'var(--error, #e5484d)', padding: '2px 8px', fontSize: 12 }}>
-                {pendingQueueError}{t('composer.pq.returned')}
+                {pendingQueueError}{focused ? '' : t('composer.pq.returned')}
               </div>
             )}
             <div className="pq-list">
@@ -1502,7 +1553,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             name="message"
             className="input"
             rows={1}
-            placeholder={compressing ? t('composer.compressing.wait') : queueFull ? t('composer.queueFull').replace('{n}', String(QUEUE_CAP)) : t(mobile ? 'composer.placeholderMobile' : 'composer.placeholder')}
+            placeholder={compressing ? t('composer.compressing.wait') : queueFull ? t('composer.queueFull').replace('{n}', String(QUEUE_CAP)) : t(focused ? 'composer.placeholderSub' : mobile ? 'composer.placeholderMobile' : 'composer.placeholder')}
             value={text}
             readOnly={queueFull || compressing}
             disabled={compressing}
@@ -1512,7 +1563,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
               const pos = e.target.selectionStart ?? v.length
               histNavRef.current = null // 用户开始编辑 → 退出历史浏览（当前文本成为新草稿）
               setText(v)
-              if (!mobile && v.trim().startsWith('/')) {
+              if (!mobile && !focused && v.trim().startsWith('/')) {
                 if (!cmdMenu) fetchSkills() // 命令列表数据源：技能清单（启用过滤；仅首开拉取）
                 setCmdMenu(true)
               } else {
@@ -1648,7 +1699,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
         </div>
         <div className="row2">
           {/* 模式恒在最左（P 布局决策）；模型/思考强度/上下文/发送归右组 */}
-          {!mobile && (
+          {!mobile && !focused && (
             <ChipMenu
               className="mode-chip"
               label={<><span className="compact-chip-icon"><AccessIcon size={14} /></span><span className="chip-full-label"><span style={{ color: 'var(--text-3)' }}>{t('composer.mode')}</span> <span className="mono">{modes.find((m) => m.key === mode)?.label ?? mode}</span></span></>}
@@ -1672,6 +1723,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 switch_model/effort/mode 与 compact，点了只会 403 —— 见函数头的 variant 注释。 */}
             {!mobile && (
               <>
+            {!focused && (<>
             <div
               ref={chipRef}
               className="model-chip"
@@ -1796,7 +1848,10 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 <ChevronDown size={11} className="chev" />
               </button>
             )}
-            {/* hover / 键盘聚焦都能展开构成面板（focus 走同一条路径：键盘用户也能看到占比） */}
+            </>)}
+            {/* hover / 键盘聚焦都能展开构成面板（focus 走同一条路径：键盘用户也能看到占比）。
+                后台工具任务不是子智能体，没有自己的上下文环 —— 不借主会话的读数。 */}
+            {(!focused || focusedIsAgent) && (
             <div
               className="ctx-wrap"
               onMouseEnter={openCtxPanel}
@@ -1809,10 +1864,10 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 role="button"
                 tabIndex={0}
                 aria-label={t('composer.ctxAria').replace('{used}', fmtTokens(ctxUsed)).replace('{total}', fmtTokens(window)).replace('{pct}', String(pct))}
-                title={ctxEstimated ? t('composer.ctxTipEstimate') : pct >= 90 ? t('composer.ctxNear') : t('composer.ctxTip')}
-                aria-disabled={compressing}
+                title={focused ? t('composer.ctxSubTip') : ctxEstimated ? t('composer.ctxTipEstimate') : pct >= 90 ? t('composer.ctxNear') : t('composer.ctxTip')}
+                aria-disabled={compressing || Boolean(focused)}
                 onClick={() => {
-                  if (compressing) return
+                  if (compressing || focused) return
                   // 点这一下 = 问「要不要压缩上下文」（用户 2026-10 口径；运行时皮肤也一样）。
                   // 构成面板仍归 hover 管（见 openCtxPanel/closeCtxPanel），点击不再兼作展开
                   // —— 一个控件两种意图，用户永远猜不到点下去会发生哪件。
@@ -1820,7 +1875,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                   setConfirmCompact(true)
                 }}
                 onKeyDown={(e) => {
-                  if (compressing) return
+                  if (compressing || focused) return
                   if (e.key !== 'Enter' && e.key !== ' ') return
                   e.preventDefault()
                   // 键盘与鼠标同一语义（与 onClick 一致）
@@ -1833,9 +1888,9 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 <span className="pct">{pct}%</span>
               </div>
               {/* hover 面板：上下文构成分区（Tools/Skills/MCP/系统提示词/消息/其他） */}
-              {ctxPanelOpen && (
+              {ctxPanelOpen && !focused && (
                 <CtxBreakdownPanel
-                  {...(rt ? {
+                  {...(rt && !focused ? {
                     onCompact: () => {
                       setCtxPanelOpen(false)
                       setConfirmCompact(true)
@@ -1852,11 +1907,12 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 />
               )}
             </div>
+            )}
               </>
             )}
             {/* 图片上传 / 添加文件：图片走内联 data URL（当前模型支持 image 才显示按钮）；
                 其他类型一律走 @引用（不复制）——引用与模型输入类型无关，所以「添加文件」恒可见。 */}
-            {!mobile && canImage && (
+            {!mobile && !focused && canImage && (
               <>
                 <input
                   ref={fileInputRef}
@@ -1878,7 +1934,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
               </>
             )}
             {/* 添加文件（本地文件引用）：原生多选对话框 → @引用进消息，不复制、不上传 */}
-            {!mobile && (
+            {!mobile && !focused && (
               <button
                 className="attach-btn doc-btn"
                 onClick={() => void pickDocFiles()}
@@ -1905,7 +1961,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             {sttError && <span className="mic-error" role="alert">{sttError}</span>}
             <button
               className={`send-btn${stopping ? ' is-stop' : ''}`}
-              onClick={stopping ? interrupt : () => void submit()}
+              onClick={stopping ? stopCurrent : () => void submit()}
               disabled={expanding || (queueFull && !stopping)}
               title={compressing ? t('composer.compressing.abort') : expanding ? t('composer.expanding') : stopping ? t('composer.stop') : t('composer.send')}
               aria-label={compressing ? t('composer.compressing.abort') : expanding ? t('composer.expanding') : stopping ? t('composer.stop') : t('composer.send')}

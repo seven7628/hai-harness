@@ -534,10 +534,12 @@ async function main() {
   // 2026-11 运行时皮肤：默认（简洁档）的工具行是**车道行** `.rt-turn > .rt-act`，
   // `.tool-row` / `.tool-group` 只在展开全量视图里出现 —— 主对话与子会话两处都走同一套，
   // 故锚点必须是 .rt-act（旧的 .tool-row 断言在这个皮肤下恒为 0，属脚本 drift）。
-  const laneCount = await page.locator('.narrative .rt-act').count()
+  // 运行中的工具任务走 LivePanel（.cy-live），结算后才折成 WorkFold（.rt-act）；
+  // 两者都是「主对话同一套工具行」的合法形态，不能只认结算态。
+  const laneCount = await page.locator('.narrative .rt-act, .narrative .cy-live').count()
   const turnCount = await page.locator('.narrative .rt-turn').count()
   // 简洁档默认把这一个调用折成「Worked · 1 call」，参数/结果要点开才看得到（与主对话同构）。
-  if (laneCount > 0) {
+  if (await page.locator('.narrative .rt-act').count() > 0) {
     await page.locator('.narrative .rt-act').first().click()
     await page.waitForTimeout(300)
   }
@@ -585,8 +587,39 @@ async function main() {
   assert(hint.back === 1, '输入框上方有「返回主会话」（注意力在这里，回程要够近）')
   assert(hint.headBack === 1, '头部也保留「返回主会话」')
 
+  // 草稿也要按作用域隔离：主会话与子会话、不同子会话之间不能互相串。
+  await page.locator('.composer textarea.input').fill('子会话草稿')
+  await page.evaluate(() => window.__store.getState().focusAgent(undefined))
+  await page.waitForTimeout(80)
+  assert(await page.locator('.composer textarea.input').inputValue() === '',
+    '切回主会话 → 不显示子会话的草稿')
+  await page.evaluate(() => window.__store.getState().focusAgent({ nodeId: 'task-1', runId: 'sub-1', taskId: 'task-1' }))
+  await page.waitForTimeout(80)
+  assert(await page.locator('.composer textarea.input').inputValue() === '子会话草稿',
+    '切回子会话 → 草稿按作用域恢复')
   await page.locator('.composer textarea.input').fill('请把返回 401 的分支也改掉')
   await page.locator('.composer textarea.input').press('Enter')
+  await page.waitForTimeout(50)
+  // 子会话队列必须立即可见（用户报障「没有暂存队列展示」）；mock bridge 在 120ms 后
+  // 回 agent_user_message，模拟真实 Poll 消费 —— 事件到达后队列出队，转录出现 user 块。
+  const queued = {
+    count: await page.locator('.composer .pending-queue').count(),
+    text: await page.locator('.composer .pending-queue').innerText().catch(() => ''),
+  }
+  assert(queued.count === 1, `发送后子会话队列可见（实际 ${queued.count}）`)
+  assert(queued.text.includes('401'), `队列里是刚发的正文（实际「${queued.text.replace(/\n/g, ' / ')}」）`)
+  await page.screenshot({ path: path.join(SHOTS, 'center-subsession-queue.png') })
+  // 折角图标必须有尺寸：简洁档在 current/v3 皮肤也会渲染 .rt-fold，缺几何时
+  // 两个 SVG 会退化成 300×150（截图里正文中间两个巨大箭头）。
+  const foldBox = await page.locator('.narrative .rt-fold').first().boundingBox()
+  assert(Boolean(foldBox && foldBox.width <= 16 && foldBox.height <= 16),
+    `折角图标不能退化成 SVG 默认尺寸（实际 ${foldBox?.width}×${foldBox?.height}）`)
+  // 探针页不启动 bridge 的 wire()，mock 的延迟事件不会自动进 store；手动重放同一条
+  // agent_user_message（真实 app 由 bridge 在 Poll 消费时发）。
+  await page.evaluate(() => window.__dispatch({
+    event_type: 'agent_user_message', session_id: 'probe', task_id: 'task-1',
+    text: '请把返回 401 的分支也改掉', source: 'user', timestamp: Date.now(),
+  }))
   await page.waitForTimeout(300)
   const sends = await page.evaluate(() => window.__sends)
   assert(sends.length === 1, `发送走了 sendToAgent（子智能体通道），实际 ${sends.length} 次`)
@@ -594,16 +627,55 @@ async function main() {
   assert(sends[0].text.includes('401'), '正文原样投递')
   const cleared = await page.locator('.composer textarea.input').inputValue()
   assert(cleared === '', '发完即清空输入框')
+  assert(await page.locator('.composer .pending-queue').count() === 0,
+    'agent_user_message 到达后队列出队（不是永远停在已推送）')
   await page.screenshot({ path: path.join(SHOTS, 'center-subsession-composer.png') })
+
+  // ---- ④c 子会话的停止/运行条也必须是它自己的（2026-11 用户报障）----
+  //
+  // 旧实现：Composer 的 runActive/AgentRunningBar 只读 mainRunActive → 看子会话时
+  // 显示主会话的「Agent 运行中 36s」；点停止调用 interrupt()，停的是主 Session。
+  // 这里同时钉住三条：作用域标记、计时源、停止锚点。
+  const scopeBar = await page.locator('.agent-running-bar').evaluate((el) => ({
+    scope: el.getAttribute('data-agent-scope'),
+    task: el.getAttribute('data-agent-task'),
+    text: el.textContent || '',
+  }))
+  assert(scopeBar.scope === 'subagent', `运行条作用域 = subagent（实际 ${scopeBar.scope}）`)
+  assert(scopeBar.task === 'task-1', `运行条锚定当前子智能体（实际 ${scopeBar.task}）`)
+  assert(/Agent 运行中/.test(scopeBar.text), '运行条文案仍在（不是把整条藏掉）')
+  await page.evaluate(() => {
+    const st = window.__store.getState()
+    window.__stopCalls = { main: 0, tasks: [] }
+    window.__origStops = { interrupt: st.interrupt, interruptTask: st.interruptTask }
+    window.__store.setState({
+      interrupt: () => { window.__stopCalls.main++ },
+      interruptTask: (taskId) => { window.__stopCalls.tasks.push(taskId) },
+    })
+  })
+  await page.locator('.send-btn.is-stop').click()
+  await page.waitForTimeout(80)
+  const stopCalls = await page.evaluate(() => window.__stopCalls)
+  assert(stopCalls.main === 0, `子会话点停止不得停主 Session（实际 interrupt ${stopCalls.main} 次）`)
+  assert(stopCalls.tasks.length === 1 && stopCalls.tasks[0] === 'task-1',
+    `停止必须走 interrupt_task(task-1)（实际 ${JSON.stringify(stopCalls.tasks)}）`)
+  // 子会话没在跑 → 不显示主会话的运行条（不是显示一个 0s 的假条）
+  await page.evaluate(() => window.__store.getState().focusAgent({ nodeId: 'tooltask-1', runId: 'main-1', taskId: 'tooltask-1' }))
+  await page.waitForTimeout(100)
+  assert(await page.locator('.agent-running-bar').count() === 0,
+    '聚焦没有运行中的任务 → 运行条隐藏，不回退显示主会话计时')
+  await page.evaluate(() => {
+    const orig = window.__origStops
+    window.__store.setState({ interrupt: orig.interrupt, interruptTask: orig.interruptTask })
+    window.__store.getState().focusAgent({ nodeId: 'task-1', runId: 'sub-1', taskId: 'task-1' })
+  })
+  await page.waitForTimeout(120)
+  await page.screenshot({ path: path.join(SHOTS, 'center-subsession-running-stop.png') })
 
   // 发出去的话必须出现在**它的转录里**（用户 2026-10：「子智能体发送消息不能等同于主
   // 智能体吗？理论上就是不同的 session 管理」）。事件在消息被投入上下文时产生
   // （subagent 的 Poll，所有投递源的唯一汇合点），reducer 追加一条 user 项 →
   // 子会话按主会话的 user 块渲染。
-  await page.evaluate(() => window.__dispatch({
-    event_type: 'agent_user_message', session_id: 'probe', task_id: 'task-1',
-    text: '把返回 401 的分支也改掉', source: 'user', timestamp: Date.now(),
-  }))
   await page.waitForTimeout(350)
   /* skin：user 块（`.msg.user`）在**三档皮肤**下都渲染 —— current/v3 走 Narrative.renderBlock
      的老 DOM（`.msg.user > .who/.body`，F43 恢复；此前 6d28d60 把这条分支连同事件卡一起删了，
@@ -932,6 +1004,37 @@ async function main() {
   const mainCards = await page.locator('.narrative .agent-card').count()
   assert(mainCards === 0, `窗口外卡片不进主对话流（否则会话开头凭空多几张旧卡），实际 ${mainCards} 张`)
   await page.screenshot({ path: path.join(SHOTS, 'center-after-refresh.png') })
+
+  // ---- ④d agent_resume 后必须是 Working，不是上一轮的 Worked ----
+  // 旧树合并「只补空字段」：同一 task 新 run 的 running 被旧 run 的 done/durMs 挡住，
+  // 子会话头部停在「已完成」、时长显示上一轮 —— 用户 2026-11 报障的第三条。
+  await page.evaluate(() => {
+    const ev = window.__dispatch
+    const now = Date.now()
+    ev({ event_type: 'agent_start', session_id: 'probe', run_id: 'resume-1', parent_run_id: 'main-1', depth: 1, task_id: 'task-resume', name: '续跑审查', timestamp: now - 12000 })
+    ev({ event_type: 'agent_end', session_id: 'probe', run_id: 'resume-1', parent_run_id: 'main-1', task_id: 'task-resume', finish_reason: 'stop', duration_ms: 9000, timestamp: now - 10000 })
+    ev({ event_type: 'agent_start', session_id: 'probe', run_id: 'resume-2', parent_run_id: 'main-1', depth: 1, task_id: 'task-resume', name: '续跑审查', timestamp: now - 2000 })
+    // 故意用过期 runId 聚焦：真实用户是在第一轮点进去的，续跑时不会重新点。
+    window.__store.getState().focusAgent({ nodeId: 'task-resume', runId: 'resume-1', taskId: 'task-resume' })
+  })
+  await page.waitForTimeout(300)
+  const resumeUi = await page.evaluate(() => ({
+    status: document.querySelector('.narrative .as-st')?.textContent || '',
+    dur: document.querySelector('.narrative .as-dur')?.textContent || '',
+    bar: document.querySelector('.agent-running-bar')?.getAttribute('data-agent-task') || '',
+    barText: document.querySelector('.agent-running-bar')?.textContent || '',
+  }))
+  assert(/执行中|Running/.test(resumeUi.status),
+    `续跑后头部必须是运行中，不能停在上一轮（实际「${resumeUi.status}」）`)
+  assert(resumeUi.dur !== '' && !/Worked/.test(resumeUi.dur),
+    `续跑后显示实时计时，不是上一轮的 Worked（实际「${resumeUi.dur}」）`)
+  assert(resumeUi.bar === 'task-resume',
+    `续跑后运行条锚到同一个 task（实际「${resumeUi.bar}」）`)
+  // 计时必须是新 run 的（约 2s），不能是主会话从开场累计到现在的量级。
+  const barSec = Number((resumeUi.barText.match(/(\d+)s/) || [])[1] || 0)
+  assert(barSec > 0 && barSec < 10,
+    `续跑后运行条显示新 run 的时长，不是主会话的（实际「${resumeUi.barText.trim()}」）`)
+  await page.screenshot({ path: path.join(SHOTS, 'center-resume-working.png') })
 
   await browser.close()
   console.log(`\n✅ ${pass} 条断言全通过；截图在 ${SHOTS}`)

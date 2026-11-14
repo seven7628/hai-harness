@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { AgentFocus, MsgBlock } from '../store/useAppStore'
 import { agentTreeFromView, pathOfNode } from '../lib/agentTree'
-import type { AgentTreeNode } from '../lib/agentTree'
+import type { AgentNodeStatus, AgentTreeNode } from '../lib/agentTree'
 import { agentItemsToBlocks } from '../lib/agentSession'
 import { childrenOf, placeChildCards } from '../lib/nestedCards'
 import { TaskErrorInline } from './NarrativeBlocks'
@@ -31,11 +31,12 @@ import { useT } from '../i18n'
 //   2. 把它的分页态接成 NarrativeSource（子 agent 的历史在子任务 journal 里）
 //   3. 顶部那一行「面包屑 / 状态 / 用量 / 停止 / 返回主会话」作为 Narrative 的 header
 //
-// ## 仍然是「视图」而不是「会话」
+// ## 仍然是「视图」，但输入/停止/计时都按子会话作用域
 //
-// 消息只发给主会话（子智能体的输入通道是 agent_send，只有模型会用它）—— 所以这里没有
-// 自己的输入框，Composer 仍是主会话的，并明示了这一点。
-// 停止/续跑与任务卡同源（interrupt_task），不新开一套动作语义。
+// 用户 2026-11 报障：子会话里发消息没反应、停止会停主会话、计时还是主会话的。
+// 结论：不是「子会话没有输入框」，而是 Composer 的作用域没隔离 —— 输入走 agent_send，
+// 停止走 interrupt_task，运行条/压缩态读当前子 run。这里只负责叙述区；Composer 的
+// 作用域在 components/Composer.tsx 统一接线（同一个组件，不复制第二套）。
 export const AgentSessionView = memo(function AgentSessionView({ focus }: { focus: AgentFocus }) {
   // 树节点身份用于定位节点/祖先链；真实 runId 用于找卡片（两者不同，见 AgentFocus 注释）
   const { nodeId, runId } = focus
@@ -167,9 +168,22 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
     // agentDurMs 只挂在文本项（kind='text'）与思考项上（工具项没有这个字段）
     return last && (last.kind === 'text' || last.kind === 'thinking') ? last.agentDurMs : undefined
   })()
-  const dur = agentDurationOf({ status: node.status, cardDurMs: card?.durMs, nodeDurMs: node.durMs, lastItemAgentDurMs: lastItemDur })
+  const dur = agentDurationOf({
+    status: node.status,
+    cardStatus: card?.status,
+    cardDurMs: card?.durMs,
+    nodeDurMs: node.durMs,
+    lastItemAgentDurMs: lastItemDur,
+  })
   const running = dur.running
-  const canStop = Boolean(node.taskId) && running
+  // 当前 run 的三元组：卡片是直接证据（续跑会换 run_id），节点只做兜底。
+  // 头部状态、停止锚点、Narrative 的运行态必须同源，否则会出现「卡片 running、
+  // 头部 Worked、停止按钮消失」这种半对状态。
+  const currentStatus = (card?.status as AgentNodeStatus | undefined) ?? node.status
+  const currentRunId = card?.runId ?? node.runId
+  const currentTaskId = card?.taskId ?? node.taskId
+  const currentStartedAt = card?.spawnedAt ?? node.startedAt
+  const canStop = Boolean(currentTaskId) && running
   const usage = card?.usage
   const trimmed = cards.reduce((n, c) => n + (c.itemsTrimmed ?? 0), 0)
   // 「还有更早」的判据：**有 task_id 就有 journal** —— 续跑轮的卡片 items 非空、trimmed=0，
@@ -184,7 +198,11 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
   const historyAnswered = pager?.historyHasMore !== undefined
   const hasMoreHistory = historyAnswered
     ? pager?.historyHasMore === true
-    : trimmed > 0 || Boolean(oldestCard?.taskId)
+    // 有 task_id 通常意味着有 journal，但如果后端已经报了 total=0，就不要显示
+    // 「加载更早（还有 0 条）」这种自相矛盾的入口。
+    : trimmed > 0 || (pager?.historyTotal == null
+      ? Boolean(oldestCard?.taskId)
+      : pager.historyTotal > 0)
 
   const source: NarrativeSource = {
     blocks: subBlocks,
@@ -227,7 +245,7 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
         ))}
         <span className="as-crumb-cur" title={node.label}>{node.label}</span>
       </span>
-      <span className={`as-st mono st-${statusCls(node.status)}`}>{statusLabel(node, t)}</span>
+      <span className={`as-st mono st-${statusCls(currentStatus)}`}>{statusLabel({ ...node, status: currentStatus }, t)}</span>
       {usage && (usage.input > 0 || usage.output > 0) && (
         <UsageChip
           className="as-usage mono"
@@ -238,14 +256,14 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
         />
       )}
       {(running || dur.durMs != null) && (
-        <ElapsedTimer className="as-dur mono" startAt={node.startedAt} running={running} durMs={dur.durMs} />
+        <ElapsedTimer className="as-dur mono" startAt={currentStartedAt} running={running} durMs={dur.durMs} />
       )}
       {canStop && (
         <button
           className="as-stop"
           title={t('rp.task.stopTask')}
           aria-label={t('rp.task.stopTaskAria')}
-          onClick={() => interruptTask(node.taskId!)}
+          onClick={() => interruptTask(currentTaskId!)}
         >
           ⏹
         </button>
@@ -272,10 +290,10 @@ export const AgentSessionView = memo(function AgentSessionView({ focus }: { focu
       source={source}
       header={header}
       footer={errorFooter}
-      runState={{ live: running, startedAt: node.startedAt, ...(node.runId ? { runId: node.runId } : {}) }}
+      runState={{ live: running, startedAt: currentStartedAt, ...(currentRunId ? { runId: currentRunId } : {}) }}
       /* 转录身份：子 agent 的 run_id（后台任务节点退化为 task_id）。滚动容器按它重建 ——
          从 A 切到 B 是新的一段转录，不是同一段滚到别处。 */
-      sourceKey={node.runId ?? node.taskId ?? node.id}
+      sourceKey={currentRunId ?? currentTaskId ?? node.id}
     />
   )
 })

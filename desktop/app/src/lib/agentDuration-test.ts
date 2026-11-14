@@ -27,3 +27,12 @@ test('都没有且已结束 → 不给数（宁可不显示，也不要显示一
 test('优先级：卡片 > 节点 > item', () => {
   assert.deepEqual(agentDurationOf({ cardDurMs: 100, nodeDurMs: 200, lastItemAgentDurMs: 300 }), { running: false, durMs: 100 })
 })
+
+test('当前卡片在跑 → 忽略上一轮残留的节点 durMs（agent_resume 后续跑仍显示 Working）', () => {
+  assert.deepEqual(agentDurationOf({ status: 'done', cardStatus: 'running', nodeDurMs: 9000 }), { running: true })
+  assert.deepEqual(agentDurationOf({ status: 'interrupting', cardStatus: 'interrupting', nodeDurMs: 9000 }), { running: true })
+})
+
+test('当前卡片已结算 → 仍按卡片结算（cardStatus 不把已完成误判成运行中）', () => {
+  assert.deepEqual(agentDurationOf({ cardStatus: 'completed', cardDurMs: 1200, nodeDurMs: 9000 }), { running: false, durMs: 1200 })
+})

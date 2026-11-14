@@ -34,6 +34,10 @@ export interface AgentTreeInput {
   startedAt?: number
   /** 结算时长（runNodes/blocks 的 dur_ms）：子会话页顶部的时长用它兜底 */
   durMs?: number
+  /** 同一 id 的多个来源谁更权威：runNode = 0，agent 卡 = 1。
+   *  同一 run 的卡片状态是后到的（interrupting 等），不能被先到的 runNode 挡住；
+   *  不同 run 仍以 startedAt 判新旧，避免旧卡晚到把续跑打回上一轮。 */
+  priority?: number
 }
 
 export interface AgentTreeNode {
@@ -77,11 +81,42 @@ export function buildAgentTree(input: AgentTreeInput[], opts?: { order?: 'asc' |
   const dir = opts?.order ?? 'desc'
   const nodes = new Map<string, AgentTreeNode>()
   const order: string[] = []
+  // 每个 id 当前采纳的来源等级（见 AgentTreeInput.priority）。同 run 的 runNode 先到、
+  // agent 卡后到；卡片的 status 才是最新事实（例如 interrupt_task 乐观置的 interrupting）。
+  const rank = new Map<string, number>()
   for (const it of input) {
     const id = String(it.id || '')
     if (!id) continue
     const prev = nodes.get(id)
     if (prev) {
+      const prevRank = rank.get(id) ?? 0
+      const itRank = it.priority ?? 0
+      // agent_resume 复用同一 task_id、但每轮是新的 run_id。树的节点身份是 taskId，
+      // 所以这里必须把「新 run」当成一次覆盖，而不是补空字段：
+      //   · 旧 run 的 done/ durMs 会先占住 status/durMs → 续跑后仍显示 Worked；
+      //   · 旧 run 的 startedAt 也会占住 → 计时从上一轮开始，看起来像主会话的量级。
+      // 判据用 startedAt（不是输入顺序）：runNodes 全部排在 blocks 前面，旧卡晚到
+      // 不能把新 run 覆盖回去。时间相同/缺失时才看来源等级。
+      const runChanged = Boolean(it.runId && prev.runId && it.runId !== prev.runId)
+      if (runChanged) {
+        const itTime = it.startedAt ?? Number.NEGATIVE_INFINITY
+        const prevTime = prev.startedAt ?? Number.NEGATIVE_INFINITY
+        const takeNewRun = itTime > prevTime || (itTime === prevTime && itRank > prevRank)
+        if (takeNewRun) {
+          prev.runId = it.runId
+          prev.status = it.status
+          prev.startedAt = it.startedAt
+          prev.durMs = it.durMs
+          if (it.taskId) prev.taskId = it.taskId
+          if (it.label) prev.label = it.label
+          if (it.parentId) prev.parentId = it.parentId
+          if (it.kind === 'agent') prev.kind = 'agent'
+          rank.set(id, itRank)
+        }
+        // 旧 run 的卡片/节点晚到：只允许它补 label 之类的静态字段，绝不能回写
+        // status/durMs/startedAt（否则续跑会闪回 Worked）。
+        continue
+      }
       // 重复项：补空字段，不新增（父关系以先到的为准，晚到的只在原本缺失时生效）——
       // 典型：task_started 先建 async_task 占位，agent_start 到达后同一个 task 变成 agent 卡
       if (!prev.parentId && it.parentId) prev.parentId = it.parentId
@@ -91,8 +126,17 @@ export function buildAgentTree(input: AgentTreeInput[], opts?: { order?: 'asc' |
       if (!prev.taskId && it.taskId) prev.taskId = it.taskId
       if (!prev.toolName && it.toolName) prev.toolName = it.toolName
       if (!prev.startedAt && it.startedAt) prev.startedAt = it.startedAt
-      if (!prev.durMs && it.durMs) prev.durMs = it.durMs
-      if (!prev.status && it.status) prev.status = it.status
+      // 同一 run：来源等级不低才允许覆盖运行态。卡片（1）能盖 runNode（0），
+      // runNode 不能反过来把卡片的 interrupting 改回 running。
+      if (itRank >= prevRank) {
+        if (it.status) prev.status = it.status
+        if (it.startedAt != null) prev.startedAt = it.startedAt
+        if (it.durMs != null) prev.durMs = it.durMs
+        // 新状态是 running/interrupting 时，上一轮残留的 durMs 必须清掉；
+        // 否则 agentDurationOf 会优先取 durMs，继续显示 Worked。
+        else if (it.status === 'running' || it.status === 'interrupting') prev.durMs = undefined
+        rank.set(id, itRank)
+      }
       // 占位（task）升级成 agent：agent 是更具体的身份，它的转写才有内容，
       // 名字也以 agent 的为准（占位贴的是「后台任务」这种泛称）。
       if (it.kind === 'agent' && prev.kind === 'task') {
@@ -120,6 +164,7 @@ export function buildAgentTree(input: AgentTreeInput[], opts?: { order?: 'asc' |
       last: false,
       guides: [],
     })
+    rank.set(id, it.priority ?? 0)
     order.push(id)
   }
 
@@ -381,6 +426,7 @@ export function agentTreeFromView(
       status: runStatusToNode(n.status),
       startedAt: n.startedAt,
       durMs: n.durMs,
+      priority: 0,
     })
   }
   for (const b of blocks) {
@@ -399,6 +445,7 @@ export function agentTreeFromView(
         status: b.status as AgentNodeStatus | undefined,
         startedAt: b.spawnedAt,
         durMs: b.durMs,
+        priority: 1,
       })
       continue
     }
@@ -414,6 +461,7 @@ export function agentTreeFromView(
       toolName: b.kind === 'async_task' ? b.toolName : b.name,
       status: b.status as AgentNodeStatus | undefined,
       startedAt: b.startedAt,
+      priority: 1,
     })
   }
   return buildAgentTree(input)
@@ -428,6 +476,89 @@ function runStatusToNode(s: string | undefined): AgentNodeStatus | undefined {
     case 'interrupted': return 'interrupted'
     default: return undefined
   }
+}
+
+/** 子会话视图的「当前 run」：AgentFocus 是点选时的快照，agent_resume 后 run_id 会变。 */
+export interface AgentRunFocus {
+  nodeId: string
+  runId: string
+  taskId?: string
+}
+
+export interface AgentRunState {
+  card?: ViewAgentBlock
+  runId?: string
+  taskId?: string
+  status?: AgentNodeStatus
+  /** 这个焦点是不是**子智能体运行**（有卡片或子 run 节点）；后台工具任务为 false */
+  isAgent: boolean
+  /** 以**当前 run** 为准：running/interrupting 时计时器走实时，其余走结算值 */
+  running: boolean
+  startedAt?: number
+  durMs?: number
+  label?: string
+}
+
+/**
+ * agentRunStateFromView 由焦点求「当前这一轮」的状态。
+ *
+ * 为什么不能直接用 focusedAgent.runId：agent_resume 复用 task_id、每轮换 run_id，
+ * 焦点是用户点选那一刻的快照。续跑后拿旧 runId 找卡片会找到上一轮（Worked/旧时长），
+ * 审批/提问的作用域过滤也会落空。这里按 taskId 找**最新**一张卡，再回填当前 runId。
+ */
+export function agentRunStateFromView(
+  blocks: readonly ViewAgentBlock[],
+  runNodes: readonly ViewRunNode[],
+  focus: AgentRunFocus,
+): AgentRunState {
+  const taskKey = focus.taskId || focus.nodeId
+  const cards = blocks.filter((b) => b.kind === 'agent' && (
+    (b.taskId && b.taskId === taskKey) || b.runId === focus.runId || b.runId === focus.nodeId
+  ))
+  // 最新一轮 = spawnedAt 最大；没有时间的按输入顺序靠后（append 顺序）兜底。
+  let card: ViewAgentBlock | undefined
+  for (const c of cards) {
+    if (!card) { card = c; continue }
+    const ct = c.spawnedAt ?? Number.NEGATIVE_INFINITY
+    const pt = card.spawnedAt ?? Number.NEGATIVE_INFINITY
+    if (ct >= pt) card = c
+  }
+  if (card) {
+    return {
+      card,
+      isAgent: true,
+      runId: card.runId,
+      taskId: card.taskId || focus.taskId,
+      status: card.status as AgentNodeStatus | undefined,
+      running: card.status === 'running' || card.status === 'interrupting',
+      startedAt: card.spawnedAt,
+      durMs: card.durMs,
+      label: card.label,
+    }
+  }
+  let node: ViewRunNode | undefined
+  for (const n of runNodes) {
+    // 只收**子 run**（有 parentId）。焦点是后台工具任务时 taskId 在 tool 块上，
+    // 没有对应的子 run；此时绝不能因为 focus.runId 恰好是主 run 就把主会话的
+    // running/计时借过来（用户 2026-11 报障的另一半）。
+    if (n.kind !== 'run' || !n.parentId) continue
+    if (n.id !== focus.runId && !(focus.taskId && n.taskId === focus.taskId) && n.id !== focus.nodeId) continue
+    if (!node || (n.startedAt ?? Number.NEGATIVE_INFINITY) >= (node.startedAt ?? Number.NEGATIVE_INFINITY)) node = n
+  }
+  if (node) {
+    const status = runStatusToNode(node.status)
+    return {
+      isAgent: true,
+      runId: node.id,
+      taskId: node.taskId || focus.taskId,
+      status,
+      running: status === 'running' || status === 'interrupting',
+      startedAt: node.startedAt,
+      durMs: node.durMs,
+      label: node.label,
+    }
+  }
+  return { isAgent: false, runId: focus.runId, taskId: focus.taskId, running: false }
 }
 
 /**

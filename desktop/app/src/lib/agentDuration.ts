@@ -13,6 +13,8 @@
 
 export interface AgentDurationInput {
   status?: string
+  /** 当前 run 的卡片状态（比节点状态更权威：同一 task 续跑会换 run_id，节点可能还是上一轮） */
+  cardStatus?: string
   /** 卡片结算（agent_end.duration_ms 落盘） */
   cardDurMs?: number
   /** run 节点结算（Go 侧 runNodes[].dur_ms） */
@@ -29,6 +31,9 @@ export interface AgentDuration {
 }
 
 export function agentDurationOf(input: AgentDurationInput): AgentDuration {
+  // 卡片是当前 run 的直接证据：它说还在跑，就不能被上一轮残留的 durMs 结算掉。
+  // （树节点在 agent_resume 后可能仍带着旧 run 的 dur_ms，见 lib/agentTree 的合并规则。）
+  if (input.cardStatus === 'running' || input.cardStatus === 'interrupting') return { running: true }
   const pick = [input.cardDurMs, input.nodeDurMs, input.lastItemAgentDurMs].find((v) => typeof v === 'number' && v > 0)
   if (pick != null) return { running: false, durMs: pick }
   return { running: input.status === 'running' || input.status === 'interrupting' }

@@ -1,7 +1,8 @@
 import { useAppStore } from '../store/useAppStore'
 import type { SessionView, MsgBlock } from '../store/useAppStore'
 import { approvalsInScope, questionInScope } from '../lib/sessionScope'
-import type { ScopeSessionView } from '../lib/sessionScope'
+import { agentRunStateFromView } from '../lib/agentTree'
+import type { ViewAgentBlock, ViewRunNode } from '../lib/agentTree'
 
 // 会话分域（2026-10）。
 //
@@ -27,11 +28,18 @@ import type { ScopeSessionView } from '../lib/sessionScope'
 
 /** 当前查看的作用域：undefined = 主会话；runId = 某个子会话 */
 export function useScopeRunId(): string | undefined {
-  return useAppStore((s) => s.focusedAgent?.runId)
+  const focus = useAppStore((s) => s.focusedAgent)
+  const view = useScopeView()
+  if (!focus) return undefined
+  // 焦点是点选时的快照；agent_resume 后同一 task 会换 run_id。所有作用域读取
+  // （审批/提问/压缩/运行条）都必须解析到**当前这一轮**，否则续跑后读的是上一轮。
+  const blocks = [...(view?.blocks ?? []), ...(view?.agentDetached ?? [])].filter((b): b is Extract<MsgBlock, { kind: 'agent' }> => b.kind === 'agent') as ViewAgentBlock[]
+  const nodes = (view?.runNodes ?? []) as ViewRunNode[]
+  return agentRunStateFromView(blocks, nodes, focus).runId ?? focus.runId
 }
 
 /** 当前活跃会话视图（作用域判定与压缩态都要读它）。 */
-function useScopeView(): ScopeSessionView | undefined {
+function useScopeView(): SessionView | undefined {
   return useAppStore((s) => (s.activeSessionId ? s.views[s.activeSessionId] : undefined))
 }
 
