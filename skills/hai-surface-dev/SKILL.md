@@ -152,3 +152,47 @@ with `surface.json`: `{"id":"hello","kind":"plugin:hello","version":"1.0.0","ent
 Every tool description in this product is a permanent cost (it rides in the schema of every turn).
 Keep a new one **≤ 120 characters**, ≤ 3 parameters, and put the tutorial in this skill — not in
 the schema. Same rule for the receipt strings you show the user: one line, actionable.
+
+## Self-check (run before you say it works)
+
+Two commands, both take **the directory you just wrote** (absolute path is safest, because
+`go test` runs with the package as its working directory):
+
+```bash
+go test ./desktop/bridge -run TestSurfaceInstallExternal -count=1 -v -args -dir=<plugin-dir>
+
+cd desktop/app && node e2e/verify_external_surface.mjs --dir=<plugin-dir>
+# …or via npm (SURFACE_DIR defaults to the in-repo template):
+cd desktop/app && SURFACE_DIR=<plugin-dir> npm run test:surface-install
+cd desktop/app && SURFACE_DIR=<plugin-dir> npm run e2e:external-surface
+```
+
+What they prove — and each one is a failure, not a warning:
+
+- **Installer** (`TestSurfaceInstallExternal`): the real installer copies your directory into a
+  throw-away `HOME` and prints the receipt. `status` must be `applied`, the receipt carries
+  `entries: <n>` (how many entrances you declared) and `entryHint` (where the user finds them:
+  right panel ＋ → Panel plugins), `index.json` must have exactly one item whose `hash` is
+  `sha256(<your entry file>)`, and the installed copy keeps `0600` files / `0700` directories.
+  A rejected receipt prints the reason the installer refused (`reason`) — fix the manifest and
+  run it again.
+- **Browser** (`verify_external_surface.mjs`): loads **your real `panel.js` bytes** into the app
+  and clicks what a user would click — every `entries[].id` appears in the ＋ menu with your
+  title, the first one renders non-empty content (a crash card or a tombstone fails), the tab
+  title equals your declared title, `pageerror` stays 0, and the ＋ menu itself is keyboard
+  operable (↑↓ move, Enter opens, Esc closes and returns focus). It also re-checks after a reload.
+
+Exit codes: `0` pass, `1` your plugin is wrong, `2` the environment is wrong (port taken, or
+`--dir` has no `surface.json` / no `panel.js`) — `2` never means "your panel is fine".
+
+`entries[].title` accepts either form; `{ zh, en }` is picked by the host's current language, the
+plain string is used for every language:
+
+```json
+{ "entries": [ { "id": "overview", "title": "总览" },
+               { "id": "schedule", "title": { "zh": "课表", "en": "Schedule" } } ] }
+```
+
+Limits of the browser check (do not read a green run as more than it is): it feeds your file as a
+single Blob module, so a panel that `import`s other files will fail there (production serves your
+whole directory over `hai-surface://`); entry icons are not asserted.
