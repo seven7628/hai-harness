@@ -6,7 +6,7 @@
 
 ## 0. 已拍板的三条
 
-1. **插件任务会话必须进左栏会话树**，且是**第三种简单形态**：不绑 Project、不是智能体/群组会话，只知道「自己这个 Session」。
+1. **插件任务会话必须进左栏会话树**：以**虚拟 Project** 的形态出现（每插件一个）——不绑真实项目、不是智能体/群组，Session 仍是普通 Session。
 2. **引用到会话只插草稿**，发送永远由用户按；「自动发送」留到以后，V1 不做。
 3. **`agent.run` 加载全部系统内置工具 + 全局 MCP + 全局 subAgents**；插件**不能修改**这三套集合；但**允许插件注册自定义工具**进来（只增不改）。
 4. **卸载保留插件会话**（D1）：左栏归入「已卸载插件」，只读、可手动删。
@@ -38,51 +38,58 @@
 
 `new_session` 要求 `workspace` 非空（`main.go:2843`）；`ask` / `interrupt` / `approve` 等会话命令都按 workspace 解析 runtime。第三种形态因此必须在**命令解析层**增加 `plugin_id` 这一路，而不是伪造一个项目路径。
 
-## 2. 第三种 Session：Plugin Session
+## 2. 虚拟 Project：每个插件一个
 
 ### 2.1 定义
 
+**插件 = 一个虚拟 Project**（不是第三种 Session，也不是真实工作区目录）：
+
 ```
-kind: plugin
-owner: plugin:<id>
-fields: { id, title, plugin_id, created_at, updated_at, running, pinned? }
-没有: project / workspace 绑定、agent profile、group 成员、项目技能层、项目 MCP 层
-```
-
-- **存储**：`~/.go-code/plugin-sessions/<id>/{home,sessions,events}`（0700）。
-  - `home/`：该插件的虚拟工作目录，bash/file 工具的根（等价 `hubAgentHome`，与代码目录物理分开）。
-  - 不设 `index.json` / `session_key` 映射（D4）：会话 id 由 bridge 随机生成，列表直接扫 `sessions/*.jsonl`；「复用哪条会话」由插件自己记住 id（存它自己的 localStorage）。
-- **运行时**：`runtimePlugin` 加入 `runtimeKind`（`pluginID` 字段），登记在 `m.pluginRuntimes[pluginID]`，**不进 `m.workspaces`**（否则 `workspace_list`/reload/MCP 重放会把插件当项目遍历）。
-- **工具面**：与 `runtimeHubAgent` 同一套全局层（内置 + 用户级 MCP + 全局技能/子代理），**外加该插件自己注册的工具**。
-- **模型**：建会话时继承全局 active provider/model；会话窗口的 Provider/Model 选择器走既有 `switch_model`（`useAppStore.ts:3059`，按会话独立），切换只影响这条插件会话；插件**不能**指定 provider、模型或密钥。
-
-### 2.2 生命周期
-
-- 懒创建：第一次 `agent.run` 或用户从插件面板点「打开会话」时创建 runtime。
-- 会话创建：`agent.run` 不带 `session_id` → 新建一条随机 id 的会话；带 `session_id` → 复用。插件想「一个功能一条会话」，就在第一次拿到的 id 存进自己的 localStorage，后续带上；想每次新开就都不带。宿主不替它记映射。
-- 插件卸载：**停止 runtime、取消所有在跑的 run**；会话记录**保留**（D1），左栏归入「已卸载插件」分组，只读可删。
-- 插件停用（enabled=false）：runtime 不装配；已有会话可读，不能继续跑。
-- 插件升级（hash 变）：runtime 重启；会话保留。
-
-### 2.3 命令解析：一个 sessionRef
-
-所有会话命令（`new_session`/`ask`/`interrupt`/`approve`/`answer_question`/`compact`/`session_send`…）统一接受二选一：
-
-```json
-{ "workspace": "/abs/project" }        // 现有
-{ "plugin_id": "course-mvp" }          // 新：解析到 m.pluginRuntimes[id]
+{ virtual: true, plugin_id: "course-mvp", name: "儿童英语课程",
+  path: "~/.go-code/plugin-sessions/<id>/home",  // 虚拟根，真实存在
+  sessions: [ ... ] }                            // 普通 Session
 ```
 
-两个都给 → `bad_request`；都不给 → 现有报错口径。`bridgeSession` 上记录 `origin: "project" | "plugin"` 与 `plugin_id`，供事件与左栏用。
+- 它下面的 Session 就是**普通 Session**：`new_session` / `list` / `ask` / `interrupt` / `approve` / `switch_model` 全部沿用，`workspace` 传虚拟路径即可 —— **不加 `plugin_id` 二选一**。
+- 运行时：新增 `runtimePlugin`（`runtimeKind` 第三值），装配在 `m.pluginRuntimes[path]`，**不进 `m.workspaces`**；`m.runtime(path)` 先查插件表再走项目表。这样 `workspace_list` / reload / MCP 重放 / cron / git 检测这些遍历 `m.workspaces` 的路径天然看不到它。
+- 存储：`~/.go-code/plugin-sessions/<id>/{home,sessions,events}`（0700）。`home` 是 bash/file 工具的根，卸载不删（D1）。
+- 工具面：照 `runtimeHubAgent` 装配**全局层**（内置 + 用户级 MCP + 全局技能/子代理），**不叠项目层**（虚拟路径没有 `.mcp.json`、没有项目技能）；再叠加该插件自己的工具。
+- 模型：Session 自带既有 `switch_model`，用户自由切换 Provider/Model（D3），插件不能指定。
 
-### 2.4 左栏（第三种形态的 UI）
+### 2.2 与真实 Project / 第三种 Session 的区别
 
-- 项目区之上/之下新增一个**「插件会话」分组**：按插件分组，插件名 + 图标 + 会话列表；空则整组隐藏。
-- 每条会话显示：标题、运行中 spinner、停止按钮、插件来源标记；未读/最近排序与现有会话一致。
-- 点开即普通会话视图（消息、工具卡、审批、TODO 全部复用）；顶部显示「插件会话 · <插件名>」徽标。
-- 不显示「项目路径」；文件工具显示的是插件 home，不是用户项目。
-- 事件：`plugin_sessions_changed { plugin_id }` → 前端刷新该分组。
+| | 真实 Project | 第三种 Session（旧方案） | **虚拟 Project（选定）** |
+|---|---|---|---|
+| 用户是否要创建 | 要 | 不要 | **不要**（装插件即出现） |
+| Session 命令 | 原生 | 需加 `plugin_id` 解析 | **原生**（`workspace`=虚拟路径） |
+| 左栏 | 项目分组 | 新分组类型 | **项目分组的变体**（插件徽标） |
+| 文件工具根 | 用户项目 | 插件 home | **插件 home** |
+| 工具面 | 内置+项目层 | 内置+全局层 | **内置+全局层** |
+| 进 workspace_list / 选择器 | 是 | 否 | **否**（`virtual` 过滤） |
+| 卸载后 | 目录还在 | 另建 orphan 分组 | **orphan 插件分组**（虚拟 Project 还在，只读） |
 
+### 2.3 生命周期
+
+- 首次出现：插件安装并启用后，`plugin_projects_list` 返回一个虚拟 Project（无需用户操作）。
+- 会话创建：`agent.run` 不带 `session_id` → 新建一条**随机 id** 的普通会话（D4）；带 → 复用。插件想复用就把 id 存自己的 localStorage。
+- 插件停用（enabled=false）：虚拟 Project 仍显示、会话可读；`ask` 拒绝 `denied`（runtime 不装配）。
+- 插件卸载：停止 runtime、取消运行中的 run；虚拟 Project 保留为「已卸载插件」分组，会话只读、可手动删（`plugin_session_delete`）。
+- 插件升级：runtime 重启；虚拟路径与会话不变。
+
+### 2.4 左栏与前端状态
+
+- `projects` 里增加 `virtual?: 'plugin'` + `pluginId` + `pluginName`；插件分组带插件图标与「插件」徽标。
+- 必须过滤虚拟 Project 的路径（逐条核过）：
+  - `syncWorkspacesToBridge`（**绝不能写进 workspaces.json**）；
+  - workspace 选择器 / 最近项目 / 置顶；
+  - `loadWsGit` / git 历史 / 文件树刷新（虚拟根不是仓库）；
+  - 项目层 MCP/技能的状态展示。
+- 启动：`plugin_projects_list` 拉虚拟 Project 与其 sessions；普通 `list` 仍只跑真实工作区。
+- 事件：`plugin_projects_changed`（安装/卸载/启用/停用）→ 前端刷新分组；会话增删走既有 `list` 响应。
+
+### 2.5 插件侧看到的身份
+
+插件只知道自己收到的 `session_id` / `run_id`，不知道虚拟路径，也不能选择真实项目；虚拟路径由 bridge 根据 token 里的 `plugin_id` 内部映射。
 ## 3. 能力面（插件看到的）
 
 ### 3.1 HostApi 新增
@@ -153,8 +160,8 @@ bridge --event surface_agent_event--> main --webContents.send--> loader --路由
 | `surface_agent_run` | `{plugin_id, run_id, session_id?, input, instructions?, schema?, tools:"global"\|"none"}` | `{ok, run_id, session_id}`（`session_id` 缺省 = 新建；立即回，流式走事件） |
 | `surface_agent_cancel` | `{plugin_id, run_id}` | `{ok}` |
 | `surface_tool_result` | `{call_id, ok, result?, error?}` | `{ok}` |
-| `plugin_session_list` | `{}` | `{plugins:[{id,name,enabled,sessions:[...]}]}` |
-| `plugin_session_open` | `{plugin_id, id?, key?, create?}` | 与 `new_session` 同形 |
+| `plugin_projects_list` | `{}` | `{projects:[{plugin_id,name,enabled,virtual:true,sessions:[...]}]}` |
+| `plugin_session_open` | `{plugin_id, id?, create?}` | 与 `new_session` 同形（内部用虚拟路径） |
 | `plugin_session_delete` | `{plugin_id, id}` | `{ok}` |
 
 `surface_agent_run` 的 prompt 组装（bridge 侧，插件不可绕过）：
@@ -268,28 +275,30 @@ host.composer.quote({ text, source: { kind:'pdf', file:'unit-3.pdf', page:3 } })
 ## 9. 决策记录
 
 - **D1（已定）卸载后的插件会话**：**保留**，左栏「已卸载插件」分组，只读 + 手动删除（`plugin_session_delete`）。
-- **D2（已定）不绑定 Project，保留第三种 Session**。理由见下；绑项目的成本对比仅省 1.5–2 轮，但代价是插件拿到项目级 bash/file 工具（爆炸半径）、工具面随项目漂移、空项目用户无法使用。
+- **D2（已定）虚拟 Project**：每插件一个虚拟 Project，Session/命令/左栏全部复用，但不绑真实项目、不进 workspace_list、文件工具根在插件 home。比「第三种 Session」省掉命令解析改造，比「真实 Project」少掉爆炸半径与使用门槛。
 - **D3（已定）模型**：建会话时继承全局 active；用户在会话窗口自由切换 Provider/Model（既有 `switch_model`，按会话独立，不改全局）；插件不能指定。
 - **D4（已定）随机会话 ID**：不做 `session_key` 映射；插件可新建，也可复用自己记住的 id。
 
 ### D2 备选方案的成本对比（存档）
 
-| | 第三种 Plugin Session（选定） | 绑定 Project |
-|---|---|---|
-| 实现成本 | 多 1.5–2 轮（runtime kind + 命令解析 + 左栏分组 + 空态） | 复用现有 workspace runtime |
-| 工具根 | 插件自己的 home（沙盒） | **用户项目目录**（bash/read/write 全开） |
-| 工具面 | 内置 + 全局 MCP + 全局 subAgents（确定） | 额外叠项目技能/MCP/hooks（随项目变） |
-| 使用门槛 | 装完即用 | 必须先有 Project |
-| 卸载/清理 | 独立分组，归属清晰 | 混在项目会话里，需额外区分 |
+| | 虚拟 Project（选定） | 真实 Project | 第三种 Session |
+|---|---|---|---|
+| Session 命令 | 原生 | 原生 | 需加 `plugin_id` 二选一 |
+| 左栏 | 项目分组变体 | 项目分组 | 新分组类型 |
+| 文件工具根 | 插件 home（沙盒） | **用户项目目录** | 插件 home |
+| 工具面 | 内置+全局层 | 内置+项目层（随项目漂移） | 内置+全局层 |
+| 使用门槛 | 装完即用 | 必须先建 Project | 装完即用 |
+| 卸载/清理 | orphan 分组 | 混在项目里 | orphan 分组 |
+| 主要成本 | 过滤虚拟路径（6 处遍历） | 零改造 | 命令解析 + 新 runtime |
 
-**折中（V2，不阻塞）**：plugin session 默认无项目；`agent.run({ workspace })` 显式申请一次项目上下文，宿主弹确认「插件 X 想读取项目 Y」，用户同意才把文件工具根切过去。
+**折中（V2，不阻塞）**：虚拟 Project 默认无真实项目；`agent.run({ workspace })` 显式申请一次项目上下文，宿主弹确认「插件 X 想读取项目 Y」，同意后才把文件工具根切过去。
 
 ## 10. 分阶段与工作量
 
 | 阶段 | 内容 | 估 |
 |---|---|---|
 | **L0** | `window.desktop` 收窄 + token + 探针（插件拿不到 providerKey/fs/command） | 1–2 轮 |
-| **P1** | `runtimePlugin` + 命令解析 + 左栏第三种会话 + `agent.run`（流式/schema/配额/审计）+ `composer.quote` | 3 轮 |
+| **P1** | `runtimePlugin` + 虚拟 Project（左栏/列表/过滤 6 处）+ `agent.run`（流式/schema/配额/审计）+ `composer.quote` | 3 轮 |
 | **P2** | manifest `tools[]` + 代理工具 + 工具调用协议 + 审批 + 项目会话授权 | 2–3 轮 |
 | **P3** | 当前会话只读订阅 / 通用 channel（可选） | 2 轮 |
 
