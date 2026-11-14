@@ -52,6 +52,10 @@ export async function bundleHubComponent(contents) {
 /**
  * 挂载一个组件并返回 page。contents 里要自己 createRoot + 渲染，
  * 完成后设置 window.__harnessReady = true（本函数等它）。
+ *
+ * 组件的 host 依赖（右栏展开/showToast/打开项目会话）走 src/host/panels.ts 的 context：
+ * 夹具必须像真应用（src/main.tsx）一样包一层 HostPanelsProvider，否则这些动作落到
+ * no-op 兜底 —— 断言会静默变成「点不动」。
  */
 export async function openHubHarness(browser, {
   contents,

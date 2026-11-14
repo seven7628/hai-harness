@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useHubStore } from './useHubStore'
-import { useAppStore } from '../store/useAppStore'
+import { useHostPanelsActions } from '../host/panels'
 import {
   composeAnswers,
   parseInlineQuestions,
@@ -43,7 +43,7 @@ export default function HubInlineNeeds({ scope }: { scope: Scope }) {
   const needs = useHubStore((s) => s.needs)
   const resolve = useHubStore((s) => s.resolveNeed)
   const setInspector = useHubStore((s) => s.setInspector)
-  const setRightExpanded = useAppStore((s) => s.setRightExpanded)
+  const { setRightExpanded } = useHostPanelsActions()
   const [busy, setBusy] = useState<string | null>(null)
   // 自由输入/单选值（按 need → question 两层）；多选另外记一份勾选集合，两者在提交时
   // 由 composeAnswers 合成 —— 勾选不能覆盖用户已经打过字的自由输入。

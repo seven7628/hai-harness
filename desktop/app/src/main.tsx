@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import './surfaces/builtin' // 注册内置 SurfaceProvider（副作用 import，必须早于首次渲染）
 import App from './App'
+import { HostPanelsProvider } from './host/panels-desktop'
 import './index.css'
 
 // TEMP-STARTUP：黑屏定位打点（renderer 侧时间轴，经 IPC 回传 main 写 electron-startup.log）
@@ -53,7 +54,10 @@ if (import.meta.env.DEV) {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    {/* Host seam：Hub 组件不再直接读 useAppStore 的 6 个值（手机复用同一条缝）。 */}
+    <HostPanelsProvider>
+      <App />
+    </HostPanelsProvider>
   </React.StrictMode>,
 )
 

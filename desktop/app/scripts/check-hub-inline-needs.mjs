@@ -126,6 +126,7 @@ import { createRoot } from 'react-dom/client'
 import HubInlineNeeds from './HubInlineNeeds.tsx'
 import { useHubStore } from './useHubStore.ts'
 import { useAppStore } from '../store/useAppStore.ts'
+import { HostPanelsProvider } from '../host/panels-desktop.tsx'
 
 const NEED = {
   id: 'need_multi', kind: 'question', status: 'pending', group_id: 'grp_1', task_id: 'task_multi',
@@ -153,8 +154,13 @@ useHubStore.setState({
 })
 useAppStore.setState({ setRightExpanded: () => {} })
 
+// 与真应用同一条 host seam（组件读 context，不直接读 store）。
 createRoot(document.getElementById('hub-root')).render(
-  React.createElement(HubInlineNeeds, { scope: { kind: 'group', groupId: 'grp_1' } }),
+  React.createElement(
+    HostPanelsProvider,
+    null,
+    React.createElement(HubInlineNeeds, { scope: { kind: 'group', groupId: 'grp_1' } }),
+  ),
 )
 requestAnimationFrame(() => { window.__harnessReady = true })
 `

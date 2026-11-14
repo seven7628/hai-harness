@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { AlertIcon, Bot, CheckList, LayersIcon, PanelRight, PencilIcon } from '../components/icons'
 import { useT } from '../i18n'
-import { useAppStore } from '../store/useAppStore'
+import { useHostPanels } from '../host/panels'
 import AgentSigil from './AgentSigil'
 import AgentStack from './AgentStack'
 import { stateResolver } from './avatar'
@@ -26,8 +26,7 @@ export default function HubInspector() {
   const setPanel = useHubStore((s) => s.setInspector)
   const tasks = useHubStore((s) => s.tasks)
   const needs = useHubStore((s) => s.needs)
-  const rightExpanded = useAppStore((s) => s.rightExpanded)
-  const setRightExpanded = useAppStore((s) => s.setRightExpanded)
+  const { rightExpanded, setRightExpanded } = useHostPanels()
   const activeTasks = tasks.filter((task) => !isTerminal(task.status)).length
 
   // 折叠态：右栏只剩 44px 图标条。Hub 打开时 RightPanel 被隐藏，

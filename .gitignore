@@ -123,6 +123,7 @@ node_modules/
 /computer_e2e
 /dist/
 desktop/app/dist/
+desktop/app/dist-mobile/
 desktop/app/dist-electron/
 desktop/app/release/
 # 构建目录，但应用图标是发布必需资产——显式放行这几个

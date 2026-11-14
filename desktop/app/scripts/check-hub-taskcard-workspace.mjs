@@ -51,6 +51,7 @@ import { createRoot } from 'react-dom/client'
 import { GroupBubble } from './MessageBubble.tsx'
 import { useHubStore } from './useHubStore.ts'
 import { useAppStore } from '../store/useAppStore.ts'
+import { HostPanelsProvider } from '../host/panels-desktop.tsx'
 
 const WS = ${JSON.stringify(WS)}
 const SID = ${JSON.stringify(SID)}
@@ -105,7 +106,11 @@ function App() {
   )
 }
 
-createRoot(document.getElementById('hub-root')).render(React.createElement(App))
+// Host seam：组件不再直接读 useAppStore，任务卡「打开会话」走 context ——
+// 夹具必须像真应用（main.tsx）一样挂桌面 provider，否则动作落到 no-op 兜底。
+createRoot(document.getElementById('hub-root')).render(
+  React.createElement(HostPanelsProvider, null, React.createElement(App)),
+)
 requestAnimationFrame(() => { window.__harnessReady = true })
 `
 
