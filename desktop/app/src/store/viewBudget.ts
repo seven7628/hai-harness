@@ -165,6 +165,52 @@ export function domStats(): { nodes: number; htmlBytes: number } {
   return { nodes, htmlBytes }
 }
 
+/** 内存分解（诊断用）：`performance.measureUserAgentSpecificMemory()`。
+ *
+ * ## 为什么它值钱
+ *
+ * 这个 API **会先强制一次完整 GC**，然后给出「JS 堆 / DOM / 其他」的分解。
+ * ⇒ 它同时是**诊断工具**和**泄压阀**：
+ *
+ *   · 诊断：GC 之后的 JS 堆才是**活对象**的真值（`usedJSHeapSize` 含垃圾）；
+ *   · 泄压：调一次就等于让 V8 立刻回收掉几百 MB 垃圾。
+ *
+ * 限制：Chrome 要求**跨源隔离**（COOP/COEP）才允许调用，否则抛 SecurityError。
+ * Electron 的 file:// / http://localhost 页面通常**没有**隔离 ⇒ 调用会失败。
+ * 所以这里返回 null 表示「不可用」，不是错误。
+ */
+export async function measureMemoryBreakdown(): Promise<
+  { totalBytes: number; jsHeapBytes: number; domBytes: number; types: string[] } | null
+> {
+  const p = performance as unknown as {
+    measureUserAgentSpecificMemory?: () => Promise<{
+      bytes: number
+      breakdown: Array<{ bytes: number; attribution: string; types: Array<{ type: string; bytes: number }> }>
+    }>
+  }
+  if (typeof p.measureUserAgentSpecificMemory !== 'function') return null
+  try {
+    const r = await p.measureUserAgentSpecificMemory()
+    const types = new Map<string, number>()
+    let jsHeapBytes = 0
+    let domBytes = 0
+    for (const b of r.breakdown ?? []) {
+      for (const t of b.types ?? []) {
+        types.set(t.type, (types.get(t.type) ?? 0) + t.bytes)
+        if (t.type.includes('DOM') || t.type.includes('Canvas')) domBytes += t.bytes
+        if (t.type.includes('V8') || t.type.includes('JS')) jsHeapBytes += t.bytes
+      }
+    }
+    const top = [...types.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([k, v]) => `${k}=${(v / 1048576).toFixed(1)}MB`)
+    return { totalBytes: r.bytes, jsHeapBytes, domBytes, types: top }
+  } catch {
+    return null // 跨源隔离没开 ⇒ 不可用
+  }
+}
+
 /** 降级后保留的**尾部**块数（保留最近的对话 + 正在流式输出的内容）。 */
 export const VIEW_KEEP_BLOCKS = 200
 

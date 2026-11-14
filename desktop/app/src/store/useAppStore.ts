@@ -26,6 +26,7 @@ import {
   domStats,
   planBudget,
   measureExact,
+  measureMemoryBreakdown,
   roughSize,
   setMemPressure,
   v8HeapBytes,
@@ -9483,6 +9484,12 @@ let heapAtLastDegrade = 0
  */
 let heapAxisIneffective = false
 
+/** 上次「强制 GC 探测」的时刻（毫秒）—— 别一分钟一次地逼 V8 干活。 */
+let lastHeapProbeAt = 0
+
+/** 强制 GC 探测的冷却（毫秒）。 */
+const heapProbeCooldownMs = 60000
+
 /** 按字节预算处置超限的视图。
  *
  * ## 两根轴（2026-11-13 卡死事故后）
@@ -9515,6 +9522,30 @@ function enforceViewBudget(force = false): void {
   })
   const heapBytes = v8HeapBytes()
   const heapOver = heapBytes > V8_HEAP_BUDGET_BYTES
+  // —— 堆超预算 ⇒ 试一次「强制 GC + 内存分解」——
+  //
+  // `performance.measureUserAgentSpecificMemory()` **会先强制一次完整 GC**。
+  // 在没有 `--max-old-space-size` 的情况下（V8 默认上限 2~4GB ⇒ 它没理由回收），
+  // 这是**不重启应用**也能泄压的唯一手段：几百 MB 垃圾当场回收。
+  //
+  // 它同时是**判决工具**：GC 之后的堆才是活对象的真值 —— 堆从 600MB 掉到
+  // ~30MB ⇒ 那 570MB 就是垃圾（2026-11-13 的结论）；不掉 ⇒ 有活对象被攥着。
+  if (heapOver && now - lastHeapProbeAt >= heapProbeCooldownMs) {
+    lastHeapProbeAt = now
+    const before = heapBytes
+    void measureMemoryBreakdown().then((bd) => {
+      if (!bd) {
+        console.info('[budget] 内存分解不可用（Chrome 要求跨源隔离）⇒ 无法从内部强制 GC')
+        return
+      }
+      const after = v8HeapBytes()
+      console.info(
+        `[budget] 强制 GC：堆 ${(before / 1048576).toFixed(0)}MB → ${(after / 1048576).toFixed(0)}MB` +
+          ` | 活对象 JS ${(bd.jsHeapBytes / 1048576).toFixed(0)}MB DOM ${(bd.domBytes / 1048576).toFixed(0)}MB` +
+          ` | ${bd.types.join(' ')}`,
+      )
+    })
+  }
   reportBudget(st, plan.total, budget, plan.degrade.length, plan.evict.length)
   if (plan.degrade.length === 0 && plan.evict.length === 0 && !heapOver) return
   const views = { ...st.views }
