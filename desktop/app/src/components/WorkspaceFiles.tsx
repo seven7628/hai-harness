@@ -25,6 +25,7 @@ import {
   TrashIcon,
 } from './icons'
 import { bridge } from '../lib/bridge'
+import { realProjects } from '../lib/pluginProjects'
 
 // 工作区文件浏览（左栏「查看文件」模式）：目录懒展开 + 点击文件在右侧文件栏展示。
 //
@@ -1178,7 +1179,8 @@ export default function WorkspaceFiles({ onBack }: { onBack: () => void }) {
         {wsOpen && (
           <div className="add-ws-menu lf-ws-menu" role="menu">
             <div className="lf-ws-menu-title">{t('files.switch')}</div>
-            {projects.map((p) => {
+            {/* 虚拟 Project（插件 home）不是工作区：文件树的「切换工作区」里不出现（§4.6 第 3/5 条） */}
+            {realProjects(projects).map((p) => {
               const name = p.path.split('/').pop() || p.path
               const cur = p.path === workspace
               return (

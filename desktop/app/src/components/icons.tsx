@@ -76,3 +76,5 @@ export const MinimizeIcon = ({ size = 13, className }: P) => base(size, <><path 
 export const AlertIcon = ({ size = 13, className }: P) => base(size, <><path d="M12 4l8.5 15h-17z" /><path d="M12 10v4M12 17h.01" /></>, className)
 export const PlayIcon = ({ size = 13, className }: P) => base(size, <path d="M7 4.5l12 7.5-12 7.5z" />, className)
 export const PaletteIcon = ({ size = 14, className }: P) => base(size, <><path d="M12 3a9 9 0 1 0 0 18h1.2a2.3 2.3 0 0 0 0-4.6H12a2.4 2.4 0 0 1 0-4.8h4.6A4.4 4.4 0 0 0 21 7.2 4.2 4.2 0 0 0 16.8 3z" /><circle cx="8" cy="9.5" r="1.1" /><circle cx="12" cy="7" r="1.1" /><circle cx="16" cy="9" r="1.1" /></>, className)
+// PluginIcon 插件（模块方块）：左栏插件分组头 —— 虚拟 Project 没有文件夹语义，用方块组区分。
+export const PluginIcon = ({ size = 13, className }: P) => base(size, <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>, className)

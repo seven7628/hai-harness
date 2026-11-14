@@ -883,6 +883,65 @@ body.is-electron .left-brand {
 .ws-body .session-item {
   margin-left: 16px;
 }
+
+/* —— 插件分组（虚拟 Project，docs/creator-mode-v0.1/09-agent-bridge.md §9）——
+   插件行与工作区行同构（复用 .ws-group/.ws-head/.ws-body/.session-item），差别只有三点：
+   ① 头部预留右侧空间少（只有「新建会话」一个按钮，没有 files/pin/删除工作区）；
+   ② 名字后面跟一枚「插件」徽标（视觉上与真实项目区分，且不影响名字省略）；
+   ③ 行首 icon 换成插件图标/插件给的 emoji。
+   分组容器加一条分隔线，让「真实项目 / 插件」两个区一眼可分；空组由 JSX 整组隐藏。 */
+.left-sub-title {
+  margin: 10px 12px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  user-select: none;
+}
+.left-sub-title.sub {
+  margin: 6px 12px 2px 16px;
+  font-size: 10px;
+  font-weight: 500;
+}
+.plugin-projects {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+.ws-head.plugin {
+  /* 只有 1 个右浮按钮（新建会话）：18px 按钮 + 4px 边距 + 名字下限，够用 */
+  padding-right: 26px;
+}
+.ws-head.plugin .ws-chev {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.ws-head.plugin .plugin-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+.ws-head.plugin .plugin-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  /* 窄面板下名字优先：徽标可以先被压掉，但绝不能把名字挤成省略号 */
+  max-width: 44px;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
 .session-item {
   display: flex;
   align-items: center;

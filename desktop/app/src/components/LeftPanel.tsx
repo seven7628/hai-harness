@@ -4,7 +4,10 @@ import { useAppStore, titleKey, MAX_WORKSPACE_PINS, MAX_SESSION_PINS } from '../
 import ConfirmModal from './ConfirmModal'
 import WorkspaceFiles from './WorkspaceFiles'
 import HaiLogo from './HaiLogo'
-import { ChevronDown, Plus, FolderPlus, FolderIcon, FolderOpenIcon, SessionPlus, PinIcon, Sparkles, Gear, SessionIcon, PanelLeft, Clock, MoreIcon } from './icons'
+import { ChevronDown, Plus, FolderPlus, FolderIcon, FolderOpenIcon, SessionPlus, PinIcon, Sparkles, Gear, SessionIcon, PanelLeft, Clock, MoreIcon, PluginIcon } from './icons'
+// 虚拟 Project（插件）的判据/分组：与 store、插件分组渲染共用同一份纯函数
+// （virtual 标记 + 插件 home 路径特征），左栏不再各写一次 p.virtual。
+import { isVirtualProject, pluginProjectLabel, realProjects, splitPluginProjects } from '../lib/pluginProjects'
 import { useT } from '../i18n'
 import { AgentTree } from './AgentTree'
 import { Bot } from './icons'
@@ -45,6 +48,10 @@ export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
   const togglePin = useAppStore((s) => s.togglePin)
   const workspace = useAppStore((s) => s.workspace)
   const projects = useAppStore((s) => s.projects)
+  // 真实工作区与虚拟 Project（插件）分组渲染（docs/creator-mode-v0.1/09-agent-bridge.md §9）：
+  // 真实项目保持原顺序、原折叠状态；插件组排在它们之后，空则整组隐藏。
+  const realList = realProjects(projects)
+  const pluginGroups = splitPluginProjects(projects)
   const persona = useAppStore((s) => s.persona)
   const switchPersona = useAppStore((s) => s.switchPersona)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -271,7 +278,7 @@ export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
             {projects.length === 0 && (
               <div className="session-item" style={{ color: 'var(--text-3)', cursor: 'default' }}>{t('left.noProjects')}</div>
             )}
-            {projects.map((p) => {
+            {realList.map((p) => {
               const pathOpen = isOpen(p.path)
               const activeProject = p.path === workspace
               return (
@@ -492,6 +499,116 @@ export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
                 </div>
               )
             })}
+
+            {/* —— 插件分组（虚拟 Project）——
+                插件 = 一个虚拟 Project：图标 + 「插件」徽标，会话行与真实项目完全同构。
+                只提供「新建会话 / 删除会话」：pin/files/git/删除工作区对插件 home 都没有
+                意义（§4.6 第 6 条）。已卸载（installed:false）单独一个子组，只读 —— 可打开、
+                可删会话，不给新建。空则整组隐藏。 */}
+            {pluginGroups.installed.length + pluginGroups.uninstalled.length > 0 && (
+              <div className="plugin-projects">
+                <div className="left-sub-title">{t('left.plugins')}</div>
+                {([
+                  { key: 'installed', title: pluginGroups.uninstalled.length ? t('left.pluginsInstalled') : '', list: pluginGroups.installed },
+                  { key: 'uninstalled', title: pluginGroups.uninstalled.length ? t('left.pluginsUninstalled') : '', list: pluginGroups.uninstalled },
+                ] as const).map((group) => group.list.length === 0 ? null : (
+                  <div key={group.key} className="plugin-sub">
+                    {group.title && <div className="left-sub-title sub">{group.title}</div>}
+                    {group.list.map((p) => {
+                      const pathOpen = isOpen(p.path)
+                      const activeProject = p.path === workspace
+                      const readonly = p.installed === false
+                      const label = pluginProjectLabel(p)
+                      const firstId = p.sessions[0]?.id
+                      const openProject = () => {
+                        exitHub()
+                        setOpen((o) => ({ ...o, [p.path]: true }))
+                        // 行点击 = 打开该插件的第一个会话；还没有会话 = 直接新建（已卸载只读，不建）。
+                        if (firstId) setActiveSession(firstId, p.path)
+                        else if (!readonly) createSessionIn(p.path)
+                      }
+                      return (
+                        <div key={p.path} className={`ws-group plugin-group ${pathOpen ? 'open' : ''}`}>
+                          <div
+                            className={`ws-head plugin ${activeProject ? 'active' : ''} ${narrow ? 'narrow' : ''}`}
+                            title={p.path}
+                            onClick={openProject}
+                          >
+                            <button
+                              className="ws-chev"
+                              aria-label={pathOpen ? t('left.collapse') : t('left.expand')}
+                              aria-expanded={pathOpen}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setOpen((o) => ({ ...o, [p.path]: !pathOpen }))
+                              }}
+                            >
+                              <ChevronDown className="chev" />
+                            </button>
+                            <span className="ws-ic">
+                              {p.icon ? <span className="plugin-icon" aria-hidden="true">{p.icon}</span> : <PluginIcon size={13} />}
+                            </span>
+                            <span className="wname">{label}</span>
+                            <span className="plugin-badge">{t('left.pluginBadge')}</span>
+                            <span className="ws-count">{p.sessions.length}</span>
+                            {!readonly && (
+                              <button
+                                className="ws-new"
+                                title={t('left.newSessionIn')}
+                                aria-label={t('left.newSessionIn')}
+                                onClick={(e) => { e.stopPropagation(); exitHub(); createSessionIn(p.path) }}
+                              >
+                                <Plus size={12} />
+                              </button>
+                            )}
+                          </div>
+                          {pathOpen && (
+                            <div className="ws-body">
+                              {p.sessions.length === 0 && (
+                                <div className="session-item" style={{ color: 'var(--text-3)', cursor: 'default' }}>{t('left.noSessions')}</div>
+                              )}
+                              {p.sessions.map((s) => {
+                                const title = titleOverrides[titleKey(p.path, s.id)] ?? s.title
+                                return (
+                                  <Fragment key={s.id}>
+                                    <div
+                                      className={`session-item ${s.id === activeSessionId ? 'active' : ''}`}
+                                      title={title}
+                                      onClick={() => {
+                                        if (s.id === activeSessionId) {
+                                          if (focusedAgent) focusAgent(undefined)
+                                          return
+                                        }
+                                        setActiveSession(s.id, p.path)
+                                      }}
+                                    >
+                                      <span className={`dot ${s.id === activeSessionId ? 'active' : busySids.has(s.id) ? 'running' : 'done'}`} />
+                                      <span className="session-title">{title}</span>
+                                      <button
+                                        className="session-del"
+                                        title={t('left.deleteSession')}
+                                        aria-label={t('left.deleteSession')}
+                                        onClick={(e) => {
+                                          e.stopPropagation()
+                                          setConfirm({ kind: 'session', path: p.path, sid: s.id, name: title })
+                                        }}
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                    {s.id === activeSessionId && <AgentTree />}
+                                  </Fragment>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           </>
           )}
@@ -499,7 +616,9 @@ export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
           {/* 工作区行「⋯」溢出菜单（窄面板形态）：行内 4 个操作在此收齐，行为完全一致 */}
           {moreMenu && (() => {
             const p = projects.find((x) => x.path === moreMenu.path)
-            if (!p) return null
+            // 虚拟 Project（插件）不出现在这个菜单里：它的行只给「新建会话 / 删除会话」，
+            // pin/files/删除工作区对插件 home 都没有意义（§4.6 第 6 条）。
+            if (!p || isVirtualProject(p)) return null
             const activeProject = p.path === workspace
             const name = p.path.split('/').pop() || p.path
             return (

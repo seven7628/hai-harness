@@ -5,6 +5,7 @@ import type { MCPServerCfg } from '../transport/types'
 import { useT } from '../i18n'
 import { FolderIcon, Gear } from './icons'
 import { DetailHead, SourceCard, Switch } from './SettingsGroups'
+import { realProjects } from '../lib/pluginProjects'
 
 // ─── MCP 设置页（2026-09-21 改造：全局 × 项目两级 + 二级详情面板）───
 //
@@ -32,7 +33,8 @@ export function MCPTab() {
   // 全局配置文件路径：来自 mcp_list.layers（user 层），拿不到时只显示「所有项目共用」
   const userPath = mcpLayers.find((l) => l.source === 'user')?.path
 
-  const paths = useMemo(() => projects.map((p) => p.path), [projects])
+  // 虚拟 Project（插件 home）不是工作区：项目层 MCP 状态里不出现（§4.6 第 8 条）。
+  const paths = useMemo(() => realProjects(projects).map((p) => p.path), [projects])
   const pathsKey = paths.join('\u0000')
   useEffect(() => {
     fetchMCPServers()
@@ -232,7 +234,8 @@ function MCPProjectDetail({ proj, onBack }: { proj: MCPProjectInfo; onBack: () =
   const saveMCPProject = useAppStore((s) => s.saveMCPProject)
   const fetchMCPProjects = useAppStore((s) => s.fetchMCPProjects)
   const projects = useAppStore((s) => s.projects)
-  const paths = useMemo(() => projects.map((p) => p.path), [projects])
+  // 虚拟 Project（插件 home）不是工作区：项目层 MCP 状态里不出现（§4.6 第 8 条）。
+  const paths = useMemo(() => realProjects(projects).map((p) => p.path), [projects])
 
   const [adding, setAdding] = useState(false)
   const [editingName, setEditingName] = useState<string | null>(null)

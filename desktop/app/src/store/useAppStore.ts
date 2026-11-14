@@ -3022,7 +3022,9 @@ function persistProjects(s: AppState): void {
   const canWrite = Boolean(cur && activeWs && activeAtNow >= prevLastAt)
   saveJSON(LS_PROJECTS, {
     paths,
-    active: activeWs || (paths.includes(prev.active) ? prev.active : ''),
+    // 活跃工作区：插件会话打开时 activeWs 为空 → **保留上一个真实工作区**（不能写成空串：
+    // 用户「打开插件会话 → 退出应用 → 重新打开」会落到 BootScreen，看起来像项目全丢了）。
+    active: activeWs || (paths.includes(prev.active) ? prev.active : '') || paths[0] || '',
     pinned: workspaceProjects.filter((p) => p.pinned).map((p) => p.path).slice(0, MAX_WORKSPACE_PINS),
     lastSession: canWrite
       ? { path: activeWs, id: cur }
