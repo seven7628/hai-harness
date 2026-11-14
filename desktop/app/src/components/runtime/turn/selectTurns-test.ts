@@ -7,7 +7,7 @@
 //   3. 盒子存在 = workBody 非空（不是「有工具」）；没有盒子的轮（纯对话）正文回到时间线。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, runningBody, runWorkBody, segmentUsage, selectTurns, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
+import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, rememberSettleMark, runningBody, runWorkBody, segmentUsage, selectTurns, settleMarkValid, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
 import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
@@ -352,6 +352,29 @@ test('缺 run id：结算边界在两端时不分段（没有「新到的块」�
   const turn = selectTurns(blocks)[0]
   assert.equal(turnRuns(turn, 0).length, 1)
   assert.equal(turnRuns(turn, turn.items.length).length, 1, '结算之后什么都没来 → 还是一段')
+})
+
+test('缺 run id：结算后又来工具时，已记录的边界不能被当前长度覆盖', () => {
+  // P8-02 实测：AgentEnd 时边界 = 1（只有结论）；之后后台 run 的 tool 块落进同一轮。
+  // 如果每次渲染都把边界重记成 items.length，turnRuns 会从两段缩回一段，
+  // multiRun 翻 false，Worked 盒的 state key 从 turn#1 切回 turn → 刚点开就弹回收起。
+  const blocks: MsgBlock[] = [user(1), assistant(2, '结论'), tool(3)]
+  const turn = selectTurns(blocks)[0]
+  const mark = rememberSettleMark(undefined, turn.items.slice(0, 1))
+  assert.deepEqual(mark, { at: 1, lastId: 2 }, '首次结算记在结论之后')
+  assert.equal(settleMarkValid(mark, turn.items), true, '追加块后旧边界仍有效')
+  const kept = rememberSettleMark(mark, turn.items)
+  assert.deepEqual(kept, { at: 1, lastId: 2 }, '追加块不许把边界往后挪')
+  assert.equal(turnRuns(turn, kept.at).length, 2, '边界保持 → 后台 run 仍切自己的段')
+})
+
+test('缺 run id：轮的内容被整体替换时，旧边界作废并按新长度重建', () => {
+  const old: MsgBlock[] = [user(1), assistant(2, '旧结论')]
+  const mark = rememberSettleMark(undefined, selectTurns(old)[0].items)
+  const replaced: MsgBlock[] = [user(1), assistant(99, '重灌的结论')]
+  assert.equal(settleMarkValid(mark, selectTurns(replaced)[0].items), false, 'lastId 对不上 → 旧边界作废')
+  const rebuilt = rememberSettleMark(mark, selectTurns(replaced)[0].items)
+  assert.deepEqual(rebuilt, { at: 1, lastId: 99 }, '按替换后的最后一块重建')
 })
 
 test('连续两次运行都没交付（没有正文/记录/产出）→ 合成一个盒子', () => {

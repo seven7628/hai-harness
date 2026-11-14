@@ -489,6 +489,28 @@ export interface TurnRun {
    其中三个 0 calls、没有任何正文（全是 run 边界，不是三次交付）。 */
 const delivers = (b: MsgBlock): boolean => isRecord(b) || b.kind === 'artifacts' || isText(b)
 
+/* 已结算边界（settle mark）的合法性：下标还在、且那一段最后一块仍是同一块。
+   轮的内容被整体替换（分页 / 重放 / 测试夹具重灌块，同一个 turn key 被复用）时作废，
+   否则会把新内容从中间切开。 */
+export interface SettleMark {
+  at: number
+  lastId?: number
+}
+
+export function settleMarkValid(mark: SettleMark | undefined, items: readonly MsgBlock[]): mark is SettleMark {
+  return !!mark && mark.at > 0 && mark.at <= items.length && items[mark.at - 1]?.id === mark.lastId
+}
+
+/* 记录结算边界时**不能每次渲染都往后挪**：
+   AgentEnd 之后又来了工具/记录（后台 run / promote）时，旧边界仍然有效；如果每次
+   都把它重置成当前 items.length，`turnRuns` 会从两段缩回一段，`multiRun` 翻成 false，
+   Worked 盒的 state key 从 `turn#1` 切回 `turn` —— 用户刚点开的盒子立刻弹回收起。
+   所以：旧边界仍有效就原样保留；只有它失效（内容被替换）才按当前长度重建。 */
+export function rememberSettleMark(prev: SettleMark | undefined, items: readonly MsgBlock[]): SettleMark {
+  if (settleMarkValid(prev, items)) return prev
+  return { at: items.length, lastId: items[items.length - 1]?.id }
+}
+
 export function turnRuns(turn: Turn, settleAt?: number): TurnRun[] {
   const runs: TurnRun[] = []
   let curId: string | undefined
