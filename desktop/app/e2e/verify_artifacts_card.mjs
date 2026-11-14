@@ -171,28 +171,71 @@ async function main() {
     const t = m.text()
     if (m.type() === 'error' && !/ERR_NAME_NOT_RESOLVED|Failed to load resource/.test(t)) errs.push(t.slice(0, 200))
   })
-  // L0（D6）：宿主在模块求值时一次性 claim（真应用里由 preload 交出）。探针页用 static import
-  // 拉 src 模块 → 桥在探针代码之前就求值了，所以 fake 只能在这里（页面脚本之前）交出去。
-  // 同一个对象后面各阶段用 Object.assign 补方法（桥持有的是**同一个引用**）。
+  // —— 假宿主桥（fake window.desktop）——
+  //
+  // L0（D6）之后：preload 只暴露一次性交接，宿主（src/lib/bridge.ts）在 **src 模块求值时**
+  // 就把 api 领走。探针页用 static import 拉 src 模块 ⇒ fake 必须在**任何页面脚本之前**摆好，
+  // 所以只能在这里注入 —— 与生产里「preload 先于 bundle」同一条时序。
+  //
+  // fake 用 Proxy 兜底（未知 IPC 回 {ok:true}），但**两条通道必须真的实现**：
+  //   · onEvent：store 的 wire() 在这里订阅（生产里是 preload 的 IPC 推送）；
+  //   · command：真 bridge 对每条命令回一个 command_response **事件**（不是返回值），
+  //     文件内容（file_preview）就走这条路 —— 只回 {ok:true} 的话预览会永远停在
+  //     「正在读取文件…」（这正是本段要修的那条红）。
   await page.addInitScript(() => {
-    const target = {}
+    const WS = '/Users/dev/ws'
+    const listeners = new Set()
+    const emit = (payload) => {
+      const line = JSON.stringify(payload)
+      for (const cb of [...listeners]) {
+        try { cb(line) } catch { /* 订阅方自己炸不该带崩 fake */ }
+      }
+    }
+    // 文本内容按后缀给一份「像那么回事」的样例：.md 走 markdown 预览、.csv 走表格、其余走高亮源码。
+    const contentOf = (path) => {
+      const ext = String(path).split('.').pop()
+      if (ext === 'csv') return 'name,qty\napple,3\npear,5\n'
+      if (ext === 'md') return '# 标题\n\n正文一段。\n\n- 列表项\n'
+      if (ext === 'json') return '{ "ok": true, "items": [1, 2, 3] }\n'
+      if (ext === 'ts') return 'export const answer: number = 42\n'
+      return '第一行\n第二行\n'
+    }
     const noops = new Map()
-    window.__fake = new Proxy(target, {
+    const fake = new Proxy({}, {
       get(t, k) {
         if (typeof k === 'symbol') return t[k]
         if (k in t) return t[k]
-        if (k === 'then' || k === 'toJSON') return undefined
+        if (k === 'then' || k === 'toJSON') return undefined // 别让 Proxy 变成 thenable
+        // 内嵌视图池：RightPanel 会在 effect 里调这几条（缺了就 "is not a function"）。
         if (k === 'embedStatus') return () => Promise.resolve({ ok: true, targets: [] })
-        // 文件内容通道：文本预览（json/md/ts/csv/txt）靠它取字节，缺了会一直停在「正在读取文件…」。
-        if (k === 'fsReadRef') return (req) => Promise.resolve({ ok: true, content: JSON.stringify(req?.path ?? 'x') })
-        if (k === 'fsStat') return () => Promise.resolve({ ok: true, size: 16, isFile: true })
+        if (k === 'onEvent') {
+          return (cb) => { listeners.add(cb); return () => listeners.delete(cb) }
+        }
+        if (k === 'command') {
+          return async (cmd) => {
+            const type = cmd && cmd.type
+            const ws = (cmd && cmd.workspace) || WS
+            const reqPath = String(cmd?.payload?.path ?? '')
+            const data = type === 'file_preview'
+              ? (() => { const content = contentOf(reqPath); return { path: reqPath, content, lines: content.split('\n').length - 1 } })()
+              : type === 'workspace_list' ? { workspaces: [] }
+                : type === 'session_list' ? { sessions: [] }
+                  : {}
+            // 命令响应是**事件**（真 bridge 经 preload 推回来），异步一拍再发。
+            setTimeout(() => emit({ event_type: 'command_response', id: cmd && cmd.id, ok: true, data, workspace: ws }), 0)
+            return { ok: true }
+          }
+        }
         if (!noops.has(k)) noops.set(k, () => Promise.resolve({ ok: true }))
         return noops.get(k)
       },
       set(t, k, v) { t[k] = v; return true },
       deleteProperty(t, k) { delete t[k]; return true },
     })
-    window.__haiClaimHostApi = () => window.__fake
+    // 桥读到 fake 会**立刻 delete window.desktop**（一次性消费）：__fake 是探针自己的句柄，
+    // 后续阶段用 Object.assign 往同一个对象上补方法（宿主持有的是同一个引用）。
+    window.__fake = fake
+    window.desktop = fake
   })
   await page.addInitScript((c) => { window.__CASES = c }, {
     single: SINGLE, multi: MULTI, appendDelta: APPEND_DELTA, dup: DUP, trunc: TRUNC, empty: EMPTY, pdf: PDF, xlsx: XLSX,
@@ -206,6 +249,23 @@ async function main() {
   const surfaces = (await page.evaluate(() => window.__surfaces)) ?? {}
   assert(surfaces.file && surfaces.git && surfaces.web,
     `surface provider 已注册（file/git/web = ${JSON.stringify(surfaces)}）`)
+
+  // ── 仪器自检 2：宿主真的「一次性」领走了 fake（L0 / D6）──
+  // 探针注入的 window.desktop 必须被宿主消费掉（页面上不再有它），而宿主持有的就是同一个
+  // 对象（dev 档的读取口 __haiTestBridge 指向它）。这条红了说明假桥没走到真实加载顺序上，
+  // 下面所有「点预览 → 渲染出内容」就不再是那条链路的结果。
+  {
+    const bridge = await page.evaluate(() => ({
+      desktop: typeof window.desktop,
+      hasDesktopKey: Object.prototype.hasOwnProperty.call(window, 'desktop'),
+      testBridgeIsFake: window.__haiTestBridge === window.__fake,
+      testBridgeType: typeof window.__haiTestBridge,
+    }))
+    assert(bridge.desktop === 'undefined' && bridge.hasDesktopKey === false,
+      `宿主消费掉注入的 fake（window.desktop = ${bridge.desktop}）`)
+    assert(bridge.testBridgeIsFake === true,
+      `宿主持有的就是探针那个对象（__haiTestBridge = ${bridge.testBridgeType}）`)
+  }
 
   const q = (sel, caseName = 'single') => page.locator(`[data-case="${caseName}"] ${sel}`)
   // 折叠可见行数：.art-more 包裹层 display:none 的行不计
