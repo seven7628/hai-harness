@@ -2,6 +2,7 @@ import type { Transport } from './types'
 import { electronTransport } from './electron'
 import { mockTransport } from './mock'
 import { sharedMobileTransport } from '../mobile/transport/mobile'
+import { setHubTransport } from './host'
 
 let cached: Transport | null = null
 
@@ -22,3 +23,8 @@ export function getTransport(): Transport {
 export function resetTransport(): void {
   cached = null
 }
+
+// Hub 的 store / 命令 / 附件从 `transport/host.ts` 取实现（P8-01b）：这里在模块求值时
+// 把三档分流注册进去 —— 桌面（Electron / 浏览器 mock）行为与直接调 getTransport 完全一致；
+// 手机入口不 import 本模块，改注册 sharedMobileTransport()，于是 electron/mock 不进手机包。
+setHubTransport(getTransport)

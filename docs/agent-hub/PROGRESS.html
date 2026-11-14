@@ -2618,9 +2618,11 @@ const BASE = {
       ],
       "acceptance": "390/430：列表→群/DM→发消息/流式/任务卡/Needs；新 mobile transport 合成 command_response；host seam 桌面行为零变化；新页可通过 HAI_MOBILE_WEB_DIR 托管，旧 /m/ 不回归。",
       "tests": "npx tsc --noEmit；node mobile transport 单测；浏览器 390/430 截图；桌面 check-hub-* 关键脚本",
-      "commit": "—",
-      "status": "in_progress",
-      "note": "P8-01a 已合并（094d6ad）；P8-01b 列表/群/DM 屏幕进行中。"
+      "commit": "926c94d",
+      "status": "done",
+      "note": "P8-01a 已合并（094d6ad）；P8-01b 列表/群/DM 屏幕进行中。",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 139 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-hub 390/430 38 条全绿；桌面 collapse/group-edit/taskcard 全 PASS；手机包无 useAppStore/mock/electron。merge ab5a01f。"
     },
     {
       "id": "P8-02",
@@ -2638,7 +2640,7 @@ const BASE = {
       "acceptance": "390/430：打开会话→流式→工具折叠→审批/提问→子智能体卡；复用桌面同一份 block/turn 渲染；无独立转录渲染器。",
       "tests": "npx tsc --noEmit；test:hub-conv；浏览器 390/430；桌面主会话回归",
       "commit": "—",
-      "status": "blocked"
+      "status": "pending"
     },
     {
       "id": "P8-03",
@@ -3845,11 +3847,14 @@ const BASE = {
       "reviewNote": "主 Session 复验：目标用例 + agenthub 全包 + vet + tsc + hub-conv 160 全绿；全量 desktop/bridge 复跑 193.5s 全绿（首跑 80ms 冷却时序用例偶发红，单跑 10 次绿，非本包回归）；merge fa40292。"
     },
     "P8-01": {
-      "status": "in_progress",
-      "commit": "—"
+      "status": "done",
+      "commit": "926c94d",
+      "merge": "ab5a01f",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 139 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-hub 390/430 38 条全绿；桌面 collapse/group-edit/taskcard 全 PASS；手机包无 useAppStore/mock/electron。merge ab5a01f。"
     },
     "P8-02": {
-      "status": "blocked",
+      "status": "pending",
       "commit": "—"
     },
     "P8-03": {
@@ -3862,6 +3867,13 @@ const BASE = {
       "merge": "094d6ad",
       "review": "passed",
       "reviewNote": "主 Session 复验：tsc + mobile transport 131 + css + hub-conv 151 + right-tabs 225 全绿；手机包 157KB/51KB gzip，边界断言无 useAppStore/mock/electron。"
+    },
+    "P8-01b": {
+      "status": "done",
+      "commit": "926c94d",
+      "merge": "ab5a01f",
+      "review": "passed",
+      "reviewNote": "手机 Hub 列表/群/DM + 抽屉；transport/lang/markdown 三个 seam；能力收窄；390/430 38 条浏览器断言。"
     }
   },
   "reviewGate": {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useHostCapabilities } from '../host/panels'
 import { useHubStore } from './useHubStore'
 import { formatHubDeepLink } from './deeplink'
 import {
@@ -22,6 +23,9 @@ import type { HubMessage } from './types'
 // 面板里没有输入框/保存按钮：记忆、人格、工具的编辑仍只在资料页（AgentEditor）。
 
 export default function ContextPanel() {
+  // 手机（P8-01b）：hub_agent_prompt_preview 不在 mobile_server 的 allowlist 内。
+  // 提示词分层整段不渲染、也不发请求；①消息上下文（纯本地投影）照常可用。
+  const canPromptPreview = useHostCapabilities().promptPreview
   const activeId = useHubStore((s) => s.activeId)
   const activeGroupId = useHubStore((s) => s.activeGroupId)
   const groups = useHubStore((s) => s.groups)
@@ -63,8 +67,8 @@ export default function ContextPanel() {
   // （群变体才有 @ 与 assign_task，L2 是群名册而不是该 agent 的 DM 身份）。DM 传空串。
   const promptGroupId = group?.id ?? ''
   useEffect(() => {
-    if (promptAgentId) void loadPrompt(promptAgentId, false, promptGroupId)
-  }, [promptAgentId, promptGroupId, loadPrompt])
+    if (canPromptPreview && promptAgentId) void loadPrompt(promptAgentId, false, promptGroupId)
+  }, [canPromptPreview, promptAgentId, promptGroupId, loadPrompt])
   const promptAgent = agents.find((a) => a.id === promptAgentId)
   // 只认同作用域的预览：切群/切 DM 后旧层在语义上是别人的正文，不能先显示再替换。
   const promptForTarget = promptScopeMatches(prompt, { agentId: promptAgentId, groupId: promptGroupId })
@@ -187,66 +191,69 @@ export default function ContextPanel() {
         )}
       </div>
 
-      <div className="hub-context-section">
-        <div className="hub-section-head">
-          <strong>提示词分层</strong>
-          {group && memberIds.length > 0 ? (
-            <select
-              aria-label="选择成员"
-              value={promptAgentId}
-              onChange={(e) => setMemberPick(e.target.value)}
+      {/* 提示词分层：手机整段不渲染（hub_agent_prompt_preview 未在 allowlist 内）。 */}
+      {canPromptPreview ? (
+        <div className="hub-context-section">
+          <div className="hub-section-head">
+            <strong>提示词分层</strong>
+            {group && memberIds.length > 0 ? (
+              <select
+                aria-label="选择成员"
+                value={promptAgentId}
+                onChange={(e) => setMemberPick(e.target.value)}
+              >
+                {members.map((m) => (
+                  <option key={m.agent_id} value={m.agent_id}>
+                    {(names[m.agent_id] ?? m.agent_id)}{m.role ? `（${m.role}）` : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="hub-muted">{promptAgent?.name ?? '—'}</span>
+            )}
+            <button
+              className="hub-link"
+              onClick={() => void loadPrompt(promptAgentId, true, promptGroupId)}
+              disabled={!promptAgentId}
+              title="重新读取（只读）"
             >
-              {members.map((m) => (
-                <option key={m.agent_id} value={m.agent_id}>
-                  {(names[m.agent_id] ?? m.agent_id)}{m.role ? `（${m.role}）` : ''}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <span className="hub-muted">{promptAgent?.name ?? '—'}</span>
-          )}
-          <button
-            className="hub-link"
-            onClick={() => void loadPrompt(promptAgentId, true, promptGroupId)}
-            disabled={!promptAgentId}
-            title="重新读取（只读）"
-          >
-            ↻
-          </button>
-        </div>
+              ↻
+            </button>
+          </div>
 
-        {!promptAgentId ? (
-          <div className="hub-empty hub-pad">
-            <p>这个群还没有成员</p>
-            <span className="hub-muted">加入成员后才能预览提示词</span>
-          </div>
-        ) : null}
-        {promptAgentId && promptForTarget?.loading ? <div className="hub-muted hub-pad">读取提示词…</div> : null}
-        {promptAgentId && promptForTarget?.error ? <p className="hub-error-text hub-pad">{promptForTarget.error}</p> : null}
-        {promptAgentId && promptForTarget?.loaded && layers.length === 0 ? (
-          <div className="hub-empty hub-pad">
-            <p>预览为空</p>
-            <span className="hub-muted">这个智能体还没有可展示的提示词层</span>
-          </div>
-        ) : null}
-        {layers.length > 0 ? (
-          <div className="hub-prompt-layers">
-            {layers.map((layer, index) => (
-              <details key={`${layer.key}-${index}`} className="hub-prompt-layer" open={index === 0}>
-                <summary>
-                  <span className={`hub-chip ${layer.label ? `layer-${layer.label.toLowerCase()}` : ''}`}>{layer.label || 'L?'}</span>
-                  <span className="hub-prompt-title">{layer.title}</span>
-                  <span className="hub-muted">{layer.chars} 字</span>
-                </summary>
-                <pre className="hub-prompt-text">{layer.text || '（空）'}</pre>
-              </details>
-            ))}
-          </div>
-        ) : null}
-        <p className="hub-muted hub-pad hub-prompt-note">
-          {layers.length > 0 ? `共 ${totalBytes} 字节 · ` : ''}{note}
-        </p>
-      </div>
+          {!promptAgentId ? (
+            <div className="hub-empty hub-pad">
+              <p>这个群还没有成员</p>
+              <span className="hub-muted">加入成员后才能预览提示词</span>
+            </div>
+          ) : null}
+          {promptAgentId && promptForTarget?.loading ? <div className="hub-muted hub-pad">读取提示词…</div> : null}
+          {promptAgentId && promptForTarget?.error ? <p className="hub-error-text hub-pad">{promptForTarget.error}</p> : null}
+          {promptAgentId && promptForTarget?.loaded && layers.length === 0 ? (
+            <div className="hub-empty hub-pad">
+              <p>预览为空</p>
+              <span className="hub-muted">这个智能体还没有可展示的提示词层</span>
+            </div>
+          ) : null}
+          {layers.length > 0 ? (
+            <div className="hub-prompt-layers">
+              {layers.map((layer, index) => (
+                <details key={`${layer.key}-${index}`} className="hub-prompt-layer" open={index === 0}>
+                  <summary>
+                    <span className={`hub-chip ${layer.label ? `layer-${layer.label.toLowerCase()}` : ''}`}>{layer.label || 'L?'}</span>
+                    <span className="hub-prompt-title">{layer.title}</span>
+                    <span className="hub-muted">{layer.chars} 字</span>
+                  </summary>
+                  <pre className="hub-prompt-text">{layer.text || '（空）'}</pre>
+                </details>
+              ))}
+            </div>
+          ) : null}
+          <p className="hub-muted hub-pad hub-prompt-note">
+            {layers.length > 0 ? `共 ${totalBytes} 字节 · ` : ''}{note}
+          </p>
+        </div>
+      ) : null}
     </section>
   )
 }

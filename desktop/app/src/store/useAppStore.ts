@@ -23,10 +23,17 @@ import {
   BUDGET_CHECK_INTERVAL_MS,
   currentBudgetBytes,
   degradeView,
+  domStats,
   planBudget,
+  measureExact,
+  roughSize,
   setMemPressure,
+  v8HeapBytes,
   viewBytes,
+  viewHasPendingInteraction,
+  V8_HEAP_BUDGET_BYTES,
 } from './viewBudget'
+import { useHubStore } from '../hub/useHubStore'
 import { t as i18nT } from '../i18n'
 // 归属（owner）编码：信任/启用按归属隔离（FE 侧只做展示与回传，判定在 bridge）
 import { ownerValid } from '../lib/owner'
@@ -9244,14 +9251,136 @@ function reportBudget(
   }
   const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory
   const heapMB = mem?.usedJSHeapSize ? (mem.usedJSHeapSize / 1048576).toFixed(0) : '?'
+  // 诊断维度（2026-11-13 卡死事故后加）：
+  //   · DOM 节点数 —— 「不是我们数据」的那部分（React 树/DOM）到底多大
+  //   · DOM HTML 字面量 —— DOM 的体量代理
+  //   · pending 表 —— 模块级命令表，响应丢失就永久残留（无 TTL 兜底）
+  const dom = domStats()
+  const pendingN = Object.keys(pending).length
+  const pendingLineN = Object.keys(pendingLines).length
   console.info(
     `[budget] 视图 ${Object.keys(st.views).length} 个 / 块 ${blocks} / 卡片 ${cards}` +
       ` | 估算 ${(remaining / 1048576).toFixed(0)}MB（预算 ${(budget / 1048576).toFixed(0)}MB）` +
-      ` | V8 堆 ${heapMB}MB | 降级 ${degradeN} 淘汰 ${evictN}`,
+      ` | V8 堆 ${heapMB}MB | DOM ${dom.nodes} 节点/${(dom.htmlBytes / 1e6).toFixed(1)}MB` +
+      ` | pending ${pendingN}/${pendingLineN}` +
+      ` | 降级 ${degradeN} 淘汰 ${evictN}`,
   )
+  // —— 内存归因（2026-11-13 卡死事故）：堆 460MB、数据 13MB、DOM 1200 节点 ⇒
+  // 「不是我们的数据」也不在 DOM 里 ⇒ 必须按 slice 拆开看，才知道是谁攥着。
+  // 每 5 次心跳打一次（拆解要遍历，切片状态，全量打印太吵）。
+  budgetReportCount++
+  if (budgetReportCount % 5 === 0) reportMemoryBreakdown(st)
 }
 
-/** 按字节预算处置超限的视图。 */
+/** 体检计数（用于「每 N 次打一次归因」）。 */
+let budgetReportCount = 0
+
+/** 内存归因：把两个 store 的每个 slice 按 roughSize 排序打出来。
+ *
+ * 目的：2026-11-13 的卡死里，V8 活堆 460MB 而「我们的数据」只有 13MB、
+ * DOM 只有 1200 个节点 ⇒ 光看总量定位不到 ⇒ 必须按 slice 拆。
+ *
+ * hub store 走 window.__hub（main.tsx 已经挂好了）⇒ 不必在这里 import
+ * （useAppStore ← useHubStore 是单向依赖，但 window 入口更省事、也不动依赖图）。
+ */
+function reportMemoryBreakdown(st: AppState): void {
+  const top = (obj: Record<string, unknown> | undefined, label: string): void => {
+    if (!obj) {
+      console.info(`[budget][mem] ${label}: 不可达`)
+      return
+    }
+    const rows: Array<[string, number]> = []
+    const exactRows: Array<[string, string]> = []
+    for (const [k, v] of Object.entries(obj)) {
+      let n = 0
+      try {
+        n = roughSize(v)
+      } catch {
+        n = 0
+      }
+      rows.push([k, n])
+      // 精确计量（无节点上限）：用来暴露 roughSize 的上限导致的低估。
+      if (n > 512 * 1024) {
+        try {
+          const m = measureExact(v)
+          exactRows.push([
+            k,
+            `${(m.bytes / 1048576).toFixed(1)}MB/${m.nodes}节点${m.capped ? '(截断)' : ''}`,
+          ])
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+    rows.sort((a, b) => b[1] - a[1])
+    const total = rows.reduce((s, r) => s + r[1], 0)
+    const head = rows
+      .slice(0, 6)
+      .map(([k, n]) => `${k}=${(n / 1048576).toFixed(1)}MB`)
+      .join(' ')
+    const exactHead = exactRows.length ? ' | 精确: ' + exactRows.map(([k, v]) => `${k}=${v}`).join(' ') : ''
+    console.info(`[budget][mem] ${label} 合计≈${(total / 1048576).toFixed(0)}MB | ${head}${exactHead}`)
+  }
+  top(st as unknown as Record<string, unknown>, 'app store')
+  // hub store：独立的 zustand（不依赖 useAppStore ⇒ 无环）。
+  // 它不在 app store 的 state 里 ⇒ 光量 app store 会漏掉它（2026-11-13 差点漏）。
+  try {
+    top(useHubStore.getState() as unknown as Record<string, unknown>, 'hub store')
+  } catch (e) {
+    console.info(`[budget][mem] hub store: 读取失败 ${String(e)}`)
+  }
+  // markdown 渲染缓存（dev 观测口，main.tsx 挂的）。
+  const md = (window as unknown as { __mdCache?: { stats?: () => { entries: number; chars: number } } }).__mdCache
+  if (md?.stats) {
+    try {
+      const s2 = md.stats()
+      console.info(`[budget][mem] md 缓存: ${s2.entries} 条 / ${s2.chars} 字符`)
+    } catch {
+      /* 忽略 */
+    }
+  }
+}
+
+/** 上次「因 V8 堆超预算而额外降级」的时刻（毫秒）。
+ *
+ * 为什么要冷却：降级 ⇒ 丢数据 ⇒ React 提交 ⇒ GC ⇒ **堆才缩**。
+ * GC 不是立刻发生的 ⇒ 不冷却就会在堆还没缩下来时连降多个视图 ⇒
+ * 把用户历史一次性丢光（而其实降一两个就够了）。
+ */
+let lastHeapDegradeAt = 0
+
+/** 堆降级的冷却（毫秒）。 */
+const heapDegradeCooldownMs = 5000
+
+/** 上次因堆降级时的堆字节数（用来判断「降级到底有没有用」）。 */
+let heapAtLastDegrade = 0
+
+/** 堆轴是否已被判定为无效（降了也不缩 ⇒ 停手，别白丢用户历史）。
+ *
+ * 2026-11-13 实测：堆 623MB 时降级一个视图，堆 **一点没降**（623→625）。
+ * ⇒ 那 500 多 MB 是 **V8 没收的垃圾**，不是活数据 ⇒ 降级视图对它无效。
+ *
+ * 所以：降级只在「降了确实会缩」时才有意义；否则唯一的解法是给 V8 设
+ * **硬上限**（`--max-old-space-size`）让 V8 及时回收，而不是拿用户历史去换。
+ */
+let heapAxisIneffective = false
+
+/** 按字节预算处置超限的视图。
+ *
+ * ## 两根轴（2026-11-13 卡死事故后）
+ *
+ *   · **数据轴**：我们的数据估算（blocks/cards/turns…）超预算 → 降级；
+ *   · **堆轴**：**V8 活堆**超预算 → 额外降级。
+ *
+ * 为什么必须有堆轴：数据轴量的是「我们的数据」，而渲染进程的真实占用里
+ * 有一大块**不是我们的数据**（React fiber 树 / DOM / props / 闭包）。
+ * 实测事故：数据估算 30MB，V8 活堆 554MB、已提交堆 3.7GB（3.5GB 被换出到
+ * swap）⇒ 数据轴永远看不见 ⇒ 不降级 ⇒ 堆一路涨 ⇒ 机器进入换页颠簸 ⇒
+ * major GC 退化成全量磁盘读 ⇒ **整个应用点不动**。
+ *
+ * 堆轴降的是「最久未看的非活跃视图」：丢掉它的 React 树，堆才缩得回去。
+ * 活跃会话、有未决交互（审批/提问/草稿）、正在跑的会话**不降**。
+ */
 function enforceViewBudget(force = false): void {
   const now = Date.now()
   if (!force && now - lastBudgetCheck < BUDGET_CHECK_INTERVAL_MS) return
@@ -9266,12 +9395,44 @@ function enforceViewBudget(force = false): void {
     // 运行中的会话**不可淘汰**（淘汰 = 它的实时 UI 直接坏掉）；但可以被降级。
     protect: (_sid, v) => sessionBusy(v),
   })
-  reportBudget(st, plan.remaining, budget, plan.degrade.length, plan.evict.length)
-  if (plan.degrade.length === 0 && plan.evict.length === 0) return
+  const heapBytes = v8HeapBytes()
+  const heapOver = heapBytes > V8_HEAP_BUDGET_BYTES
+  reportBudget(st, plan.total, budget, plan.degrade.length, plan.evict.length)
+  if (plan.degrade.length === 0 && plan.evict.length === 0 && !heapOver) return
   const views = { ...st.views }
   const activeId = st.activeSessionId
   let degradedActive = false
-  for (const sid of plan.degrade) {
+
+  // —— 堆轴：数据估算没超，但真实占用超了 ⇒ 额外降级 LRU 的非活跃视图 ——
+  const degradeSids = plan.degrade.slice()
+  if (heapOver && !heapAxisIneffective && now - lastHeapDegradeAt >= heapDegradeCooldownMs) {
+    // 上次降级后堆**没降** ⇒ 降级对堆无效（堆是 V8 未回收的垃圾）⇒ 停手。
+    // 继续降只是在白丢用户历史，而堆纹丝不动（实测 623MB → 625MB）。
+    if (heapAtLastDegrade > 0 && heapBytes > heapAtLastDegrade * 0.8) {
+      heapAxisIneffective = true
+      console.info(
+        `[budget] 堆 ${(heapBytes / 1048576).toFixed(0)}MB：上次降级后没缩 ⇒ 堆降级无效，停手` +
+          `（真解是给 V8 设 --max-old-space-size，让它及时回收）`,
+      )
+    } else {
+      const keep = new Set<string>()
+      if (activeId) keep.add(activeId)
+      for (const [sid, v] of Object.entries(st.views)) {
+        // 有未决交互（审批/提问/待发队列）或正在跑 ⇒ 不动。
+        if (viewHasPendingInteraction(v) || sessionBusy(v)) keep.add(sid)
+      }
+      for (const sid of viewLruOrder(st.views)) {
+        if (degradeSids.includes(sid) || keep.has(sid)) continue
+        if (!views[sid]) continue
+        degradeSids.push(sid)
+        lastHeapDegradeAt = now
+        heapAtLastDegrade = heapBytes
+        break // 一次只降一个 → 下一周期再看堆缩了没（见 lastHeapDegradeAt 的注释）
+      }
+    }
+  }
+
+  for (const sid of degradeSids) {
     const v = views[sid]
     if (v) {
       views[sid] = degradeView(v)
@@ -9290,10 +9451,17 @@ function enforceViewBudget(force = false): void {
   // ⇒ 旧数组仍被引用 ⇒ 白降级（内存一点没释放）。
   // 这正是「978 MB 的 V8 堆却不降级」的一个直接原因（2026-11-12）。
   useAppStore.setState(degradedActive && activeId ? { views, ...viewFields(views[activeId]) } : { views })
-  console.info(
-    `[budget] 超预算（${(budget / 1048576).toFixed(0)}MB）→ 降级 ${plan.degrade.length} 个 / 淘汰 ${plan.evict.length} 个，` +
-      `剩余估算 ${(plan.remaining / 1048576).toFixed(1)}MB`,
-  )
+  // **只在真的动了才打**：堆轴每 1 秒都会触发一次，若每次都打就是刷屏
+  // （2026-11-13 踩过：终端被「超预算 → 降级 0 个」刷满，真正的信号被淹没）。
+  if (degradeSids.length > 0 || plan.evict.length > 0) {
+    const why = heapOver
+      ? `堆 ${(heapBytes / 1048576).toFixed(0)}MB > ${(V8_HEAP_BUDGET_BYTES / 1048576).toFixed(0)}MB`
+      : `数据 ${(plan.total / 1048576).toFixed(1)}MB > ${(budget / 1048576).toFixed(0)}MB`
+    console.info(
+      `[budget] 超预算（${why}）→ 降级 ${degradeSids.length} 个 / 淘汰 ${plan.evict.length} 个，` +
+        `处置后 ${(plan.remaining / 1048576).toFixed(1)}MB`,
+    )
+  }
 }
 
 let wired = false

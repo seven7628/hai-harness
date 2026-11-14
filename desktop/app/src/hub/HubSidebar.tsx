@@ -13,6 +13,7 @@ import {
 } from './search'
 import { formatRelativeTime, groupPreview, unreadBadge } from './conversation'
 import { useHubStore } from './useHubStore'
+import { useHostCapabilities } from '../host/panels'
 import GroupEditor from './GroupEditor'
 import type { HubAgent, HubSearchScope } from './types'
 import './hub.css'
@@ -21,8 +22,16 @@ import './hub.css'
 //
 // 这里只负责「入口 + 全历史搜索 + 列表」：选中后由 store 打开 Hub，
 // 中栏渲染会话、右栏渲染详情。列表自身限高（~38vh）内部滚动，工作区树仍在下方。
-export default function HubSidebar() {
+//
+// variant（P8-01b）：手机壳复用**同一个组件**，只换布局与入口可见性 ——
+//   · 'mobile' 隐藏「返回工作区」（手机列表页就是 Hub 的家，没有工作区可回）；
+//   · 'mobile' 隐藏新建/编辑群入口：mobile_server 的 allowlist 未放行 hub_group_create/edit，
+//     渲染出来只会 403（见 host/panels.ts 的 HostCapabilities）。
+// 搜索/tab/未读/运行态/预览/群编辑弹层全部共用，不复制一份列表。
+export default function HubSidebar({ variant = 'desktop' }: { variant?: 'desktop' | 'mobile' } = {}) {
   const t = useT()
+  const mobile = variant === 'mobile'
+  const capabilities = useHostCapabilities()
   const agents = useHubStore((s) => s.agents)
   const dm = useHubStore((s) => s.dm)
   const activeId = useHubStore((s) => s.activeId)
@@ -114,13 +123,13 @@ export default function HubSidebar() {
   const showingSearch = searchPanel && !!searchInput.trim()
 
   return (
-    <section className="hub-side" aria-label={t('hub.agents')}>
+    <section className={`hub-side${mobile ? ' hub-side--mobile' : ''}`} data-variant={variant} aria-label={t('hub.agents')}>
       <header className="hub-side-head">
         <span className="hub-side-title">
           <Bot size={13} /> {t('hub.title')}
         </span>
         <span className="hub-side-actions">
-          {hubOpen ? (
+          {hubOpen && !mobile ? (
             <button
               className="hub-side-back"
               onClick={closeHub}
@@ -130,14 +139,16 @@ export default function HubSidebar() {
               <ChevronLeft size={11} /> <span className="hub-side-back-label">{t('hub.back')}</span>
             </button>
           ) : null}
-          <button
-            className="hub-side-add"
-            onClick={() => (tab === 'groups' ? openGroupEditor(null) : openEditor(null))}
-            title={tab === 'groups' ? '新建群组' : t('hub.newAgent')}
-            aria-label={tab === 'groups' ? '新建群组' : t('hub.newAgent')}
-          >
-            <Plus size={13} />
-          </button>
+          {(tab === 'groups' ? capabilities.groupAdmin : capabilities.agentEditor) ? (
+            <button
+              className="hub-side-add"
+              onClick={() => (tab === 'groups' ? openGroupEditor(null) : openEditor(null))}
+              title={tab === 'groups' ? '新建群组' : t('hub.newAgent')}
+              aria-label={tab === 'groups' ? '新建群组' : t('hub.newAgent')}
+            >
+              <Plus size={13} />
+            </button>
+          ) : null}
         </span>
       </header>
 
@@ -256,9 +267,11 @@ export default function HubSidebar() {
               <div className="hub-side-empty">
                 <p>还没有群组</p>
                 <span>在 Hub 里把多个智能体拉进同一个群。</span>
-                <button className="hub-side-empty-add" onClick={() => openGroupEditor(null)}>
-                  <Plus size={12} /> 新建群组
-                </button>
+                {capabilities.groupAdmin ? (
+                  <button className="hub-side-empty-add" onClick={() => openGroupEditor(null)}>
+                    <Plus size={12} /> 新建群组
+                  </button>
+                ) : null}
               </div>
             ) : (
               <div className="hub-side-list">
@@ -346,7 +359,7 @@ export default function HubSidebar() {
         </>
       )}
 
-      {groupEditor.open ? (
+      {groupEditor.open && capabilities.groupAdmin ? (
         <GroupEditor
           group={groupEditor.groupId ? groups.find((g) => g.id === groupEditor.groupId) ?? null : null}
           onClose={closeGroupEditor}

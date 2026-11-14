@@ -13,7 +13,7 @@
 //   ③ 读盘走主进程 IPC（fs:read-image，见 electron/read-image.ts）：路径合法性判定只做一份，
 //      渲染进程不碰文件系统，也不自己猜「文件在不在」（猜错的代价是把「没权限」说成「不存在」）。
 import { useEffect, useMemo, useState } from 'react'
-import { getTransport } from '../transport'
+import { getHostTransport } from '../transport/host'
 
 // 有 scheme 的（http: / https: / data: / blob: / mailto: …）与协议相对 URL（//cdn/x.png）
 // 都不是本地路径。
@@ -123,7 +123,10 @@ function fetchAsset(abs: string, workspace?: string): Promise<LocalAssetState> {
   if (running) return running
   const req = (async (): Promise<LocalAssetState> => {
     try {
-      const r = await getTransport().fsReadImage({ path: abs, workspace: String(workspace ?? '') })
+      // 走宿主 transport 的注册点（transport/host.ts），不静态 import ../transport：
+      // 后者会把 electron/mock 顺着 markdown 渲染拖进手机包（P8-01b）。手机上该方法
+      // 降级为 unsupported，图片落回错误态 —— 不崩、不假装读到。
+      const r = await getHostTransport().fsReadImage({ path: abs, workspace: String(workspace ?? '') })
       if (r?.ok && r.dataUrl) return { url: r.dataUrl }
       return { error: r?.error || '图片读取失败' }
     } catch (e) {
