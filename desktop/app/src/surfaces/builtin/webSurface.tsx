@@ -74,6 +74,11 @@ export const webSurface: SurfaceProvider<WebTabInstance> = {
   // heavy：一个 web 标签背后是一个真实的渲染进程（视图池上限 12，见 03 §2.3 不变量 1）。
   weight: 'heavy',
   capabilities: ['read', 'view'],
+  // 原生宿主（R11c）：web 标签永远是宿主 —— 面板里就是一块 WebContentsView。
+  // 待重建的恢复标签（viewId 为空、池里还没有视图）也照样返回 true，与 R11c 之前的
+  // `activeTab?.kind === 'web'` 逐字同义：那一帧池里确实没有视图，hide 一次是幂等的空操作；
+  // 而按 viewId 收窄会让「用户刚点开还没重建完」的那一帧既不 hide、又让旧视图继续浮着。
+  nativeHost: () => true,
   title: (tab, t) => {
     const tp = liveTarget(tab)
     return tabLabel(tp?.url ?? tab.url ?? '', tp?.title ?? '') || t('rp.tab.web')
