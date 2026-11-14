@@ -179,7 +179,7 @@ export default function MobileApp() {
 
   return (
     <MobileHostPanelsProvider lang={lang} onToast={showToast}>
-      <div className={`m-app${convOpen ? ' m-app--conv' : ''}`} data-testid="mobile-shell">
+      <div className="m-app" data-testid="mobile-shell">
         {convOpen ? null : (
           <header className="m-head">
             <div className="m-brand">

@@ -313,6 +313,14 @@ body {
   margin-right: -8px;
 }
 
+/* Hub 屏幕按需加载时的占位（React.lazy 的 Suspense fallback）。 */
+.m-loading {
+  margin: auto;
+  padding: 24px;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
 /* —— 列表 —— */
 
 .m-hub-list {
@@ -460,6 +468,19 @@ body {
   width: 44px;
   height: 44px;
   margin-bottom: 0;
+}
+
+/* 群 composer 的「对话 / 派任务」切换：桌面是 28px 的小 tab，手机要 44px 才点得准。 */
+.m-conv .composer-mode-switch button {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* 自动对话状态条上的「停止自动对话」：桌面是 11px 的行内链接，手机要真按钮尺寸。 */
+.m-conv .hub-conv-bar button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 8px;
 }
 
 /* 桌面键盘提示（Enter 发送 / Shift+Enter 换行）在触屏上没有意义，占的是一行消息高度。 */

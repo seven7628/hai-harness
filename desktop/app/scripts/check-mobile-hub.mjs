@@ -277,6 +277,9 @@ const TOUCH_SELECTORS = [
   '.hub-side-search-box',
   '.hub-demo .composer .icon-btn',
   '.hub-demo .composer .send-btn',
+  '.composer-mode-switch button',
+  '.hub-conv-bar button',
+  '.event-card--need .hub-btn',
   '.m-drawer .hub-inspector-close',
   '.m-drawer .hub-inspector-tabs button[role="tab"]',
 ]
