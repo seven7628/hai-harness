@@ -313,6 +313,62 @@ host.onEvent('tool.call', async (ev) => {
 
 语义与处置见 §8.4。
 
+### 6.6 Wire contract（P1b2 / P1c 共用，先钉死再各写一端）
+
+**渲染层 → main（claimed API）**
+
+```ts
+surfaceAgentToken(id: string): Promise<{ ok: boolean; token?: string; reason?: string }>
+surfaceAgent(p: { token: string; name: string; args?: unknown }): Promise<SurfaceCommandReply>
+onSurfaceAgentEvent(cb: (p: { surface_id: string; event: SurfaceAgentEvent }) => void): () => void
+```
+
+- main 维护 `surface_id → token`；token 由 `crypto.randomUUID()` 生成，插件加载时领取。
+- `surface:agent` 校验 token，注入 `surface_id`，再向 bridge 发 `{type:"surface_agent", payload:{id,name,args}}`。
+- `surface_command` 仍存在，但 P1c 起宿主表为空：四条旧只读命令一律 `denied`（D11）。
+
+**bridge stdout 事件（统一信封）**
+
+```json
+{"event_type":"surface_agent_event","data":{
+  "surface_id":"demo",
+  "event":{"type":"agent.delta","seq":1,"run_id":"sr-1","session_id":"s-1","data":{"text":"你"}}
+}}
+```
+
+- main 把 `data` 原样转发到渲染层 `surface:agent-event`；loader 按 `surface_id === item.id` 过滤。
+- `seq` 每个 run 单调递增；终态（`agent.done` / `agent.error`）之后停投。
+- `tool.call` 同信封，`data:{call_id, tool, args, deadline_ms}`（P2 才启用）。
+
+**命令参数/回执**
+
+| name | args | 立即回执 data |
+|---|---|---|
+| `agent.session` | `{title?}` | `{session_id}` |
+| `agent.run` | `{session_id?, input, instructions?}` | `{run_id, session_id}` |
+| `agent.cancel` | `{run_id}` | `{}` |
+| `tool.result` | `{call_id, ok, result?, error?}` | `{}`（P2） |
+
+- `agent.run` 不带 `session_id` = 新建插件会话（D4）；带 = 必须属于同一 `surface_id`，否则 `denied`。
+- `agent.run` 先回 `command_response`，再流事件；事件失败不改变已发出的 ack。
+- P1 不实现 `schema` / `tools` 参数；manifest 里出现也只忽略（P2 再启用），避免半套 JSON 校验。
+
+**事件 data**
+
+| type | data |
+|---|---|
+| `agent.delta` | `{text}`（Go 侧 50ms 合并） |
+| `agent.tool` | `{name, status, ok?}`（只给名字/状态） |
+| `agent.usage` | `{input_tokens, output_tokens}` |
+| `agent.done` | `{text}` |
+| `agent.error` | `{reason, message?}`；reason ∈ `cancelled` / `quota` / `no_session` / `invalid_input` / `bridge_error` |
+| `tool.call` | `{call_id, tool, args, deadline_ms}`（P2） |
+
+**拒绝**
+
+- `surface_agent` 的 `command_response`：`{ok:false, code, data:{ok:false, reason}}`，code/reason 用 §6.5 的封闭集合。
+- 未声明命令：`not_declared`（不是 `denied`）；D11 四条：`denied`。
+
 ---
 
 ## 7. 工具集
