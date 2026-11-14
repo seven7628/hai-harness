@@ -4523,7 +4523,11 @@ class MockTransport implements Transport {
   // 按钮一直 busy。保持异步 = mock 与真 bridge 同形。
   private respond(cmd: BridgeCommand, data: Record<string, unknown>) {
     const delay = this.mockSendDelayMs(cmd)
-    const emit = () => this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data })
+    // 回显**这条命令的** workspace（真实 bridge 逐命令回显）。不能等到微任务里读 this.ws ——
+    // 那时循环里连发的下一条命令已经把它改掉了，三条 list 会全部回同一个 workspace
+    //（表现：多项目会话列表串到最后一个项目里）。
+    const echoWs = String(cmd.payload?.workspace ?? '') || this.ws
+    const emit = () => this.emit({ event_type: 'command_response', id: cmd.id, ok: true, data }, echoWs)
     if (delay > 0) { setTimeout(emit, delay); return }
     queueMicrotask(emit)
   }
@@ -4599,8 +4603,8 @@ class MockTransport implements Transport {
   }
 
   // emit：事件行注入 workspace + seq；session_id 由调用方显式带（按会话路由）
-  private emit(e: Record<string, unknown>) {
-    const line = JSON.stringify({ ...e, workspace: this.ws, seq: ++seq })
+  private emit(e: Record<string, unknown>, workspace?: string) {
+    const line = JSON.stringify({ ...e, workspace: workspace ?? this.ws, seq: ++seq })
     for (const cb of this.cbs) cb(line)
   }
 

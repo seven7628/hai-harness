@@ -3703,7 +3703,9 @@ function bareNewSessionInFlight(): boolean {
 // 决定，回执未必回显 `workspace`；只按回显判会把插件会话的响应当成「不是当前工作区」
 // 而**静默丢弃** —— 症状是点了没反应/历史不出现，且没有任何报错可查。
 function responseWorkspaceMatches(respWs: string, meta: PendingCommand | undefined, current: string | undefined): boolean {
-  const ws = respWs || String(meta?.workspace ?? '')
+  // 请求时登记的工作区优先（pending[id].workspace），回显兜底 —— 与 list 的取路径同源：
+  // 「这条响应回答的是发给我当前工作区的那条命令吗」，答案在发起时就确定了。
+  const ws = String(meta?.workspace ?? '') || respWs
   return !!ws && !!current && ws === current
 }
 // bridge 不可用（进程退出/未启动/写 stdin 失败）→ UI 需要升级为「需要重启 bridge」，
@@ -5541,10 +5543,12 @@ export function dispatchEvent(raw: AnyEvent): void {
       //（recoverPaths 门控：主动添加/切换工作区不自动建会话，建会话是显式动作）
       if (t === 'list') {
         const sessions = Array.isArray(d.sessions) ? normalizeSessions(d.sessions as SessionMeta[]) : []
-        // 归属路径：回显优先，缺省用**请求时**的 workspace（pending[id].workspace）。
-        // 虚拟 Project 的 list 就是靠这一条把会话并进它自己的项目条目（而不是按活跃真实
+        // 归属路径：**请求时**的 workspace 优先（pending[id].workspace），回显兜底。
+        // list 是「查这个路径的会话列表」，路径在发命令时就定了；循环里连发多条 list 时，
+        // 迟到的回显可能已经被后续命令改写 —— 只认回显会把会话串到别的项目里。
+        // 虚拟 Project 的会话列表正是靠这一条并进它自己的项目条目（而不是按活跃真实
         // workspace 查找 —— 那样插件的会话会挂到真实项目下面）。
-        const listWs = respWs || String(meta?.workspace ?? '')
+        const listWs = String(meta?.workspace ?? '') || respWs
         if (listWs) setState((s) => applySessionsWithOwner(s, listWs, sessions))
         if (responseWorkspaceMatches(respWs, meta, getState().workspace)) {
           let recovered = false
@@ -10301,6 +10305,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       // list / skills / git_*，插件 home 在后端按工作区解析 = 一片拒绝）。这里只切「当前
       // 项目指针」，再复用 newSession 的 loading shell / 首条消息缓冲语义。
       if (project?.installed === false) return // 已卸载插件只读：不建会话（UI 也不给入口）
+      // 上一个项目里「无会话时的输入」不能带进这个插件会话（那是用户在真实项目里打的字；
+      // newSession 会把 firstAsks 缓冲到响应后 flush → 跨项目误投）。
+      sessionPending = false
+      firstAsks.length = 0
       if (path !== get().workspace) {
         set({
           workspace: path,
