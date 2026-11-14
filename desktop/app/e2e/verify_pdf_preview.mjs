@@ -196,7 +196,7 @@ try {
     const st = await store(`({
       // 阶段 2：内容按归一化路径索引（filePreviews）。PDF_NAME 是裸文件名（已相对）→ 键即它本身。
       binary: s.filePreviews?.[${JSON.stringify(PDF_NAME)}]?.binary === true,
-      tab: s.rightTab,
+      tab: m.selectRightTab(s),
       expanded: s.rightExpanded,
       buttons: document.querySelectorAll('.file-binary-actions .btn').length,
       hint: document.querySelectorAll('.file-binary-hint').length,
@@ -207,7 +207,7 @@ try {
   check('bridge 判定为二进制（filePreviews[path].binary=true，内容不当文本喂 shiki）', t1.binary === true, JSON.stringify(t1))
   check('**没有**中间态按钮（「预览 PDF」/「用默认程序打开」都不再出现）', t1.buttons === 0, JSON.stringify(t1))
   check('**没有**提示段落（.file-binary-hint）', t1.hint === 0, JSON.stringify(t1))
-  check('右栏已自动切到预览（rightTab=web + 已展开）', t1.tab === 'web' && t1.expanded === true, JSON.stringify(t1))
+  check('右栏已自动切到预览（激活标签=web + 已展开）', t1.tab === 'web' && t1.expanded === true, JSON.stringify(t1))
   await win.screenshot({ path: path.join(SHOTS, '01-file-tab-binary.png') })
 
   // —— T2 视图池新增该 PDF ——
@@ -333,7 +333,7 @@ try {
   const t4bTabs = await store(`({
     kinds: (s.tabsByScope[s.activeSessionId]?.tabs ?? []).map((t) => t.kind),
     focus: s.fileFocus?.path ?? '',
-    tab: s.rightTab,
+    tab: m.selectRightTab(s),
   })`)
   check('openFile(pdf) 之后**没有** file 标签（一个文件一个标签）', !t4bTabs.kinds.includes('file'), JSON.stringify(t4bTabs))
   check('fileFocus 仍指向该 PDF（手动开「文件」标签时能看到它）', t4bTabs.focus === PDF_NAME, JSON.stringify(t4bTabs))
@@ -343,23 +343,26 @@ try {
   }
   check('标签条上没有 file 标签（同一个文件不占两个标签）', t4bBar.fileTabs === 0, JSON.stringify(t4bBar))
   check('标签条上该 PDF 只有一个标签', t4bBar.pdfTabs === 1, JSON.stringify(t4bBar))
-  // 诊断订阅：记录 rightTab 的每次变化（失败时能看出是谁把它切走的）
+  // 诊断订阅：记录激活标签 kind 的每次变化（失败时能看出是谁把它切走的）。
+  // R11b：没有可比较的镜像字段了，两侧都现算（选择器是纯函数，订阅里调它零成本）。
   await win.evaluate(`(async () => {
     const m = await import('/src/store/useAppStore.ts')
     window.__tabLog = []
     m.useAppStore.subscribe((s, prev) => {
-      if (s.rightTab !== prev.rightTab) window.__tabLog.push({ t: Date.now(), from: prev.rightTab, to: s.rightTab, left: s.leftExpanded })
+      const from = m.selectRightTab(prev)
+      const to = m.selectRightTab(s)
+      if (from !== to) window.__tabLog.push({ t: Date.now(), from, to, left: s.leftExpanded })
     })
     return true
   })()`)
-  await store('(async () => { s.setRightTab("file"); return true })()')
+  await store('(async () => { s.openTab({ kind: "file" }); return true })()')
   let t4bDiag = null
   const t4b = await waitFor(async () => {
     const st = await store(`({
       status: document.querySelector('.file-binary-status')?.textContent?.trim() ?? '',
       buttons: document.querySelectorAll('.file-binary-actions .btn').length,
       hints: document.querySelectorAll('.file-binary-hint').length,
-      tab: s.rightTab,
+      tab: m.selectRightTab(s),
       focus: s.fileFocus?.path ?? '',
       binary: s.filePreviews?.[${JSON.stringify(PDF_NAME)}]?.binary ?? null,
       standalone: !!document.querySelector('.file-side-detail'),
@@ -376,9 +379,9 @@ try {
   await win.screenshot({ path: path.join(SHOTS, '01b-file-tab-status.png') })
   // 拉锯回归：切到文件 tab 后不得被弹回预览（第一版把自动打开放在组件里，实测 4ms 被顶回 web）
   await sleep(700)
-  const t4c = await store('({ tab: s.rightTab, log: (window.__tabLog ?? []).slice(-4) })')
+  const t4c = await store('({ tab: m.selectRightTab(s), log: (window.__tabLog ?? []).slice(-4) })')
   check('切到文件栏后停在文件栏（不被自动打开弹回预览）', t4c.tab === 'file', JSON.stringify(t4c))
-  await store('(async () => { s.setRightTab("web"); return true })()')
+  await store('(async () => { s.openTab({ kind: "web" }); return true })()')
 
   // —— T5 标签条（新 UI）——
   console.log('T5 标签条：文件名标题 + aria-selected + URL 在 title 里')
@@ -409,8 +412,8 @@ try {
   check('前台打开的标签**没有**未读点', pdfTab?.unread === false, JSON.stringify(pdfTab))
 
   // —— T6 面板语义（切内容标签 + 不收左栏）——
-  const t6 = await store('({ tab: s.rightTab, expanded: s.rightExpanded, left: s.leftExpanded })')
-  check('面板切到内容标签（rightTab=web）且已展开', t6.tab === 'web' && t6.expanded === true, JSON.stringify(t6))
+  const t6 = await store('({ tab: m.selectRightTab(s), expanded: s.rightExpanded, left: s.leftExpanded })')
+  check('面板切到内容标签（激活标签=web）且已展开', t6.tab === 'web' && t6.expanded === true, JSON.stringify(t6))
   check('左栏**未被收起**（M4 回归点：预览不该有「AI 接管视界」的副作用）', t6.left === true, JSON.stringify(t6))
   await win.screenshot({ path: path.join(SHOTS, '03-app-window.png') })
 
@@ -487,7 +490,7 @@ try {
   // 原生 WebContentsView 恒合成在窗口 DOM 之上（原生层级 > DOM，CSS z-index 压不住）→
   // 菜单打开期间必须把原生视图 hide 掉，否则菜单被预览画面挡掉（2026-09-20 用户实测报障）。
   console.log('T14 打开「＋」菜单 → 原生视图必须隐藏（否则菜单被画面盖住）')
-  await store('(async () => { s.setRightTab("web"); return true })()')
+  await store('(async () => { s.openTab({ kind: "web" }); return true })()')
   await waitFor(async () => {
     const st = await win.evaluate(() => window.desktop.embedStatus())
     return st?.visible === true ? st : null
@@ -532,11 +535,11 @@ try {
   // —— T15「＋ → 网页」在**池里没有真实页面**时必须真的开出一个标签（2026-09-21 用户报障）——
   // 用户原话：「右侧侧边栏点击加号、选择网页无效」。真机 trace：点击确实建了 web 标签，但它认下了
   // 池里那个 **about:blank 自举载体**的 id（`makeTab` 取 embedNav.activeId），而 onEmbedNav 喂给
-  // syncWebTabs 的 items 会过滤掉 about:blank → 标签在 4ms 后被当「页面已关闭」删掉、rightTab 被
+  // syncWebTabs 的 items 会过滤掉 about:blank → 标签在 4ms 后被当「页面已关闭」删掉、面板被
   // 顶回 activity —— 用户看到的就是「点了没反应」。修法见 store 的 activePageIdOf。
   // 本用例走**真实点击路径**（＋ → 菜单项「网页」），且刻意把池清成「只剩自举载体」= 用户当时的现场。
   console.log('T15 无真实页面时「＋ → 网页」也必须开出 web 标签（自举载体不当身份）')
-  await store('(async () => { s.setRightTab("web"); return true })()')
+  await store('(async () => { s.openTab({ kind: "web" }); return true })()')
   await sleep(300)
   // 清掉所有真实页面（只留 about:blank 自举载体）—— 与用户现场一致
   await win.evaluate(async () => {
@@ -566,7 +569,7 @@ try {
   // 修复前此刻标签已经被吃掉了，这条会红（见提交记录里的先红后绿）。
   await sleep(1000)
   const t15 = await store(`({
-    tab: s.rightTab,
+    tab: m.selectRightTab(s),
     web: (s.tabsByScope[s.activeSessionId]?.tabs ?? []).filter((x) => x.kind === 'web').map((x) => ({ id: x.id, viewId: x.viewId ?? null })),
     active: s.tabsByScope[s.activeSessionId]?.activeId ?? null,
     chips: [...document.querySelectorAll('.rtab[data-kind="web"]')].length,

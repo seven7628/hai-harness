@@ -100,7 +100,7 @@ const cleanup = () => {
 }
 process.on('exit', cleanup)
 
-// 打开某文件的「最终文件」视图：走真实动作链（openFile → setRightTab/Expanded +
+// 打开某文件的「最终文件」视图：走真实动作链（openFile → 展开 + 打开 file 标签 +
 // file_preview 命令），而不是直接 setState 伪造终态。
 // seedActivity 往文件活动列表注入一条 read_file 记录（让文件「在列表里」）。
 // 必须在 start() 之后注入 —— start 会用 mock 数据覆盖 blocks。
@@ -113,11 +113,11 @@ const seedActivity = (page, filePath) => page.evaluate(async (p) => {
   // 已经关不掉它），下面等 .file-activity-row 就会超时。
   for (const t of [...(s0.tabsByScope[scope]?.tabs ?? [])]) if (t.kind === 'file') s0.closeTab(t.id)
   st.setState({
-    rightExpanded: true, rightTab: 'file', fileFocus: undefined, filePreviews: {},
+    rightExpanded: true, fileFocus: undefined, filePreviews: {},
     blocks: [{ kind: 'tool', id: 1, toolId: 't1', name: 'read_file', args: JSON.stringify({ path: p }), result: 'ok', status: 'done', startedAt: Date.now() }],
     gitFiles: [],
   })
-  // rightTab='file' 且此刻没有 file 标签 → **显式**开一个空标签（无 path = 文件活动列表态）。
+  // 此刻没有 file 标签 → **显式**开一个空标签（无 path = 文件活动列表态）。
   // 不能只靠 syncTabsToRightTab：PR-02 起它只在「这个 scope 还没有标签集」时建默认集，
   // 而这里恰恰是「标签集还在、只是被清空了」—— 于是 [9] 起的用例一直是红的（R07 复跑时
   // 发现：补 surfaces/builtin import **之前**就已经红，与本轮改动无关，属链外腐化）。
@@ -377,9 +377,10 @@ async function main() {
     const s0 = st.getState()
     const scope = s0.activeSessionId || s0.workspace
     for (const t of [...(s0.tabsByScope[scope]?.tabs ?? [])]) if (t.kind === 'file') s0.closeTab(t.id)
-    // rightTab 落到 activity 而不是 'file'：否则 RightPanel 的收敛 effect 会立刻补一个**空** file
-    // 标签（无 path），本节的两个标签就变成三个（实测踩过）。
-    st.setState({ rightExpanded: true, rightTab: 'activity', fileFocus: undefined, filePreviews: {}, blocks: [], gitFiles: [] })
+    // 只需清 file 标签本身：R11b 起收敛 effect 只在「这个 scope 还没有标签集」时建默认集，
+    // 集合在（只是没有 file 了）→ 不会再补一个**空** file 标签（旧实现要靠把面板字段写成
+    // activity 才躲得开，那一幕正是两份真相的代价）。
+    st.setState({ rightExpanded: true, fileFocus: undefined, filePreviews: {}, blocks: [], gitFiles: [] })
     await new Promise((r) => setTimeout(r, 250))
   })
   await openFinalFile(page, 'guide.md')

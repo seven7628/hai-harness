@@ -108,7 +108,6 @@ const snapshot = (page) => page.evaluate(() => {
     activeKind: active?.kind ?? '',
     activeMode: active?.mode ?? '',
     activePath: active?.path ?? '',
-    rightTab: st.rightTab,
     fileTabs: tabs.filter((t) => t.kind === 'file').length,
     // 源码块 = 用户报的「被当纯文本显示」那一幕的 DOM 指纹
     fpCode: document.querySelectorAll('.right-body .fp-code').length,
@@ -172,7 +171,7 @@ async function main() {
   const prev = await snapshot(page)
   // 断言顺序：先断言**用户看到的那一幕**（源码块），再断言通道 —— 红的时候最该被看见的是症状。
   assert(prev.fpCode === 0, `面板里没有 .fp-code 源码块（实得 ${prev.fpCode} 块；面板文本=${JSON.stringify(prev.bodyText)}）`)
-  assert(prev.rightTab === 'web', `落在内嵌浏览器（web）通道（实得 rightTab=${prev.rightTab}、标签=${prev.activeKind}/${prev.activeMode}）`)
+  assert(prev.activeKind === 'web', `落在内嵌浏览器（web）通道（实得标签=${prev.activeKind}/${prev.activeMode}）`)
 
   // —— [2] 仍然落进 preview 标签的路径：由 html 渲染器接，且真的渲染出页面 ——
   console.log('\n[2] 渲染器：mode=preview 的 .html 由 html 渲染器接（旧的持久化标签/直接 openTab 的调用方）')
@@ -255,8 +254,8 @@ async function main() {
   await page.locator('.right-body [data-renderer="html"] .pv-html-open').click()
   await settle(page)
   const afterExit = await snapshot(page)
-  assert(afterExit.rightTab === 'web' && afterExit.activeKind === 'web',
-    `出口把人送进内嵌浏览器（实得 rightTab=${afterExit.rightTab}、标签=${afterExit.activeKind}）`)
+  assert(afterExit.activeKind === 'web',
+    `出口把人送进内嵌浏览器（实得激活标签 kind=${afterExit.activeKind}）`)
   const before = await page.evaluate(() => {
     const st = window.__store.getState()
     return Object.values(st.tabsByScope).flatMap((x) => (x?.tabs ?? [])).filter((t) => t.kind === 'file').length
@@ -265,8 +264,8 @@ async function main() {
   await settle(page)
   const opened = await snapshot(page)
   assert(opened.fileTabs === before, `openFile(html, 'source') 不新建 file 标签（${before} → ${opened.fileTabs}）`)
-  assert(opened.activeKind === 'web' && opened.rightTab === 'web',
-    `html 的「打开」仍落 web 标签（T1 口径未变；实得 ${opened.activeKind}/${opened.rightTab}）`)
+  assert(opened.activeKind === 'web',
+    `html 的「打开」仍落 web 标签（T1 口径未变；实得激活标签 kind=${opened.activeKind}）`)
   assert(opened.fpCode === 0, `默认通道里也没有源码块（实得 ${opened.fpCode}）`)
 
   // —— [5] 截断如实提示 ——

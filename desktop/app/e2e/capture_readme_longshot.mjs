@@ -86,8 +86,7 @@ await page.waitForFunction(() => (window).__store?.getState?.().workspace, null,
 await page.evaluate(async () => {
   const st = window.__store
   st.getState().setRightExpanded?.(true)
-  st.setState({ rightTab: 'file', fileFocus: undefined, filePreviews: {} })
-  st.getState().syncTabsToRightTab?.()
+  st.setState({ fileFocus: undefined, filePreviews: {} })
   await new Promise((r) => setTimeout(r, 300))
   st.getState().openFile('/mock/workspace/README.zh-CN.md')
   await new Promise((r) => setTimeout(r, 1500))
@@ -208,8 +207,7 @@ await shotPage.waitForFunction(() => (window).__store?.getState?.().workspace, n
 await shotPage.evaluate(async () => {
   const st = window.__store
   st.getState().setRightExpanded?.(true)
-  st.setState({ rightTab: 'file', fileFocus: undefined, filePreviews: {} })
-  st.getState().syncTabsToRightTab?.()
+  st.setState({ fileFocus: undefined, filePreviews: {} })
   await new Promise((r) => setTimeout(r, 300))
   st.getState().openFile('/mock/workspace/README.zh-CN.md')
   await new Promise((r) => setTimeout(r, 1500))

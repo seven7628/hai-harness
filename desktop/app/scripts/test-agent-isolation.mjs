@@ -46,6 +46,7 @@ await build({
 const {
   useAppStore,
   dispatchEvent,
+  selectRightTab,
   materializeSnapshot,
   isSubAgentRun,
   approvalOwnerIsSub,
@@ -73,7 +74,8 @@ function setup() {
     costUsd: 0,
     toolStartTs: {},
     rightExpanded: false,
-    rightTab: 'activity',
+    // R11b：右栏面板 = 激活标签（旧的直写面板字段已删）→ 「面板停在链路」
+    tabsByScope: { s1: { tabs: [{ id: 'act0', kind: 'activity' }], activeId: 'act0', closed: [] } },
   })
 }
 const EV = (t, p = {}) => dispatchEvent({ event_type: t, session_id: 's1', ...p })
@@ -94,7 +96,7 @@ assert.equal(st.approvals.length, 2, 'SubAgent 审批应追加到同一队列（
 assert.equal(st.approvals[0].id, 'a-main', '队首必须是先到的主审批')
 assert.deepStrictEqual(st.focusedAgent, { nodeId: 'sub-1', runId: 'sub-1' },
   'SubAgent 审批应聚焦到它的子会话（nodeId 回退到 runId：这张卡还没有 taskId）')
-assert.equal(st.rightTab, 'activity', 'SubAgent 审批不再切换右栏标签（任务 tab 已退役）')
+assert.equal(selectRightTab(st), 'activity', 'SubAgent 审批不再切换右栏标签（任务 tab 已退役）')
 console.log('PASS 场景1：SubAgent 审批聚焦子会话；主审批不抢视线；统一队列保序')
 
 // ===== 场景 2：统一 FIFO 顺序 = 事件顺序；重复 id 去重；approvals[0] 才是展示队首 =====

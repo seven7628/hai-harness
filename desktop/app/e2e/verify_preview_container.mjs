@@ -297,11 +297,14 @@ try {
       async panel() {
         const m = await import('/src/store/useAppStore.ts')
         const s = m.useAppStore.getState()
-        return { tab: s.rightTab, expanded: s.rightExpanded, left: s.leftExpanded }
+        // 面板 = 激活标签的 kind（R11b：状态里的写穿副本已删，读真选择器）
+        return { tab: m.selectRightTab(s) ?? '', expanded: s.rightExpanded, left: s.leftExpanded }
       },
       async resetPanel() {
         const m = await import('/src/store/useAppStore.ts')
-        m.useAppStore.setState({ rightTab: 'activity', rightExpanded: false })
+        // 复位到链路面板：开/激活 activity 标签（旧实现写的是面板字段）+ 收起面板
+        m.useAppStore.getState().openTab({ kind: 'activity' })
+        m.useAppStore.setState({ rightExpanded: false })
       },
       async call(name, args) {
         const m = await import('/src/store/useAppStore.ts')
@@ -455,7 +458,7 @@ try {
   }, [fileC])
   check('activate:false 仍**新建**标签（内容准备好）', t3b.n1 === t3b.n0 + 1, JSON.stringify({ n0: t3b.n0, n1: t3b.n1 }))
   check('activate:false **不激活**（activeId 不变）', t3b.activeAfter === t3b.activeBefore, JSON.stringify(t3b))
-  check('activate:false **不动面板**（rightTab/rightExpanded 不变）',
+  check('activate:false **不动面板**（激活标签/rightExpanded 不变）',
     t3b.p1.tab === t3b.p0.tab && t3b.p1.expanded === t3b.p0.expanded, JSON.stringify({ p0: t3b.p0, p1: t3b.p1 }))
 
   // —— T3c 「产出即展示」= Agent 自动打开的**当前**语义（2026-09 二改，修的就是本文开头那个缺陷）——
@@ -958,8 +961,8 @@ try {
   // （previewOwnedViews）：预览打开的视图 → focusBrowserForPreview()（不收左栏）。
   //
   // 两个「防空转」的要点（缺一个这条断言就永远是绿的）：
-  //   ① 用 activate:false 触发 —— 面板不动（仍非 web tab），focusWebTabIfClosed 的早退守卫
-  //      `rightExpanded && rightTab==='web'` 才不成立；用 activate:true 面板已切 web → 直接早退。
+  //   ① 用 activate:false 触发 —— 面板不动（仍非 web 标签），focusWebTabIfClosed 的早退守卫
+  //      「面板展开 且 激活标签是 web」才不成立；用 activate:true 面板已切 web → 直接早退。
   //   ② 换到**全新会话** —— onEmbedNav 的「每会话只自动展开一次」守卫按会话 id 去重，复用旧会话
   //      会让 focusWebTabIfClosed 根本不被调用。
   console.log('T6 预览不收起左栏（真链路：nav 事件路径）')
@@ -970,7 +973,11 @@ try {
     for (const id of ids.slice(1, 3)) await window.desktop.embedCloseTarget(id)
     // 全新会话 + 复位到「面板收起、不在 web tab、左栏展开」→ 早退守卫不成立
     const S = 'S-E2E-T6'
-    m.useAppStore.setState({ activeSessionId: S, rightTab: 'activity', rightExpanded: false, leftExpanded: true })
+    m.useAppStore.setState({
+      activeSessionId: S, rightExpanded: false, leftExpanded: true,
+      // 面板停在链路（激活标签 = activity）；R11b 起没有可直写的面板字段了
+      tabsByScope: { [S]: { tabs: [{ id: 'act0', kind: 'activity' }], activeId: 'act0', closed: [] } },
+    })
     await window.desktop.embedSetSession(S)
     const before = await window.__r2.panel()
     await window.__r2.call('openInBrowserTab', [u, { activate: false }])
@@ -1040,12 +1047,13 @@ try {
   fs.writeFileSync(fileT11, markerHtml('PREVIEW-T11-C'))
   const t13 = await win.evaluate(async ([f, other, fUrl]) => {
     const m = await import('/src/store/useAppStore.ts')
-    // 复位到「面板收起 + 不在 web tab + 左栏展开」。必须走 store 的 action：rightTab/rightExpanded
-    // 是**会话级**视图状态，raw setState 只改顶层镜像 —— App 的 onResize 用 setRightExpanded 镜像
-    // 布局时会触发 setView，把顶层 rightTab 一起从会话态拉回旧值（实测：复位 10ms 后 tab 自己
-    // 变成 'web'）→ p0 就成了噪声，断言变成「拿噪声比噪声」。
+    // 复位到「面板收起 + 不在 web 标签 + 左栏展开」。仍然走 store 的 action：rightExpanded 是
+    // **会话级**视图状态（走 setRightLayout 才会写进该会话的 view），raw setState 只改顶层镜像。
+    // 旧版这里必须走 action 还有第二个理由 —— 标签动作会无条件 setView，把顶层面板字段从会话态
+    // 拉回旧值（实测：复位 10ms 后 tab 自己变成 'web'）。R11b 删掉了那次无条件的镜像，但「布局
+    // 归会话」的理由仍然成立，写法不变。
     const resetPanel = async () => {
-      m.useAppStore.getState().setRightTab('activity')
+      m.useAppStore.getState().openTab({ kind: 'activity' })
       m.useAppStore.getState().setRightExpanded(false)
       m.useAppStore.setState({ leftExpanded: true })
       await new Promise((r) => setTimeout(r, 500)) // 等布局观察者镜像一次（可能再报一次 resize）
@@ -1072,14 +1080,14 @@ try {
     }
   }, [fileT11, fileT7, toFileUrl(fileT11)])
   // 前提（防空转）：基线真的复位成功 + 被测标签真的在后台 + 确实找得到它的 id
-  check('T13 前提：面板已复位（非 web tab + 收起 + 左栏展开）',
+  check('T13 前提：面板已复位（非 web 标签 + 收起 + 左栏展开）',
     t13.p0.tab === 'activity' && t13.p0.expanded === false && t13.p0.left === true, JSON.stringify(t13.p0))
   check('T13 前提：被测标签在**后台**（激活的是另一个标签）',
     t13.bgWasHidden === true && !!t13.bgId, JSON.stringify({ bgId: t13.bgId, active: t13.activeBefore }))
   check('T13 activate:false 刷新**不新建**标签（池大小不变）', t13.n1 === t13.n0, JSON.stringify({ n0: t13.n0, n1: t13.n1 }))
   check('T13 activate:false **不改激活态**（activeId 不变）',
     t13.activeAfter === t13.activeBefore, JSON.stringify({ before: t13.activeBefore, after: t13.activeAfter }))
-  check('T13 activate:false **不展开也不切面板**（rightTab/rightExpanded 不变）',
+  check('T13 activate:false **不展开也不切面板**（激活标签/rightExpanded 不变）',
     t13.p1.tab === t13.p0.tab && t13.p1.expanded === t13.p0.expanded, JSON.stringify({ p0: t13.p0, p1: t13.p1 }))
   check('T13 activate:false **不收左栏**（leftExpanded 保持 true）',
     t13.p1.left === true, JSON.stringify(t13.p1))

@@ -95,7 +95,7 @@ const emptyView = {
   pendingQueue: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0 },
   git: { is_repo: false, ahead: 0, behind: 0, staged: 0, modified: 0, untracked: 0, conflicted: 0, clean: true },
   costUsd: 0, streaming: false, aborted: false, runningAgentCount: 0,
-  gitHasMore: false, gitHistLoading: false, gitLoading: false, rightExpanded: false, rightTab: 'activity',
+  gitHasMore: false, gitHistLoading: false, gitLoading: false, rightExpanded: false,
 }
 const card = (id, runId, items, spawnedAt) => ({
   kind: 'agent', id, taskId: TASK, runId, label: 'fix-path-select', status: 'running', spawnedAt, items,

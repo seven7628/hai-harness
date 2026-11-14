@@ -59,7 +59,6 @@ function setup() {
     costUsd: 0,
     toolStartTs: {},
     rightExpanded: false,
-    rightTab: 'activity',
   })
 }
 const view = () => useAppStore.getState().views.s1

@@ -39,7 +39,7 @@
 | 08e | （可选）ffmpeg 转码 + 缩略图 | 可选 | 2d | 08c | 中 |
 | 09 | 标签条：溢出 / 右键菜单 / `⌃⇥` / 空态能力面板 | 交互 | 1d | 04 | 低 |
 | 10 | Tombstone + Boundary + 3 次自动禁用 | 健壮性 | 1d | 09 | 低 |
-| 11 | 删除 legacy：`TAB_KINDS` / `makeTab` switch / `rightTab` | 清理 | 0.5d | 10 | 中 |
+| 11 | 删除 legacy：`TAB_KINDS` / `makeTab` switch / `rightTab`（→ R11b，已删） | 清理 | 0.5d | 10 | 中 |
 | 12 | `ui` 通道 + `ui_inspect` 工具 | 新增 | 1.5d | 11 | 中 |
 | 13 | 安装器（index/manifest/install/remove/audit） | 新增 | 2d | 12 | 中 |
 | 14 | 常驻工具接线 + `hai-surface-dev` skill + 模板 + 插件页（**无 mode**） | 新增 | 1.5d | 13 | 低 |
@@ -331,6 +331,29 @@
     **可守的数：RightPanel 的 `grep -c "kind === '"` = 16，且只许降不许升**（新增一条 `kind === '`
     必须先回答「provider 能不能给」—— 能，就进 provider；不能，是标签形状的固有语义）。
 
+- **11b（R11b 已收口）**：删 `AppState.rightTab` / `SessionView.rightTab` 与它的兼容入口。
+  - **判据全部达成**：`grep -rn "rightTab" desktop/app/src` = **17 行，全是注释**（0 处代码引用）；
+    `grep -rn "rightTab" desktop/app/e2e/*.mjs` = **0**（迁移前实测 **56 处 / 16 个文件** —— 02 原写
+    「55 处 / 15 文件」，少算了 `capture_brand_readme_shot.mjs`）。
+  - **做法**：先加派生选择器（`src/lib/rightPanel.ts` 的 `tabScopeKey` / `activeTabOf` / `selectRightTab`），
+    把渲染层与 store 的 6 处读点改过去；再删字段（`rightTabPatch` → 只做布局的 `layoutPatch`；
+    `viewFields`/`topViewFields` 的写穿一并去掉；`setRightTab` 的 4 个 src 调用点改走 `openTab`）；
+    最后迁探针。**选择器不写回 state** —— 否则等于把两份真相换个名字。
+  - **行为差异（3 处，都是有意的）**：① 标签关光后 rail 不再高亮一个已不存在的面板（旧字段保留了
+    最后的值）；② 标签动作不再无条件 `setView`（旧实现每次都把「会话 view → 顶层镜像」重放一遍，
+    会把顶层的 blocks/streaming 拉回旧值）；③ 「直写面板字段 + sync」这条 e2e 复位路径消失 ——
+    想开标签就 `openTab`。
+  - **门禁**：19 项与 main **逐项同数**（tsc 0 / eslint 0 error·59 warning / vite build；right-tabs 236、
+    tabbar 89、surface-boundary 82、session-tabs 38、ui-snapshot 31、plugin-loader 50、plugin-persist 33、
+    surfaces-page 51、md-file-modes 63、preview-renderers 81、csv 45、html-file-preview 25、agent-tree 110、
+    appearance 78、artifacts 89、auto-open-visual 43）。新增单测 `test:rightpanel-select`（9 条，进 `npm test`）。
+  - **变异**：选择器只认内置四类 → 单测 plugin 用例 + plugin 探针红；悬空兜底 `'web'` → 单测红
+    （泛化成「任何无值都兜底」时 right-tabs A1、activeid D3 也红）；rail 读恒定值 → session-tabs 的
+    rail 高亮断言红。前两条第一次跑时**没有证人**（探针自己算 activeKind、rail 无人断言）→ 先补
+    `data-kind` 与选择器读点，再复跑（见 04 F69）。
+  - **留待裁决**：`TabSet.restored` 标记的外部读者随字段一起消失（只剩自己的清理分支），本轮保留，
+    建议与 R11c 一起收。
+
 ---
 
 ### PR-12 `ui` 通道 + `ui_inspect`
@@ -428,7 +451,7 @@ skill requires 双向生效、panel.js 无 JSX / 无裸模块 import）。
 | params 非对象 / 超 4 KiB（**读侧**） | 未写 | **只丢 params 字段、标签照恢复** | 与写侧刻意相反：面板缺参数最坏退化成空/默认形态（看得见、点一下能重开），丢标签是用户打开过的东西没了；手改 localStorage / 老写法的代价也不该是标签消失 |
 | 卸载 / 禁用后重启 | 「（或变墓碑，按 R14b 的墓碑持久化结论）」 | 标签**留记录**、恢复成墓碑（`missing` / `disabled`），不退化成空白 web 标签 | 标签是「用户打开过的东西」，它的地址（kind+params）不依赖插件活着。卸载即从标签条上消失，等于用户的东西被第三方卸掉了。R14b 的插件页与这里口径一致 |
 | 恢复时序（墓碑 → 面板） | 未写 | **不改代码**：复用 PR-10 的 `subscribeSurfaces` 一条订阅 | `registerSurface` → `emit` → RightPanel 重算 `activeUnavailable`。新探针用「gate 住 surfaceIndex」把那一瞬确定性地复现出来（不靠 sleep 赌时序），放行后面板自己出现 |
-| `rightTab` 的 `as RightTab` | 「要么去掉要么收窄」 | 本轮**不动**（并入 R11b） | 派生字段的删除是 R11b 的范围；本轮恢复出来的 plugin 标签让它暂时仍是一个 string 断言，`rightTab` 的读点在 R11b 一起收口 |
+| `rightTab` 的 `as RightTab` | 「要么去掉要么收窄」 | **R11b 已收口**：断言改成返回 `SurfaceKind`（内置四类 \| `plugin:<id>`） | 字段删掉后选择器取代了它的位置；plugin 是第五种标签，所以返回类型不能收窄成 `BuiltinKind` —— 用错了选择器会把插件标签当成「未知」返回空值 |
 
 **证据**：`e2e/verify_plugin_tab_persist.mjs`（33 项，端口 5229：写入形态 / reload 恢复 /
 墓碑 → 面板 / params 往返 / 超限不恢复 / 卸载后墓碑 / 零 pageerror）、

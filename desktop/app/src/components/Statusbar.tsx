@@ -23,7 +23,7 @@ export default function Statusbar() {
   const settings = useAppStore((s) => s.settings)
   const contextWindow = useAppStore(ctxWindowOf)
   const git = useAppStore((s) => (s.git.is_repo ? s.git : s.wsGit ?? s.git))
-  const setRightTab = useAppStore((s) => s.setRightTab)
+  const openTab = useAppStore((s) => s.openTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const window = modelWindowOf(settings, model, contextWindow) // 分母优先 harness 上报（问题六）
   const lastTurn = turns.length > 0 ? turns[turns.length - 1] : undefined
@@ -57,7 +57,7 @@ export default function Statusbar() {
         className={`status-git ${git.is_repo && git.clean ? 'clean' : ''}`}
         title={git.is_repo ? `${git.branch}${t('status.clickViewChanges')}` : t('status.notRepo')}
         role="button"
-        onClick={() => { setRightTab('git'); setRightExpanded(true) }}
+        onClick={() => { openTab({ kind: 'git' }); setRightExpanded(true) }}
       >⑂ <span className="mono">{git.is_repo ? (git.branch || 'detached') : 'no git'}</span>{git.is_repo && !git.clean && <span className="git-modified"> M {git.modified + git.untracked}</span>}</span>
       <span className="grow" />
       <span className="sb-bridge" style={{ color: 'var(--text-3)' }}>{bridgeStatus === 'running' ? `${personaLabel} · ${model} · ${t('status.mode.' + mode) ?? mode}` : bridgeStatus}</span>

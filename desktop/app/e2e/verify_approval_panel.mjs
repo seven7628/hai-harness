@@ -104,7 +104,7 @@ const VIEW = {
   gitFiles: [], gitHistory: [], gitHasMore: false, gitHistLoading: false, gitLoading: false,
   turns: [], costUsd: 0, toolStartTs: {}, streaming: false, aborted: false, reqBlock: {},
   runningAgentCount: 0, thinkStartTs: {}, turnThinkMs: {}, pendingQueue: [],
-  rightExpanded: false, rightTab: 'activity', traceEvents: [],
+  rightExpanded: false, traceEvents: [],
 }
 useAppStore.setState({
   persona: 'code',
