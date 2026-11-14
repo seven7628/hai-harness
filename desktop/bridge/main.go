@@ -419,6 +419,10 @@ type bridgeSession struct {
 	hubBudgetReason   atomic.Value // string
 	// hubFinishTask 根 AgentEnd 时结算 hub_task（nil = 非项目会话/未接线）。
 	hubFinishTask func(ae *events.AgentEnd)
+	// surfaceAgent 本会话当前在投递的插件 run（nil = 没有；09 §6.6，P1c）。
+	// emit 是唯一的生产侧（dispatchMu 内读写 seq），dispatch 侧的 cancel/超时
+	// 也先拿 dispatchMu 再动它 —— 所以这里用原子指针即可，不需要另加锁。
+	surfaceAgentRun atomic.Pointer[surfaceAgentRun]
 	// hubTaskRunning 根 AgentStart：dispatched → running（P3b-08 B3；nil = 未接线）。
 	hubTaskRunning func(runID string)
 	// hubBudgetCheck 目标会话 LLMEnd 的预算检查；true = 立即中断本 run。
@@ -973,6 +977,12 @@ func (bs *bridgeSession) emit(e events.Event) {
 	if !isStreamingChunkType(e.Type()) {
 		bs.logEventLine(injected)
 	}
+	// 插件 Agent 通道（09 §6.6 / D9）：本会话若有插件 run 在投递，把**根 run** 的
+	// 正文增量 / 用量 / 工具状态 / 终态派生到 surface_agent_event。
+	// 必须在这里而不是另起 goroutine 读事件流：emit 已持 dispatchMu，插件事件与
+	// stdout 事件行同序，也不会与 run goroutine 争 writer（delta 的 50ms 合并同样
+	// 拿 dispatchMu 再写，见 surface_agent.go）。
+	bs.observeSurfaceAgentEvent(e)
 	// AgentEnd 快照归档推迟到这里：事件已落盘，ExtractMessages 能读到完整对话
 	//（含本条 agent_end 的最终回复）。只对定时任务派生会话生效（cronLedger 非空）。
 	if e.Type() == events.AgentEndType && bs.cronLedger != nil && bs.cronRun != "" {
@@ -1398,6 +1408,11 @@ type manager struct {
 	// pluginRuntimes 插件虚拟 Project 的运行时，key = pluginID（09-agent-bridge §4.1）。
 	// 同上：不放进 workspaces —— 一个插件变成一个项目，左栏/清单/workspaces.json 全会跟着错。
 	pluginRuntimes map[string]*workspaceRuntime
+	// surfaceAgents 插件 Agent 通道的进程级状态（run 表 / per-surface 并发闸门 /
+	// 每小时计数；懒开，见 surfaceAgentHub()）。与 pluginRuntimes 分开：那是装配，
+	// 这是配额与事件投递，生命周期不同（run 结束不撤装配）。
+	surfaceAgentMu sync.Mutex
+	surfaceAgents  *surfaceAgentHub
 	// hubFS Hub 领域存储（~/.go-code/hub，懒开；见 hubStore）。
 	hubFS *agenthub.FileStore
 	// hubQueue Hub 派发队列（账本 + 空闲闸门；懒开，见 hubQueueFor）。
@@ -2613,6 +2628,13 @@ func (m *manager) dispatch(c command) {
 		// 同样放在最前：它自带 `workspace` 解析，不该被下面的「workspace 为空」分支拦掉
 		//（workspace_list / ui_inspect 不需要 workspace）。
 		m.handleSurfaceCommand(c)
+		return
+
+	case CmdSurfaceAgent:
+		// 插件 → Agent（09 §6.2 / §6.6，P1c）：入口校验链 + 配额 + 审计在
+		// surface_agent.go。与 surface_command 同样放在最前：它自带 surface 身份与
+		// 虚拟 home 解析（payload 里没有 workspace，不该被下面「workspace 为空」的分支拦掉）。
+		m.handleSurfaceAgent(c)
 		return
 
 	case CmdSurfaceSetEnabled, CmdSurfaceRemove, CmdSurfaceAudit:

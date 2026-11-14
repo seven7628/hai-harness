@@ -269,6 +269,16 @@ const (
 	// payload = {id, name, args?}；白名单与审计在 Go（surfaces_command.go），
 	// 渲染层的预检只是省一次 IPC，不是边界。
 	CmdSurfaceCommand Command = "surface_command"
+	// CmdSurfaceAgent 插件 ↔ Agent 双向互通的唯一命令（09-agent-bridge §6.2 / §6.6，P1c）。
+	// payload = {id, name, args}：id 由 main 按 token 注入（bridge 只信任主进程给的值），
+	// name ∈ {agent.session, agent.run, agent.cancel, tool.result}，args 是该 name 的参数对象。
+	//
+	// 与 `surface_command` 的分工：那条是老只读通道（D11 之后宿主表为空，一律 denied），
+	// 这条只服务 Agent 能力 —— 它能花用户的 token、写会话，所以走独立的
+	// 拒绝原因表（§6.5 封闭集合）与审计（§8.5），不与只读命令表混在一起。
+	// 回执：成功 {ok:true, data:{...}}；拒绝 {ok:false, code:<reason>, data:{ok:false, reason}}。
+	// 事件：统一信封 surface_agent_event（见 surface_agent.go）。
+	CmdSurfaceAgent Command = "surface_agent"
 	// CmdSurfaceSetEnabled / CmdSurfaceRemove / CmdSurfaceAudit 插件页（PR-14b）的
 	// 读-改-读三条。与 `ui` / `surface_command` 同一层级：不是事件（不进 28 类）、
 	// 不落盘会话、不重放；回执 reason 是封闭集合（unknown_id / bad_request / error）。
