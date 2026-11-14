@@ -11,7 +11,7 @@
 // 运行：esbuild bundle 后 node --test（见 package.json 的 test:agent-tree）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { agentTreeFromView, buildAgentTree, collectTreeKeys, focusedPathKeys, countRunningNodes, flattenAgentTree, flattenVisible, pathKeyOf, subtreeSize, pageRoots, DEFAULT_ROOT_PAGE } from './agentTree'
+import { agentTreeFromView, agentRunStateFromView, buildAgentTree, collectTreeKeys, focusedPathKeys, countRunningNodes, flattenAgentTree, flattenVisible, pathKeyOf, subtreeSize, pageRoots, DEFAULT_ROOT_PAGE } from './agentTree'
 
 test('嵌套：子智能体下的子智能体挂在子节点下（不是平级）', () => {
   const roots = buildAgentTree([
@@ -105,6 +105,49 @@ test('task→agent 升级：同一 id 的占位卡与运行卡合成一个节点
   assert.equal(roots[0].kind, 'agent', 'agent 是更具体的身份（有转录）')
   assert.equal(roots[0].label, 'review')
   assert.equal(roots[0].toolName, 'bash', '工具名不能因升级丢掉（图标来源）')
+})
+
+test('agent_resume：同一 task 的新 run 覆盖旧 run 的终态与时长', () => {
+  // 真实事件顺序：旧 run 的 runNode/卡片先占住 task 节点；agent_resume 复用 task_id，
+  // 新 run 的 agent_start 追加新 runNode + 新卡片。旧实现的「只补空字段」会把
+  // done/durMs 留在节点上 —— 续跑后子会话仍是 Worked，且时长是上一轮的。
+  const roots = buildAgentTree([
+    { id: 'task-1', runId: 'run-old', status: 'done', startedAt: 100, durMs: 9000, priority: 0 },
+    { id: 'task-1', runId: 'run-new', status: 'running', startedAt: 200, priority: 0 },
+    { id: 'task-1', runId: 'run-old', status: 'done', startedAt: 100, durMs: 9000, priority: 1 },
+    { id: 'task-1', runId: 'run-new', status: 'running', startedAt: 200, priority: 1 },
+  ])
+  assert.equal(roots.length, 1)
+  assert.equal(roots[0].runId, 'run-new', '节点必须指向新 run（找卡片/事件用）')
+  assert.equal(roots[0].status, 'running', '续跑后必须是 running，不是上一轮的 done')
+  assert.equal(roots[0].startedAt, 200, '计时锚点切到新 run')
+  assert.equal(roots[0].durMs, undefined, '上一轮的 durMs 必须清掉（否则仍显示 Worked）')
+})
+
+test('同一 run：agent 卡的状态覆盖 runNode（interrupt_task 立即显示 interrupting）', () => {
+  const roots = buildAgentTree([
+    { id: 'task-1', runId: 'run-1', status: 'running', startedAt: 100, priority: 0 },
+    { id: 'task-1', runId: 'run-1', status: 'interrupting', startedAt: 100, priority: 1 },
+  ])
+  assert.equal(roots[0].status, 'interrupting')
+  assert.equal(roots[0].durMs, undefined, '运行中不能残留结算时长')
+})
+
+test('agent_resume 的旧卡晚到：不能把新 run 打回上一轮（时间优先于输入顺序）', () => {
+  const roots = agentTreeFromView(
+    [
+      { id: 'run-old', parentId: 'main', kind: 'run', taskId: 'task-1', status: 'done', startedAt: 100, durMs: 9000 },
+      { id: 'run-new', parentId: 'main', kind: 'run', taskId: 'task-1', status: 'running', startedAt: 200 },
+    ],
+    [
+      { kind: 'agent', runId: 'run-new', taskId: 'task-1', label: 'review', status: 'running', spawnedAt: 200 },
+      // 旧卡在 blocks 里排在后面（历史顺序），但它不是「更新」。
+      { kind: 'agent', runId: 'run-old', taskId: 'task-1', label: 'review', status: 'done', spawnedAt: 100, durMs: 9000 },
+    ],
+  )
+  assert.equal(roots[0].runId, 'run-new')
+  assert.equal(roots[0].status, 'running')
+  assert.equal(roots[0].durMs, undefined)
 })
 
 test('排序：同层按 startedAt 倒序（最新在前）；缺失时间戳的一律垫底', () => {
@@ -266,4 +309,51 @@ test('嵌套任务：parentTaskId 优先于 parent_run_id（父卡不在窗口�
   assert.equal(child!.children.length, 1, '孙任务必须挂在子智能体下，不能掉成主会话下的根')
   assert.equal(child!.children[0].id, 'task-grand')
   assert.equal(roots.length, 1, '根只有一个（主会话下的子智能体）')
+})
+
+// ---------------------------------------------------------------------------
+// 子会话作用域：焦点是「点选时」的快照，续跑后 run_id 会变。
+// 所有读作用域的地方（Composer/审批/提问/运行条/上下文）都必须解析到当前 run，
+// 不能拿旧 runId 去找卡片 —— 否则续跑后仍读上一轮的 Worked/时长，或过滤不到
+// 新 run 的审批。纯函数在这里钉住，组件只接线。
+// ---------------------------------------------------------------------------
+test('子会话当前 run：按 taskId 找最新一张卡（agent_resume 后焦点 runId 过期）', () => {
+  const blocks = [
+    { kind: 'agent' as const, runId: 'run-old', taskId: 'task-1', label: 'review', status: 'completed' as const, spawnedAt: 100, durMs: 9000 },
+    { kind: 'agent' as const, runId: 'run-new', taskId: 'task-1', label: 'review', status: 'running' as const, spawnedAt: 200 },
+  ]
+  const st = agentRunStateFromView(blocks, [], { nodeId: 'task-1', runId: 'run-old', taskId: 'task-1' })
+  assert.equal(st.isAgent, true)
+  assert.equal(st.runId, 'run-new')
+  assert.equal(st.status, 'running')
+  assert.equal(st.running, true)
+  assert.equal(st.startedAt, 200)
+  assert.equal(st.durMs, undefined)
+})
+
+test('子会话当前 run：没有 taskId 的同步子智能体按 runId 找卡', () => {
+  const blocks = [
+    { kind: 'agent' as const, runId: 'sync-1', label: 'explore', status: 'interrupting' as const, spawnedAt: 50 },
+  ]
+  const st = agentRunStateFromView(blocks, [], { nodeId: 'sync-1', runId: 'sync-1' })
+  assert.equal(st.runId, 'sync-1')
+  assert.equal(st.running, true, 'interrupting 仍算在跑（停止按钮/计时不能提前收）')
+})
+
+test('子会话当前 run：卡片还没到 → 用 runNode 兜底，不能直接判成空闲', () => {
+  const st = agentRunStateFromView([], [
+    { id: 'run-1', parentId: 'main', kind: 'run', taskId: 'task-1', label: 'review', status: 'running', startedAt: 300 },
+  ], { nodeId: 'task-1', runId: 'run-1', taskId: 'task-1' })
+  assert.equal(st.runId, 'run-1')
+  assert.equal(st.running, true)
+  assert.equal(st.startedAt, 300)
+})
+
+test('子会话当前 run：后台工具任务不能借主 run 的运行态/计时', () => {
+  const st = agentRunStateFromView([], [
+    { id: 'main-1', kind: 'run', status: 'running', startedAt: 100 },
+  ], { nodeId: 'tooltask-1', runId: 'main-1', taskId: 'tooltask-1' })
+  assert.equal(st.isAgent, false, '后台工具任务不是子智能体')
+  assert.equal(st.running, false, '没有子 run 的 task 焦点 → 空闲，不回退主会话')
+  assert.equal(st.startedAt, undefined)
 })

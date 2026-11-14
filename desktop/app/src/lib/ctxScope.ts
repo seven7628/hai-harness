@@ -12,13 +12,13 @@
 // 数据都已在客户端：turns 带 runId，agent 块带 usage。没有新协议字段。
 
 export interface CtxScopeState {
-  focusedAgent?: { runId: string }
+  focusedAgent?: { runId: string; nodeId?: string; taskId?: string }
   ctxTokens?: number
   ctxTokensEstimated?: boolean
   contextWindow?: number
   turns: { runId?: string; input?: number; durMs?: number }[]
-  runNodes: { id: string; ctxWindow?: number }[]
-  blocks: { kind: string; runId?: string; ctxWindow?: number; usage?: { input?: number } }[]
+  runNodes: { id: string; taskId?: string; ctxWindow?: number }[]
+  blocks: { kind: string; runId?: string; taskId?: string; spawnedAt?: number; ctxWindow?: number; usage?: { input?: number } }[]
 }
 
 export interface RunCtx {
@@ -34,16 +34,34 @@ export interface RunCtx {
 export function runCtxOf(s: CtxScopeState): RunCtx | undefined {
   const f = s.focusedAgent
   if (!f) return undefined
+  // 焦点是点选时的快照；agent_resume 后同一 task 换 run_id → 按 taskId 找最新卡，
+  // 否则环里的分子/窗口仍停在上一轮（用户 2026-11 报障的「续跑后状态不对」同源）。
+  const taskKey = f.taskId || f.nodeId
+  let currentRunId = f.runId
+  let latestAt = Number.NEGATIVE_INFINITY
+  for (const b of s.blocks) {
+    if (b.kind !== 'agent') continue
+    if (!(b.taskId && b.taskId === taskKey) && b.runId !== f.runId && b.runId !== f.nodeId) continue
+    const at = b.spawnedAt ?? Number.NEGATIVE_INFINITY
+    if (at >= latestAt) {
+      latestAt = at
+      if (b.runId) currentRunId = b.runId
+    }
+  }
+  if (currentRunId === f.runId) {
+    const node = s.runNodes.find((n) => (taskKey && n.taskId === taskKey) || n.id === f.runId)
+    if (node) currentRunId = node.id
+  }
   const out: RunCtx = {}
   for (let i = s.turns.length - 1; i >= 0; i--) {
     const t = s.turns[i]
-    if (t.runId !== f.runId) continue
+    if (t.runId !== currentRunId) continue
     if (typeof t.input === 'number' && t.input > 0) out.tokens = t.input
     if (t.durMs != null) out.turnDurMs = t.durMs
     break
   }
-  const node = s.runNodes.find((n) => n.id === f.runId)
-  const block = s.blocks.find((b) => b.kind === 'agent' && b.runId === f.runId)
+  const node = s.runNodes.find((n) => n.id === currentRunId)
+  const block = s.blocks.find((b) => b.kind === 'agent' && b.runId === currentRunId)
   const w = node?.ctxWindow ?? (block as { ctxWindow?: number } | undefined)?.ctxWindow
   if (w != null && w > 0) out.window = w
   // 一个 turn 都还没落地（子 agent 刚起）：退回它这一路已累计的输入

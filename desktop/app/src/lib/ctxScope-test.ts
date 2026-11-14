@@ -53,3 +53,27 @@ test('块上的窗口也能用（runNodes 被裁剪后块是更稳的来源）',
   }
   assert.equal(ctxWindowOf(s), 200000)
 })
+
+test('agent_resume 后焦点 runId 过期：按 taskId 解析到最新一轮的 token/窗口/耗时', () => {
+  const s = {
+    ctxTokens: 12000,
+    contextWindow: 1_000_000,
+    turns: [
+      { runId: 'run-old', input: 3000, durMs: 900 },
+      { runId: 'run-new', input: 7000, durMs: 1500 },
+    ],
+    runNodes: [
+      { id: 'main-1' },
+      { id: 'run-old', taskId: 'task-1', ctxWindow: 100000 },
+      { id: 'run-new', taskId: 'task-1', ctxWindow: 200000 },
+    ],
+    blocks: [
+      { kind: 'agent', runId: 'run-old', taskId: 'task-1', spawnedAt: 100, ctxWindow: 100000, usage: { input: 3000 } },
+      { kind: 'agent', runId: 'run-new', taskId: 'task-1', spawnedAt: 200, ctxWindow: 200000, usage: { input: 7000 } },
+    ],
+    focusedAgent: { nodeId: 'task-1', runId: 'run-old', taskId: 'task-1' },
+  }
+  assert.equal(ctxTokensOf(s), 7000)
+  assert.equal(ctxWindowOf(s), 200000)
+  assert.equal(runCtxOf(s)?.turnDurMs, 1500)
+})

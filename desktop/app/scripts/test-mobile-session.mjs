@@ -266,13 +266,13 @@ console.log('\n4) 静态边界：会话页复用桌面组件 + 按需加载')
   const composer = read('src/components/Composer.tsx')
   assert(/variant\?: 'desktop' \| 'mobile'/.test(composer), 'Composer 有 variant（默认 desktop）')
   for (const [re, why] of [
-    [/\{!mobile && \(\s*<ChipMenu\s*\n\s*className="mode-chip"/, '模式芯片'],
-    [/className="model-chip"/, '模型芯片'],
-    [/\{!mobile && canImage && \(/, '图片附件按钮'],
-    [/!mobile && \(\s*\n\s*<button\s*\n\s*className="attach-btn doc-btn"/, '添加文件按钮'],
+    [/\{!mobile && !focused && \(\s*<ChipMenu\s*\n\s*className="mode-chip"/, '模式芯片'],
+    [/\{!focused && \(<>\s*\n\s*<div\s*\n\s*ref=\{chipRef\}\s*\n\s*className="model-chip"/, '模型芯片'],
+    [/\{!mobile && !focused && canImage && \(/, '图片附件按钮'],
+    [/!mobile && !focused && \(\s*\n\s*<button\s*\n\s*className="attach-btn doc-btn"/, '添加文件按钮'],
     [/!mobile && sttEnabled && \(/, '语音按钮'],
     [/\{!mobile && atOpen && workspace && \(/, '@ 文件引用面板'],
-    [/filtered\.length > 0 && !mobile/, '斜杠命令菜单'],
+    [/filtered\.length > 0 && !mobile && !focused/, '斜杠命令菜单'],
   ]) assert(re.test(composer), `手机上不渲染桌面专属入口：${why}`)
   assert(/composer\.placeholderMobile/.test(composer), '手机用不含 @ / 斜杠承诺的占位符')
 

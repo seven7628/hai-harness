@@ -2710,6 +2710,28 @@ class MockTransport implements Transport {
         this.afterBg(120, () => this.promoteContinue(sid, p.runId), sid)
         break
       }
+      case 'agent_send': {
+        // 子会话输入框：把用户消息投给子智能体（真实 bridge 走 Registry.Send → inbox）。
+        // mock 只需让 UI 能看到「已发送 → 进入上下文」的闭环：先回 command_response，
+        // 下一拍发 agent_user_message（与真实 Poll 消费的时序同形，不伪造同步返回）。
+        const sid = this.cmdSid(cmd)
+        const taskId = String((cmd.payload?.task_id as string) || '')
+        const text = String((cmd.payload?.text as string) || '')
+        if (!taskId || !text) {
+          this.respondErr(cmd, 'task_id and text are required')
+          break
+        }
+        if (taskId === 'task-finished') {
+          this.respondErr(cmd, 'task already finished')
+          break
+        }
+        this.respond(cmd, {})
+        this.afterBg(120, () => this.emit({
+          event_type: 'agent_user_message', session_id: sid, task_id: taskId,
+          text, source: 'user', timestamp: Date.now(),
+        }), sid)
+        break
+      }
       case 'interrupt_task': {
         // 按 taskId 精确中断异步任务（右侧任务栏「停止」）：只影响目标任务，不停主会话。
         // 锚：已 promote 的后台工具（bgTool）或仍在等待 promote 的运行中工具（promote）。

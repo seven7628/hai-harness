@@ -14,6 +14,8 @@ import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
 import { looksSubRun } from '../lib/sessionScope'
+import { agentRunStateFromView } from '../lib/agentTree'
+import type { ViewAgentBlock, ViewRunNode } from '../lib/agentTree'
 import { visualKindOf, isVisualPath, BROWSER_EXTS, extOf } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
@@ -643,6 +645,12 @@ export function queuedHasAttach(q: QueuedInput): boolean {
   return q.contents.some((c) => c.type !== 'text')
 }
 
+// 子会话队列的键：session + 后台任务 id。不能只用 taskId —— 不同会话可能有同名 id
+// （测试/恢复场景），混键会把 A 会话的排队消息发到 B 会话。
+export function agentQueueKey(sid: string, taskId: string): string {
+  return `${sid}\u0000${taskId}`
+}
+
 // messageImageBytes 一条消息的图片总量（推送前体积预检用；口径同 bridge
 // maxImageBlockBytes —— 只算 image 块，文本由命令单行上限兜底）。
 export function messageImageBytes(contents: QueuedContent[] | undefined): number {
@@ -1153,7 +1161,8 @@ export interface SessionView {
   // 为什么放在会话视图里（而不是全局）：子智能体的身份是 run_id/task_id，属于某个会话；
   // 切到别的会话再切回来，「刚才在看哪个子智能体」应当恢复（与「刚才在看哪个标签」同类，
   // 只是后者现在归 tabsByScope 管，见文件顶部标签模型）。
-  // 它只影响**展示**（叙述区渲染谁），不改变「消息发给谁」—— 输入框永远发给主会话。
+  // 它决定**当前作用域**：叙述区渲染谁、Composer 的消息/停止/队列发给谁、审批与压缩看谁。
+  // 焦点是点选时的快照；agent_resume 换 run_id 后由 agent_start 跟到新 run（见该事件分支）。
   focusedAgent?: AgentFocus
   usage: UsageAgg
   ctxTokens?: number // 当前主 Agent 上下文占用
@@ -3321,6 +3330,11 @@ export interface AppState {
   streaming: boolean
   runEnded: boolean // 活跃会话镜像：主 run 是否已收到 AgentEnd（见 SessionView 同名字段）
   pendingQueue: QueuedInput[]
+  // 子会话自己的暂存队列：key = `${sid}\0${taskId}`。主会话的 pendingQueue 是
+  // ask_batch 队列，子会话走 agent_send（逐条 inbox），不能共用 —— 共用会把子会话
+  // 的消息混进主会话的 ask_batch，正是「Session 没隔离」的典型。
+  agentQueues: Record<string, QueuedInput[]>
+  agentQueueErrors: Record<string, string>
   runningAgentCount: number // 活跃会话镜像：运行中的子 agent 数（右栏角标/Agent tab）
   busySids: ReadonlySet<string> // 正在运行（有 running run 节点）的会话 id 集合（左栏运行点；事件级维护，不随 chunk 扫描）
   // 沙箱 UI（visual-ui 生成的 html 块）回传的待发送文本：
@@ -3363,6 +3377,10 @@ export interface AppState {
   // 子智能体是独立上下文，「我想让它改一下」和让主智能体再派一次是两件事。
   // 失败原因可区分（已结束 / 队列满 / 找不到任务），见 agentSendError。
   sendToAgent(taskId: string, text: string): void
+  // 子会话暂存队列（与主会话 pendingQueue 平行、按 taskId 隔离）
+  updateAgentPending(taskId: string, id: number, text: string): void
+  removeAgentPending(taskId: string, id: number): void
+  flushAgentPending(taskId: string): void
   clearAgentSendError(): void
   releaseSandbox(approve: boolean): void // 沙箱拦截放行决策（放行=该命令绕过沙箱重跑一次）
   promoteTask(taskId: string): void // 运行中长工具 → 后台任务（主 loop 立即拿占位继续；后台完成自动回传）
@@ -3501,8 +3519,9 @@ export interface AppState {
    */
   loadOfficePreview(path: string, kind: 'xlsx' | 'docx' | 'pptx'): Promise<OfficePreviewResult>
   // focusAgent：左栏树点选一个子智能体 → 叙述区改为展示它的转录（同一次运行的两处视图）。
-  // 传 undefined = 回到主会话。**不改变消息投递目标**（输入框永远发给主会话）：
-  // 这只是"看哪个"，与"发给谁"是两个问题（子智能体的输入通道是 agent_send）。
+  // 传 undefined = 回到主会话。焦点决定 Composer 的投递目标：子会话走 agent_send/子队列，
+  // 主会话走 ask/ask_batch —— 两套队列不混。
+  // 焦点是点选时的快照；agent_resume 后由 agent_start 更新 runId，作用域读取始终跟当前轮。
   focusAgent(f?: AgentFocus): void
   // —— 右侧栏标签（阶段 1，docs/RIGHT_PANEL_TABS_PLAN.md）——
   openTab(spec: TabSpec, opts?: { activate?: boolean }): string // 打开或激活（阶段 1 幂等键 = kind）；返回标签 id
@@ -6308,11 +6327,30 @@ export function dispatchEvent(raw: AnyEvent): void {
       const text = String(raw.text || '')
       if ((!taskId && !runId) || !text.trim()) break
       const ts = evTs(raw)
+      const source = String(raw.source || '')
       setState((s) => {
         const v = s.views[sid] ?? emptyView()
         const blocks = appendAgentUser(v.blocks, taskId, text, ts, runId)
-        if (blocks === v.blocks) return s
-        return setView(s, sid, { ...v, blocks })
+        // 队列出队：用户从子会话输入框发的消息在 agent_send 成功时是 pushed；
+        // 服务端真正把它投进上下文后才发这条事件。按 (taskId, 文本) 移除队首一条，
+        // 与 appendAgentUser 的幂等键（runId+text+时间戳）分开 —— 队列项没有服务端时间戳。
+        // 只处理 source=user：初始 prompt（prompt）与孙任务结果（child_task）不占队列。
+        let queues = s.agentQueues
+        let errors = s.agentQueueErrors
+        let queueChanged = false
+        const key = taskId ? agentQueueKey(sid, taskId) : ''
+        if (key && (source === '' || source === 'user')) {
+          const q = queues[key] ?? []
+          const idx = q.findIndex((x) => queuedText(x) === text.trim())
+          if (idx >= 0) {
+            queues = { ...queues, [key]: q.filter((_, i) => i !== idx) }
+            errors = { ...errors, [key]: '' }
+            queueChanged = true
+          }
+        }
+        if (blocks === v.blocks && !queueChanged) return s
+        const patch = blocks === v.blocks ? s : setView(s, sid, { ...v, blocks })
+        return { ...patch, ...(queueChanged ? { agentQueues: queues, agentQueueErrors: errors } : {}) }
       })
       break
     }
@@ -7460,6 +7498,13 @@ export function dispatchEvent(raw: AnyEvent): void {
         const v = s.views[sid] ?? emptyView()
         // 新顶层 run = 新 trace：直接丢弃旧 trace（链路只保留最近一次 agent_start→agent_end 子树，减少数据量）
         const runNodes = parentId ? [...v.runNodes, node] : [node]
+        // 续跑（agent_resume 复用 task_id、换 run_id）：如果用户正看着这个子会话，
+        // 焦点必须跟到新 run。否则审批/提问/压缩/运行条仍按旧 runId 过滤 —— 表现是
+        // 「续跑后子会话里看不到自己的审批」「计时还是上一轮」。
+        const focus = v.focusedAgent
+        const nextFocus = focus && runTaskId && (focus.taskId === runTaskId || focus.nodeId === runTaskId)
+          ? { ...focus, runId: id, taskId: runTaskId }
+          : undefined
         // 新顶层 run → 链路 tab 自动跟随最新（用户在历史 trace 上查看时也切回实时，
         // 否则新 run 开始后链路 tab 会「停在过去」且无提示）。
         const followLatest = parentId ? {} : { activeTraceId: undefined, traceDetail: undefined }
@@ -7472,6 +7517,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           ...(parentId ? {} : { runEnded: false }),
           ...(cw > 0 && !parentId ? { contextWindow: cw } : {}),
           ...followLatest,
+          ...(nextFocus ? { focusedAgent: nextFocus } : {}),
           runNodes,
           // 子 agent（有父 run）→ 对话页异步 Agent 卡片 + 右侧 Agent 监视器数据源
           blocks: parentId
@@ -7500,6 +7546,10 @@ export function dispatchEvent(raw: AnyEvent): void {
         })
         return { ...upd, busySids: busySidsFromViews(upd.views) }
       })
+      // 续跑起来后自动补发「任务已结束时暂存」的消息：队列属于 task，不属于某一轮；
+      // 新 run 的 agent_start 是它重新可投递的唯一信号。microtask 确保上面的 setState
+      // 已落地（flush 里要读最新卡片状态）。
+      if (runTaskId) queueMicrotask(() => useAppStore.getState().flushAgentPending(runTaskId))
       break
     }
     // memory_activity：Project Memory 的读/写活动（官方 §2.7 的
@@ -7828,6 +7878,31 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 判定方式与上方 setState 内一致（ParentRunId 优先 —— 视图里的登记会被新顶层 run 重置）。
       const endView = getState().views[sid]
       const isSubRun = Boolean(raw.parent_run_id) || (id !== '' && isSubAgentRun(endView ?? emptyView(), id))
+      // 子会话队列收尾：agent_end 到了还没等到 agent_user_message，说明消息没进上下文
+      //（中断/任务刚好结束）。把 pushed 回滚成可编辑的未推送项，并给出原因 ——
+      // 否则队列会永远停在「已推送」，用户以为它已送达。
+      if (isSubRun) {
+        const endedCard = endView
+          ? [...endView.blocks, ...(endView.agentDetached ?? [])].find((b) => b.kind === 'agent' && b.runId === id)
+          : undefined
+        const endedTaskId = endedCard?.kind === 'agent' ? endedCard.taskId : (raw.task_id ? String(raw.task_id) : '')
+        if (endedTaskId) {
+          const key = agentQueueKey(sid, endedTaskId)
+          const q = getState().agentQueues[key] ?? []
+          const stuck = q.filter((x) => x.pushed)
+          if (stuck.length) {
+            const err = i18nT('composer.agent.queueUnsent')
+            useAppStore.setState((s) => ({
+              agentSendError: err,
+              agentQueueErrors: { ...s.agentQueueErrors, [key]: err },
+              agentQueues: {
+                ...s.agentQueues,
+                [key]: (s.agentQueues[key] ?? []).map((x) => (x.pushed ? { ...x, pushed: false } : x)),
+              },
+            }))
+          }
+        }
+      }
       if (!isSubRun) {
         const arts = pickArtifacts(raw.artifacts)
         const visual = arts?.find((a) => isVisualPath(a.path))
@@ -9853,6 +9928,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   toolStartTs: {},
   streaming: false,
   pendingQueue: [],
+  agentQueues: {},
+  agentQueueErrors: {},
   runningAgentCount: 0,
   agentSendError: undefined,
   questions: [],
@@ -10568,14 +10645,100 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sid = get().activeSessionId
     const body = text.trim()
     if (!sid || !taskId || !body) return
-    set({ agentSendError: undefined })
-    send(
-      { type: 'agent_send', payload: { session_id: sid, task_id: taskId, text: body } },
-      false,
-      (r) => {
-        if (!r.ok) set({ agentSendError: r.error || 'send failed' })
-      },
+    const key = agentQueueKey(sid, taskId)
+    // 先入子会话自己的队列（可见的「排队中」反馈），再按运行态推送。
+    // 旧实现直接 send 后什么都不显示：子 agent 正在工具轮里时，消息要等下一次
+    // Poll 才进上下文，用户看到的是「发了没反应」；失败时也只有一个顶部错误条。
+    const item: QueuedInput = { id: blockSeq++, contents: [{ type: 'text', content: body }], pushed: false }
+    set((s) => ({
+      agentQueues: { ...s.agentQueues, [key]: [...(s.agentQueues[key] ?? []), item] },
+      agentQueueErrors: { ...s.agentQueueErrors, [key]: '' },
+      agentSendError: undefined,
+    }))
+    get().flushAgentPending(taskId)
+  },
+  updateAgentPending: (taskId, id, text) => {
+    const sid = get().activeSessionId
+    const body = text.trim()
+    if (!sid || !taskId || !body) return
+    const key = agentQueueKey(sid, taskId)
+    set((s) => {
+      const q = s.agentQueues[key] ?? []
+      return {
+        agentQueues: {
+          ...s.agentQueues,
+          [key]: q.map((x) => (x.id === id && !x.pushed
+            ? { ...x, contents: [{ type: 'text' as const, content: body }] }
+            : x)),
+        },
+      }
+    })
+  },
+  removeAgentPending: (taskId, id) => {
+    const sid = get().activeSessionId
+    if (!sid || !taskId) return
+    const key = agentQueueKey(sid, taskId)
+    set((s) => {
+      const q = (s.agentQueues[key] ?? []).filter((x) => x.id !== id)
+      return {
+        agentQueues: { ...s.agentQueues, [key]: q },
+        ...(q.length === 0 ? { agentQueueErrors: { ...s.agentQueueErrors, [key]: '' } } : {}),
+      }
+    })
+  },
+  flushAgentPending: (taskId) => {
+    const s0 = get()
+    const sid = s0.activeSessionId
+    if (!sid || !taskId) return
+    const view = s0.views[sid]
+    if (!view) return
+    const key = agentQueueKey(sid, taskId)
+    const run = agentRunStateFromView(
+      [...view.blocks, ...(view.agentDetached ?? [])].filter((b) => b.kind === 'agent') as ViewAgentBlock[],
+      view.runNodes as ViewRunNode[],
+      { nodeId: taskId, runId: taskId, taskId },
     )
+    if (!run.running) {
+      const err = i18nT('composer.agent.ended')
+      set((s) => ({
+        agentSendError: err,
+        agentQueueErrors: { ...s.agentQueueErrors, [key]: err },
+      }))
+      return
+    }
+    // 能投递了：清掉上一轮「任务已结束」的错误，避免队列已发出去但红字还挂着。
+    set((s) => ({
+      agentSendError: undefined,
+      agentQueueErrors: { ...s.agentQueueErrors, [key]: '' },
+    }))
+    const pending = (s0.agentQueues[key] ?? []).filter((q) => !q.pushed)
+    for (const q of pending) {
+      const body = queuedText(q)
+      if (!body) continue
+      // 先置 pushed（乐观），失败回滚；事件 agent_user_message 到达时再出队。
+      set((s) => ({
+        agentQueues: {
+          ...s.agentQueues,
+          [key]: (s.agentQueues[key] ?? []).map((x) => (x.id === q.id ? { ...x, pushed: true } : x)),
+        },
+      }))
+      send(
+        { type: 'agent_send', payload: { session_id: sid, task_id: taskId, text: body } },
+        false,
+        (r) => {
+          if (r.ok) return
+          const err = r.error || 'send failed'
+          set((s) => ({
+            agentSendError: err,
+            agentQueueErrors: { ...s.agentQueueErrors, [key]: err },
+            agentQueues: {
+              ...s.agentQueues,
+              [key]: (s.agentQueues[key] ?? []).map((x) => (x.id === q.id ? { ...x, pushed: false } : x)),
+            },
+          }))
+        },
+      )
+    }
   },
   clearAgentSendError: () => set({ agentSendError: undefined }),
 
@@ -11430,8 +11593,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sid = s.activeSessionId
     if (!sid) return
     const v = s.views[sid] ?? emptyView()
-    // 同一个焦点重复点：不变更（否则每点一下都触发一次全量重渲）
-    if (v.focusedAgent?.nodeId === f?.nodeId) return
+    // 同一个焦点重复点：不变更（否则每点一下都触发一次全量重渲）。
+    // runId 也要比：agent_resume 后同一 nodeId 会换 runId，不能因为 nodeId 相同
+    // 就把新焦点丢掉（否则审批/压缩作用域还停在上一轮）。
+    const cur = v.focusedAgent
+    if (cur?.nodeId === f?.nodeId && cur?.runId === f?.runId && cur?.taskId === f?.taskId) return
     set(setView(s, sid, { ...v, focusedAgent: f }))
   },
   // 同值不 set：菜单开合会连带触发 RP 的两个 setter（menu 与 ctx 各一），重复写会让
