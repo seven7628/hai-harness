@@ -2295,8 +2295,10 @@
       ],
       "acceptance": "设置保存后立即 emit 新限额视图；run_timeout_ms 变化重挂已挂定时器；429 清 timer；waiting_human+queue 文案不再说排空；Schedulable 表驱动；stat 移出 m.mu。",
       "tests": "go test ./agenthub ./desktop/bridge -run 'Limits|Timeout|Waiting|Schedulable'；node scripts/test-hub-conv.mjs；tsc",
-      "commit": "—",
-      "status": "in_progress"
+      "commit": "bac3551",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：目标用例 + agenthub 全包 + vet + tsc + hub-conv 160 全绿；merge fa40292。全 bridge 首跑在既有 80ms 冷却时序用例上偶发红（单跑/10 次绿，非本包回归），复跑进行中。"
     },
     {
       "id": "P8-01",
@@ -3534,8 +3536,11 @@
       "reviewNote": "主 Session 复验：agenthub + desktop/bridge 整包全绿；merge 2021e97。人类 @all=12 / owner @all=11 两个子测试，3 条 429 退避重投；真实 provider 压测仍待人工。"
     },
     "P7-04": {
-      "status": "in_progress",
-      "commit": "—"
+      "status": "done",
+      "commit": "bac3551",
+      "merge": "fa40292",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：目标用例 + agenthub 全包 + vet + tsc + hub-conv 160 全绿；merge fa40292。全 bridge 首跑在既有 80ms 冷却时序用例上偶发红（单跑/10 次绿，非本包回归），复跑进行中。"
     },
     "P8-01": {
       "status": "in_progress",
