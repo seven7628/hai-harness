@@ -23,7 +23,7 @@ import { auditContrast, installFakeVisualViewport, installTheme } from './mobile
 
 const APP = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(APP, 'dist-mobile')
-// mobile:embed 之后是 index.html，只跑过 mobile:build 时是 mobile.html。
+// npm run mobile:build 之后是 index.html，单独跑 vite build 时是 mobile.html。
 const INDEX = existsSync(join(DIST, 'index.html')) ? '/index.html' : '/mobile.html'
 const SHOTS = '/tmp/p8-polish'
 const PAIR_CODE = '123456'

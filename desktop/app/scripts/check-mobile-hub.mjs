@@ -169,8 +169,8 @@ function json(res, code, body) {
   res.end(JSON.stringify(body))
 }
 
-// 根路径：mobile:embed 会把 mobile.html 改名 index.html（bridge 的 /m/ 就是这么兜底的），
-// 只跑过 mobile:build 时还是 mobile.html —— 两种产物都认。
+// 根路径：npm run mobile:build 会把 mobile.html 改名 index.html（bridge 的 /m/ 直接托管目录），
+// 单独跑 vite build 时还是 mobile.html —— 两种产物都认。
 const INDEX = existsSync(join(DIST, 'index.html')) ? '/index.html' : '/mobile.html'
 
 async function serveStatic(res, pathname) {
