@@ -137,9 +137,13 @@
 
 **门禁（2026-11-14，合并 main/R11b + dedupeKey 修复后全绿）**：`go vet ./...`、
 `go test ./desktop/bridge -run TestSurface`、`tsc --noEmit`、`eslint src`（0 error / 59 warning）、
-`vite build`、`test:surface-index`（4）、`test:right-tabs`（236）、`test:rightpanel-select`（9）、
-`verify_plugin_entries`（58）、`verify_surfaces_page`（51）、`verify_plugin_loader`（50）、
-`verify_plugin_tab_persist`（33）、`e2e:tabbar`（89）、`e2e:surface-boundary`（82）、`e2e:session-tabs`（38）。
+`vite build`、`test:surface-index`、`test:right-tabs`（238）、`test:rightpanel-select`（9）、
+`verify_plugin_entries`（59）、`verify_surfaces_page`（51）、`verify_plugin_loader`（50）、
+`verify_plugin_tab_persist`（33）、`e2e:tabbar`（89）、`e2e:surface-boundary`（82）、`e2e:session-tabs`（45）。
+
+**R16b 收口（2026-11-14）**：上表三条「已知限制/已知不一致」（title 本地化、回执入口提示、
+＋菜单键盘）全部落地；新增 `test:surface-install` 与 `e2e:external-surface` 两条可重复验收命令，
+外部插件（干净子智能体只读 SKILL.md 写出的课程 MVP）已在真 Electron 里装得上、点得开。
 
 **落地与裁决（2026-11-14 定稿；改之前先读）**
 
@@ -147,9 +151,9 @@
   （单插件不画，少一行噪声）。**记为 V0.1 的 UX 债务**：20 入口 × N 插件时单层菜单会很长，
   届时再考虑折叠 / 搜索 / 二级菜单。
 - **默认入口标题**：接受固定优先级 `manifest.name.zh → name.en → 任意非空 → 插件 id`，
-  默认入口的 `params.entry` 固定 `default`。**已知限制**：`entries[].title` 是单字符串，
-  插件入口**无法本地化**（按当前 manifest 声明渲染，不随界面语言切换）；以后若要支持，
-  扩成 `title: string | { zh, en }`（manifest + electron 读侧 + 渲染层三处一起改）。
+  默认入口的 `params.entry` 固定 `default`。`entries[].title` **已支持** `string | { zh, en }`
+  （R16b 落地：Go 逐语言校验 ≥1 非空 / 每个 ≤64 rune、electron 原样透传、渲染点按当前语言现选）；
+  单字符串写法行为不变（两种语言都原样显示）。
 - **设置页文案**：接受 ——「打开」+「入口在右栏 ＋ → 面板插件」；停用后按钮置灰、
   提示换成「插件已停用：启用后入口才会回到右栏」。
 - **标签标题（契约）**：**已声明** entry 的标签标题由**宿主**用 manifest 的 `title` 覆盖
@@ -157,10 +161,12 @@
   插件若需要「课表 · 周一」这类标题，应把它作为入口内部的页面内容表达，而不是改标签名（V0.1 口径）。
 - **模板 id**：保持 `cost-board`（`verify_plugin_loader` T10 按这个 id 断言真模板渲染，改名会打红既有门禁）；
   三个 entry 的标题按本轮任务取「总览/课表/资源」，D-2 里的 `course-manager` 例子只示意形状。
-- **安装回执的入口提示**：本轮**不做**（D-2 的「工具返回值」那一半），记 **R16b 待办** ——
-  改 `surface_install` 的回执体，可能影响模型行为与既有回执断言，需要单独一轮。
-- **菜单键盘可达性**：与既有 ＋ 菜单保持一致（Tab 可达、方向键不可达），本轮不单独补，
-  记为**已知不一致**（`+N` 溢出菜单有 roving focus，＋ 菜单没有）。
+- **安装回执的入口提示**：**已落地**（R16b）—— `surface_install` 回执带 `entries: <n>` 与
+  `entryHint: "right panel ＋ → Panel plugins"`，`applied` 与 `already_installed` 都带；`uninstall` /
+  `rejected` 不带（那两种状态下「入口在哪」没有意义）。
+- **菜单键盘可达性**：**已落地**（R16b）—— ＋ 菜单打开即聚焦首项、↑↓ 在菜单项间移动并回绕
+  （含插件入口分组边界）、Enter 走原生激活、Esc 关闭并把焦点还给 ＋；`aria-haspopup` / `aria-expanded`
+  同步。与 `+N` 溢出门的 roving focus 口径一致。
 
 ## 明确不做（V0.1）
 
