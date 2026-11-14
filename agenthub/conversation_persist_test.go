@@ -89,12 +89,26 @@ func TestConversationStateRoundTrip(t *testing.T) {
 	if len(due) != 1 || due[0].Target != "agent_c" {
 		t.Fatalf("恢复后队列 = %+v, want 只有 agent_c（不重放已投递的那条）", due)
 	}
-	// 指纹也恢复了：同一段正文再来一次仍然判循环。
+	// 指纹也恢复了：同一段正文再来一次仍然判循环 —— N7/P7-02 之后是 per-target
+	// 跳过（skipped/fingerprint_loop），不再整批熔断。
 	if _, err := c2.Offer(ConversationOffer{
 		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
 		Text: "@agent_b 第一件事", Depth: 2, TriggerSeq: 13,
-	}); !errors.Is(err, ErrConversationExhausted) {
-		t.Fatalf("恢复后的指纹没生效（同内容没判循环）：%v", err)
+	}); err != nil {
+		t.Fatalf("恢复后的指纹命中只该跳过该 target: %v", err)
+	}
+	var fpSkip *Delivery
+	for _, d := range c2.Deliveries("group_1") {
+		if d.Target == "agent_b" && d.Status == DeliverySkipped && d.Reason == DeliveryReasonFingerprint {
+			dd := d
+			fpSkip = &dd
+		}
+	}
+	if fpSkip == nil {
+		t.Fatalf("恢复后的指纹没生效（同内容没判循环）: %+v", c2.Deliveries("group_1"))
+	}
+	if v := c2.View("group_1"); v.Status != ConversationWaitingHuman {
+		t.Fatalf("全部跳过 → status = %q, want waiting_human", v.Status)
 	}
 }
 

@@ -174,6 +174,18 @@ const eq = (got, want, m) => {
   eq(conv.deliveryReasonText(''), '', '空原因 → 空文案')
   eq(conv.deliveryReasonText('budget'), '预算不足，未启动', '预算门的可见文案（P6-03）')
   eq(conv.deliveryReasonText('rate_limit'), '上游限流，退避重试', '429 退避的可见文案')
+  // N7/P7-02：同内容指纹改成 per-target 跳过 —— 状态条要能说清「为什么这条没跑」。
+  eq(conv.deliveryReasonText('fingerprint_loop'), '同一对重复内容，已跳过', '同内容指纹跳过的可见文案')
+  eq(conv.deliveryLabel({ target: 'agt_a', status: 'skipped', reason: 'fingerprint_loop' }, names),
+    'A 已跳过：同一对重复内容，已跳过', 'fingerprint_loop 的单条明细')
+  eq(
+    conv.deliveryTallyText(conv.deliveryTally({ deliveries: [
+      { target: 'agt_a', status: 'skipped', reason: 'fingerprint_loop' },
+      { target: 'agt_b', status: 'queued', reason: 'target_busy' },
+    ] })),
+    '已入队 1 · 未回复 1 · 跳过 1',
+    'N7：指纹只跳过一个 target 时状态条显示「跳过 1」，同批另一个照常入队',
+  )
   // 一轮 @ 的投递汇总只有一处实现（deliveryTally + deliveryTallyText）：
   // 同一批数据分两套口径迟早会漂，P6-10 把旧的 deliverySummary 并了进去。
   assert(!('deliverySummary' in conv), '投递汇总只有 deliveryTally 一处实现（不再有第二套口径）')

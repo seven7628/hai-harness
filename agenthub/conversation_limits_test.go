@@ -408,25 +408,17 @@ func TestConversationTerminalNeverSchedules(t *testing.T) {
 	if v := c.View("group_1"); v.Status != ConversationStopped {
 		t.Fatalf("stopped 之后状态 = %q", v.Status)
 	}
-	// exhausted：同一对重复同一段内容 → 整批熔断（保留原有语义）。
+	// exhausted：轮次预算耗尽仍然是整批熔断（N7 之后同内容指纹不再走这里）。
 	c2, clk2 := newTestController(t, ConversationLimits{
-		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+		TurnBudget: 1, Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
 	})
 	c2.BeginHuman("group_2", 1, clk2.Now())
+	c2.StartHumanRound("group_2", 1, clk2.Now())
 	if _, err := c2.Offer(ConversationOffer{
 		GroupID: "group_2", Sender: "agent_a", Targets: convIDs("agent_b"),
-		Text: "同一句话", Depth: 2,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := c2.BeginTurn("group_2", clk2.Now()); !ok {
-		t.Fatal("begin")
-	}
-	if _, err := c2.Offer(ConversationOffer{
-		GroupID: "group_2", Sender: "agent_a", Targets: convIDs("agent_b"),
-		Text: "同一句话", Depth: 2,
+		Text: "第 2 轮", Depth: 2,
 	}); !errors.Is(err, ErrConversationExhausted) {
-		t.Fatalf("同内容应 exhausted: %v", err)
+		t.Fatalf("轮次预算耗尽应 exhausted: %v", err)
 	}
 	if wakes := c2.DueWakes("group_2", clk2.Now()); len(wakes) != 0 {
 		t.Fatalf("exhausted 之后不该有可投 wake: %+v", wakes)
@@ -440,11 +432,10 @@ func TestConversationTerminalNeverSchedules(t *testing.T) {
 // queued 记录也要收口，不能留下永远「排队中」的记录。
 func TestConversationExhaustMarksQueuedSkipped(t *testing.T) {
 	c, clk := newTestController(t, ConversationLimits{
-		Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
+		TurnBudget: 1, Cooldown: -1, PairLimit: 99, PairWindow: time.Hour, IdleReset: -1,
 	})
 	c.BeginHuman("group_1", 1, clk.Now())
-	c.StartHumanRound("group_1", 1, clk.Now())
-	// 先排一条正常的 @。
+	// 先排一条正常的 @（此时还没开始任何一轮，预算没用掉）。
 	wakes, err := c.Offer(ConversationOffer{
 		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
 		Text: "同一句", Depth: 2, TriggerSeq: 3,
@@ -455,12 +446,13 @@ func TestConversationExhaustMarksQueuedSkipped(t *testing.T) {
 	if v := c.View("group_1"); v.QueueLen != 1 {
 		t.Fatalf("前置队列 = %d, want 1", v.QueueLen)
 	}
-	// 同内容再来一次 → 整批熔断 → exhausted 并清队列。
+	// 人类首轮开始 → 用掉唯一的轮次预算；下一条 @ 整批熔断 → exhausted 并清队列。
+	c.StartHumanRound("group_1", 1, clk.Now())
 	if _, err := c.Offer(ConversationOffer{
 		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
-		Text: "同一句", Depth: 2, TriggerSeq: 4,
+		Text: "另一句", Depth: 2, TriggerSeq: 4,
 	}); !errors.Is(err, ErrConversationExhausted) {
-		t.Fatalf("同内容应 exhausted: %v", err)
+		t.Fatalf("轮次预算耗尽应 exhausted: %v", err)
 	}
 	v := c.View("group_1")
 	if v.Status != ConversationExhausted || v.QueueLen != 0 {

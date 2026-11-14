@@ -27,8 +27,9 @@ import (
 	"unicode"
 )
 
-// ErrConversationExhausted 对话护栏命中（轮次预算/深度/踢皮球/同内容循环）。
-// errors.Is(err, ErrConversationExhausted) 为真；具体原因见 *ExhaustedError.Reason。
+// ErrConversationExhausted 对话整批熔断（轮次预算耗尽；深度/踢皮球/同内容循环
+// 只跳过命中的 target，不再走这里）。errors.Is(err, ErrConversationExhausted) 为真；
+// 具体原因见 *ExhaustedError.Reason。
 var ErrConversationExhausted = errors.New("agenthub: conversation exhausted")
 
 // ExhaustedError 带人话原因（直接写进群系统消息）与命中瞬间的状态。
@@ -584,11 +585,15 @@ func (c *ConversationController) StartHumanRound(group GroupID, targets int, at 
 
 // Offer 把一条消息上的 @ 目标入队（每个目标一条 Wake）。
 //
-// 护栏（命中即 exhausted + ErrConversationExhausted，**一条都不入队**）：
-//   - 轮次预算：TurnBudget>0 且 TurnsUsed >= TurnBudget（生产默认不限轮次）；
+// 护栏分两档：
+//
+// 整批熔断（命中即 exhausted + ErrConversationExhausted，**一条都不入队**）：
+//   - 轮次预算：TurnBudget>0 且 TurnsUsed >= TurnBudget（生产默认不限轮次）。
+//
+// per-target 跳过（只跳过命中的 target，其他照常入队；全部命中才 waiting_human）：
 //   - 深度：这批 wake 的 Depth > MaxDepth（人类首轮=1，之后每 @ 一跳 +1）；
 //   - 踢皮球：同一对 agent 的 A→B 次数已达 PairLimit（人类发送不计）；
-//   - 同内容循环：同一对 agent 重复同一段归一化指纹（人类发送不计）。
+//   - 同内容循环：同一对 agent 重复同一段归一化指纹（人类发送不计，N7/P7-02）。
 //
 // 自我 @（target == sender）直接跳过（§6.5.6 规则 10），不报错。
 // 对话已被人类停止时静默丢弃（返回 nil, nil）：那是人的意图，不是错误。
@@ -697,9 +702,13 @@ func (c *ConversationController) Offer(req ConversationOffer) ([]Wake, error) {
 			continue
 		}
 		if fp != "" && conv.prints[p].has(fp) {
-			// 同内容指纹：保留原来的整批熔断语义（不是 P6-04 改动的范围）。
-			return nil, c.exhaustLocked(conv, now,
-				fmt.Sprintf("%s 对 %s 重复了同一段内容，判定为循环对话，等待人类继续", req.Sender, target))
+			// N7（P7-02）：同内容指纹也按 per-target 跳过 —— A→[B,C] 里 A↔B 在复读
+			// 不该把 C 一起熔断。被跳过的 target 不写指纹（下面 add 只对真入队者执行），
+			// 否则「命中一次 → 记一次」会让后续同内容永远被判循环。
+			plans = append(plans, plan{target: target, pair: p, skip: DeliveryReasonFingerprint,
+				note: fmt.Sprintf("%s 与 %s 重复了同一段内容（同内容指纹），已跳过该目标",
+					req.Sender, target)})
+			continue
 		}
 		plans = append(plans, plan{target: target, pair: p})
 	}

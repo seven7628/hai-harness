@@ -64,6 +64,7 @@ const (
 	DeliveryReasonRateLimit   = "rate_limit"         // provider 429 → 退避后重试，不算失败
 	DeliveryReasonPairLimit   = "pair_limit"         // 无序 pair 到限（P6-04）
 	DeliveryReasonDepthLimit  = "depth_limit"        // 这条链超过 max_depth（P6-05）
+	DeliveryReasonFingerprint = "fingerprint_loop"   // 同一对重复同一段内容（N7/P7-02，只跳该 target）
 	DeliveryReasonBudget      = "budget"             // 预算不足，不启动 run（P6-03）
 	DeliveryReasonStopped     = "stopped"            // 人类停止自动对话
 	DeliveryReasonStale       = "stale_conversation" // 旧 generation 的 wake，丢弃

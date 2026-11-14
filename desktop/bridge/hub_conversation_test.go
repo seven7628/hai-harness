@@ -434,9 +434,10 @@ func TestHubConversationPairLimitStopsPingPong(t *testing.T) {
 	}
 }
 
-// TestHubConversationFingerprintLoopStops：同一对 agent 重复同一段话（标点/空白
-// 变体）→ 判定循环，不再唤醒。
-func TestHubConversationFingerprintLoopStops(t *testing.T) {
+// TestHubConversationFingerprintLoopSkipsTarget（N7/P7-02）：同一对 agent 重复同一段
+// 话（标点/空白变体）→ 只跳过该 target，记 skipped(fingerprint_loop)，状态
+// waiting_human（**不是** exhausted）；不再整批熔断。
+func TestHubConversationFingerprintLoopSkipsTarget(t *testing.T) {
 	m, buf := testManager(t)
 	convLimits(m, agenthub.ConversationLimits{MaxDepth: 99, PairLimit: 99, Cooldown: -1})
 
@@ -451,16 +452,27 @@ func TestHubConversationFingerprintLoopStops(t *testing.T) {
 	}); !ok {
 		t.Fatalf("human send: %s", errMsg)
 	}
-	msgs := waitConvSystemMessage(t, m, g.ID, "循环")
+	msgs := waitConvSystemMessage(t, m, g.ID, "重复")
 	v := convView(m, g.ID)
-	if v.Status != agenthub.ConversationExhausted {
-		t.Fatalf("复读之后对话 = %+v", v)
+	if v.Status != agenthub.ConversationWaitingHuman {
+		t.Fatalf("复读之后对话 = %+v, want waiting_human（不是 exhausted）", v)
 	}
-	if !strings.Contains(v.StopReason, "循环") {
-		t.Fatalf("停止原因 = %q, want 循环", v.StopReason)
+	if !strings.Contains(v.StopReason, "重复") {
+		t.Fatalf("等待原因 = %q, want 提到重复内容", v.StopReason)
 	}
 	if got := len(convSystemMessages(msgs)); got != 1 {
 		t.Fatalf("系统消息 = %d 条, want 1", got)
+	}
+	// 账本：B 被跳过，原因是 fingerprint_loop（前端按码本地化）。
+	var hit *agenthub.Delivery
+	for _, d := range v.Deliveries {
+		if d.Target == b.ID && d.Status == agenthub.DeliverySkipped {
+			dd := d
+			hit = &dd
+		}
+	}
+	if hit == nil || hit.Reason != agenthub.DeliveryReasonFingerprint {
+		t.Fatalf("缺 B 的 skipped(fingerprint_loop): %+v", v.Deliveries)
 	}
 	// A 说了两遍（第二遍被拦），B 只说了一遍。
 	if n := convAgentMessages(msgs, a.ID); n != 2 {
