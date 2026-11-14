@@ -19,16 +19,19 @@ import { readFile } from 'node:fs/promises'
 import { existsSync, mkdirSync } from 'node:fs'
 import { extname, join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { auditContrast, installFakeVisualViewport, installTheme } from './mobile-fixture-helpers.mjs'
 
 const APP = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(APP, 'dist-mobile')
-const SHOTS = '/tmp/p8-session'
+const SHOTS = '/tmp/p8-polish'
 const PAIR_CODE = '123456'
 
 const VIEWPORTS = [
   { name: '390', width: 390, height: 844 },
   { name: '430', width: 430, height: 932 },
+  { name: '640', width: 640, height: 900 },
 ]
+const THEMES = ['ink', 'paper']
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -319,21 +322,23 @@ async function measure(page, label, vp, settle = 120) {
   return m
 }
 
-async function shot(page, vp, name) {
+async function shot(page, vp, name, theme) {
   await page.waitForTimeout(300)
-  const file = join(SHOTS, `${vp.name}-${name}.png`)
+  const file = join(SHOTS, `${vp.name}-${theme}-session-${name}.png`)
   await page.screenshot({ path: file })
   return file
 }
 
-async function runViewport(browser, baseURL, vp) {
-  console.log(`\n── ${vp.name}×${vp.height} ──`)
+async function runViewport(browser, baseURL, vp, theme) {
+  console.log(`\n── ${vp.name}×${vp.height} · ${theme} ──`)
   const context = await browser.newContext({
     viewport: { width: vp.width, height: vp.height },
     deviceScaleFactor: 2,
     isMobile: true,
     hasTouch: true,
   })
+  await installTheme(context, theme)
+  await installFakeVisualViewport(context)
   const page = await context.newPage()
   const errors = []
   page.on('pageerror', (e) => errors.push(`pageerror ${e.message}`))
@@ -356,6 +361,16 @@ async function runViewport(browser, baseURL, vp) {
   const shots = []
   await page.goto(baseURL, { waitUntil: 'load' })
 
+  const boot = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    skin: document.documentElement.dataset.skin,
+    meta: document.querySelector('meta[name="theme-color"]')?.getAttribute('content') ?? '',
+  }))
+  assert(boot.skin === 'runtime', `data-skin 不是 runtime：${boot.skin}`)
+  assert(boot.theme === theme, `data-theme=${boot.theme}，期望 ${theme}`)
+  assert(boot.meta === (theme === 'paper' ? '#f4f3f1' : '#08080a'), `theme-color 没跟随主题：${boot.meta}`)
+  console.log(`  ✅ 主题：data-skin=runtime, data-theme=${theme}, theme-color=${boot.meta}`)
+
   // 1) 配对
   await waitFor(() => page.locator('[data-testid="mobile-pair-code"]').count())
   await page.fill('[data-testid="mobile-pair-code"]', PAIR_CODE)
@@ -366,7 +381,7 @@ async function runViewport(browser, baseURL, vp) {
   await waitFor(() => page.locator('[data-testid="mobile-tab-sessions"]').count(), 12000)
   assert((await page.locator('[data-testid="mobile-tab-hub"]').count()) === 1, '入口条缺少 Hub 入口')
   await measure(page, 'Hub 列表（入口条）', vp)
-  shots.push(await shot(page, vp, '1-hub'))
+  shots.push(await shot(page, vp, '1-hub', theme))
 
   // 3) 会话列表：工作区 + 会话行（数据来自 workspace_list + list）
   await page.click('[data-testid="mobile-tab-sessions"]')
@@ -377,7 +392,21 @@ async function runViewport(browser, baseURL, vp) {
   assert(seen.cmds.includes('workspace_list'), '没有调用 workspace_list（不该依赖桌面 localStorage 项目树）')
   assert(seen.cmds.includes('list'), '没有调用 list')
   await measure(page, '会话列表', vp)
-  shots.push(await shot(page, vp, '2-sessions'))
+  shots.push(await shot(page, vp, '2-sessions', theme))
+
+  // 640（平板竖屏）：单列内容最宽 640 居中（.m-main 的既有上限）。
+  const listW = await page.evaluate(() => {
+    const r = document.querySelector('.m-sess-list').getBoundingClientRect()
+    return { w: Math.round(r.width), left: Math.round(r.left), right: Math.round(r.right) }
+  })
+  assert(listW.w <= 640, `会话列表宽 ${listW.w} > 640`)
+  if (vp.width > 640) {
+    assert(Math.abs(listW.left - (vp.width - listW.right)) <= 1, `会话列表没有居中：${JSON.stringify(listW)}`)
+  }
+  await auditContrast(page, [
+    ['.m-sess-row-title', '会话标题'],
+    ['.m-sess-row-meta', '会话时间'],
+  ], `${vp.name}/${theme} 会话列表`)
 
   // 4) 打开会话：历史可见（Markdown 渲染）
   await page.locator('[data-testid="mobile-session-row"]', { hasText: 'P8 会话' }).first().click()
@@ -392,7 +421,80 @@ async function runViewport(browser, baseURL, vp) {
   const m1 = await measure(page, '会话页（历史）', vp)
   assert(m1.composerAboveNarrative === true, `composer 没有贴在叙述区下方：${JSON.stringify(m1)}`)
   assert(m1.composerBottomGap !== null && m1.composerBottomGap <= 24, `composer 没贴底：底部留白 ${m1.composerBottomGap}px`)
-  shots.push(await shot(page, vp, '3-session'))
+  shots.push(await shot(page, vp, '3-session', theme))
+
+  // composer 高度（P8-03a）：输入区 64→48px，整块 ≤120px（桌面 130+）。
+  const comp = await page.evaluate(() => {
+    const r = (s) => {
+      const e = document.querySelector(s)
+      const b = e.getBoundingClientRect()
+      return { h: Math.round(b.height), bottom: Math.round(b.bottom) }
+    }
+    return {
+      composer: r('.m-session .composer'),
+      input: r('.m-session .composer .input'),
+      wrap: r('.m-session .composer-wrap'),
+    }
+  })
+  assert(comp.composer.h <= 120, `会话 composer ${comp.composer.h}px 偏高（应 ≤120）`)
+  assert(comp.input.h >= 44 && comp.input.h <= 240, `输入区 ${comp.input.h}px 不在 44–240 内`)
+  console.log(`  ✅ composer：整块 ${comp.composer.h}px，输入区 ${comp.input.h}px`)
+  await auditContrast(page, [
+    ['.m-session .msg .body', '会话正文'],
+    ['.m-session .composer .input-hl', 'composer 输入'],
+  ], `${vp.name}/${theme} 会话页`)
+
+  // 软键盘（visualViewport）：layout viewport 不变、可见区缩到 400 —— composer 仍在上沿之上。
+  const beforeVv = await page.evaluate(() => Math.round(document.querySelector('.m-app').getBoundingClientRect().height))
+  await page.evaluate(() => {
+    window.visualViewport.height = 400
+    window.visualViewport.dispatchEvent(new Event('resize'))
+  })
+  await page.waitForTimeout(150)
+  const kb = await page.evaluate(() => {
+    const app = document.querySelector('.m-app').getBoundingClientRect()
+    const c = document.querySelector('.m-session .composer').getBoundingClientRect()
+    return {
+      vvH: window.visualViewport.height,
+      innerH: window.innerHeight,
+      appH: Math.round(app.height),
+      compBottom: Math.round(c.bottom),
+      varH: getComputedStyle(document.documentElement).getPropertyValue('--m-vv-height').trim(),
+    }
+  })
+  assert(kb.innerH === vp.height, `键盘模拟前 innerHeight=${kb.innerH}，期望 ${vp.height}（layout viewport 不该变）`)
+  assert(kb.vvH === 400, `假 visualViewport 高度没生效：${kb.vvH}`)
+  assert(kb.varH === '400px', `--m-vv-height=${kb.varH}，期望 400px`)
+  assert(kb.appH <= 401, `键盘弹出后 .m-app 高 ${kb.appH}，没有跟着可见区缩`)
+  assert(kb.compBottom <= 401, `键盘弹出后 composer 底 ${kb.compBottom} 超出可见区 400`)
+  shots.push(await shot(page, vp, '9-keyboard', theme))
+  console.log(`  ✅ 软键盘：可见区 400（innerHeight 仍 ${kb.innerH}），app=${kb.appH}，composer 底=${kb.compBottom}`)
+  await page.evaluate(() => {
+    window.visualViewport.height = 0
+    window.visualViewport.dispatchEvent(new Event('resize'))
+  })
+  await page.waitForTimeout(150)
+  const restored = await page.evaluate(() => Math.round(document.querySelector('.m-app').getBoundingClientRect().height))
+  assert(Math.abs(restored - beforeVv) <= 1, `键盘收起后 .m-app 没恢复：${restored} vs ${beforeVv}`)
+
+  // safe-area：--m-safe-bottom=34px 时 composer 必须整体抬到 home 条之上。
+  await page.addStyleTag({ content: ':root{--m-safe-bottom:34px !important}' })
+  await page.waitForTimeout(120)
+  const safe = await page.evaluate(() => {
+    const c = document.querySelector('.m-session .composer').getBoundingClientRect()
+    return {
+      gap: Math.round(window.innerHeight - c.bottom),
+      appPad: getComputedStyle(document.querySelector('.m-app')).paddingBottom,
+    }
+  })
+  assert(safe.gap >= 33, `--m-safe-bottom=34px 时 composer 离底 ${safe.gap}px（应 ≥33）`)
+  console.log(`  ✅ safe-area：--m-safe-bottom=34px → composer 离底 ${safe.gap}px（app padding ${safe.appPad}）`)
+  await page.evaluate(() => {
+    for (const el of document.querySelectorAll('style')) {
+      if (el.textContent?.includes('--m-safe-bottom:34px')) el.remove()
+    }
+  })
+  await page.waitForTimeout(100)
 
   // 5) 发消息：ask_batch（桌面 Composer 的暂存队列整队推送）→ 服务端消费 → 用户气泡
   //    桌面语义：点发送先入本地暂存队列（composer 里的「待发送」），服务端 user_inputs_consumed
@@ -424,7 +526,7 @@ async function runViewport(browser, baseURL, vp) {
   assert((await page.locator('.m-session .composer .send-btn.is-stop').count()) === 1, '流式中发送钮没变成「停止」')
   console.log('  ✅ 流式气泡出现 + 发送钮变停止')
   await measure(page, '会话页（流式）', vp)
-  shots.push(await shot(page, vp, '4-stream'))
+  shots.push(await shot(page, vp, '4-stream', theme))
 
   // 7) 工具折叠：运行中工具行在 Working 盒子里（可直接展开）；交卷后整轮收成一行
   //    「Worked for …」（.rt-act），展开它又能看到同一批工具行 —— 两级折叠都要能点开。
@@ -440,7 +542,7 @@ async function runViewport(browser, baseURL, vp) {
   await waitFor(() => row.locator('.tool-row-body').count())
   console.log('  ✅ 工具行：运行中默认折叠 → 点开显示参数/结果')
   await measure(page, '会话页（工具折叠）', vp)
-  shots.push(await shot(page, vp, '5-tool'))
+  shots.push(await shot(page, vp, '5-tool', theme))
 
   // 交卷：发送钮回到「发送」态，工作过程收成一行
   push({ event_type: 'agent_end', session_id: 's_demo', run_id: 'r1' })
@@ -483,7 +585,7 @@ async function runViewport(browser, baseURL, vp) {
   assert(!dock.fullScreen, `审批卡是全屏遮罩：${JSON.stringify(dock)}`)
   console.log('  ✅ 审批卡停靠在 composer 上方（非全屏）')
   await measure(page, '会话页（审批）', vp)
-  shots.push(await shot(page, vp, '6-approval'))
+  shots.push(await shot(page, vp, '6-approval', theme))
   // 拒绝（第一个 .btn 是「拒绝」）
   await page.locator('.m-session .appr-dock .btn').first().click()
   await waitFor(async () => (await page.locator('.m-session .appr-dock').count()) === 0)
@@ -504,7 +606,7 @@ async function runViewport(browser, baseURL, vp) {
   await waitFor(() => page.locator('.m-session .dock.ask-scope').count())
   await waitFor(async () => (await page.locator('.m-session .dock.ask-scope').innerText()).includes('用哪个分支'))
   await measure(page, '会话页（提问）', vp)
-  shots.push(await shot(page, vp, '7-ask'))
+  shots.push(await shot(page, vp, '7-ask', theme))
   await page.locator('.m-session .dock.ask-scope .ask-opt', { hasText: 'main' }).first().click()
   const submit = page.locator('.m-session .dock.ask-scope .ask-btn').first()
   await waitFor(async () => !(await submit.isDisabled()))
@@ -520,7 +622,7 @@ async function runViewport(browser, baseURL, vp) {
   await waitFor(() => page.locator('[data-testid="mobile-session-list"]').count())
   assert((await page.locator('[data-testid="mobile-hub-list"]').count()) === 0, '会话返回落到了 Hub 列表（返回栈串了）')
   await measure(page, '返回会话列表', vp)
-  shots.push(await shot(page, vp, '8-back'))
+  shots.push(await shot(page, vp, '8-back', theme))
 
   // 11) 第二条入口：Hub 群里的 Project 结果卡「打开会话」→ openProjectSession →
   //     **真的**跳到手机会话页（P8-02 之前这里只是 toast「请在桌面端打开」）。
@@ -580,7 +682,14 @@ async function main() {
   const browser = await chromium.launch()
   const all = []
   try {
-    for (const vp of VIEWPORTS) all.push(...await runViewport(browser, baseURL, vp))
+    // 迭代用过滤（不传就是全量）：P8_ONLY_VP=390 P8_ONLY_THEME=ink
+    for (const vp of VIEWPORTS) {
+      if (process.env.P8_ONLY_VP && vp.name !== process.env.P8_ONLY_VP) continue
+      for (const theme of THEMES) {
+        if (process.env.P8_ONLY_THEME && theme !== process.env.P8_ONLY_THEME) continue
+        all.push(...await runViewport(browser, baseURL, vp, theme))
+      }
+    }
   } finally {
     await browser.close()
     await new Promise((r) => server.close(r))

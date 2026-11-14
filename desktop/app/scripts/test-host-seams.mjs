@@ -183,11 +183,18 @@ console.log('\n4) 手机 Hub 屏幕：只做布局/导航，列表与会话都�
   assert(/<HubSurface \/>/.test(conv), '会话屏复用 HubSurface（DM 与群同一份）')
   assert(/data-testid="mobile-back"/.test(conv), '会话屏有返回按钮（e2e 依赖这个 testid）')
   assert(!/import .*(GroupView|MessageBubble|TaskResultCard)/.test(conv), '会话屏没有自己画消息/任务卡')
+  // P8-03a 单头：外层不再有第二个「⋯」抽屉入口；共享 chat-header 的「上下文」是抽屉入口，
+  // 「更多操作」是唯一菜单。外层只留返回 + 视觉隐藏标题（e2e/读屏兜底）。
+  assert(!/mobile-inspector-open/.test(conv), '会话屏外层不再有重复的「⋯」抽屉入口（单头）')
+  assert(/data-testid="mobile-conv-title"/.test(conv), '会话屏保留 mobile-conv-title（e2e/读屏兜底）')
+  assert(/className="m-conv-head"/.test(conv) && !/m-conv-inspector/.test(conv), '会话屏外层头只做返回（不占一行）')
 
   const drawer = read('src/mobile/screens/InspectorDrawer.tsx')
   assert(/<HubInspector \/>/.test(drawer), '抽屉复用 HubInspector（Context/Tasks/Needs 不隐藏）')
   assert(/role="dialog"/.test(drawer), '抽屉是 dialog 语义')
   assert(/'Escape'/.test(drawer), '抽屉 Esc 关闭')
+  assert(/data-overflow/.test(drawer), '抽屉页签量溢出写 data-overflow（横向滚动 + 边缘渐隐）')
+  assert(/ResizeObserver/.test(drawer), '抽屉页签跟随宽度/字号变化重量溢出')
 }
 
 console.log(`\nHOST_SEAMS_TEST_PASS (${ok})`)
