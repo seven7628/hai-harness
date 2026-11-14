@@ -205,7 +205,7 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-13 18:50",
+    "updated": "2026-11-13 14:05",
     "current": "R14b"
   },
   "rounds": [
@@ -1071,8 +1071,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "R14"
       ],
       "status": "done",
-      "commit": "c3b6ac5",
-      "review": "主会话复核：tsc 0 / eslint 56（同基线）/ vite build；新探针 verify_plugin_tab_persist 33 项、plugin-loader 50 / session-tabs 38 / tabbar 89 / boundary 82 / ui 31 逐项同数；test:right-tabs 236（N52..N62 新增 11 条）。读码确认：plugin 分支在 toPersistedTab 的 switch 之前（落进 default 会静默变空白网页）；恢复期白名单是纯形状判定、不查 index（查 index 就是本轮 bug 的成因）；内置四类判据与落盘字节未动（session-tabs P8 守住反方向）。变异 3 条真红并复原：删写侧分支 16 红 / params 不往返 2 红 / 恢复侧当 web 重建 14 红",
+      "commit": "45346c1",
+      "review": "主会话复核：tsc 0 / eslint 56 / build / 新探针 33 项 / plugin-loader 50 / session-tabs 38 / tabbar 89 / boundary 82 / ui 31 / right-tabs 236 全绿。读码确认：plugin 分支在 default(web) 之前、不升 schema 版本、params 超限写侧丢标签/读侧丢字段（两处注释说明了不对称的理由）",
       "perf": [],
       "acc": [
         "sanitizePersistedTab 接受合法 plugin:<id>（纯形状判定；**不查 index** —— 恢复时插件还没加载，查 index 必然丢标签），内置四类行为字节不变",
@@ -1082,7 +1082,11 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "裁决：params > 4 KiB 写侧「整条不持久化」、读侧「只丢 params」——两侧刻意相反（前者是别画错面板，后者是别丢用户的标签）",
         "裁决：卸载/禁用后墓碑**留记录**（标签地址不依赖插件活着）；从标签条上消失等于用户的东西被第三方卸掉了",
         "裁决：不升 TABS_PERSIST_VERSION（加一种标签，旧数据天然兼容；升版本会让老用户标签集整体丢弃）",
-        "rightTab 的 `as RightTab` 断言本轮不动（并入 R11b 的派生字段删除）"
+        "rightTab 的 `as RightTab` 断言本轮不动（并入 R11b 的派生字段删除）",
+        "裁决：params 超限——写侧整条不持久化（身份=kind+params，变过的参数会画出别的面板），读侧只丢字段（别把用户开过的东西抹掉）；不对称是刻意的",
+        "裁决：卸载后标签保留为墓碑（标签地址不依赖插件活着）",
+        "裁决：改了既有探针 P8（plugin:dummy 由「必须丢弃」改为「恢复成墓碑」）——旧断言钉的是 R11b 之前的规则",
+        "残留：注册发生在「render 已提交、passive effect 未订阅」的同步窗口时会短暂停在墓碑；彻底修要 useSyncExternalStore，归 PR-10 范围"
       ],
       "rollback": "白名单放行是可独立回滚的一处判据；回滚后 plugin 标签退化为「重启丢失」"
     },
