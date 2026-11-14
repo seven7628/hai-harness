@@ -370,10 +370,33 @@ console.log('\n▶ 静态边界：手机包与 Hub 组件不得 import 桌面 st
   }
   const mobileFiles = walk(join(APP, 'src', 'mobile'))
   assert(mobileFiles.length >= 4, `手机包有 ${mobileFiles.length} 个源文件`)
+  // P8-02 把这条线的判据从「src/mobile/** 一律不许 import store」收紧成
+  // 「**首屏可达**的文件不许 import store」。原因：主会话页要复用桌面 CenterPanel
+  // （Narrative/Composer/审批/提问），那一整棵本来就长在 useAppStore 上 —— 复制一份
+  // 转录渲染器才是 P8 明确禁止的事。代价是会话页 chunk 会带进桌面 store，所以这些
+  // 文件必须**只能**经 React.lazy 加载（MobileApp 里 lazy(() => import(...))），
+  // 首屏 chunk 里不许出现它们。构建产物的 grep 断言见 scripts/test-host-seams.mjs
+  // 与 `npm run mobile:build` 后的手工核对（mobile-*.js 不含 useAppStore）。
+  const LAZY_ONLY = new Set([
+    'src/mobile/screens/SessionScreen.tsx',
+    'src/mobile/screens/SessionListScreen.tsx',
+    'src/mobile/session-boot.ts',
+  ])
+  const appSrc = readFileSync(join(APP, 'src', 'mobile', 'MobileApp.tsx'), 'utf8')
   for (const f of mobileFiles) {
+    const rel = relative(APP, f)
     const src = readFileSync(f, 'utf8')
-    assert(!/from\s+['"][^'"]*store\/useAppStore['"]/.test(src), `${relative(APP, f)} 不 import useAppStore`)
-    assert(!/from\s+['"][^'"]*transport\/mock['"]/.test(src), `${relative(APP, f)} 不 import mock transport`)
+    const lazyOnly = LAZY_ONLY.has(rel)
+    if (!lazyOnly) {
+      assert(!/from\s+['"][^'"]*store\/useAppStore['"]/.test(src), `${rel} 不 import useAppStore`)
+    } else {
+      // 允许带 store，但**只能**被 lazy(() => import(...)) 引用（静态 import 就会进首屏）
+      const spec = './' + relative(join(APP, 'src', 'mobile'), f).replace(/\.tsx?$/, '').replace(/\\/g, '/')
+      assert(!new RegExp(`import\\s+[A-Za-z_]\\s+from\\s+['"]${spec}['"]`).test(appSrc), `${rel} 不被 MobileApp 静态 import（必须走 lazy）`)
+      // 直接 import store，或经 session-boot（它 import store）—— 两者都只活在会话 chunk 里
+      assert(/store\/useAppStore|session-boot/.test(src), `${rel} 复用桌面 store（会话页的既定代价）`)
+    }
+    assert(!/from\s+['"][^'"]*transport\/mock['"]/.test(src), `${rel} 不 import mock transport`)
   }
   for (const name of ['GroupView', 'HubSurface', 'HubInspector', 'HubInlineNeeds', 'HubAttachments', 'MessageBubble']) {
     const src = readFileSync(join(APP, 'src', 'hub', `${name}.tsx`), 'utf8')
