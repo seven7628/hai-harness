@@ -159,7 +159,7 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
 export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowData; host?: ToolRowHost }) {
   const [open, setOpen] = useState(false)
   const [diffOpen, setDiffOpen] = useState(true) // 行内 diff 默认展开（运行时变更立即可见）
-  const setRightTab = useAppStore((s) => s.setRightTab)
+  const openTab = useAppStore((s) => s.openTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const openFile = useAppStore((s) => s.openFile)
   const openHtmlInBrowser = useAppStore((s) => s.openHtmlInBrowser)
@@ -485,7 +485,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
                   if (b.name === 'write_file') openFile(b.diff.path, undefined, 'source')
                   else openFile(b.diff.path, b.toolId)
                 } else {
-                  setRightTab('git')
+                  openTab({ kind: 'git' })
                   setRightExpanded(true)
                 }
               }}
@@ -552,7 +552,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
                 <button
                   className="tr-act"
                   onClick={() => {
-                    setRightTab('git')
+                    openTab({ kind: 'git' })
                     setRightExpanded(true)
                   }}
                 >

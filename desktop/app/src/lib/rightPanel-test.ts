@@ -1,4 +1,4 @@
-// rightTab-test.ts —— `selectRightTab`（右栏「现在是哪个面板」的派生选择器）的单测
+// rightPanel-test.ts —— `selectRightTab`（右栏「现在是哪个面板」的派生选择器）的单测
 //（node:test，无 DOM、无 store 运行时）—— R11b。
 //
 // 为什么钉这些：R11b 删掉了 `AppState.rightTab`（PR-02 起的写穿副本），把全部读点换成这个
@@ -15,7 +15,7 @@
 // 把选择器改成「只认内置四类」或「悬空返回 'web'」，对应用例必须变红（见提交说明）。
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { activeTabOf, selectRightTab, tabScopeKey } from './rightTab'
+import { activeTabOf, selectRightTab, tabScopeKey } from './rightPanel'
 import type { TabSet } from '../store/useAppStore'
 import type { SurfaceKind } from '../surfaces/types'
 

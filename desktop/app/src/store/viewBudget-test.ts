@@ -58,7 +58,6 @@ const view = (blocks: MsgBlock[], extra: Partial<SessionView> = {}): SessionView
     pendingQueue: [],
     rightExpanded: false,
     rightLayout: { ratio: 0.32 },
-    rightTab: 'activity',
     compressing: false,
     gitLoading: false,
     hydrated: true,
