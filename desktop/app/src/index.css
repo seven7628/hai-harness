@@ -5662,6 +5662,31 @@ body.is-electron .left.collapsed .rail .rbtn {
   color: var(--text-3);
   cursor: default;
 }
+/* R16：＋ 菜单里的「面板插件」分组 —— 分隔线 + 小标题，与上面三个内置项区分开。
+   为什么用一条线而不是两级菜单：V0.1 的插件最多 20 个入口，一次列完比多一层点击好；
+   多插件时再在组内加插件名小标（.rtabs-menu-sub），层级仍然只有「组 → 插件 → 入口」。 */
+.rtabs-menu-sec {
+  margin-top: 4px;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.rtabs-menu-sub {
+  padding: 2px 8px 1px;
+  color: var(--text-3);
+  font-size: 10px;
+  opacity: 0.9;
+}
+/* 入口图标：12×12 与内置 provider 的图标同尺寸（标签条/菜单按这个尺寸排版）。 */
+.rtabs-entry-ico {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  object-fit: contain;
+}
 .rtabs-empty {
   padding: 40px 16px;
 }
@@ -5690,6 +5715,25 @@ body.is-electron .left.collapsed .rail .rbtn {
   color: var(--text);
   background: var(--surface-2);
   border-color: var(--accent-strong);
+}
+/* R16：空态里的插件入口段（D-2 第 2 处渲染点）。与内置能力之间一条分隔线：
+   「应用本来的三类」与「你装的插件」不是同一来源，不该混成一片按钮。 */
+.rtabs-empty-plugin {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.rtabs-empty-sec {
+  margin-bottom: 8px;
+  color: var(--text-3);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.rtabs-empty-sub {
+  margin: 6px 0 2px;
+  color: var(--text-3);
+  font-size: 11px;
+  opacity: 0.9;
 }
 .right-body {
   flex: 1;

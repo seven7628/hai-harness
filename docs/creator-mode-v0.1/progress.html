@@ -205,8 +205,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-14 09:10",
-    "current": "R16"
+    "updated": "2026-11-14 10:30",
+    "current": "R16b"
   },
   "rounds": [
     {
@@ -1128,9 +1128,9 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "deps": [
         "R14b"
       ],
-      "status": "doing",
-      "commit": "",
-      "review": "",
+      "status": "done",
+      "commit": "6da3b1e",
+      "review": "主会话复核（两轮）：第一版退回 tabKeyOf 违反 PR-00 dedupeKey 契约（同 entry 不同 fileId 被合并）；修后 tsc 0 / eslint 0·59 / build / entries 58 / surfaces-page 51 / loader 50 / plugin-tabs 33 / tabbar 89 / boundary 82 / session-tabs 38 / right-tabs 236 全绿；合并 main（R11b）后 rightTab 未回潮",
       "perf": [],
       "acc": [
         "surface.json 支持 entries[]（≤20、id/title/icon 校验，非法则安装 rejected 且 index 不变）",
@@ -1138,9 +1138,34 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
         "一个插件仍只注册一个 kind；每个 entry = 一个标签实例，params.entry 指页面",
         "零 entries 的插件至少有一个默认入口（不允许「加载成功但看不见」）",
         "禁用/卸载入口立即消失；已开标签变墓碑",
-        "reload 后标签、标题、页面都恢复"
+        "reload 后标签、标题、页面都恢复",
+        "落地：Go validateSurfaceEntries/validateSurfaceEntryIcon（title 按 rune、icon 缺失不阻塞）；electron/surface-index.ts 读 entries + name；surfaces/plugin/entries.ts 快照（唯一写者 = loader）",
+        "落地：标签身份 = provider.dedupeKey 优先，缺省 = entry + 其余 params 的键排序序列化；同入口不同上下文不再被合并",
+        "落地：模板 templates/surface 三个 entries + panel.js 按 params.entry 分发；SKILL.md 补「Multiple entrances」",
+        "落地：测试 Go 五连 + 往返、读侧 node --test 4、e2e verify_plugin_entries（端口 5231，58 项；T8b 钉住 dedupeKey 契约）",
+        "合并：main/R11b（4d3d939）两处冲突（package.json test 链 / progress.html）；RightPanel 与 store 自动合并逐点核对 —— selectRightTab 在读、rightTab/setRightTab 未回归"
       ],
-      "rollback": "entries 是 manifest 可选字段；老插件无 entries 走默认入口，回滚不影响已装插件"
+      "rollback": "entries 是 manifest 可选字段；老插件无 entries 走默认入口，回滚不影响已装插件。标签身份的 dedupeKey 优先是纯身份键变更：回滚后同一入口的不同上下文会合并成一个标签（不丢数据）"
+    },
+    {
+      "id": "R16b",
+      "pr": "PR-16b",
+      "title": "插件入口收尾：安装回执写明入口位置 + ＋菜单键盘可达 + entry 标题本地化",
+      "type": "打磨",
+      "est": 0.5,
+      "deps": [
+        "R16"
+      ],
+      "status": "todo",
+      "commit": "",
+      "review": "",
+      "perf": [],
+      "acc": [
+        "surface_install 回执带一句「入口在右栏 ＋ → 面板插件」（含条目数）",
+        "＋ 菜单支持 ↑↓ 移焦点 / Enter 进入 / Esc 还焦点（与 +N 溢出菜单一致）",
+        "entries[].title 支持 string | {zh,en}（三处一起改：Go 校验 / 索引 IPC / 渲染）"
+      ],
+      "rollback": "三条互相独立；回执文案可单独撤，不影响入口本身"
     }
   ],
   "perf": [

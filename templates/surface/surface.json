@@ -11,5 +11,10 @@
   "icon": "icon.svg",
   "placement": "plugin",
   "commands": ["workspace_list", "session_list", "git_snapshot", "ui_inspect"],
-  "data": ["surfaces_changed"]
+  "data": ["surfaces_changed"],
+  "entries": [
+    { "id": "overview", "title": "总览", "order": 10 },
+    { "id": "schedule", "title": "课表", "order": 20 },
+    { "id": "resources", "title": "资源", "order": 30 }
+  ]
 }

@@ -711,6 +711,21 @@ export interface IMChatInfo {
 // 不能 import 渲染层代码，而渲染层不能 import 主进程模块）。字段名即磁盘协议
 // （bridge 的 index.json + 每个 <id>/surface.json），**不是**驼峰改写 —— 少一层翻译，
 // 少一处会写错的地方。
+/**
+ * manifest.entries[] 的一项（D-2：入口由 manifest 声明，宿主渲染）。
+ *
+ * 与主进程 electron/surface-index.ts 同构。渲染层把它翻成菜单项/设置页的「打开」，
+ * 插件**不能**自己注入菜单（那正是 D-2 否掉的做法）。
+ */
+export interface SurfaceEntryDecl {
+  id: string
+  title: string
+  /** `<id>` 目录内的相对路径（缺省 = 没有图标，用 kind 图标） */
+  icon?: string
+  /** 排序权重（缺省 100，升序） */
+  order?: number
+}
+
 export interface SurfaceIndexItem {
   id: string
   version: string
@@ -719,6 +734,10 @@ export interface SurfaceIndexItem {
   enabled: boolean
   /** 必须等于 `plugin:<id>`（loader 校验；不符即拒绝注册） */
   kind?: string
+  /** manifest.name 的显示名（zh → en → 任意非空）；零入口时默认入口的标题取它 */
+  name?: string
+  /** manifest.entries[]（空数组 = 没声明，宿主给一个默认入口） */
+  entries: SurfaceEntryDecl[]
   /** 声明的宿主命令（白名单的一半；另一半在 bridge） */
   commands: string[]
   /** 声明的 ui op（host.events.on 的闸门） */

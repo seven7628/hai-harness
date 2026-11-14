@@ -30,6 +30,22 @@ export const DEFAULT_SURFACE_ICON = 'icon.svg'
 /** index.json 的磁盘协议版本（bridge 侧 surfaceIndexVersion）。不匹配 = 整份当损坏。 */
 export const SURFACE_INDEX_VERSION = 1
 
+/**
+ * manifest.entries[] 的一项（D-2 的入口声明）。
+ *
+ * 它是**manifest 字段，不是 index 字段**：index.json 的 schema 一个字节都不动，
+ * 每次读索引时顺带从 `<id>/surface.json` 取一次（这正是本文件已经为 kind/commands/data
+ * 做的事 —— 同一份声明只能有一个来源）。
+ */
+export interface SurfaceEntryDecl {
+  id: string
+  title: string
+  /** `<id>` 目录内的相对路径（缺省 = 没有图标，渲染层用 kind 图标） */
+  icon?: string
+  /** 菜单里的排序权重（缺省 100；升序） */
+  order?: number
+}
+
 export interface SurfaceIndexItem {
   id: string
   version: string
@@ -38,6 +54,13 @@ export interface SurfaceIndexItem {
   enabled: boolean
   /** manifest 声明的 kind（必须等于 `plugin:<id>`，loader 校验；坏 manifest 时缺省） */
   kind?: string
+  /**
+   * manifest.name 的显示名（zh → en → 任意一个非空）。只在**零入口**时被用到：
+   * 那时宿主合成一个默认入口，标题取它（再退到 id，见渲染层 surfaces/plugin/entries.ts）。
+   */
+  name?: string
+  /** manifest.entries[]（声明顺序原样保留；排序是渲染层的事，见 order） */
+  entries: SurfaceEntryDecl[]
   /** manifest.commands：插件声明要调的宿主命令（白名单的一半） */
   commands: string[]
   /** manifest.data：插件声明要订阅的 ui op（host.events.on 的闸门） */
@@ -74,6 +97,69 @@ function str(v: unknown): string {
 function strList(v: unknown): string[] {
   if (!Array.isArray(v)) return []
   return v.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
+}
+
+/**
+ * relInDir 只接受**目录内相对路径**：绝对路径 / 上跳 / 反斜杠一律不收。
+ *
+ * 协议侧（surface-protocol.ts）同样会拒；这里先挡一次是为了让索引里的字段本身是可信的
+ * （渲染层拿到 entry/icon 后会直接拼 `hai-surface://<id>/<rel>`，不信任就等于每次拼都判一遍）。
+ * 从 readSurfaceIndex 的循环里提到模块级是 R16 的事：entries[].icon 也要走同一条口径。
+ */
+function relInDir(v: unknown): string {
+  const rel = str(v).trim()
+  if (!rel || path.isAbsolute(rel) || rel.includes('\\') || rel.split('/').includes('..')) return ''
+  return rel
+}
+
+/**
+ * manifest.entries[] 的**防御性**解析（守方是渲染层）：bridge 在安装期已经校验过形状
+ * （≤20 / id 合法且唯一 / title 非空 ≤64 / icon 在目录内），但 `~/.go-code/surfaces/` 是
+ * 用户自己的目录 —— 手改一份 surface.json 不该让整份索引读不出来（与「坏 manifest 不炸
+ * 整份索引」同一条纪律，见文件头第 1 条）。
+ *
+ * 处置是**丢这一项**，不是丢整个插件：一条坏 entry 只少一个入口，插件本身照常加载
+ * （零入口时宿主会给默认入口 —— D-2 的硬约束兜住了「一个都不剩」）。
+ */
+const MAX_ENTRIES = 20
+const MAX_ENTRY_TITLE = 64
+
+function parseEntries(v: unknown): SurfaceEntryDecl[] {
+  if (!Array.isArray(v)) return []
+  const out: SurfaceEntryDecl[] = []
+  const seen = new Set<string>()
+  for (const raw of v) {
+    if (out.length >= MAX_ENTRIES) break
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const m = raw as Record<string, unknown>
+    const id = str(m.id).trim()
+    if (!SURFACE_ID_RE.test(id) || seen.has(id)) continue
+    const title = str(m.title).trim()
+    if (!title) continue
+    seen.add(id)
+    const decl: SurfaceEntryDecl = { id, title: [...title].slice(0, MAX_ENTRY_TITLE).join('') }
+    const icon = relInDir(m.icon)
+    if (icon) decl.icon = icon
+    if (typeof m.order === 'number' && Number.isFinite(m.order)) decl.order = m.order
+    out.push(decl)
+  }
+  return out
+}
+
+/** manifest.name 的显示名：zh → en → 任意一个非空（兜底顺序与 i18n 的主语言一致）。 */
+function displayName(v: unknown): string {
+  if (typeof v === 'string') return v.trim()
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return ''
+  const m = v as Record<string, unknown>
+  for (const k of ['zh', 'en']) {
+    const s = str(m[k]).trim()
+    if (s) return s
+  }
+  for (const k of Object.keys(m)) {
+    const s = str(m[k]).trim()
+    if (s) return s
+  }
+  return ''
 }
 
 /**
@@ -116,6 +202,7 @@ export function readSurfaceIndex(root: string = surfaceRoot()): SurfaceIndex {
       commands: [],
       data: [],
       entry: DEFAULT_SURFACE_ENTRY,
+      entries: [],
     }
     // manifest 是**声明**的来源（kind / commands / data / icon）。它坏掉不该让这条
     // 从清单里消失（用户还看得见「装了什么、为什么不能用」），所以带上 error 照发。
@@ -125,13 +212,11 @@ export function readSurfaceIndex(root: string = surfaceRoot()): SurfaceIndex {
       item.kind = str(mf.kind)
       item.commands = strList(mf.commands)
       item.data = strList(mf.data)
-      // entry / icon 只接受**目录内相对路径**：绝对路径/上跳/反斜杠一律不收
-      //（协议侧同样会拒，这里先挡一次是为了让 index 里的字段本身是可信的）。
-      const relInDir = (v: unknown): string => {
-        const rel = str(v).trim()
-        if (!rel || path.isAbsolute(rel) || rel.includes('\\') || rel.split('/').includes('..')) return ''
-        return rel
-      }
+      // entries / name 是 R16 的入口声明（D-2）：**只读 manifest，不改 index.json 的 schema** ——
+      // 入口是「插件声明了什么」，不是「store 记了什么」。
+      item.entries = parseEntries(mf.entries)
+      const name = displayName(mf.name)
+      if (name) item.name = name
       item.entry = relInDir(mf.entry) || DEFAULT_SURFACE_ENTRY
       // 图标：manifest 显式声明的优先；没声明但目录里**有** icon.svg 就用它
       //（01-design §5.6 的模板本来就带这个文件名 —— 让「拷模板」自动有图标）。
