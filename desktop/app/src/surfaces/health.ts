@@ -231,6 +231,15 @@ export function noteSurfaceVersion(kind: SurfaceKind, hash: string | undefined):
   const prev = store[kind]
   if (!prev) return
   if (prev.hash && prev.hash !== h) {
+    // 手动禁用（用户显式点的「禁用此面板」）不因版本变更复活：保留那条记录，只把这一版的
+    // 账归零。判据是 `auto !== true`（自动禁用一定带 auto:true；老记录没有该字段 = 手动）。
+    if (prev.disabled === true && prev.auto !== true) {
+      writeStore({
+        ...store,
+        [kind]: { ...prev, count: 0, lastError: '', at: Date.now(), hash: h, disabled: true, auto: false },
+      })
+      return
+    }
     const next = { ...store }
     delete next[kind]
     writeStore(next)

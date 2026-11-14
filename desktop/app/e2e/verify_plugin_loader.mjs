@@ -29,6 +29,7 @@
 //   T12 **禁用不清理**：enabled:false 的插件离开 index 的 alive 集合，但数据一个都不能少。
 //   T13 **R-20**：同 hash 继续累计；hash 一变 → 整条健康记录清空，标签恢复渲染。
 //   T14 known-ids 跨启动：首次（无记录）只记不清；第二次启动 index 少一个 id → 清那一个。
+//   T16 **手动禁用不被版本变更复活**：换 hash 保留记录（disabled 仍 true）只把这一版的账归零。
 //   T15 **非权威 index**（浏览器版 / 没有 preload）：不清理、不写 known-ids —— 缺省即不权威。
 //
 // 用法：cd desktop/app && node e2e/verify_plugin_loader.mjs
@@ -226,6 +227,9 @@ w.__probe = {
     fail: (k: string) => health.recordMountFailure(k as never, new Error('mount boom（e2e 的 fixture）')),
     record: (k: string) => health.getSurfaceHealth(k as never) ?? null,
     disabled: () => health.listDisabled(),
+    // CrashCard 的「禁用此面板」走的就是 disableSurface（auto:false = 手动禁用）。
+    disable: (k: string) => health.disableSurface(k as never),
+    enable: (k: string) => health.enableSurface(k as never),
   },
   // T15 专用：直接调**生产入口** syncPlugins 演「不权威 index」那一档。
   // store 的 start() 只能走权威那条（探针的 window.desktop.surfaceIndex 是真的），
@@ -609,6 +613,62 @@ try {
   await page.waitForSelector('[data-plugin="demo"]', { timeout: 5000 }).catch(() => {})
   check('新版可挂载：面板内容真的画出来了（不是墓碑 / 禁用卡）',
     await page.evaluate(() => !!document.querySelector('[data-plugin="demo"]')))
+
+  // ---- T16 手动禁用不被版本变更复活 ----
+  console.log('\nT16 手动禁用（CrashCard「禁用此面板」）不因换版本被自动复活')
+  // 先把 demo 换到 h5：让「手动禁用」这条记录**带着版本戳**（disableSurface 会沿用 prev.hash）。
+  // 不带戳的记录走的是「老记录只补值」那条分支，测不到「换版本」的判据（第一版用例就踩了这个假绿）。
+  const runsBefore16 = await page.evaluate(() => window.__probe.moduleRuns('demo'))
+  await setIndex([item('demo', 'h5'), tplItem])
+  await injectChanged()
+  await page.waitForFunction((n) => window.__probe.moduleRuns('demo') > n, runsBefore16, { timeout: 8000 }).catch(() => {})
+  // 2 次失败 → 记录带 h5 的戳 + 非空 lastError（换版本后这两样都必须变），
+  // 再由「禁用此面板」把它变成手动禁用。三项都在同一次 evaluate 里做完（跨 task 中间有
+  // SurfaceBoundary 的 didUpdate → recordMountSuccess 会把 count 归零）。
+  const manual16 = await page.evaluate(() => {
+    const h = window.__probe.health
+    h.fail('plugin:demo')
+    h.fail('plugin:demo')
+    const beforeDisable = h.record('plugin:demo')
+    h.disable('plugin:demo')
+    const manual = h.record('plugin:demo')
+    return { beforeDisable, manual }
+  })
+  check('基线：禁用前记录带 h5 的戳 + count=2',
+    manual16.beforeDisable?.count === 2 && typeof manual16.beforeDisable?.hash === 'string'
+      && manual16.beforeDisable.hash.startsWith('h5'), JSON.stringify(manual16.beforeDisable))
+  check('基线：手动禁用 = disabled:true 且 auto 不是 true（沿用那枚 h5 戳）',
+    manual16.manual?.disabled === true && manual16.manual?.auto !== true
+      && typeof manual16.manual?.hash === 'string' && manual16.manual.hash.startsWith('h5'),
+    JSON.stringify(manual16.manual))
+  const runsBefore16b = await page.evaluate(() => window.__probe.moduleRuns('demo'))
+  await setIndex([item('demo', 'h6'), tplItem]) // 换版本
+  await injectChanged()
+  await page.waitForFunction((n) => window.__probe.moduleRuns('demo') > n, runsBefore16b, { timeout: 8000 }).catch(() => {})
+  const rec16 = await page.evaluate(() => window.__probe.health.record('plugin:demo'))
+  check('换 hash 后：记录**仍在**且仍是手动禁用（不替用户撤销决定）',
+    rec16?.disabled === true && rec16?.auto !== true, JSON.stringify(rec16))
+  check('换 hash 后：这一版的账归零 + hash 换新 + lastError 清空',
+    rec16?.count === 0 && typeof rec16?.hash === 'string' && rec16.hash.startsWith('h6') && rec16?.lastError === '',
+    JSON.stringify(rec16))
+  // 用户在墓碑上点「重新启用」之后：必须重新攒满 3 次才自动禁用（= 计数真的归零过，
+  // 不是拿换版本前的旧账往上加）。三次全在同一次 evaluate 里做完。
+  const seq16 = await page.evaluate(() => {
+    const h = window.__probe.health
+    h.enable('plugin:demo')
+    const afterEnable = h.record('plugin:demo')
+    h.fail('plugin:demo')
+    h.fail('plugin:demo')
+    const two = h.record('plugin:demo')
+    h.fail('plugin:demo')
+    const three = h.record('plugin:demo')
+    return { afterEnable, two, three }
+  })
+  check('enableSurface 后记录被清空', seq16.afterEnable === null, JSON.stringify(seq16.afterEnable))
+  check('连续失败 2 次**不**自动禁用（count=2, disabled:false）',
+    seq16.two?.count === 2 && seq16.two?.disabled === false, JSON.stringify(seq16.two))
+  check('第 3 次才自动禁用（count=3, disabled:true）',
+    seq16.three?.count === 3 && seq16.three?.disabled === true, JSON.stringify(seq16.three))
 
   // ---- T14b known-ids 跨启动 ----
   console.log('\nT14b 第二次启动：known-ids 里少一个 id → 只清那一个')

@@ -144,8 +144,10 @@ Three consequences, in increasing order of how much they hurt:
    resumes where it left off. (The index entry, version and hash stay too.)
 3. **Uninstalling DOES delete every key prefixed `<id>:`.** Treat plugin storage as **disposable**:
    never store anything that must survive uninstall (user-authored documents, credentials, anything
-   the user would call "my work"). If a value must outlive the plugin, it does not belong in
-   `localStorage` — surface it to the user or put it in the workspace through a declared command.
+   the user would call "my work"). The host has **no write command** — there is no plugin API that
+   saves a file or a workspace, so "keep it somewhere safe" is not something the host can do for you:
+   if a value must outlive the plugin, it does not belong in `localStorage` — let the user export or
+   copy it, and own the saving in your own UI (say so on screen, do not claim the host persists it).
    There is also a "Clear data" button on the settings page (same effect, without uninstalling), and
    the host sweeps the prefix on the next start if the plugin vanished while the app was not running.
 
