@@ -2653,15 +2653,20 @@ const BASE = {
       ],
       "files": [
         "desktop/app/src/mobile/mobile.css",
-        "desktop/app/src/hub/hub.css",
-        "desktop/bridge/mobile_web/**",
-        "desktop/app/scripts/*mobile*",
+        "desktop/app/src/mobile/visual-viewport.ts",
+        "desktop/app/src/mobile/chrome.ts",
+        "desktop/app/scripts/build-mobile-embed.mjs",
+        "desktop/app/scripts/test-mobile-static.mjs",
+        "desktop/bridge/mobile_web.go",
+        "desktop/bridge/mobile_web.zip",
         "desktop/bridge/mobile_server.go"
       ],
       "acceptance": "三主题 390/430/640；safe-area/visualViewport；测试改写为 DOM/行为断言；旧 app.js/hub_model.js 删除；/m/ 默认走新页。",
-      "tests": "test:mobile-390；test:mobile-hub；tokens_sync；check-mobile-*；tsc",
-      "commit": "—",
-      "status": "in_progress"
+      "tests": "test:mobile-static；check:mobile-hub/session；mobile:embed；go test ./desktop/bridge -run 'Mobile|Web|Embed'；tsc",
+      "commit": "6d63a3d",
+      "status": "done",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：tsc + mobile-static 12 + host-seams 57 + mobile transport 154 + mobile session 120 + css + turn-layout 42 + hub-conv 160 + hub-p3b 295 + right-tabs 236 + hub-avatar 77 全绿；mobile:build + check:mobile-hub 180 + check:mobile-session 162（390/430/640 × ink/paper）全绿；Go 定向 24.8s + 全量 desktop/bridge 189.6s 绿；npm run build 后 zip SHA 仍 7ae504c6…c008c63。merge ec05e1d。"
     },
     {
       "id": "P8-04",
@@ -3880,9 +3885,11 @@ const BASE = {
       "reviewNote": "主 Session 复验：tsc + host-seams 52 + mobile transport 150 + mobile session 98 + css + hub-conv 160 + hub-p3b 295 + right-tabs 236 全绿；mobile:build + check:mobile-session 390/430 42 条 + check:mobile-hub 38 条全绿；桌面 collapse/group-edit/taskcard/markdown 56 全 PASS；全量 desktop/bridge 182.3s 绿。merge ab1a380。"
     },
     "P8-03": {
-      "status": "in_progress",
-      "commit": "—",
-      "reviewNote": "P8-03a 已合并；P8-03b 构建嵌入/旧页退役待做。"
+      "status": "done",
+      "commit": "6d63a3d",
+      "merge": "ec05e1d",
+      "review": "passed",
+      "reviewNote": "主 Session 复验：tsc + mobile-static 12 + host-seams 57 + mobile transport 154 + mobile session 120 + css + turn-layout 42 + hub-conv 160 + hub-p3b 295 + right-tabs 236 + hub-avatar 77 全绿；mobile:build + check:mobile-hub 180 + check:mobile-session 162（390/430/640 × ink/paper）全绿；Go 定向 24.8s + 全量 desktop/bridge 189.6s 绿；npm run build 后 zip SHA 仍 7ae504c6…c008c63。merge ec05e1d。"
     },
     "P8-01a": {
       "status": "done",
@@ -3913,9 +3920,11 @@ const BASE = {
       "reviewNote": "结算边界保留 + 失效重建；unit + 浏览器反证 + 手机会话回归绿。"
     },
     "P8-03b": {
-      "status": "in_progress",
-      "commit": "—",
-      "reviewNote": "构建嵌入 /m/ + 旧 mobile_web 退役"
+      "status": "done",
+      "commit": "6d63a3d",
+      "merge": "ec05e1d",
+      "review": "passed",
+      "reviewNote": "确定性 zip 嵌入 /m/ + 缓存解压 + 旧 mobile_web 退役；Go/浏览器/build 全绿。"
     }
   },
   "reviewGate": {
