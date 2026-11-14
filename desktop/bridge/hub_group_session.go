@@ -592,6 +592,11 @@ func (m *manager) finishHubReply(bs *bridgeSession, spec *hubSessionSpec, ae *ev
 		// 的下一轮误标 done）。
 		bs.hubGroupRunWakeID = ""
 		bs.hubGroupRunNoFinish = true
+		// P7-04（review nit #6）：这一轮已经因 429 结束，退避窗口里这个 agent 没有
+		// 在跑的 run —— 投递成功时挂上的 run 超时定时器必须在这里显式撤掉，否则它
+		// 会带着「上一轮」的 wake id 在窗口内到点白跑一次复核（上限比退避短时尤其
+		// 容易看到）。必须在 requeue **之前**清：requeue 之后账本已是 queued。
+		m.clearHubRunTimeout(spec.Scope.GroupID, spec.Agent.ID)
 		m.requeueHubWakeOnRateLimit(spec, wake)
 		return
 	}
