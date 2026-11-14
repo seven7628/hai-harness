@@ -231,8 +231,10 @@ console.log('\n4) 静态边界：会话页复用桌面组件 + 按需加载')
   const list = read('src/mobile/screens/SessionListScreen.tsx')
   assert(/fetchWorkspaces\(sharedMobileTransport\(\)\)/.test(list), '列表数据来自 workspace_list（不读桌面 localStorage 项目树）')
   assert(/fetchSessions\(sharedMobileTransport\(\), ws\)/.test(list), '会话数据来自 list')
-  assert(/ensureStoreStarted\(\)/.test(list), '列表屏先把 store 的事件流接起来')
-  assert(!/from '\.\.\/\.\.\/store\/useAppStore'/.test(list), '列表屏不碰 store 的会话状态（避免第二份真相）')
+  // 列表屏**完全不碰 store**：点开「会话」只加载它自己的小 chunk，桌面 store +
+  // Narrative 那一大坨等真正打开某个会话时才拉（否则首点就要 450KB）。
+  assert(!/from '[^']*(store\/useAppStore|session-boot)'/.test(list), '列表屏不 import store / session-boot（小 chunk 先出）')
+  assert(/ensureStoreStarted\(\)/.test(sess), '会话页负责接线（ensureStoreStarted 在会话屏）')
 
   const boot = read('src/mobile/session-boot.ts')
   assert(/let booted = false/.test(boot) && /if \(booted\) return/.test(boot), 'ensureStoreStarted 幂等（模块级闸门）')

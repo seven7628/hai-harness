@@ -5,13 +5,14 @@
 //
 // 这一层刻意**薄**：只画行、只做导航。点一行 → 交给壳的 onOpenSession(ws, sid)，
 // 真正的激活在 SessionScreen 里走 useAppStore.setActiveSession(sid, ws)（桌面同一套
-// 恢复/事件路径）。列表屏自己不碰 store 的会话状态，避免出现「第二份真相」。
+// 恢复/事件路径）。列表屏**完全不碰 store**（连 wire 都不在这里做）—— 于是点开
+// 「会话」只需加载这个 ~3KB 的小 chunk，桌面 store + Narrative 那一大坨要等真正打开
+// 某个会话时才拉（见 session-boot.ts 与 SessionScreen）。
 //
 // 与 Hub 列表并列（壳的 tab 切换），返回栈也是分开的：会话页返回 → 这里，Hub 返回 →
 // Hub 列表（见 MobileApp 的 nav）。
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { t as i18nT, useLang, useT } from '../../i18n'
-import { ensureStoreStarted } from '../session-boot'
 import { sharedMobileTransport } from '../transport/mobile'
 import {
   fetchSessions,
@@ -40,12 +41,6 @@ export default function SessionListScreen({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [tick, setTick] = useState(0) // 「刷新」按钮：变一下就重跑加载 effect
-
-  // 会话页的事件监听由 store 的 wire() 建立（桌面同一条路径）。列表屏先把它拉起来
-  // （整个进程只接线一次，见 session-boot.ts 的注释）。
-  useEffect(() => {
-    ensureStoreStarted()
-  }, [])
 
   // 工作区清单：只在挂载/刷新时拉。失败保留上一次的结果（弱网下不要清空屏幕）。
   // 注意 deps 里**不能放 t**：useT() 每次渲染都返回新函数，放进去就是死循环。
