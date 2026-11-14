@@ -231,7 +231,7 @@ func TestConversationUnlimitedTurnBudgetKeepsTwentyTurns(t *testing.T) {
 	}
 }
 
-// 取消轮次闸门后，其余安全阀一个都不能松：深度、同对、同内容指纹照样停。
+// 取消轮次闸门后，其余安全阀一个都不能松：深度、同对、同内容指纹照样挡住命中的 target。
 func TestConversationUnlimitedTurnBudgetStillStopsOnSafetyValves(t *testing.T) {
 	t.Run("深度", func(t *testing.T) {
 		c, clk := newTestController(t, ConversationLimits{TurnBudget: UnlimitedTurnBudget, Cooldown: -1, MaxDepth: 4})
@@ -310,12 +310,16 @@ func TestConversationUnlimitedTurnBudgetStillStopsOnSafetyValves(t *testing.T) {
 		if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
 			t.Fatal("begin")
 		}
-		_, err := c.Offer(ConversationOffer{
+		// N7/P7-02：同内容只跳过该 target（不整批熔断、不报错）。
+		wakes, err := c.Offer(ConversationOffer{
 			GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
 			Text: "好的 我来处理！把报告写好，然后发给你", Depth: 2,
 		})
-		if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "循环") {
-			t.Fatalf("同内容必须按循环 exhausted，得到 %v", err)
+		if err != nil || len(wakes) != 0 {
+			t.Fatalf("同内容只该跳过该 target: %v %+v", err, wakes)
+		}
+		if v := c.View("group_1"); v.Status != ConversationWaitingHuman {
+			t.Fatalf("全跳过 → status = %q, want waiting_human", v.Status)
 		}
 	})
 }
@@ -442,8 +446,63 @@ func TestConversationCooldownBetweenAgentWakes(t *testing.T) {
 	}
 }
 
-func TestConversationFingerprintLoop(t *testing.T) {
-	c, clk := newTestController(t, ConversationLimits{PairLimit: 99, Cooldown: -1})
+// TestConversationFingerprintSkipsOnlyHitTarget（N7/P7-02）：同内容指纹从「generation
+// 级整批熔断」改成 per-target 跳过 —— A→[B,C] 里 A↔B 在复读，只跳过 B；C 照常入队、
+// 照常可投。旧实现会在这里返回 ErrConversationExhausted 且 C 一条都不入队。
+func TestConversationFingerprintSkipsOnlyHitTarget(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{PairLimit: 99, Cooldown: -1, IdleReset: -1})
+	c.BeginHuman("group_1", 1, clk.Now())
+	text := "好的，我来处理：把报告写好，然后发给你。"
+	if _, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: text, Depth: 2,
+	}); err != nil {
+		t.Fatalf("预置 a→b: %v", err)
+	}
+	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
+		t.Fatal("begin 预置")
+	}
+	// 同一段内容（标点/空白变体）同时 @ b、c：只有 b 命中 a↔b 的指纹。
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b", "agent_c"),
+		Text: "好的 我来处理！把报告写好，然后发给你", Depth: 2,
+	})
+	if err != nil {
+		t.Fatalf("per-target 跳过不该整批报错: %v", err)
+	}
+	if len(wakes) != 1 || wakes[0].Target != "agent_c" {
+		t.Fatalf("wakes = %+v, want 只留 agent_c（B 被指纹跳过）", wakes)
+	}
+	if v := c.View("group_1"); v.Status != ConversationRunning || v.QueueLen != 1 {
+		t.Fatalf("视图 = %+v, want running/queue=1（不整批熔断）", v)
+	}
+	var hit *Delivery
+	for _, d := range c.Deliveries("group_1") {
+		if d.Target == "agent_b" && d.Status == DeliverySkipped {
+			dd := d
+			hit = &dd
+		}
+	}
+	if hit == nil || hit.Reason != DeliveryReasonFingerprint {
+		t.Fatalf("缺 b 的 skipped(fingerprint_loop) 记录: %+v", c.Deliveries("group_1"))
+	}
+	if !strings.Contains(hit.Note, "重复") || !strings.Contains(hit.Note, "agent_b") {
+		t.Fatalf("note 没说清是同一对重复内容: %q", hit.Note)
+	}
+	// C 真的还能投（不是「账本 queued 但调度器不再放行」）。
+	due := c.DueWakes("group_1", clk.Now())
+	if len(due) != 1 || due[0].Target != "agent_c" {
+		t.Fatalf("可投 wake = %+v, want agent_c", due)
+	}
+	if begun, fresh := c.BeginDelivery(due[0], clk.Now()); !fresh {
+		t.Fatalf("C 应当可以投递: %+v", begun)
+	}
+}
+
+// TestConversationFingerprintAllSkippedWaitsHuman：A→[B] 复读同一段 → 只 skipped，
+// 状态 waiting_human（**不是** exhausted），队列空；人类一句话就能继续。
+func TestConversationFingerprintAllSkippedWaitsHuman(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{PairLimit: 99, Cooldown: -1, IdleReset: -1})
 	c.BeginHuman("group_1", 1, clk.Now())
 	text := "好的，我来处理：把报告写好，然后发给你。"
 	if _, err := c.Offer(ConversationOffer{
@@ -455,16 +514,60 @@ func TestConversationFingerprintLoop(t *testing.T) {
 	if _, ok := c.BeginTurn("group_1", clk.Now()); !ok {
 		t.Fatal("begin")
 	}
-	// 同样的内容、标点/空白变体：判定为循环，且一条都不入队。
-	_, err := c.Offer(ConversationOffer{
+	wakes, err := c.Offer(ConversationOffer{
 		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
 		Text: "好的 我来处理！把报告写好，然后发给你", Depth: 2,
 	})
-	if !errors.Is(err, ErrConversationExhausted) || !strings.Contains(err.Error(), "循环") {
-		t.Fatalf("同内容必须按循环 exhausted，得到 %v", err)
+	if err != nil {
+		t.Fatalf("全部跳过不该报 exhausted: %v", err)
 	}
-	if v := c.View("group_1"); v.Status != ConversationExhausted || v.QueueLen != 0 || v.StopReason == "" {
-		t.Fatalf("exhausted 视图 = %+v", v)
+	if len(wakes) != 0 {
+		t.Fatalf("同内容不该入队: %+v", wakes)
+	}
+	v := c.View("group_1")
+	if v.Status != ConversationWaitingHuman || v.QueueLen != 0 || v.StopReason == "" {
+		t.Fatalf("视图 = %+v, want waiting_human/queue=0/有原因（不是 exhausted）", v)
+	}
+	if len(c.DueWakes("group_1", clk.Now())) != 0 {
+		t.Fatal("全跳过之后不该有可投 wake")
+	}
+	// 人类新输入开新一代：同一段话重新可投（指纹随 generation 清零）。
+	c.BeginHuman("group_1", 2, clk.Now())
+	wakes, err = c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: "好的 我来处理！把报告写好，然后发给你", Depth: 2,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("人类新输入后同一段话应当能重新入队: %v %+v", err, wakes)
+	}
+}
+
+// TestConversationFingerprintOnlyForEnqueuedTargets：指纹只在**真正入队**的 target 上
+// 记录（§2 P7-02）。这里用 queue_full 把两条都跳过 —— 那句没投出去的话不能写指纹，
+// 否则下一轮同样的内容会被误判成「同内容循环」。
+func TestConversationFingerprintOnlyForEnqueuedTargets(t *testing.T) {
+	c, clk := newTestController(t, ConversationLimits{
+		PairLimit: 99, Cooldown: -1, IdleReset: -1, MaxPendingWakes: 1,
+	})
+	c.BeginHuman("group_1", 1, clk.Now())
+	text := "同一段话"
+	wakes, err := c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b", "agent_c"),
+		Text: text, Depth: 2,
+	})
+	if err != nil || len(wakes) != 0 {
+		t.Fatalf("队列上限只该跳过不入队: %v %+v", err, wakes)
+	}
+	if v := c.View("group_1"); v.QueueLen != 0 {
+		t.Fatalf("队列 = %d, want 0", v.QueueLen)
+	}
+	// 队列现在空着：同一段话必须能正常入队（说明上面那两条没写指纹）。
+	wakes, err = c.Offer(ConversationOffer{
+		GroupID: "group_1", Sender: "agent_a", Targets: convIDs("agent_b"),
+		Text: text, Depth: 2,
+	})
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("被跳过的 target 不该写指纹（下一轮同内容必须能入队）: %v %+v", err, wakes)
 	}
 }
 

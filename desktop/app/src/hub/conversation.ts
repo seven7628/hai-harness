@@ -215,6 +215,7 @@ export function deliveryReasonText(reason?: string | null): string {
     case 'target_busy': return '目标忙，排队中'
     case 'rate_limit': return '上游限流，退避重试'
     case 'pair_limit': return '互踢到上限，已跳过'
+    case 'fingerprint_loop': return '同一对重复内容，已跳过'
     case 'depth_limit': return '链路太深，已跳过'
     case 'budget': return '预算不足，未启动'
     case 'stopped': return '已停止'
