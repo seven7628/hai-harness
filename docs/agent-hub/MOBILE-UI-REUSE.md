@@ -84,6 +84,14 @@ Hub 屏幕要求：
 - 三个 seam：`transport/host.ts`（Hub store/命令/附件）、`host/lang.tsx`（i18n）、`HostWorkspaceContext` + `getHostTransport()`（markdown/localAsset）。
 - 手机包边界：`grep -c "useAppStore|mock/proj-auth|electronTransport|proj-auth" dist-mobile/assets/*.js` 全 0；首屏 218KB，会话 chunk 按需加载。
 
+### P8-02 落地记录（2026-11-13，`a91b35c` / merge `ab1a380`）
+
+- 会话列表数据来自 `workspace_list` + `list`（不读桌面 localStorage 项目树）；打开会话走 `setActiveSession` + `connectChat`，事件由 store 的 `wire()` 消费。
+- 会话页直接渲染 `<CenterPanel variant="mobile" />`：`Narrative` / `ApprovalPanel` / `AskUserQuestionPanel` / `Composer` 原样复用；只隐藏 `RecentBar` 与手机不支持的模型/模式/Effort/附件入口。
+- `ask_batch` 加入手机 allowlist（与 `ask` 同一能力：用户消息进会话 inbox），发送走桌面 Composer 的暂存队列整队推送。
+- 首屏 220KB；点「会话」额外 5.8KB；会话页 chunk 649KB 按需加载，仍含桌面 store/mock（复用代价，首屏边界保持 0）。
+- 已知既有缺陷：`Narrative` 一轮内「交卷边界后又来工具」时折叠键会弹回；桌面/手机同一份代码，建议单独 follow-up。
+
 ## 4. 测试
 
 - Node：mobile transport 单测（HTTP 应答 → command_response、WS 事件分发、401/断线）；`test:host-seams` 锁 transport/lang/markdown 三个 seam 的桌面等价与手机降级。
