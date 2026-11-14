@@ -73,7 +73,9 @@ test('pluginProjectsFromResponse：data.projects / data.data.projects / 顶层 p
   assert.deepEqual(pluginProjectsFromResponse({ data: { data: { projects: one } } }), one)
   assert.deepEqual(pluginProjectsFromResponse({ data: {}, raw: { projects: one } }), one)
   assert.deepEqual(pluginProjectsFromResponse({ data: { projects: [] } }), [], '空数组是有效回执（插件全没了）')
-  assert.deepEqual(pluginProjectsFromResponse({ data: {} }), [], '形状不认识 → 空数组')
+  // 形状不认识 → undefined（≠ 空数组）：调用方据此保留已加载的虚拟项目
+  assert.equal(pluginProjectsFromResponse({ data: {} }), undefined)
+  assert.equal(pluginProjectsFromResponse({}), undefined)
 })
 
 test('mergePluginProjects：保留本地会话、真实项目位置不变、新路径追加尾部', () => {

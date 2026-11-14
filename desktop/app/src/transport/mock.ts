@@ -100,6 +100,18 @@ interface MockSess {
   title: string
 }
 
+// normalizeMockSessions mock 注入的会话条目（localStorage 配置）→ MockSess[]；非对象/缺 id 丢弃。
+function normalizeMockSessions(list: unknown[]): MockSess[] {
+  const out: MockSess[] = []
+  for (const item of list) {
+    const o = item as { id?: unknown; title?: unknown }
+    const id = typeof o?.id === 'string' ? o.id.trim() : ''
+    if (!id) continue
+    out.push({ id, title: typeof o?.title === 'string' && o.title ? o.title : id })
+  }
+  return out
+}
+
 // 每会话运行态（多 session 并行）：各自独立的 inbox（takeBatch 语义）/审批/提问/脚本进度。
 // 事件按 session_id 路由进 views[sid]——背景会话的事件进自己 view，不打扰当前显示。
 interface MockRunState {
@@ -2547,6 +2559,31 @@ class MockTransport implements Transport {
       case 'list': {
         const wsPath = this.ws
         this.respond(cmd, { sessions: this.sessions.get(wsPath) ?? [] })
+        break
+      }
+      case 'plugin_projects_list': {
+        // 虚拟 Project（插件分组）：mock 回执形状与真 bridge 的 data.projects 一致。
+        // dev 联调开关（与 mock.loadDelayMs 同风格，默认「一个插件都没装」）：
+        //   localStorage.setItem('mock.pluginProjects', JSON.stringify([
+        //     { path: '/x/.go-code/plugin-sessions/alpha/home', name: 'PDF 阅读器', pluginId: 'alpha',
+        //       icon: '📕', installed: true, sessions: [{ id: 'ps-1', title: '翻译草稿' }] },
+        //   ]))
+        // 条目里的 sessions 会被塞进 mock 的会话表 → 之后的 list 能水合出来内容。
+        let projects: unknown[] = []
+        try {
+          const raw = globalThis.localStorage?.getItem('mock.pluginProjects') ?? ''
+          const parsed: unknown = raw ? JSON.parse(raw) : []
+          if (Array.isArray(parsed)) projects = parsed
+        } catch {
+          /* 坏数据按「没有插件」处理（与真 bridge 回执失败时前端保留旧分组同一取舍） */
+        }
+        for (const item of projects) {
+          const o = item as { path?: unknown; sessions?: unknown }
+          const p = typeof o?.path === 'string' ? o.path : ''
+          if (!p || !Array.isArray(o.sessions)) continue
+          this.sessions.set(p, normalizeMockSessions(o.sessions))
+        }
+        this.respond(cmd, { projects })
         break
       }
       case 'new_session': {

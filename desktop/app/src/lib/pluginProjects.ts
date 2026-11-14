@@ -87,17 +87,21 @@ export function pluginProjectFromWire(raw: unknown): Partial<Project> | undefine
  *   · `data.projects`（与 `list` 同类：数据都在 data 里）
  *   · `data.data.projects`（桥再包一层的回执）
  *   · 顶层 `projects`（早期/调试形态：字段挂在回执根上，不进 data）
- *  都取不到 → 空数组（调用方据此保留已加载的虚拟项目，绝不当成「插件全没了」）。 */
+ *
+ *  都取不到 → **undefined**，与「空数组」严格区分：
+ *   · undefined = 形状不认识（老 bridge / mock 的 `respond({})`）→ 调用方**不动**已加载的
+ *     虚拟项目（当成「插件全没了」会把整组抹掉）；
+ *   · [] = 后端明确说「当前没有插件 Project」→ 允许合并（有会话的转已卸载）。 */
 export function pluginProjectsFromResponse(r: {
   data?: Record<string, unknown> | undefined
   raw?: Record<string, unknown> | undefined
-}): unknown[] {
+}): unknown[] | undefined {
   const data = r.data ?? {}
   const nested = data.data && typeof data.data === 'object' ? (data.data as Record<string, unknown>) : undefined
   for (const candidate of [data.projects, nested?.projects, r.raw?.projects]) {
     if (Array.isArray(candidate)) return candidate
   }
-  return []
+  return undefined
 }
 
 /** mergePluginProjects 把 `plugin_projects_list` 回执合并进项目树。
