@@ -206,8 +206,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
   "meta": {
     "branch": "main",
     "worktree": "每轮一个：.go-code/worktrees/<轮次>（从 main 拉，合并后删）",
-    "updated": "2026-11-14 12:52",
-    "current": "R17a（插件数据生命周期，并行）/ R17b 本链；待定：CJK 字体复验 R-18"
+    "updated": "2026-11-14 13:42",
+    "current": "24 PR 收口 + R17a/R17b；下一项：Agent 互通（L0 窗口收窄 → P1 任务/引用）待拍板"
   },
   "rounds": [
     {
@@ -1171,7 +1171,48 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       ],
       "rollback": "三条互相独立；回执文案可单独撤，不影响入口本身"
     }
-  ],
+,
+    {
+          "id": "R17a",
+          "pr": "（缓冲）",
+          "title": "插件数据生命周期：卸载即清理 + R-20 按版本重置 + ui_inspect 标题单一策略",
+          "type": "打磨",
+          "est": 0.5,
+          "deps": [
+                "R16b"
+          ],
+          "status": "done",
+          "commit": "bcabc2c（merge）",
+          "review": "主会话复核：storage.ts 的四条保守语义成立（非权威 index 缺省不动、首次升级不清、先清再写、只认 index 全量 id）；设置页「清除数据」与卸载直清两条路径都堵上；health 用 surface.versions 表解决「记录出生时不知道版本」的死角，手动禁用豁免按用户意图保留；uiSnapshot.titleOf 删本地分支。门禁：tsc 0 / eslint 0·59 / build / plugin_loader 89 / surfaces_page 66 / ui_snapshot 35；变异 6 条真红（M5a 守手动豁免、M5b 守自动必须清）。合并后 main 上 test:creator-mode 全绿 + 课程 MVP 真 Electron 通过。",
+          "perf": [],
+          "acc": [
+                "卸载删 <id>: 前缀数据与禁用/版本记录；停用不删",
+                "跨重启 known-ids 对账；非权威 index 缺省不清任何东西（浏览器版误删口已堵）",
+                "换版本清账；手动禁用（auto!==true）换版本保留、计数归零",
+                "ui_inspect 标签标题与界面逐字一致（含「· 预览」）"
+          ],
+          "rollback": "五个 commit 各自独立：端口/版本表/清理/标题/豁免；清理与 known-ids 同一条链，回滚按 4→3 顺序退"
+    },
+    {
+          "id": "R17b",
+          "pr": "（缓冲）",
+          "title": "Creator Mode 8 个探针入链（test:creator-mode → npm test）+ 看板风险台账去陈旧",
+          "type": "打磨",
+          "est": 0.5,
+          "deps": [
+                "R16b"
+          ],
+          "status": "done",
+          "commit": "02de33b（merge）",
+          "review": "主会话复核：test:creator-mode 串联 tabbar/boundary/ui-snapshot/plugin-loader/plugin-tab-persist/surfaces-page/plugin-entries/external-surface，实测 427 行 ✅ / 40.6s / 连跑两次零 flake，已挂进 npm test；看板 R-8/R-11 按 git ls-files 证据关闭、R-10 保持打开、新增 R-22 闭环。合并后 main 复跑同链全绿、端口无残留。",
+          "perf": [],
+          "acc": [
+                "8 个游离探针有唯一入口，且默认 npm test 会跑",
+                "每项计数与端口在报告里可复查",
+                "风险台账关闭项带证据，未核实项不关"
+          ],
+          "rollback": "只动 package.json 与看板；撤掉 npm test 尾部那一步即恢复原链"
+    }  ],
   "perf": [
     {
       "id": "P01",
@@ -1472,7 +1513,8 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
       "level": "mid",
       "title": "换插件新版本仍吃旧的挂载失败计数（禁用键只有 kind，没有 hash）",
       "d": "PR-10 的 <code>localStorage['surface.disabled']</code> 按 <b>kind</b> 记连续失败与禁用态；02 原本写的「按 kind+hash」里那个 hash 这一轮拿不到（插件产物要等 PR-12 的 loader）。后果：插件作者发版修好了崩溃，用户那边仍然是「已自动禁用」，要手动点一次「重新启用」才会重新尝试。",
-      "a": "PR-12 的 <code>surface_install</code> 落地后把键改成 <code>kind@hash</code>，迁移策略：旧键视为「无 hash 版本」，首次遇到新 hash 时重置计数；在此之前把这条写进插件安装文档。"
+      "status": "closed",
+      "a": "R17a 已修（bcabc2c）：health 记录带 <code>hash</code> + 独立的 <code>surface.versions</code> 表，记录出生时盖版本戳；<b>换版本 = 干净重来</b>（自动禁用整条删掉），<b>手动禁用不被版本变更复活</b>（保留记录、count 归零）。探针 T13/T16 钉住两条语义。原计划：PR-12 的 <code>surface_install</code> 落地后把键改成 <code>kind@hash</code>，迁移策略：旧键视为「无 hash 版本」，首次遇到新 hash 时重置计数；在此之前把这条写进插件安装文档。"
     },
     {
       "id": "R-1",
@@ -1648,9 +1690,11 @@ test(surface): CodeMode 脚本断言 —— 对象返回 + 审批拒绝</pre></d
     "每个 PR 可独立 revert；表外 PR 先裁决。"
   ],
   "next3": [
-    "<b>CJK 字体复验（R-18）</b>：换一台 macOS / Linux 重跑 LibreOffice 的 docx→PDF，把「中文是否落字形」按真转换结果写回风险表（本机 26.8 实测三组字体全空白，不能算数）。",
-    "<b><code>source</code> 上 wire</b>：插件安装来源（内置 / 本地目录 / 外部目录）从 index 透到设置页插件行，让用户看得出「这个是从哪装进来的」，卸载/重装时也有据可依。",
-    "<b><code>relIfInside</code> 双份口径去重</b>：<code>store/useAppStore.ts:2168 relIfInside</code> 与 <code>lib/filePaths.ts:15 toRelIfInside</code> 是同一算法的两份实现（注释自己写着「同口径」），合并成一份并加单测钉住工作区内/外两种输出。"
+    "<b>L0 窗口收窄</b>：插件加载前把 <code>window.desktop</code>（91 个方法）换成收窄视图，真实桥留在模块作用域；先堵住 providerKey / fs* / 通用 command 三个口子，再谈 Agent 能力。",
+    "<b>Agent 互通 P1</b>：<code>host.composer.quote</code>（只插草稿）+ <code>host.agent.run</code>（插件自有会话、流式、schema、配额、审计），跑通 PDF 阅读器的「引用 + 翻译渲染」两条链路。",
+    "<b>CJK 字体复验（R-18）</b>：换一台 macOS / Linux 重跑 LibreOffice 的 docx→PDF，把「中文是否落字形」按真转换结果写回风险表。",
+    "<b><code>source</code> 上 wire</b>：插件安装来源从 index 透到设置页插件行。",
+    "<b><code>relIfInside</code> 双份口径去重</b>：<code>useAppStore.ts:2168</code> 与 <code>lib/filePaths.ts:15</code> 合并成一份并加单测。"
   ],
   "docs": [
     "<a href=\"00-conventions.md\">00 前置规范与 PR 约束</a>（活文档 v0.1）",
@@ -1672,7 +1716,9 @@ $('#m-branch').textContent = D.meta.branch;
 $('#m-wt').textContent = D.meta.worktree;
 $('#m-upd').textContent = D.meta.updated;
 $('#m-foot').textContent = '当前 ' + D.meta.current + ' · ' + new Date().getFullYear();
-const done = D.rounds.filter(r => r.status === 'done').length;
+// 进度条只算**计划内**轮次：R17a/R17b 这类「（缓冲）」记录算交付量（天数），不算计划完成率，
+// 否则 done 含缓冲、doable 不含，条会超过 100%。
+const done = D.rounds.filter(r => r.status === 'done' && r.pr !== '（缓冲）').length;
 const doable = D.rounds.filter(r => r.pr !== '（缓冲）' && r.status !== 'dropped').length;
 $('#m-bar').style.width = (done / doable * 100).toFixed(1) + '%';
 
