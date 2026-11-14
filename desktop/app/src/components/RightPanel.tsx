@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useReducer, useRef, useState, useCallback } from 'react'
-import type { ReactElement, ReactNode } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, ReactElement, ReactNode } from 'react'
 import { useAppStore, isPendingWebTab, rebuildWebTab, selectRightTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
 import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
 import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
@@ -13,14 +13,14 @@ import { getSurface, subscribeSurfaces } from '../surfaces/registry'
 import { SurfaceBoundary, SurfaceTombstone } from '../surfaces/SurfaceBoundary'
 import type { UnavailableReason } from '../surfaces/SurfaceBoundary'
 import { getSurfaceHealth, isSurfaceDisabled } from '../surfaces/health'
-import { declaredEntryTitle, groupEntryItems, listPluginEntries } from '../surfaces/plugin/entries'
+import { declaredEntryTitle, entryTitleText, groupEntryItems, listPluginEntries } from '../surfaces/plugin/entries'
 import type { PluginEntryItem } from '../surfaces/plugin/entries'
 import PluginEntryIcon from '../surfaces/PluginEntryIcon'
 import type { SurfaceKind } from '../surfaces/types'
 import type {} from '../lib/fileStatus'
 import { shortName } from '../lib/shortPath'
 import { copyText } from '../lib/clipboard'
-import { useT } from '../i18n'
+import { useLang, useT } from '../i18n'
 import TodoPanel from './TodoPanel'
 import { useFocusTodos } from './useFocusTodos'
 
@@ -152,6 +152,9 @@ type PanelMenu = 'add' | 'more' | 'overflow' | null
 
 export default function RightPanel() {
   const t = useT()
+  // R16b：入口标题可能是 `{ zh, en }`，语言在**渲染点**选（快照里留声明本身 ——
+  // 见 surfaces/plugin/entries.ts 的 entryTitleText）。切语言时这里跟着重渲染。
+  const lang = useLang()
   const allTabs = primaryTabs(t).concat(secondaryTabs(t))
   const rightExpanded = useAppStore((s) => s.rightExpanded)
   // R11b：rail 高亮读**派生选择器**（激活标签的 kind），不再读 state 里那个写穿副本。
@@ -260,6 +263,31 @@ export default function RightPanel() {
     if (!items?.length) return
     items[Math.min(overflowFocus, items.length - 1)]?.focus()
   }, [menu, overflowFocus])
+  // —— R16b：＋ 新建菜单的键盘可达（与上面 +N 同一套 roving focus）——
+  // 打开时把焦点放到第一项、↑↓ 在**真 <button>** 之间搬焦点、Enter/Space 走浏览器原生
+  // 激活（= 该项的 onClick；keydown 里不代劳，否则一次按键会开两个标签）。
+  // 与 +N 的唯一差别是 items 的范围：这里用 `.rtabs-mi`（含「面板插件」那几项 ——
+  // 插件的入口也是菜单项，方向键不该在分组边界上停住）。
+  const addBtnRef = useRef<HTMLButtonElement | null>(null)
+  const addMenuRef = useRef<HTMLDivElement | null>(null)
+  const [addFocus, setAddFocus] = useState(0)
+  const addMenuItemCount = () => addMenuRef.current?.querySelectorAll<HTMLButtonElement>('.rtabs-mi').length ?? 0
+  useEffect(() => {
+    if (menu !== 'add') return
+    const items = addMenuRef.current?.querySelectorAll<HTMLButtonElement>('.rtabs-mi')
+    if (!items?.length) return
+    items[Math.min(Math.max(addFocus, 0), items.length - 1)]?.focus()
+  }, [menu, addFocus])
+  // ↑↓ 的焦点移动：回绕（末项 ↓ = 首项），与 +N 的方向语义相反没关系 —— 两个菜单都只
+  // 需要「一直按 ↓ 能转一圈回到起点」。
+  const onAddMenuKeyDown = (e: ReactKeyboardEvent) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    const n = addMenuItemCount()
+    if (!n) return
+    e.preventDefault()
+    setAddFocus((i) => (i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n)
+  }
+
   // ＋ / ⌄ / +N 三个面板菜单的 Escape：backdrop 只覆盖「点别处」，键盘也得能关。
   // +N 是键盘入口，关闭后焦点必须**回到按钮**：菜单项在关闭时被卸载，焦点会掉到 body，
   // 键盘用户得从头 Tab 一整轮才能再打开（这就是「菜单键盘可达」的反面）。
@@ -268,7 +296,10 @@ export default function RightPanel() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       setMenu(null)
+      // 关闭后焦点必须回到**打开它的按钮**：菜单项被卸载时焦点掉到 body，键盘用户得
+      // 从头 Tab 一整轮才能再打开（"菜单键盘可达"的反面）。
       if (menu === 'overflow') overflowBtnRef.current?.focus()
+      else if (menu === 'add') addBtnRef.current?.focus()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -434,7 +465,7 @@ export default function RightPanel() {
     // 是插件自己，宿主没有声明可以依据（见 surfaces/plugin/entries.ts 的 declaredEntryTitle）。
     // provider 缺失（加载失败/已卸载）时退回 kind 本身，但**已声明入口**仍显示它的 manifest 标题
     //（墓碑也不该叫 plugin:course-manager）。
-    const declared = declaredEntryTitle(tab.kind, (tab as { params?: unknown }).params)
+    const declared = declaredEntryTitle(tab.kind, (tab as { params?: unknown }).params, lang)
     if (declared) return declared
     const prov = getSurface(tab.kind)
     if (prov) return prov.title(tab, t)
@@ -637,14 +668,23 @@ export default function RightPanel() {
               用户口径「菜单应该锚在「＋」按钮下面（右侧），不是左侧」。⌄ 的重开菜单保持锚在左侧。 */}
           <div className="rtabs-add-wrap">
             <button
+              ref={addBtnRef}
               className="rtabs-add"
               data-tip={t('rp.tabs.add')}
               aria-label={t('rp.tabs.add')}
-              onClick={() => setMenu((m) => (m === 'add' ? null : 'add'))}
+              aria-haspopup="menu"
+              aria-expanded={menu === 'add'}
+              onClick={() => { setAddFocus(0); setMenu((m) => (m === 'add' ? null : 'add')) }}
             >
               <Plus size={13} />
             </button>
-            {menu === 'add' && <div className="rtabs-menu rtabs-menu-right" role="menu">
+            {menu === 'add' && <div
+              ref={addMenuRef}
+              className="rtabs-menu rtabs-menu-right"
+              role="menu"
+              aria-label={t('rp.tabs.add')}
+              onKeyDown={onAddMenuKeyDown}
+            >
               {addableKinds().map((k) => (
                 <button
                   key={k}
@@ -682,7 +722,7 @@ export default function RightPanel() {
                           role="menuitem"
                           onClick={() => openPluginEntry(e)}
                         >
-                          <PluginEntryIcon entry={e} fallback={kindIcon(e.kind)} /> {e.title}
+                          <PluginEntryIcon entry={e} fallback={kindIcon(e.kind)} /> {entryTitleText(e.title, lang)}
                         </button>
                       ))}
                     </Fragment>
@@ -797,7 +837,7 @@ export default function RightPanel() {
                                 onClick={() => openPluginEntry(e)}
                               >
                                 <PluginEntryIcon entry={e} fallback={kindIcon(e.kind)} />
-                                <span>{e.title}</span>
+                                <span>{entryTitleText(e.title, lang)}</span>
                               </button>
                             ))}
                           </div>

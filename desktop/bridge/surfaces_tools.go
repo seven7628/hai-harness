@@ -241,6 +241,11 @@ func surfaceReceiptSchema() any {
 		"id":      tools.Str("插件 id"),
 		"version": tools.Str("manifest 里的版本"),
 		"hash":    tools.Str("sha256(入口文件) 的十六进制"),
+		"entries": tools.Map{
+			"type":        "integer",
+			"description": "这次安装声明的入口条数（0 = manifest 没声明，宿主会合成一个默认入口）",
+		},
+		"entryHint": tools.Str(`入口在界面上的位置（固定 "right panel ＋ → Panel plugins"）`),
 	}, "status")
 }
 

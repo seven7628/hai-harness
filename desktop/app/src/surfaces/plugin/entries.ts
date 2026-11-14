@@ -16,7 +16,9 @@
 //     两份：`menu`（enabled）与 `declaredTitles`（含禁用）。
 //  4. **不做二次校验**：id/title/图标的合法性归 Go 的安装期校验（D-3）；这里只做
 //     「这份 IPC 数据能不能安全地渲染」的防御（坏项丢掉、绝不抛）。
-import type { SurfaceEntryDecl, SurfaceIndex, SurfaceIndexItem } from '../../transport/types'
+//  5. **标题留着声明、不在这里选语言**（R16b）：`title` 可能是 `{ zh, en }`。选语言的
+//     唯一入口是本文件的 entryTitleText，调用点在渲染层（useLang）。
+import type { SurfaceEntryDecl, SurfaceEntryTitle, SurfaceIndex, SurfaceIndexItem } from '../../transport/types'
 import { notifySurfacesChanged } from '../registry'
 
 /**
@@ -28,6 +30,30 @@ import { notifySurfacesChanged } from '../registry'
  */
 export const DEFAULT_ENTRY_ID = 'default'
 
+/** 渲染层要的语言（与 host/lang.tsx 的 HostLang 同一集合）。 */
+export type EntryLang = 'zh' | 'en'
+
+/**
+ * 把声明里的标题按当前语言取成字符串（R16b）——**唯一的**语言选择点。
+ *
+ * 规则（与 manifest.name 的 zh → en 兜底同向，只是反过来：先本语言，再另一边）：
+ *   · 单字符串：两种语言都用它（老 manifest 行为一字不变）；
+ *   · `{ zh, en }`：当前语言有值用它，没有就用另一边；两边都没有 = 空串（安装期已拒）。
+ * 为什么不在快照里选好：菜单/标签是活的语言订阅者，而快照只在 sync 时更新 ——
+ * 切一次语言要等下一次 surfaces_changed 才改文案，是用户看得见的 bug。
+ */
+export function entryTitleText(title: SurfaceEntryTitle | undefined | null, lang: EntryLang): string {
+  if (typeof title === 'string') return title
+  if (!title || typeof title !== 'object') return ''
+  const zh = typeof title.zh === 'string' ? title.zh.trim() : ''
+  const en = typeof title.en === 'string' ? title.en.trim() : ''
+  return lang === 'en' ? en || zh : zh || en
+}
+
+/** 快照比较用的稳定签名：字符串写法与对象写法即使同值也必须区分（en 下表现不同）。 */
+const titleSig = (t: SurfaceEntryTitle | undefined): string =>
+  (typeof t === 'string' ? `s:${t}` : `o:${JSON.stringify(t ?? null)}`)
+
 /** 一条可渲染的入口（菜单项 / 设置页的「打开」）。 */
 export interface PluginEntryItem {
   /** 插件 id（= `~/.go-code/surfaces/<id>` 的目录名） */
@@ -38,8 +64,13 @@ export interface PluginEntryItem {
   kind: `plugin:${string}`
   /** `params.entry` 的取值 */
   entryId: string
-  /** 菜单/设置页看到的标题（声明项取 manifest.title；默认入口取插件显示名） */
-  title: string
+  /**
+   * 菜单/设置页看到的标题（声明项取 manifest.title；默认入口取插件显示名）。
+   *
+   * R16b 起是**声明本身**（`string | { zh, en }`），不是某一语言的字符串：
+   * 渲染点用 `entryTitleText(title, useLang())` 现选 —— 提前选好就等于「切语言要重读索引」。
+   */
+  title: SurfaceEntryTitle
   /** `<id>` 目录内的相对路径（缺省 = 用 kind 图标） */
   icon?: string
   /** true = 宿主合成的默认入口（零 entries），不是 manifest 声明的 */
@@ -113,7 +144,7 @@ export function groupEntryItems(items: PluginEntryItem[]): PluginEntryGroup[] {
 // subscribeSurfaces（与 health 的禁用集同一条通道，见 registry.ts notifySurfacesChanged）。
 
 let menu: PluginEntryItem[] = []
-let declaredTitles = new Map<string, string>()
+let declaredTitles = new Map<string, SurfaceEntryTitle>()
 let signature = ''
 
 const titleKey = (pluginId: string, entryId: string): string => `${pluginId}\u0000${entryId}`
@@ -128,7 +159,7 @@ const titleKey = (pluginId: string, entryId: string): string => `${pluginId}\u00
 export function setSurfaceEntryIndex(index: SurfaceIndex): void {
   const items = Array.isArray(index?.items) ? index.items : []
   const nextMenu: PluginEntryItem[] = []
-  const nextTitles = new Map<string, string>()
+  const nextTitles = new Map<string, SurfaceEntryTitle>()
   for (const item of items) {
     if (!item || typeof item.id !== 'string' || !item.id) continue
     // 标题表**不看 enabled**：禁用后入口从菜单消失，但已开的标签还得叫「课表」。
@@ -137,7 +168,7 @@ export function setSurfaceEntryIndex(index: SurfaceIndex): void {
   }
   const sig = JSON.stringify(nextMenu)
   const titlesChanged = nextTitles.size !== declaredTitles.size
-    || [...nextTitles].some(([k, v]) => declaredTitles.get(k) !== v)
+    || [...nextTitles].some(([k, v]) => titleSig(declaredTitles.get(k)) !== titleSig(v))
   declaredTitles = nextTitles
   if (sig === signature && !titlesChanged) return
   signature = sig
@@ -157,11 +188,11 @@ export function listPluginEntries(): PluginEntryItem[] {
  * 用户会以为点错了。默认入口例外（零 entries 时主人是 provider 自己 —— 它没声明标题，
  * 宿主就不该用 name 覆盖掉 provider 的 title()）。
  */
-export function declaredEntryTitle(kind: string, params: unknown): string {
+export function declaredEntryTitle(kind: string, params: unknown, lang: EntryLang = 'zh'): string {
   if (!kind.startsWith('plugin:') || !params || typeof params !== 'object' || Array.isArray(params)) return ''
   const entryId = (params as Record<string, unknown>).entry
   if (typeof entryId !== 'string' || !entryId) return ''
-  return declaredTitles.get(titleKey(kind.slice('plugin:'.length), entryId)) ?? ''
+  return entryTitleText(declaredTitles.get(titleKey(kind.slice('plugin:'.length), entryId)), lang)
 }
 
 /** 仅供测试/探针：清空快照（生产里模块只求值一次，没有调用点）。 */
