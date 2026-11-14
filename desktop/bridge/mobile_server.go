@@ -291,21 +291,29 @@ func (s *mobileServer) routes() http.Handler {
 
 // mobileWebSub 手机端静态资源根。
 //
-// 开发态：HAI_MOBILE_WEB_DIR 指向一个真实目录（desktop/app/dist-mobile，见
-// electron/main.ts 的 dev 分支）就直读磁盘 —— 改样式/脚本手机刷新即可，不必重解压。
-// 交付态：解压内置的 mobile_web.zip 到缓存目录（见 mobile_web.go）。
+// P8 方案 A：手机页和桌面渲染页一样是**一个磁盘目录**，不 embed、不 zip、不缓存：
+//
+//	· 开发态：electron/main.ts 设 HAI_MOBILE_WEB_DIR=<repo>/desktop/app/dist-mobile；
+//	· 打包态：electron-builder 把 dist-mobile 复制成 Resources/mobile-web，
+//	  main.ts 设 HAI_MOBILE_WEB_DIR=<resources>/mobile-web。
+//
+// 目录里必须有 index.html（mobile:build 会把 mobile.html 改名），否则 /m/ 直接报错。
+// bridge 单独运行（没有 Electron 资源目录）时 /m/ 返回 500 + 明确原因，而不是静默 404。
 func mobileWebSub(diskDir string) (http.FileSystem, error) {
-	if diskDir != "" {
-		if st, err := os.Stat(diskDir); err == nil && st.IsDir() {
-			return http.Dir(diskDir), nil
-		}
-		fmt.Fprintf(os.Stderr, "mobile web: HAI_MOBILE_WEB_DIR=%q 不是目录，回落到内置页面\n", diskDir)
+	if diskDir == "" {
+		return nil, fmt.Errorf("HAI_MOBILE_WEB_DIR 未设置：手机页需要随应用分发 dist-mobile（开发态先跑 npm run mobile:build）")
 	}
-	root, err := mobileWebRootFn()
+	st, err := os.Stat(diskDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("HAI_MOBILE_WEB_DIR=%q 不可用: %w（开发态先跑 npm run mobile:build）", diskDir, err)
 	}
-	return http.Dir(root), nil
+	if !st.IsDir() {
+		return nil, fmt.Errorf("HAI_MOBILE_WEB_DIR=%q 不是目录", diskDir)
+	}
+	if st, err := os.Stat(filepath.Join(diskDir, "index.html")); err != nil || st.IsDir() {
+		return nil, fmt.Errorf("HAI_MOBILE_WEB_DIR=%q 缺少 index.html（mobile:build 会把 mobile.html 改名）", diskDir)
+	}
+	return http.Dir(diskDir), nil
 }
 
 func (s *mobileServer) close() {
