@@ -25,6 +25,7 @@ import type { ReactNode } from 'react'
 import { subscribeUI } from '../../lib/uiBus'
 import { t as i18nT } from '../../i18n'
 import { registerSurface, unregisterSurface } from '../registry'
+import { setSurfaceEntryIndex } from './entries'
 import { clearSurfaceLoadError, setSurfaceLoadError } from './status'
 import type { SurfaceIndex, SurfaceIndexItem, SurfaceCommandReply } from '../../transport/types'
 import type { DistributiveOmit, HostApi, SurfaceKind, SurfaceProvider, SurfaceTab } from '../types'
@@ -94,6 +95,22 @@ interface LoadedPlugin {
 
 /** 已加载的插件（id → 句柄）。模块级单例：注册表也是单例，两者生命周期必须一致。 */
 const loaded = new Map<string, LoadedPlugin>()
+
+/** 最近一次 sync 用的 base（渲染层拼入口图标 URL 时沿用同一条来源，不另猜协议）。 */
+let currentBase: SurfaceBaseUrl | undefined
+
+/**
+ * pluginAssetUrl 插件目录内某个文件的 URL（入口图标 / 声明图标）。
+ *
+ * 与 applyManifest 拼入口时**同一份 base**：生产是 `hai-surface://<id>`，探针里由
+ * setPluginBaseUrlForTest 换成同源静态目录。两处各拼一次迟早漂移（一处带 hash 一处不带、
+ * 一处用了 `<id>` 一处忘了），而图标的失败形态是「空白 12px」—— 最难被注意到的那类。
+ */
+export function pluginAssetUrl(id: string, rel: string): string {
+  if (!id || !rel) return ''
+  const base = baseOf(currentBase ?? surfaceBaseUrl, id)
+  return base ? `${base}/${rel.replace(/^\/+/, '')}` : ''
+}
 
 /** 免疫：正在进行的 sync（并发调用来一个就排队，绝不两个同时 import 同一个 id）。 */
 let syncChain: Promise<SyncReport> = Promise.resolve({ loaded: [], unloaded: [], skipped: [], failed: [] })
@@ -314,6 +331,11 @@ export function isPluginLoaded(id: string): boolean {
 
 async function syncOnce(index: SurfaceIndex, baseUrl: SurfaceBaseUrl, deps: PluginHostDeps): Promise<SyncReport> {
   const report: SyncReport = { loaded: [], unloaded: [], skipped: [], failed: [] }
+  currentBase = baseUrl
+  // 入口快照必须在**注册/卸载之前**更新：宿主的所有入口都读这一份（R16 / D-2），
+  // 而禁用 → 入口消失、启用 → 入口回来这两件事都发生在同一轮 sync 里。放在这里
+  // 还保证「插件加载失败」时入口照样在（D-3 最后一行：点它能开出墓碑标签）。
+  setSurfaceEntryIndex(index)
   const alive = new Map<string, SurfaceIndexItem>()
   for (const item of index?.items ?? []) {
     if (!item || item.id === undefined) continue

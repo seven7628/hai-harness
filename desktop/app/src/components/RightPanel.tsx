@@ -13,6 +13,9 @@ import { getSurface, subscribeSurfaces } from '../surfaces/registry'
 import { SurfaceBoundary, SurfaceTombstone } from '../surfaces/SurfaceBoundary'
 import type { UnavailableReason } from '../surfaces/SurfaceBoundary'
 import { getSurfaceHealth, isSurfaceDisabled } from '../surfaces/health'
+import { declaredEntryTitle, groupEntryItems, listPluginEntries } from '../surfaces/plugin/entries'
+import type { PluginEntryItem } from '../surfaces/plugin/entries'
+import PluginEntryIcon from '../surfaces/PluginEntryIcon'
 import type { SurfaceKind } from '../surfaces/types'
 import type {} from '../lib/fileStatus'
 import { shortName } from '../lib/shortPath'
@@ -181,6 +184,13 @@ export default function RightPanel() {
   // PR-10：内容区要不要渲染 provider（墓碑判定，见 unavailableReason）。非 null = 渲染占位卡，
   // **不渲染 provider** —— 被禁用的面板连挂载都不该发生（否则又是一次崩溃/白屏）。
   const activeUnavailable = activeTab ? unavailableReason(activeTab) : null
+  // —— R16：插件入口（D-2 的三处宿主渲染点，这里是其中两处）——
+  // 快照由加载器在每轮 sync 里更新（禁用 → 立刻为空），订阅走下面的 subscribeSurfaces，
+  // 不另开 IPC。分组口径与设置页共用 groupEntryItems：一个插件一条「这几个入口」。
+  const pluginEntryGroups = groupEntryItems(listPluginEntries())
+  // 只有一个插件时不画插件名小标：那时「面板插件」这四个字已经说清来源，
+  // 再加一行名字只是把 3 行菜单变成 4 行（多插件时才需要区分「谁的课表」）。
+  const showPluginGroupNames = pluginEntryGroups.length > 1
   // —— PR-09：+N 溢出（让 TABS_MAX_VISIBLE 真正生效）——
   // 可见窗口 = 数组前 TABS_MAX_VISIBLE 个；**激活标签必须始终可见**：它落在窗口外时占据
   // 最后一槽（只换渲染，不动 tabs 数组 —— 数组顺序既是用户打开的顺序，也是 ⌃⇥ 的遍历顺序）。
@@ -224,6 +234,13 @@ export default function RightPanel() {
     setCtxState(next)
     syncPanelMenuOpen()
   }, [syncPanelMenuOpen])
+  // 打开一个插件入口：`params.entry` 是**必填**的（D-2：一个 kind 的多个标签实例靠它区分）。
+  // 不传它 = 三个入口共用一个标签，点第二个会「没反应」（store.tabKeyOf 按 (kind, entry) 认身份）。
+  // 形状 cast 只此一处：TabInstance 联合里没有 plugin 成员（口径见 store 的 toPersistedTab）。
+  const openPluginEntry = useCallback((entry: PluginEntryItem) => {
+    openTab({ kind: entry.kind, params: { entry: entry.entryId } } as unknown as TabSpec)
+    setMenu(null)
+  }, [openTab, setMenu])
   // 卸载时归零：panelMenuOpen 描述的是**本组件子树里**那个菜单，状态不该比它的所有者活得久。
   // RightPanel 真的会卸载（App 的 <main> 由 mainReady 控制，启动/重载期间不渲染子树）——
   // 若那一次卸载恰好带着开着的菜单，残留的 true 会让下一次挂载的 WebTab **永远**隐藏原生视图
@@ -411,8 +428,14 @@ export default function RightPanel() {
       return mode === 'preview' ? `${name} · ${t('rp.tab.previewTag')}` : name
     }
     if (tab.kind === 'web') return getSurface('web')?.title(tab, t) ?? kindLabel('web')
-    // 插件 kind（PR-12 起进 store）没有 i18n 文案：面板名从 provider.title 取，
-    // 与墓碑/CrashCard 的标题保持同一来源；provider 缺失时再退到 kind 本身。
+    // 插件 kind（PR-12 起进 store）没有 i18n 文案。
+    // R16 起**已声明的入口**由 manifest 定标题：菜单项叫「课表」而标签叫别的，用户会以为点错。
+    // 默认入口（零 entries）与插件自己 openTab 的标签仍归 provider.title —— 那两种情况下主人
+    // 是插件自己，宿主没有声明可以依据（见 surfaces/plugin/entries.ts 的 declaredEntryTitle）。
+    // provider 缺失（加载失败/已卸载）时退回 kind 本身，但**已声明入口**仍显示它的 manifest 标题
+    //（墓碑也不该叫 plugin:course-manager）。
+    const declared = declaredEntryTitle(tab.kind, (tab as { params?: unknown }).params)
+    if (declared) return declared
     const prov = getSurface(tab.kind)
     if (prov) return prov.title(tab, t)
     return kindLabel(tab.kind)
@@ -513,6 +536,11 @@ export default function RightPanel() {
                   data-kind={tab.kind}
                   data-mode={tab.kind === 'file' ? ((tab as FileTabInstance).mode ?? 'source') : undefined}
                   data-view={tab.kind === 'web' ? (tab.viewId ?? (tab.pageId != null ? `p${tab.pageId}` : '')) : ''}
+                  /* R16：同一个插件的多个入口是**多个标签**（kind 相同、entry 不同），
+                     标签条上必须能分辨它们 —— 定位、诊断、e2e 都读这一个属性（与菜单同源）。 */
+                  data-entry={tab.kind.startsWith('plugin:')
+                    ? String((tab as { params?: Record<string, unknown> }).params?.entry ?? '')
+                    : undefined}
                   data-sleeping={sleeping ? '1' : undefined}
                   data-pending={pending ? '1' : undefined}
                   data-restoring={restoring ? '1' : undefined}
@@ -628,6 +656,39 @@ export default function RightPanel() {
                   {kindIcon(k)} {kindLabel(k)}
                 </button>
               ))}
+              {/* R16：分组「面板插件」（D-2 的第 1 处宿主渲染点）。
+                  条目来自 surface:index 的 enabled 插件（快照见 surfaces/plugin/entries.ts）：
+                  禁用/卸载 → 下一轮 surfaces_changed 之后这里整组消失，不是灰掉 ——
+                  一个点不动的入口比没有入口更让人以为是坏了。 */}
+              {pluginEntryGroups.length > 0 && (
+                <>
+                  <div className="rtabs-menu-sec" data-plugin-entries role="presentation">
+                    {t('rp.tabs.plugins')}
+                  </div>
+                  {pluginEntryGroups.map((g) => (
+                    <Fragment key={g.pluginId}>
+                      {showPluginGroupNames && (
+                        <div className="rtabs-menu-sub" data-plugin-group={g.pluginId} role="presentation">
+                          {g.pluginName}
+                        </div>
+                      )}
+                      {g.items.map((e) => (
+                        <button
+                          key={`${g.pluginId}:${e.entryId}`}
+                          className="rtabs-mi rtabs-mi-plugin"
+                          data-kind={e.kind}
+                          data-entry={e.entryId}
+                          data-plugin-entry={`${g.pluginId}/${e.entryId}`}
+                          role="menuitem"
+                          onClick={() => openPluginEntry(e)}
+                        >
+                          <PluginEntryIcon entry={e} fallback={kindIcon(e.kind)} /> {e.title}
+                        </button>
+                      ))}
+                    </Fragment>
+                  ))}
+                </>
+              )}
             </div>}
           </div>
           <div className="rp-bias" role="group" aria-label={t('rp.bias.label')}>
@@ -705,14 +766,46 @@ export default function RightPanel() {
                   图标/文案同源），点一下就能开工，用户不必先猜 ＋ 里有什么。
                   PR-10：这份清单已经按注册表的可用性过滤（被禁用的 kind 不再出现）。 */}
               {tabs.length === 0 && (
-                <div className="rtabs-empty-adds" role="group" aria-label={t('rp.tabs.add')}>
-                  {addableKinds().map((k) => (
-                    <button key={k} className="rtabs-empty-add" data-kind={k} onClick={() => openTab({ kind: k } as TabSpec)}>
-                      {kindIcon(k)}
-                      <span>{kindLabel(k)}</span>
-                    </button>
-                  ))}
-                </div>
+                <>
+                  <div className="rtabs-empty-adds" role="group" aria-label={t('rp.tabs.add')}>
+                    {addableKinds().map((k) => (
+                      <button key={k} className="rtabs-empty-add" data-kind={k} onClick={() => openTab({ kind: k } as TabSpec)}>
+                        {kindIcon(k)}
+                        <span>{kindLabel(k)}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {/* R16：D-2 的第 2 处渲染点 —— **空态能力面板**。这是新用户第一次看到右栏
+                      时的全部内容，插件入口不在这里出现 = 「装了插件但界面上什么都看不见」
+                      （D-2 的硬约束正是冲着这个状态写的）。分组口径与 ＋ 菜单同一份。 */}
+                  {pluginEntryGroups.length > 0 && (
+                    <div className="rtabs-empty-plugin" data-plugin-entries>
+                      <div className="rtabs-empty-sec">{t('rp.tabs.plugins')}</div>
+                      {pluginEntryGroups.map((g) => (
+                        <Fragment key={g.pluginId}>
+                          {showPluginGroupNames && (
+                            <div className="rtabs-empty-sub" data-plugin-group={g.pluginId}>{g.pluginName}</div>
+                          )}
+                          <div className="rtabs-empty-adds" role="group" aria-label={g.pluginName}>
+                            {g.items.map((e) => (
+                              <button
+                                key={`${g.pluginId}:${e.entryId}`}
+                                className="rtabs-empty-add"
+                                data-kind={e.kind}
+                                data-entry={e.entryId}
+                                data-plugin-entry={`${g.pluginId}/${e.entryId}`}
+                                onClick={() => openPluginEntry(e)}
+                              >
+                                <PluginEntryIcon entry={e} fallback={kindIcon(e.kind)} />
+                                <span>{e.title}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </Fragment>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

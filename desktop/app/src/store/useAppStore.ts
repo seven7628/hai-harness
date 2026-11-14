@@ -1488,12 +1488,58 @@ export function focusSpec(s: { fileFocus?: FileFocus }): TabSpec {
 //   · file → path + mode：同一文件可同时有 diff 与 source 两个标签（D5），
 //     但同一 (path, mode) 只有一个实例。toolId **不进键** —— 同一文件的 diff 标签只有一个，
 //     再次打开（点另一处改动）只更新它的 toolId/startLine，否则用户会看到两个同名 diff 标签。
+//   · plugin → **provider 说了算**（R16 / PR-00 的 `SurfaceProvider.dedupeKey` 契约）：
+//     `provider.dedupeKey(tab)` 优先；没声明时缺省 = `stableStringify(params ?? {})`。
+//     `entry` 本身就在 params 里，所以「一个入口一个标签」是缺省口径的直接结果，同时又允许
+//     插件用别的 params 表达「同一入口的不同上下文」（例如 `entry=resources, fileId=42`），
+//     或自己声明更粗的去重键（例如按 `courseId` 合并）。
+//     历史：R16 第一版把键硬编码成 `(kind, params.entry)` —— 那会让上面两种合法用法全部失效，
+//     而且**完全忽略** provider 的 dedupeKey（PR-00 就写在契约里的字段）。R16 裁决改回契约。
 //   · 其它 kind → undefined（沿用阶段 1 的「每类每 scope 一个实例」，匹配由调用方按 kind 做）。
 // 路径先归一化（fileKeyOf）：工作区内的绝对路径与相对路径指向同一个文件，必须落同一个标签，
 // 否则「从对话点开」与「从左栏文件树点开」会各开一个（用户看到的就是重复）。
 function tabKeyOf(t: TabInstance | TabSpec, ws: string | undefined): string | undefined {
-  if (t.kind !== 'file' || !t.path) return undefined
-  return `file\u0000${fileKeyOf(t.path, ws)}\u0000${t.mode ?? 'source'}`
+  if (t.kind === 'file' && t.path) return `file\u0000${fileKeyOf(t.path, ws)}\u0000${t.mode ?? 'source'}`
+  const plugin = pluginSpecOf(t)
+  if (!plugin) return undefined
+  // dedupeKey 由 provider 解释自己的标签形状（插件标签是 PluginTabInstance，不在 store 的
+  // TabInstance 联合里 —— 与 toPersistedTab 同一处形状断言，`as never` 只是让泛型参数落地）。
+  // 纪律：dedupeKey **必须是纯函数**（同一 params 恒定同一键）—— 它每次 openTab 都会对
+  // 已有标签重算，不稳定就等于「同一标签时有时无」。
+  const provider = getSurface(plugin.kind)
+  if (provider?.dedupeKey) return `plugin\u0000${plugin.kind}\u0000${provider.dedupeKey(t as never)}`
+  return `plugin\u0000${plugin.kind}\u0000${stableStringify(plugin.params ?? {})}`
+}
+
+/**
+ * 插件标签的 kind + params。**唯一**一处按插件实例的形状读 params（理由与 toPersistedTab
+ * 相同：TabInstance 联合里没有这个成员，也不该为它扩一个不可达分支）。
+ * params 缺失 → undefined（调用方按 `{}` 处理）：与「显式空对象」同一个身份，
+ * 否则同一入口会因为「带个空 params」多出一个标签。
+ */
+function pluginSpecOf(t: TabInstance | TabSpec): { kind: `plugin:${string}`; params?: unknown } | undefined {
+  const kind = (t as { kind: string }).kind
+  if (!isPluginKind(kind)) return undefined
+  const params = (t as { params?: unknown }).params
+  return params === undefined ? { kind } : { kind, params }
+}
+
+/**
+ * stableStringify 键排序的 JSON 序列化（**不引依赖**，10 行）。
+ *
+ * 为什么不用 `JSON.stringify(params)`：对象键序是**插入顺序**，`{a:1,b:2}` 与 `{b:2,a:1}`
+ * 是同一份数据却序列化成两串 —— 同一个标签会被当成两个，用户点两次就多出一个。
+ * 语义与 JSON 对齐：数组保序、对象键排序、`undefined`/函数在对象里被丢掉（与 JSON 一致）、
+ * 非字面量对象（Date/Map…）退回 JSON.stringify（它们的键不是「数据」，排序没有意义）。
+ */
+function stableStringify(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`
+  const proto = Object.getPrototypeOf(v)
+  if (proto !== Object.prototype && proto !== null) return JSON.stringify(v) ?? 'null'
+  const o = v as Record<string, unknown>
+  const keys = Object.keys(o).filter((k) => o[k] !== undefined && typeof o[k] !== 'function').sort()
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`).join(',')}}`
 }
 
 // activePageIdOf：原生视图池里「当前激活的**真实页面**」的 id。
