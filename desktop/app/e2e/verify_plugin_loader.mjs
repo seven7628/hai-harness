@@ -22,9 +22,12 @@
 //   T5 失败可见：快照 surfaces[] 里有 plugin:bad 且带 error（ui_inspect 能看见）。
 //   T6 卸载：index 去掉 → provider 消失、标签变墓碑（PR-10 机制）、事件订阅被清理。
 //   T7 变更/重装：hash 变 → 重新 import（模块求值 +1）；标签恢复渲染。
-//   T8 host.command：未声明 → {ok:false,reason:'denied'} 且**不抛**；声明了 → 走 IPC。
+//   T8 host 形状 = {command, onEvent}（没有 events/openTab/toast）；未声明 → not_declared
+//      且**不抛**；D11 四条声明了也 denied；agent.* → surfaceAgent（带 loader 领的 token）。
 //   T9 全程零 pageerror。
-//   T10 **真模板**（templates/surface）经 loader 注册并在 RightPanel 里渲染 + 用 host.command 取数。
+//   T10 **真模板**（templates/surface）经 loader 注册并在 RightPanel 里渲染，且走通新口子：
+//      问 Agent（session → run）→ agent.delta/done 事件路由（别人的 surface_id 不进）→
+//      composer.quote 只投 uiBus、不产生 IPC。
 //   T11 index 移除插件 → 该 id 前缀（`<id>:`）下的 localStorage 键全清 + 健康记录一起清（R17a）。
 //   T12 **禁用不清理**：enabled:false 的插件离开 index 的 alive 集合，但数据一个都不能少。
 //   T13 **R-20**：同 hash 继续累计；hash 一变 → 整条健康记录清空，标签恢复渲染。
@@ -82,7 +85,8 @@ export const surface = {
     globalThis.__applied = globalThis.__applied || {}
     globalThis.__applied.demo = (globalThis.__applied.demo || 0) + 1
     globalThis.__hostDemo = host
-    host.events.on('surfaces_changed', () => {
+    // P1 的形态：host.onEvent(type, fn) → disposer（没有 host.events 这个对象了）
+    host.onEvent('surfaces_changed', () => {
       globalThis.__hostEvents = (globalThis.__hostEvents || 0) + 1
     })
     surfaces.register({
@@ -150,6 +154,10 @@ const feeds: Array<(line: string) => void> = []
 const surfaceIndexCalls: Array<unknown> = []
 let surfaceCommandCalls: Array<Record<string, unknown>> = []
 let surfaceCommandReply: unknown = { ok: true, data: { workspaces: [{ path: '/mock', title: 'mock' }] } }
+// 插件 Agent 通道（P1b2）：token 与 surfaceAgent 的**假 main**；事件由测试显式 push。
+// 这里只验证「形状 / 闸门 / 过滤」——真 run 要 Go 侧 P1c，探针不假装它成功了。
+const agentCalls: Array<Record<string, unknown>> = []
+const agentFeeds: Array<(p: Record<string, unknown>) => void> = []
 let bootSettings: unknown = null
 // 插件索引（**可变**：T6/T7 通过改它 + 注入 surfaces_changed 模拟安装/卸载/升级）。
 // 初值可以预置（\`localStorage['__probe.index']\`）：T14 的「第二次启动」靠它模拟
@@ -189,6 +197,21 @@ const stub: Record<string, unknown> = {
     surfaceCommandCalls.push(p)
     return surfaceCommandReply
   },
+  surfaceAgentToken: async (id: string) => ({ ok: true, token: 'probe-token-' + id }),
+  surfaceAgent: async (p: Record<string, unknown>) => {
+    agentCalls.push(p)
+    // 回执形状照 wire（§6.6）：值都在 data 里，loader 再归一给插件
+    if (p.name === 'agent.session') return { ok: true, data: { session_id: 'sp-1' } }
+    if (p.name === 'agent.run') return { ok: true, data: { run_id: 'sr-1', session_id: 'sp-1' } }
+    return { ok: true, data: {} }
+  },
+  onSurfaceAgentEvent: (cb: (p: Record<string, unknown>) => void) => {
+    agentFeeds.push(cb)
+    return () => {
+      const i = agentFeeds.indexOf(cb)
+      if (i >= 0) agentFeeds.splice(i, 1)
+    }
+  },
 }
 ;(window as unknown as { desktop: unknown }).desktop = new Proxy(stub, {
   get(t, k) {
@@ -208,6 +231,9 @@ const { setPluginBaseUrlForTest, syncPlugins: syncPluginsForTest } = await impor
 setPluginBaseUrlForTest((id) => \`/e2e/_pluginprobe_run/plugins/\${id}\`)
 const health = await import('../../src/surfaces/health')
 const { subscribeUI } = await import('../../src/lib/uiBus')
+// composer.quote 是**渲染层本地**命令：投递走 uiBus，不经过任何 IPC（§6.2）。
+const quotePayloads: Array<Record<string, unknown>> = []
+subscribeUI('composer_quote', (d: Record<string, unknown>) => quotePayloads.push(d))
 const { useAppStore } = await import('../../src/store/useAppStore')
 
 useAppStore.setState({ workspace: ${JSON.stringify(WS)} })
@@ -280,14 +306,34 @@ w.__probe = {
     const scope = s.activeSessionId || s.workspace || ''
     return (s.tabsByScope[scope]?.tabs ?? []).map((t) => t.kind)
   },
-  command: (name: string) => globalThis.__hostDemo ? globalThis.__hostDemo.command(name, {}) : Promise.resolve({ ok: false, reason: 'no_host' }),
+  command: (name: string, payload?: unknown) => globalThis.__hostDemo ? globalThis.__hostDemo.command(name, payload ?? {}) : Promise.resolve({ ok: false, reason: 'no_host' }),
   setCommandReply: (r: unknown) => { surfaceCommandReply = r },
   commandCalls: () => surfaceCommandCalls,
+  // —— 插件 Agent 通道（P1b2）——
+  agentCalls: () => agentCalls,
+  // 事件从「main → 渲染层」这一跳注入：**含别人的事件**（过滤是 loader 的责任）
+  pushAgentEvent: (p: Record<string, unknown>) => agentFeeds.forEach((f) => f(p)),
+  // host 的形状：新形态 = command + onEvent，且**没有** events/openTab/toast
+  hostShape: () => {
+    const host = globalThis.__hostDemo
+    if (!host) return null
+    return {
+      keys: Object.keys(host).sort(),
+      command: typeof host.command,
+      onEvent: typeof host.onEvent,
+      events: host.events === undefined ? 'undefined' : typeof host.events,
+      openTab: typeof host.openTab,
+      toast: typeof host.toast,
+      apiLeak: ['surfaceAgent', 'surfaceAgentToken', 'onSurfaceAgentEvent'].filter((k) => host[k] !== undefined),
+    }
+  },
+  // manifest.data 闸门：未声明的事件类型必须抛（apply 期间就能发现写错了）
+  subscribeUndeclared: () => { try { globalThis.__hostDemo.onEvent('not_declared', () => {}); return 'no-throw' } catch (e) { return String(e && e.message || e) } },
+  // composer.quote 的投递（真 uiBus；本探针没挂 Composer，所以只看通道里到了什么）
+  quotes: () => quotePayloads,
   moduleRuns: (id: string) => (globalThis.__pluginRuns || {})[id] || 0,
   applied: (id: string) => (globalThis.__applied || {})[id] || 0,
   eventHits: () => globalThis.__hostEvents || 0,
-  // 声明闸门：未声明的 op 必须抛（apply 期间就能发现写错了）
-  subscribeUndeclared: () => { try { globalThis.__hostDemo.events.on('not_declared', () => {}); return 'no-throw' } catch (e) { return String(e && e.message || e) } },
 }
 
 void useAppStore.getState().start(${JSON.stringify(WS)})
@@ -323,7 +369,8 @@ const item = (id, hash, extra = {}) => ({
   hash: hash.padEnd(64, '0').slice(0, 64),
   enabled: true,
   kind: `plugin:${id}`,
-  commands: ['workspace_list'],
+  // workspace_list 是**故意**留着的：D11 说它已禁用，声明了也必须 denied（双保险）
+  commands: ['workspace_list', 'agent.session', 'agent.run'],
   data: ['surfaces_changed'],
   entry: 'panel.js',
   ...(id === 'demo' ? { icon: 'icon.svg' } : {}),
@@ -483,25 +530,46 @@ try {
   check('hash 未变 → 不重复 import（仍是 2 次）', (await page.evaluate(() => window.__probe.moduleRuns('demo'))) === 2,
     String(await page.evaluate(() => window.__probe.moduleRuns('demo'))))
 
-  // ---- T8 host.command：声明闸门 + 真 IPC 路径 ----
-  console.log('\nT8 host.command：未声明 → denied 且不抛；声明了 → 走 surfaceCommand')
+  // ---- T8 host 的形状 + command 闸门（P1b2：command/onEvent 两个口子）----
+  console.log('\nT8 host 形状 = {command,onEvent}；未声明 → not_declared；D11 → denied')
+  const shape = await page.evaluate(() => window.__probe.hostShape())
+  check('host.command 是函数', shape?.command === 'function', JSON.stringify(shape))
+  check('host.onEvent 是函数', shape?.onEvent === 'function', JSON.stringify(shape))
+  check('没有 host.events（D5 之前的形态）', shape?.events === 'undefined', JSON.stringify(shape))
+  check('没有 host.openTab / host.toast（收进 ui.* command）',
+    shape?.openTab === 'undefined' && shape?.toast === 'undefined', JSON.stringify(shape))
+  check('没有把承载 IPC 的对象交给插件', Array.isArray(shape?.apiLeak) && shape.apiLeak.length === 0, JSON.stringify(shape?.apiLeak))
+
   const beforeCalls = (await page.evaluate(() => window.__probe.commandCalls())).length
+  const beforeAgent = (await page.evaluate(() => window.__probe.agentCalls())).length
   const denied = await page.evaluate(() => window.__probe.command('not.declared'))
-  check('未声明命令回 {ok:false, reason:"denied"}', denied?.ok === false && denied?.reason === 'denied', JSON.stringify(denied))
+  check('未声明命令回 {ok:false, reason:"not_declared"}', denied?.ok === false && denied?.reason === 'not_declared', JSON.stringify(denied))
   check('未声明命令没有白走一次 IPC', (await page.evaluate(() => window.__probe.commandCalls())).length === beforeCalls)
-  const ok = await page.evaluate(() => window.__probe.command('workspace_list'))
-  check('已声明命令拿到 IPC 结果（ok:true + data）', ok?.ok === true && !!ok?.data, JSON.stringify(ok))
-  const calls = await page.evaluate(() => window.__probe.commandCalls())
-  const last = calls[calls.length - 1]
-  check('IPC 收到 {id, name, args, workspace}',
-    last?.id === 'demo' && last?.name === 'workspace_list' && last?.workspace === WS, JSON.stringify(last))
+
+  const d11 = await page.evaluate(() => window.__probe.command('workspace_list'))
+  check('D11 的 workspace_list 声明了也 denied', d11?.ok === false && d11?.reason === 'denied', JSON.stringify(d11))
+  check('D11 没有白走一次 IPC', (await page.evaluate(() => window.__probe.commandCalls())).length === beforeCalls)
+
+  // agent.* → 走 surfaceAgent（不是 surface_command），token 由 loader 闭包持有
+  const agentReply = await page.evaluate(() => window.__probe.command('agent.run', { input: '你好' }))
+  check('agent.run 回执把 data 摊到顶层（§5.1）',
+    agentReply?.ok === true && agentReply?.run_id === 'sr-1' && agentReply?.data?.run_id === 'sr-1', JSON.stringify(agentReply))
+  const agentCalls = await page.evaluate(() => window.__probe.agentCalls())
+  const runCall = agentCalls[agentCalls.length - 1]
+  check('surfaceAgent 收到 name/args/token',
+    runCall?.name === 'agent.run' && runCall?.token === 'probe-token-demo' && JSON.stringify(runCall?.args) === JSON.stringify({ input: '你好' }),
+    JSON.stringify(runCall))
+  check('agent.* 没有误走 surface_command', (await page.evaluate(() => window.__probe.commandCalls())).length === beforeCalls,
+    `before=${beforeCalls} now=${(await page.evaluate(() => window.__probe.commandCalls())).length}`)
+  check('agentCalls 只多了一条（没重复投递）', agentCalls.length === beforeAgent + 1, `${beforeAgent} → ${agentCalls.length}`)
+
   const undeclaredOp = await page.evaluate(() => window.__probe.subscribeUndeclared())
-  check('订阅未声明的 op 会抛（不是静默）', undeclaredOp.includes('未在 manifest.data 中声明'), JSON.stringify(undeclaredOp))
+  check('订阅未声明的事件类型会抛（不是静默）', undeclaredOp.includes('未在 manifest.data 中声明'), JSON.stringify(undeclaredOp))
   // 拒绝也要是「值」不是「异常」：再看一眼 pageerror（T9 会整场复查）
   check('T8 之后仍然零 pageerror', errs.length === 0, errs.join(' | '))
 
   // ---- T10 真模板端到端：templates/surface 这个「用户拷走的那份」能装能渲染 ----
-  console.log('\nT10 真模板（templates/surface）经 loader 注册并渲染')
+  console.log('\nT10 真模板（templates/surface）经 loader 注册、渲染，并走通新口子')
   // 索引条目**从真 manifest 派生**（id/kind/entry/commands/data/icon 全部照抄），
   // 只有 hash 是探针给的（生产里由安装器算 sha256）。
   const tplItem = {
@@ -516,6 +584,9 @@ try {
     ...(tplManifest.icon ? { icon: tplManifest.icon } : {}),
   }
   check(`模板 id/kind 自洽（${tplManifest.id} / ${tplManifest.kind}）`, tplManifest.kind === `plugin:${tplManifest.id}`)
+  check('模板 manifest 不再声明 D11 的旧命令',
+    !(tplManifest.commands || []).some((c) => ['workspace_list', 'session_list', 'git_snapshot', 'ui_inspect'].includes(c)),
+    JSON.stringify(tplManifest.commands))
   await setIndex([item('demo', 'h2'), tplItem]) // 去掉两个坏插件，避免它们的 warn 淹没
   await injectChanged()
   await page.waitForFunction((k) => window.__probe.surfaces.has(k), tplItem.kind, { timeout: 8000 }).catch(() => {})
@@ -524,11 +595,47 @@ try {
   await page.waitForSelector('[data-surface="cost-board"]', { timeout: 5000 }).catch(() => {})
   const tplText = await page.evaluate(() => document.querySelector('[data-surface="cost-board"]')?.textContent ?? '')
   check('模板面板在真 RightPanel 里渲染了', tplText.includes('成本看板'), JSON.stringify(tplText))
-  // 模板第一行数据来自 host.command('workspace_list')（真 IPC 路径 → 探针的假回执）
-  check('模板通过 host.command 拿到了数据并画出来', tplText.includes('工作区 1 个'), JSON.stringify(tplText))
-  const tplCalls = await page.evaluate(() => window.__probe.commandCalls())
-  check('那次调用真的走到了 surfaceCommand（id 正确）',
-    tplCalls.some((c) => c.id === tplManifest.id && c.name === 'workspace_list'), JSON.stringify(tplCalls.slice(-3)))
+
+  // ① 问 Agent：session → run（都是 surfaceAgent，不是 surface_command）
+  const tplCallsBefore = (await page.evaluate(() => window.__probe.commandCalls())).length
+  const tplAgentBefore = (await page.evaluate(() => window.__probe.agentCalls())).length
+  await page.click('[data-template-ask]')
+  await page.waitForFunction((n) => window.__probe.agentCalls().length >= n + 2, tplAgentBefore, { timeout: 5000 }).catch(() => {})
+  const tplAgent = (await page.evaluate(() => window.__probe.agentCalls())).slice(tplAgentBefore)
+  check('模板先建会话', tplAgent[0]?.name === 'agent.session' && tplAgent[0]?.token === `probe-token-${tplManifest.id}`, JSON.stringify(tplAgent[0]))
+  check('模板再发起 run（带 session_id + input）',
+    tplAgent[1]?.name === 'agent.run' && tplAgent[1]?.args?.session_id === 'sp-1' && typeof tplAgent[1]?.args?.input === 'string',
+    JSON.stringify(tplAgent[1]))
+  check('模板的 agent.* 没有误走 surface_command', (await page.evaluate(() => window.__probe.commandCalls())).length === tplCallsBefore)
+
+  // ② 事件路由：自己的 delta 进面板、别人的 delta 不进、done 收尾
+  await page.evaluate((id) => {
+    window.__probe.pushAgentEvent({ surface_id: 'someone-else', event: { type: 'agent.delta', seq: 1, run_id: 'sr-x', data: { text: '别人的输出' } } })
+    window.__probe.pushAgentEvent({ surface_id: id, event: { type: 'agent.delta', seq: 2, run_id: 'sr-1', session_id: 'sp-1', data: { text: '流式文本' } } })
+  }, tplManifest.id)
+  await page.waitForSelector('[data-template-answer]', { timeout: 5000 }).catch(() => {})
+  const answer = await page.evaluate(() => document.querySelector('[data-template-answer]')?.textContent ?? '')
+  check('agent.delta 流进了面板', answer.includes('流式文本'), JSON.stringify(answer))
+  check('别的 surface 的事件没进面板', !answer.includes('别人的输出'), JSON.stringify(answer))
+  await page.evaluate((id) => window.__probe.pushAgentEvent({ surface_id: id, event: { type: 'agent.done', seq: 3, run_id: 'sr-1', data: { text: '流式文本' } } }), tplManifest.id)
+  await page.waitForFunction(() => (document.querySelector('[data-template-status]')?.textContent || '') === '完成', null, { timeout: 3000 }).catch(() => {})
+  check('agent.done 把面板收尾（状态 = 完成）',
+    (await page.evaluate(() => document.querySelector('[data-template-status]')?.textContent ?? '')) === '完成')
+
+  // ③ composer.quote：**本层**处理，不产生任何 IPC。
+  //   探针页没有活动会话（没调 newSession），所以这里拿到的正是 §5.1 的 no_session ——
+  //   「成功插入草稿 + chip + 去重」是 verify_composer_quote.mjs 的事（那边有真 Composer 与真会话）。
+  //   这一条只钉「它是本地命令」：既不进 surface_command，也不进 surface_agent。
+  const tplQuotes = (await page.evaluate(() => window.__probe.quotes())).length
+  await page.click('[data-template-quote]')
+  await page.waitForFunction(() => (document.querySelector('[data-template-status]')?.textContent || '').includes('引用失败'), null, { timeout: 3000 }).catch(() => {})
+  const quoteStatus = await page.evaluate(() => document.querySelector('[data-template-status]')?.textContent ?? '')
+  check('无活动会话 → 面板如实显示 no_session', quoteStatus === '引用失败：no_session', JSON.stringify(quoteStatus))
+  check('no_session 不投递（uiBus 一条都没多）', (await page.evaluate(() => window.__probe.quotes())).length === tplQuotes)
+  check('composer.quote 没有走任何 IPC',
+    (await page.evaluate(() => window.__probe.commandCalls())).length === tplCallsBefore &&
+    (await page.evaluate(() => window.__probe.agentCalls())).length === tplAgentBefore + 2,
+    `cmd=${(await page.evaluate(() => window.__probe.commandCalls())).length} agent=${(await page.evaluate(() => window.__probe.agentCalls())).length}`)
   check('模板没有引入页面错误', errs.length === 0, errs.join(' | '))
 
   // ---- T11 卸载即清理（运行中）----

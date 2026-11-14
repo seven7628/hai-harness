@@ -192,6 +192,10 @@ const stub: Record<string, unknown> = {
   surfaceAudit: async () => ({ ok: true, lines: [] }),
   // 插件声明的命令：真值由 --dir 的 manifest 决定，探针只给一份「有数据」的回执。
   surfaceCommand: async () => ({ ok: true, data: { workspaces: [{ path: '/mock', title: 'mock' }] } }),
+  // P1b2：插件 Agent 通道（真 main 的三条；探针不发起 run，只保证形状对得上）
+  surfaceAgentToken: async (id: string) => ({ ok: true, token: 'probe-token-' + id }),
+  surfaceAgent: async () => ({ ok: true, data: {} }),
+  onSurfaceAgentEvent: () => () => {},
 }
 ;(window as unknown as { desktop: unknown }).desktop = new Proxy(stub, {
   get(t, k) { return k in t ? t[k as string] : () => Promise.resolve({ ok: true }) },
