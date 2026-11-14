@@ -7,16 +7,16 @@
  *      null。页面上不再有 `window.desktop`（不是隐藏，是不存在）。
  *   2. `bridge` 是**模块私有常量**：不许挂回 window，不许作为参数/属性传给插件。
  *      插件世界里既没有承载 command/onEvent 的对象，也拿不到这个模块。
- *   3. 插件只能经 `apply({ host })` 拿到 host.command 与事件入口 —— L0 的事件入口仍是
- *      `host.events.on`（§6.3 的 host.onEvent 是 P1 的改名，本轮**不改** loader 的 host
- *      形态，见 surfaces/plugin/loader.ts 的 createHost）。
+ *   3. 插件只能经 `apply({ host })` 拿到 `host.command` 与 `host.onEvent`（§5：只有这两个
+ *      口子）。事件**不复用**全局 onEvent：plugin 的 agent.* 走独立通道
+ *      （`surface:agent-event` → loader 按 surface_id 过滤，见 surfaces/plugin/loader.ts）。
  *
  * 求值时机 = **模块求值即 claim**，早于任何插件加载。推论：探针不能「先 import 再往
  * window.desktop 塞 fake」—— 注入必须发生在 bundle 求值之前（e2e 探针页都在
  * `await import(...)` 之前注入，正是这个原因）。
  */
 
-import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus, SurfaceIndex, SurfaceCommandReply, SurfaceActionResult, SurfaceAuditReply } from '../transport/types'
+import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus, SurfaceIndex, SurfaceCommandReply, SurfaceActionResult, SurfaceAuditReply, SurfaceAgentEventPayload } from '../transport/types'
 
 export type DesktopApi = {
   startupMark: (phase: string) => Promise<boolean>
@@ -33,6 +33,11 @@ export type DesktopApi = {
   surfaceSetEnabled: (id: string, enabled: boolean) => Promise<SurfaceActionResult>
   surfaceRemove: (id: string) => Promise<SurfaceActionResult>
   surfaceAudit: (limit?: number) => Promise<SurfaceAuditReply>
+  // 插件 ↔ Agent 的独立通道（P1b2，§6.6）。三条都只在**这个已 claim 的 api**上：
+  // 插件只拿得到 host.command / host.onEvent，token 由 loader 闭包持有（D6/§8.2）。
+  surfaceAgentToken: (id: string) => Promise<{ ok: boolean; token?: string; reason?: string }>
+  surfaceAgent: (p: { token: string; name: string; args?: unknown }) => Promise<SurfaceCommandReply>
+  onSurfaceAgentEvent: (cb: (p: SurfaceAgentEventPayload) => void) => () => void
   stopBridge: () => Promise<{ ok: boolean }>
   settingsGet: () => Promise<AppSettings>
   settingsSet: (patch: Partial<AppSettings>) => Promise<{ ok: boolean; error?: string; settings?: AppSettings }>

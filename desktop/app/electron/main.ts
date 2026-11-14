@@ -5,6 +5,7 @@ import * as path from 'path'
 import { pathToFileURL } from 'url'
 import * as fs from 'fs'
 import * as os from 'os'
+import { randomUUID } from 'crypto'
 // M0 POC：右侧栏内嵌浏览器视图（WebContentsView + CDP 驱动通路）
 import { showEmbed, setEmbedBounds, reflowEmbed, hideEmbed, embedCommand, embedStatus, destroyEmbed, startDebuggerProxy, stopDebuggerProxy, navigateEmbed, embedGoBack, embedGoForward, embedReload, reloadEmbedTarget, navigateEmbedTarget, openEmbedTarget, activateEmbedTarget, closeEmbedTarget, setEmbedSession, setBusySids } from './embed'
 // 登录同步：一键导入用户 Chrome 登录状态（读+解密 → 写入 Electron partition；见 chrome-import.ts）
@@ -175,6 +176,34 @@ function settleBridgeRequests(error: string): void {
     pendingBridgeRequests.delete(id)
     request.resolve({ ok: false, error })
   }
+}
+
+// —— 插件 ↔ Agent 通道的身份（P1b2，§6.6）——
+//
+// surface_id → token：main 在插件加载前签发（loader 经 `surface:agent-token` 领）。
+// 只存在内存里：token 是**进程内**凭证（重启后没有 run 可续），也不该出现在任何磁盘状态里。
+// 反查表按需扫（插件数量是个位数），不维护第二份真相 —— 两张表总有一天会不一致。
+const surfaceAgentTokens = new Map<string, string>()
+const SURFACE_AGENT_EVENT_CHANNEL = 'surface:agent-event'
+// agent.* 的四条（§6.6 命令表）。manifest 声明的其它名字走 surface_command 那条老路，
+// 不走这里；不在表里的名字一律 denied（插件 Agent 通道不承载宿主的其它命令）。
+const SURFACE_AGENT_COMMANDS = new Set(['agent.session', 'agent.run', 'agent.cancel', 'tool.result'])
+// `agent.run` 的**立即回执**（不是整轮耗时）：Go 建 run 就回，流式输出走事件。
+// 30s 是创建会话 + 取 provider 的宽限；超时只说明 ack 丢了，不代表 run 没起来。
+const SURFACE_AGENT_TIMEOUT_MS = 30_000
+
+function surfaceAgentTokenOf(id: string): string {
+  let token = surfaceAgentTokens.get(id)
+  if (!token) {
+    token = randomUUID()
+    surfaceAgentTokens.set(id, token)
+  }
+  return token
+}
+
+function surfaceIdForToken(token: string): string | undefined {
+  for (const [id, t] of surfaceAgentTokens) if (t === token) return id
+  return undefined
 }
 
 // —— 多实例/数据目录覆盖（2026-09：本地双开验证 mesh 联调用）——
@@ -1161,6 +1190,27 @@ function spawnBridge(bin: string): boolean {
         if (typeof ev.data?.kit?.available === 'boolean') officeKitAvailable = ev.data.kit.available
       } catch { /* 解析失败不影响转发 */ }
     }
+    if (t.includes('"event_type":"surface_agent_event"')) {
+      // 插件 Agent 事件（P1b2，§6.6）：**独立通道**，不进 bridge:event、也不进 16ms 批量缓冲。
+      // 归属判定不在这里做（main 不认识 manifest）：data 原样交给渲染层，loader 按
+      // `surface_id === item.id` 过滤后再分发给 host.onEvent 的监听器。
+      // 但「这个 id 在本进程里从没领过 token」= 没有装载它的 loader 实例（或已卸载且再没加载）
+      // ⇒ 一条都没人会认，丢弃即可；留着只会让 Go 端的错误 id 变成静默广播。
+      let forwarded = false
+      try {
+        const ev = JSON.parse(t) as { data?: { surface_id?: string; event?: unknown } }
+        const data = ev.data
+        if (data && typeof data.surface_id === 'string' && data.event && surfaceAgentTokens.has(data.surface_id)) {
+          forwarded = sendToRenderer(SURFACE_AGENT_EVENT_CHANNEL, data)
+        }
+      } catch {
+        /* 解析失败：没有 surface_id 就没有归属，丢弃比乱投递好 */
+      }
+      // sent=false（窗口不在/已销毁）不用额外处理：sendToRenderer 的语义就是「送不到就丢掉」，
+      // 与上面 bridge:event 的批量缓冲同一口径 —— 窗口生命周期问题不该升级成命令失败。
+      void forwarded
+      return
+    }
     if (t.includes('"event_type":"command_response"')) {
       // 先送完缓冲中的普通事件，再立即直发该同步点行（保序）
       clearFlushTimer()
@@ -1812,6 +1862,45 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
       return { ok: false, reason: /超时|timeout|timed out/i.test(detail) ? 'timeout' : 'error' }
     }
     return { ok: true, data: response.data?.result }
+  })
+  // surface:agent-token / surface:agent —— 插件 ↔ Agent 的通道（P1b2，§6.6）。
+  //
+  // 身份只认 **token**：main 在插件加载前签发 per-plugin token（`crypto.randomUUID()`），
+  // 渲染层的 loader 闭包持有、payload 不带 plugin_id；这里用 token 换回 surface_id 再注入。
+  // 于是「渲染进程能伪造 id」不成立 —— 伪造一个别人的 id 需要别人的 token（main 只发给
+  // 领过它的那个 loader 实例，而插件拿不到 claim 出去的 api 对象，见 src/lib/bridge.ts）。
+  //
+  // 同一个 id 重复领取回**同一个** token：loader 每次加载（含 hash 变化的热更新、卸载后
+  // 重装）都会领一次，作废旧 token 会让在飞的 run 失去凭证 —— 而 main 不做 run 记账，
+  // 无法知道哪些还在飞。进程内有效、不落盘（重启后已无 run 可续）。
+  ipcMain.handle('surface:agent-token', (e, id: unknown) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, reason: 'denied' }
+    const sid = typeof id === 'string' ? id.trim() : ''
+    if (!SURFACE_ID_RE.test(sid)) return { ok: false, reason: 'denied' }
+    return { ok: true, token: surfaceAgentTokenOf(sid) }
+  })
+  ipcMain.handle('surface:agent', async (e, p: { token?: unknown; name?: unknown; args?: unknown } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, reason: 'denied' }
+    const token = typeof p?.token === 'string' ? p.token : ''
+    const name = typeof p?.name === 'string' ? p.name.trim() : ''
+    const sid = token ? surfaceIdForToken(token) : undefined
+    // ② 形状 + 白名单：name 只认 agent.* 的四条（§6.6）。不在这张表里就不是插件 Agent
+    // 通道该承载的东西（旧只读命令 D11 已禁用，不该从这里绕回去）。
+    if (!sid || !SURFACE_AGENT_COMMANDS.has(name)) return { ok: false, reason: 'denied' }
+    const args = p?.args && typeof p.args === 'object' && !Array.isArray(p.args) ? (p.args as Record<string, unknown>) : {}
+    // ③ 与 surface:command 同一条一问一答通道（负 id）：插件 Agent 的回执不进渲染层
+    // 事件流 —— run 的事件走 surface:agent-event 那条独立通道（D9）。
+    const response = await sendBridgeRequest('surface_agent', { id: sid, name, args }, SURFACE_AGENT_TIMEOUT_MS)
+    if (!response.ok) {
+      // §6.5 封闭集合：bridge 给了 code 就用（denied / no_session / quota / …），
+      // 没给（超时 / 进程不在）按 error 文案分成 timeout / error —— 与 surface:command 同口径。
+      if (response.code) return { ok: false, reason: response.code }
+      const detail = response.error ?? ''
+      return { ok: false, reason: /超时|timeout|timed out/i.test(detail) ? 'timeout' : 'error' }
+    }
+    // 回执**原样**带回：data 里的 session_id / run_id 由 Go 决定，main 不解释也不改写
+    //（P1c 之前这里就没有 Go 端，收到 ok 也只能是探针/桩）。
+    return { ok: true, data: response.data }
   })
   // surface:set-enabled / surface:remove / surface:audit —— 插件页（PR-14b）的三条。
   //

@@ -96,6 +96,13 @@ export interface ExternalSkillsImportResult {
 // code 是给渲染层分流用的（EXISTS 同名冲突 / DENIED 越界或受保护 / INVALID_NAME …）。
 export type FsOpReply = { ok: boolean; path?: string; error?: string; code?: string }
 
+// 插件 Agent 事件（P1b2）的信封：main 把 bridge 的 `surface_agent_event.data` **原样**转发
+// （`{surface_id, event}`），本条只声明形状 —— 事件内容的真相在 docs/creator-mode-v0.1/09-agent-bridge.md §6.6。
+export interface SurfaceAgentEventPayload {
+  surface_id: string
+  event: { type: string; seq?: number; run_id?: string; session_id?: string; data?: unknown }
+}
+
 // 输入历史本地文件的 wire 形状（与 src/transport/types.ts / electron/input-history.ts 同构）
 export interface InputHistoryWireItem {
   text: string
@@ -126,6 +133,21 @@ const api = {
   surfaceSetEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('surface:set-enabled', { id, enabled }),
   surfaceRemove: (id: string) => ipcRenderer.invoke('surface:remove', { id }),
   surfaceAudit: (limit?: number) => ipcRenderer.invoke('surface:audit', { limit }),
+  // —— P1b2：插件 ↔ Agent 的**独立**通道（09-agent-bridge §6.6，D9）——
+  //
+  // 三条都只对**已 claim 的宿主 api**（= src/lib/bridge.ts 的模块私有对象）可见：
+  // 插件世界里没有 window.desktop，`__haiClaimHostApi()` 也已返回 null，所以插件拿不到
+  // token、也订阅不到事件流 —— 它只有 loader 给的那两个函数（§5）。
+  //
+  // 不复用 `bridge:event`：那条流是「会话事实」（进 transcript / 视图构建 / checkpoint），
+  // 插件 run 的增量只是派生副本（§6.3）。混流的症状是插件输出被当成真会话内容落盘。
+  surfaceAgentToken: (id: string) => ipcRenderer.invoke('surface:agent-token', id) as Promise<{ ok: boolean; token?: string; reason?: string }>,
+  surfaceAgent: (p: { token: string; name: string; args?: unknown }) => ipcRenderer.invoke('surface:agent', p) as Promise<{ ok: boolean; reason?: string; data?: unknown }>,
+  onSurfaceAgentEvent: (cb: (p: SurfaceAgentEventPayload) => void) => {
+    const listener = (_e: unknown, payload: SurfaceAgentEventPayload) => cb(payload)
+    ipcRenderer.on('surface:agent-event', listener)
+    return () => ipcRenderer.removeListener('surface:agent-event', listener)
+  },
   stopBridge: () => ipcRenderer.invoke('bridge:stop'),
   settingsGet: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   settingsSet: (patch: Partial<AppSettings>) => ipcRenderer.invoke('settings:set', patch) as Promise<{ ok: boolean; error?: string; settings?: AppSettings }>,
@@ -355,6 +377,10 @@ export interface HostApi {
   embedNavigateTarget: (id: string, url: string) => Promise<{ ok: boolean; error?: string }>
   onEvent: (cb: (payload: string | { lines: string[] }) => void) => () => void
   onExit: (cb: (info: BridgeExitInfo) => void) => () => void
+  // 插件 ↔ Agent 的独立通道（P1b2，§6.6）。**只给已 claim 的宿主**：插件侧拿不到这三个。
+  surfaceAgentToken: (id: string) => Promise<{ ok: boolean; token?: string; reason?: string }>
+  surfaceAgent: (p: { token: string; name: string; args?: unknown }) => Promise<{ ok: boolean; reason?: string; data?: unknown }>
+  onSurfaceAgentEvent: (cb: (p: SurfaceAgentEventPayload) => void) => () => void
   // hub:// 深链（P4-02）：返回取消订阅。
   onHubDeepLink: (cb: (url: string) => void) => () => void
   hubTakeDeepLinks: () => Promise<string[]>

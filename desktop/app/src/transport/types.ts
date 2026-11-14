@@ -773,6 +773,29 @@ export interface SurfaceCommandReply {
 }
 
 /**
+ * 插件事件信封（09-agent-bridge §5.2）：`agent.*` / `tool.call` / 本地 ui op 共用。
+ *
+ * `seq` 每个 run 单调递增、终态（agent.done / agent.error）之后停投；run_id / session_id
+ * 只在 agent.* 事件上出现（本地 op 没有 run 归属）。
+ */
+export interface SurfaceEvent {
+  type: string
+  seq?: number
+  run_id?: string
+  session_id?: string
+  data?: unknown
+}
+
+/**
+ * 插件 Agent 事件的信封（P1b2，§6.6）：main 把 bridge 的 `surface_agent_event.data`
+ * **原样**转发到 `surface:agent-event`，所以形状就是这两个键。
+ */
+export interface SurfaceAgentEventPayload {
+  surface_id: string
+  event: SurfaceEvent
+}
+
+/**
  * 插件页（PR-14b）三条写/读操作的回执。
  *
  * reason 是封闭集合（unknown_id / bad_request / error，外加不可信来源的 denied）：
