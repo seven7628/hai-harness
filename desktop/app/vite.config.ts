@@ -21,7 +21,32 @@ const input: Record<string, string> = mobileOnly
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: './',
-  server: { port: devPort, strictPort: true },
+  server: {
+    port: devPort,
+    strictPort: true,
+    // —— 2026-11-13：别盯「测试产物」目录 ——
+    //
+    // vite 的 watcher 盯着整个 root（desktop/app）。别的会话在这个仓库里跑
+    // E2E 探针/截图，产物落在 `e2e/_*probe_run/`、`e2e/*_shots/` 里 ⇒
+    // **我们这个正在用的渲染进程每被写一次就整页重载一次**。
+    //
+    // 实测：滚动缓冲里 25 分钟内 **152 次** `page reload`（≈每分钟 5–8 次）。
+    // 每次重载都要重跑一遍会话恢复（解析 1000 张卡 + 重建 React 树）⇒
+    // 每次留几十 MB 垃圾；而我们没设 `--max-old-space-size` ⇒ V8 没有理由
+    // 回收 ⇒ 渲染进程堆单调上涨 ⇒ 机器进入换页颠簸 ⇒ **整个应用点不动**
+    // （2026-11-13 的真实卡死事故）。
+    //
+    // 这些目录**不是应用源码** ⇒ 忽略它们不影响任何功能。
+    ignored: [
+      '**/e2e/**',
+      '**/release/**',
+      '**/dist/**',
+      '**/dist-mobile/**',
+      '**/*_shots/**',
+      '**/*_run/**',
+      '**/.go-code/**',
+    ],
+  },
   build: {
     outDir: mobileOnly ? 'dist-mobile' : 'dist',
     rollupOptions: { input },
