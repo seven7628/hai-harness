@@ -271,6 +271,15 @@ func TestMobileWebRejectsUnsafeZipEntries(t *testing.T) {
 	if err := extractMobileWebZip(zipWith(t, map[string]string{"assets/a.js": "x"}), t.TempDir()); err == nil {
 		t.Fatal("缺 index.html 应报错")
 	}
+
+	// 无害的 "./" 根条目（zip -r 不加 -D 时的产物）不该让整包失败
+	dst := t.TempDir()
+	if err := extractMobileWebZip(zipWith(t, map[string]string{"./": "", "index.html": "<html></html>"}), dst); err != nil {
+		t.Fatalf("./ 根条目应被跳过: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "index.html")); err != nil {
+		t.Fatalf("index.html 没解出来: %v", err)
+	}
 }
 
 // 解压失败必须显式报错，不能静默 404（/m/ 返回 500 + 原因）。

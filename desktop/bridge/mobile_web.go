@@ -170,6 +170,10 @@ func extractMobileWebZip(zipBytes []byte, dst string) error {
 		return fmt.Errorf("读 zip 失败: %w", err)
 	}
 	for _, f := range zr.File {
+		// 有些打包工具会写一个 "./" 根条目（zip -r 不加 -D 时常见）：无害，跳过。
+		if path.Clean(f.Name) == "." {
+			continue
+		}
 		rel, ok := safeMobileWebPath(f.Name)
 		if !ok {
 			return fmt.Errorf("zip 条目路径非法: %q", f.Name)
