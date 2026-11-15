@@ -481,6 +481,10 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 
 **已验证的端到端**：临时插件 `host.command('agent.session')` → token → preload/main → Go `surface_agent` → `plugin-sessions/<id>/sessions` → 左栏插件分组；`workspace_list` 即使声明也 `denied`（D11）。
 
+**收口验收（2026-11-15）**：完整 `npm test` **exit 0**（含 `e2e:agent-session` 真 Electron 22 项）；`go test ./desktop/bridge -count=1` **ok 180s**；`go test ./session/...` ok；`tsc` 0；eslint 0 error / 57 warning；host-boundary 29；creator-mode 606+。
+
+> 注：`link-check:embed-v2` 指向仓库根 `scripts/`（`.gitignore` 忽略的本地脚本），本轮为跑完整链在本地补了适配器新增的 `afterResponse()`，未入库；干净检出需先准备该脚本。
+
 **P1 仍欠**：
 1. 空会话不持久化：`agent.session` 建完未发消息时没有 `<sid>.jsonl`，重启后该 id 会丢（D4 边缘路径；下一轮补 session index/空记录）。
 2. 安装期 D11 校验：目前只在运行期 `denied`，安装器尚未对四条旧命令名做“声明即拒绝”。
