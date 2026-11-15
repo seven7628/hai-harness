@@ -177,9 +177,11 @@ try {
   const mainJs = path.join(APP, 'dist-electron', 'main.js')
   const bridge = path.join(APP, 'dist', 'hai-bridge')
   if (!fs.existsSync(ELECTRON)) fail(`找不到 electron：${ELECTRON}`)
-  // 缺产物就地构建（与 verify_external_surface_electron.mjs 同一条；不碰 5173/dev server）。
-  if (!fs.existsSync(mainJs)) {
-    console.log('  构建 dist-electron（npm run build:electron）…')
+  // electron 与 Go 桥**始终重建**：这两条正是本探针要验的边界（preload token / surface_agent）。
+  // 只在缺失时构建会让「源码已改、dist-electron 还是旧 preload」的全链跑法红成
+  // agent.session=denied（本探针在完整 npm test 里真踩过）；单独跑却可能绿，属于假象。
+  console.log('  构建 dist-electron（npm run build:electron）…')
+  {
     const b = spawnSync('npm', ['run', 'build:electron'], { cwd: APP, encoding: 'utf8' })
     if (b.status !== 0) fail(`build:electron 失败：\n${b.stdout}\n${b.stderr}`)
   }
@@ -188,8 +190,9 @@ try {
     const b = spawnSync('npx', ['vite', 'build'], { cwd: APP, encoding: 'utf8' })
     if (b.status !== 0) fail(`vite build 失败：\n${b.stdout}\n${b.stderr}`)
   }
-  if (!fs.existsSync(bridge)) {
-    console.log('  构建桥（go build ./desktop/bridge）…')
+  // Go 桥同理：surface_agent 的 handler 是 P1c 才加的，旧二进制会让本探针全红。
+  console.log('  构建桥（go build ./desktop/bridge）…')
+  {
     const b = spawnSync('go', ['build', '-o', 'desktop/app/dist/hai-bridge', './desktop/bridge'], { cwd: REPO, encoding: 'utf8' })
     if (b.status !== 0) fail(`go build 失败：\n${b.stdout}\n${b.stderr}`)
   }
