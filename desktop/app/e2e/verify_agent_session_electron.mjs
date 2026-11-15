@@ -106,14 +106,7 @@ export const surface = {
           } catch (e) {
             merge({ session: { ok: false, session_id: '', reason: '', threw: String(e && e.message || e) } })
           }
-          // ③ D11：workspace_list 声明了也必须 denied（旧只读命令能读真实项目元数据）。
-          try {
-            const r = await host.command('workspace_list', {})
-            merge({ workspaceList: { ok: r.ok === true, reason: typeof r.reason === 'string' ? r.reason : '' } })
-          } catch (e) {
-            merge({ workspaceList: { ok: true, reason: 'threw:' + String(e && e.message || e) } })
-          }
-          // ④ agent.run：**不调**。它要真模型（Provider/密钥/网络），本机不该依赖。
+          // ③ agent.run：**不调**。它要真模型（Provider/密钥/网络），本机不该依赖。
           merge({ step: 'done' })
         })()
         return () => { alive = false }
@@ -150,9 +143,10 @@ const MANIFEST = {
   kind: PLUGIN_KIND,
   entry: 'panel.js',
   placement: 'plugin',
-  // workspace_list 是**故意**声明的：D11 的判据是「声明了也 denied」。不声明它测到的
-  // 只是 manifest 闸门（not_declared），那是另一条断言（见 test-surface-host T2）。
-  commands: ['agent.session', 'workspace_list', 'composer.quote'],
+  // 只声明仍可用的命令：四条旧命令在**安装期**就被拒（P1e-B），不能再拿
+  // workspace_list 来测运行期 denied —— 那条由 verify_plugin_loader 的假 index 覆盖，
+  // 真安装器拒绝见 T2b。
+  commands: ['agent.session', 'composer.quote'],
   data: ['surfaces_changed'],
   entries: [{ id: 'probe', title: '会话探针', order: 10 }],
 }
@@ -161,11 +155,12 @@ let code = 0
 let app = null
 let HOME = ''
 let PLUGIN_DIR = ''
+let LEGACY_DIR = ''
 let WS = ''
 let USER_DATA = ''
 const cleanup = () => {
   try { app?.close() } catch { /* 已退出 */ }
-  for (const d of [HOME, PLUGIN_DIR, WS, USER_DATA]) {
+  for (const d of [HOME, PLUGIN_DIR, LEGACY_DIR, WS, USER_DATA]) {
     if (!d) continue
     try { fs.rmSync(d, { recursive: true, force: true }) } catch { /* 尽力 */ }
   }
@@ -238,6 +233,36 @@ try {
   check('index 里恰好这一条插件（enabled）',
     indexItems.length === 1 && indexItems[0].id === PLUGIN_ID && indexItems[0].enabled === true,
     JSON.stringify(indexItems))
+
+  // ---- T2b：安装期 D11（P1e-B）—— 真安装器必须拒绝旧命令 ----
+  //
+  // 旧命令不能再靠「装进去、运行期 denied」验：P1e-B 之后它连 index 都进不去。
+  // 用同一条外部安装链 + `-expect=rejected`，断言回执、index 不新增、目录不落盘。
+  console.log('\nT2b 真安装器拒绝 D11 旧命令（workspace_list）')
+  LEGACY_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-e2e-legacy-'))
+  fs.writeFileSync(path.join(LEGACY_DIR, 'surface.json'), JSON.stringify({
+    id: 'legacy-panel',
+    name: { zh: '旧命令面板', en: 'Legacy panel' },
+    version: '1.0.0',
+    api: 1,
+    kind: 'plugin:legacy-panel',
+    entry: 'panel.js',
+    placement: 'plugin',
+    commands: ['agent.session', 'workspace_list'],
+  }, null, 2) + '\n')
+  fs.writeFileSync(path.join(LEGACY_DIR, 'panel.js'), 'export default () => null\n')
+  const legacy = spawnSync('go', ['test', './desktop/bridge', '-run', 'TestSurfaceInstallExternal',
+    '-count=1', '-v', '-args', `-dir=${LEGACY_DIR}`, `-home=${HOME}`, '-expect=rejected'],
+  { cwd: REPO, encoding: 'utf8' })
+  const legacyOut = (legacy.stdout || '') + (legacy.stderr || '')
+  check('安装器回执 status=rejected', /"status": "rejected"/.test(legacyOut),
+    legacyOut.split('\n').slice(-4).join(' | '))
+  check('拒绝理由点名 workspace_list + D11',
+    legacyOut.includes('workspace_list') && legacyOut.includes('D11 已下线'),
+    legacyOut.split('\n').slice(-4).join(' | '))
+  const afterItems = JSON.parse(fs.readFileSync(indexPath, 'utf8')).items
+  check('拒绝后 index 仍只有原插件（没有脏记录）',
+    afterItems.length === 1 && afterItems[0].id === PLUGIN_ID, JSON.stringify(afterItems))
 
   // ---- T3：启动真 Electron（真 preload / 真桥 / 真协议）----
   console.log('\nT3 启动真 Electron（HAI_DATA_DIR 多实例模式）')
@@ -348,35 +373,32 @@ try {
     fs.existsSync(path.join(sessionsDir, `plugin-${PLUGIN_ID}`)), `plugin-${PLUGIN_ID}`)
   check('会话在插件 store 里有自己的子树（sessions/<sid>/）',
     fs.existsSync(path.join(sessionsDir, sid)), sid)
-  // 空会话**还没有** jsonl：Go 侧 Session 只在有消息后 persist（surface_agent_test.go 的
-  // 同名断言写着「空会话此刻还没有 jsonl（Session 只在有消息后 persist）」）。本轮按约定
-  // 不跑 agent.run（要真模型），所以这里钉的是**位置纪律**而不是「文件一定存在」：
-  //   · 真落盘了就必须落在这个目录里（名字 = <sid>.jsonl）；
+  // P1e-A：空会话在 agent.session 回执前就 Persist 出 <sid>.jsonl（不再等首条消息）。
+  // 这里只跑 agent.session、不跑 agent.run，正好钉「建完即可重启恢复」的边缘路径：
+  //   · 文件必须存在且非空（不是占位 0 字节）；
   //   · 别的会话的 jsonl 一条都不许出现；
   //   · 绝不许漏进**项目**会话目录（.go-code/sessions/<wsKey>/）。
   const strayFiles = fs.existsSync(sessionsDir)
     ? fs.readdirSync(sessionsDir).filter((n) => n.endsWith('.jsonl') && !n.startsWith(sid))
     : []
   check('sessions/ 里没有别的会话的 jsonl（位置纪律）', strayFiles.length === 0, JSON.stringify(strayFiles))
-  check(`会话 jsonl 路径 = sessions/${sid}.jsonl（空会话允许尚未落盘）`,
-    !fs.existsSync(sessionJsonl) || sessionJsonl === path.join(sessionsDir, `${sid}.jsonl`), sessionJsonl)
+  const jsonlSize = fs.existsSync(sessionJsonl) ? fs.statSync(sessionJsonl).size : 0
+  check(`空会话 jsonl 已落盘：sessions/${sid}.jsonl（P1e-A，${jsonlSize}B）`,
+    jsonlSize > 0, sessionJsonl)
   const projSessionsDir = path.join(HOME, '.go-code', 'sessions')
   const leaked = fs.existsSync(projSessionsDir)
     ? fs.readdirSync(projSessionsDir, { recursive: true }).filter((n) => String(n).includes(sid))
     : []
   check('没有落进**项目**会话目录（.go-code/sessions/…）', leaked.length === 0, JSON.stringify(leaked))
 
-  // ---- T8：D11（声明了也 denied）----
-  console.log('\nT8 D11：workspace_list 声明了也必须 denied')
-  check('workspace_list → ok:false', probe.workspaceList?.ok === false, JSON.stringify(probe.workspaceList))
-  check('reason = denied', probe.workspaceList?.reason === 'denied', String(probe.workspaceList?.reason))
+  // D11 的安装期拒绝见 T2b；运行期 deny 由 verify_plugin_loader 的假 index 覆盖。
 
-  // ---- T9：左栏即时刷新（A 的唯一真机证据）----
+  // ---- T8：左栏即时刷新（A 的唯一真机证据）----
   //
   // 这里能成立**只可能**因为 `agent.session` 成功后宿主自己重拉了 plugin_projects_list：
   // 面板没有发任何会更新左栏的命令，启动水合早就跑完了（T3a 已断言当时是 0 条）。
   // 超时放宽到 15s：一次重拉要过 150ms 去抖 + 两条 IPC 往返。
-  console.log('\nT9 左栏出现这条会话（A：会话即时刷新）')
+  console.log('\nT8 左栏出现这条会话（A：会话即时刷新）')
   const row = await waitFor(async () => {
     const n = await win.locator('.plugin-group .ws-count').first().textContent().catch(() => '')
     if ((n || '').trim() !== '1') return null
