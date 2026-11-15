@@ -1020,7 +1020,7 @@ func validateSurfaceTools(mf surfaceManifest) error {
 		// 不是截断 —— 只能安装期拦，reason 给出实际长度便于作者改短。
 		full := pluginToolName(id, name)
 		if n := len(full); n > maxSurfaceToolFullNameChars {
-			return fmt.Errorf("%s: tools[%d] 的模型侧全名 %q 有 %d 字节，超过 %d 上线（name 或 id 需改短）",
+			return fmt.Errorf("%s: tools[%d] 的模型侧全名 %q 有 %d 字节，超过 %d 上限（name 或 id 需改短）",
 				id, i, full, n, maxSurfaceToolFullNameChars)
 		}
 		if err := validateSurfaceToolInput(id, i, name, t.Input); err != nil {

@@ -1269,11 +1269,11 @@ func TestSurfaceToolsRejectedBeforeWrite(t *testing.T) {
 		},
 		{
 			// id 与 name **各自**都合法（id ≤41、name ≤41），拼出来的
-			// plugin__<id>__<name>（3+41+2+41 = 87）却超过 OpenAI 的 64 —— 这类超限
+			// plugin__<id>__<name>（8+41+2+41 = 92）却超过 OpenAI 的 64 —— 这类超限
 			// 只能在这里拦：provider 侧超长是整轮 400，不是截断。
 			name: "模型侧全名超 64",
 			opts: []fixtureOpt{
-				// id 41 + name 41 都各自合法，拼起来 3+41+2+41 = 87 > 64。
+				// id 41 + name 41 都各自合法，拼起来 8+41+2+41 = 92 > 64。
 				withManifest(func(m map[string]any) { m["id"] = strings.Repeat("i", 41) }),
 				withTools(toolDecl(strings.Repeat("n", 41), "名字很长但各自合法", wantObjSchema())),
 			},
