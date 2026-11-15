@@ -292,4 +292,32 @@ function seed({ pluginProjects, sessions } = {}) {
   ok('空回执：有会话转已卸载，不整组消失')
 }
 
+// ===== 10) schedulePluginProjectsRefresh：150ms 合并一次，且不会自我循环 =====
+{
+  PLUG = pluginHome('c10')
+  seed({ pluginProjects: [{ path: PLUG, plugin_id: 'alpha', sessions: [{ id: 'ps-1', title: 't' }] }] })
+  const countList = () => typesSent().filter((t) => t === 'plugin_projects_list').length
+
+  // 立刻发的那条（启动/手动路径）不许被去抖拖住：左栏第一帧就要有插件分组。
+  useAppStore.getState().loadPluginProjects()
+  assert.equal(countList(), 1, 'loadPluginProjects 必须同步发（不去抖）')
+  await sleep(30)
+  resetSent()
+
+  // 插件连开三个会话 → 合并成一次列表（三次回执会把左栏刷三遍，还会互相覆盖标题）
+  useAppStore.getState().schedulePluginProjectsRefresh()
+  useAppStore.getState().schedulePluginProjectsRefresh()
+  useAppStore.getState().schedulePluginProjectsRefresh()
+  assert.equal(countList(), 0, '150ms 内不该立刻发（合并窗口）')
+  await sleep(220)
+  assert.equal(countList(), 1, '三次请求合并成一次')
+
+  // 回执只更新项目树，**不再**触发本 action：没有任何新请求发出去（否则左栏 60Hz 自刷）
+  const proj = useAppStore.getState().projects.find((p) => p.path === PLUG)
+  assert.ok(proj, '合并后的那一次真的水合了（不是空转）')
+  await sleep(400)
+  assert.equal(countList(), 1, '回执不许再触发一次刷新（无自发自收环）')
+  ok('schedulePluginProjectsRefresh：同步路径不去抖 + 150ms 合并 + 无自循环')
+}
+
 console.log(`\n全部通过（${pass} 项断言组）`)
