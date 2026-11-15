@@ -20,7 +20,7 @@
 | 能力门矩阵 | 真实注册表 + 空/单工具/双工具 | 空 → `[]`；仅 `ui_inspect` → `[]`；仅 `surface_install` → `[]`；双工具 → `[create-mode(enabled=true)]` |
 | 默认开关 | `loadSurfaceToolsEnabled` 缺省 false；本机 `settings.json` 无 `features` | 默认不提供 surface 工具 → 技能不可见 |
 | 可视化开关 | 设置 →「面板插件」→「AI 创建面板」开关 + `settings:set` + `reload_settings` | **已补（2026-11-15）**；默认仍 false，但用户能看到入口 |
-| 发现阶段成本 | description 299 字符；正文 7,517 bytes / 135 行（文件 7,517 bytes）；L3 5 refs + 2 scripts + 3 assets | 清单只注入一句；正文按需加载；细节按需读 L3 |
+| 发现阶段成本 | description 299 字符；正文 7,575 bytes / 135 行（文件 7,575 bytes）；L3 5 refs + 2 scripts + 3 assets | 清单只注入一句；正文按需加载；细节按需读 L3 |
 | 模板可安装 | `TestSurfaceTemplateInstalls` | PASS（`applied` + 幂等 `already_installed`） |
 | 技能最小示例可安装 | 按 SKILL 的 minimum example 造目录跑真安装器 | `status=applied` |
 | 历史使用证据 | 本地 `~/.go-code/events` / `sessions` 检索 `hai-surface-dev`（当时名；现 `create-mode`） | 未发现加载记录；无法用历史会话做效果回归 |
@@ -63,7 +63,7 @@ description 有「插件 / 面板 / 看板 / 右栏 / right panel / surface / da
 - 渐进披露正确：清单只带 name + description，正文按需进入上下文；
 - 模板与最小示例都能过真安装器，不是「文档里的死例子」；
 - 正文覆盖了 no JSX / host.command / onEvent / D11 / entries / tools / 审批 / 自检命令；
-- 技能正文 7.3KB，只在需要时加载，常驻成本主要是 299 字符 description，方向正确。
+- 技能正文 7.4KB，只在需要时加载，常驻成本主要是 299 字符 description，方向正确。
 
 ## 建议
 
@@ -104,7 +104,7 @@ go test ./skills ./agents -run 'Skill' -count=1
 | Level 1：只注入 name + description | `Registry.ListFor` / `Descriptor` | 通过 |
 | Level 2：触发后才加载正文 | `load_skill` → `InstructionsBlock` | 通过 |
 | 正文 <500 行 | 135 行 | 通过 |
-| 正文体积接近官方 <5k tokens 建议 | 7.3KB（约 1.9k tokens）；细节在 L3 | 通过 |
+| 正文体积接近官方 <5k tokens 建议 | 7.4KB（约 1.9k tokens）；细节在 L3 | 通过 |
 | Level 3：references/scripts/assets，一层深 | 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；资源在技能目录内 | 通过（模板仍与根 `templates/surface` 双份，测试防漂移） |
 | 脚本执行而非读入上下文 | `scripts/validate-plugin.mjs` + `scripts/install-smoke.sh`，SKILL 只给路径 | 通过 |
 | 多模型测试 | 无 Haiku/Sonnet/Opus 结果 | **未验证** |
@@ -125,7 +125,7 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 
 ### 这个技能的内容分层：已修
 
-- L2 现在 135 行 / 7.3KB，只留导航 + 六步流程 + 硬规则；L3 按需加载。
+- L2 现在 135 行 / 7.4KB，只留导航 + 六步流程 + 硬规则；L3 按需加载。
 - `references/`：panel-api、tools、entries、examples、verification 五个文件，均一层深。
 - `scripts/`：`validate-plugin.mjs`（静态 preflight）+ `install-smoke.sh`（真安装器）。
 - `assets/`：模板三件套（surface.json / panel.js / icon.svg）随技能分发；根
@@ -148,7 +148,7 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 写成可执行契约。默认值漂移（design true vs code false）就是缺少单一事实源的症状。
 
 > **2026-11-15 落地**：新增 `11-skill-spec.md`（单一规范）；`create-mode` 已拆成
-> `SKILL.md`（135 行 / 7.3KB）+ 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；
+> `SKILL.md`（135 行 / 7.4KB）+ 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；
 > 设置页开关已补；默认值四处统一为 false。下面「建议的规范骨架」保留为方法论记录。
 
 ## 建议的规范骨架（下一步）

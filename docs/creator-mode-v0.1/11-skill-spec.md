@@ -70,7 +70,7 @@ CreateMode 技能是应用内置技能，不只活在仓库里：
 | L3 `assets/` | 模板、图标等 | 单文件 ≤256 KiB | 技能目录内相对路径；不能指向仓库根的外部路径 |
 
 **渐进披露的验收**：删除 `references/` 后 L2 仍能完成最小面板；删除 L2 的导航则模型必须
-知道该读哪个文件。当前 `create-mode` 的 L2 为 135 行 / 7.3 KiB，L3 为 5 个 reference +
+知道该读哪个文件。当前 `create-mode` 的 L2 为 135 行 / 7.4 KiB，L3 为 5 个 reference +
 2 个 script + 3 个 asset。
 
 ## 4. 内容要求
