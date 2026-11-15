@@ -59,8 +59,11 @@ const TOOL = {
 const SCENE_USE_TOOL = 'use-tool'
 const SCENE_CLOSED_PANEL = 'closed-panel'
 const SCENE_WRITE_TOOL = 'write-tool'
+const SCENE_CANCEL = 'cancel'
 // closed-panel 的响应延迟：面板必须**先**关掉，宿主门禁才是一次真实的门禁。
 const CLOSED_PANEL_DELAY_MS = 2500
+// cancel 的响应延迟：留足一个「请求已到上游、run 仍在跑」的窗口给取消按钮。
+const CANCEL_DELAY_MS = 4000
 
 class Precondition extends Error {
   constructor(msg) { super(msg); this.name = 'Precondition'; this.exitCode = 2 }
@@ -115,6 +118,10 @@ const SCENES = {
     toolCall: { id: 'call_3', name: TOOL.write_note, args: '{"text":"note"}' },
     text: ['write ok'],
   },
+  // T14：请求已到上游但迟迟不回，专门给 agent.cancel 制造「在跑」窗口。
+  // 没有被取消时它会在 CANCEL_DELAY_MS 后回 done；取消成功则应在此之前收到
+  // agent.error{cancelled}，且**没有** done —— 两者是互斥终态。
+  [SCENE_CANCEL]: { text: ['cancel should not complete'], delayMs: CANCEL_DELAY_MS },
 }
 
 // contentTexts：一条消息的文本块（字符串 content 与 [{type:'text',text}] 两种线形都认）。
@@ -169,6 +176,9 @@ function startFakeProvider() {
     // 客户端中途断开（桥被 close / run 被取消）不该把探针炸掉：这只是一次记录失败。
     req.on('error', () => {})
     res.on('error', () => {})
+    // 取消会让客户端先断开；清掉延迟写，别让 4s 定时器在探针收尾后还挂着。
+    let timer = null
+    res.on('close', () => { if (timer) clearTimeout(timer) })
     req.on('data', (c) => chunks.push(c))
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf8')
@@ -225,8 +235,8 @@ function startFakeProvider() {
           for (const f of frames) frame(f)
           try { res.write('data: [DONE]\n\n'); res.end() } catch { /* 已断 */ }
         }
-        // 只有 closed-panel 的第一轮才延迟：探针要在这一秒里把面板标签关掉。
-        if (spec.delayMs && !round2) setTimeout(write, spec.delayMs)
+        // closed-panel 要等面板关掉、cancel 要等用户按下取消，两者都需要延迟首轮。
+        if (spec.delayMs && !round2) timer = setTimeout(write, spec.delayMs)
         else write()
         return
       }
@@ -272,8 +282,9 @@ export const surface = {
     const calls = (globalThis.__agentToolCalls = globalThis.__agentToolCalls || [])
     const runs = (globalThis.__agentToolRuns = globalThis.__agentToolRuns || [])
     const terminals = (globalThis.__agentRunTerminals = globalThis.__agentRunTerminals || [])
-    // 复用 ping 建出来的那个会话（D4）：后续三个场景不各建一条会话，左栏也不要长出四行。
-    const shared = (globalThis.__agentSharedSession = globalThis.__agentSharedSession || { sessionId: '' })
+    // 复用 ping 建出来的那个会话（D4）：后续场景不各建一条会话，左栏也不要长出多行。
+    // lastRunId 给 T14 的 cancel 按钮用：它只取消最近一次 agent.run 的回执 id。
+    const shared = (globalThis.__agentSharedSession = globalThis.__agentSharedSession || { sessionId: '', lastRunId: '' })
 
     // ① tool.call（apply 作用域）：原样记下 data，再回 tool.result。
     //    记录里**没有** needs_panel 这一条 = T12 的门禁证据（宿主挡在投递之前，插件没进过回调）。
@@ -310,6 +321,21 @@ export const surface = {
         run_id: str(e.run_id),
         session_id: str(e.session_id),
         text: str(d.text),
+        seq: num(e.seq),
+        at: Date.now(),
+      })
+    })
+    // T14：取消的终态是 agent.error{cancelled}，不是 done。apply 作用域记录，
+    // 面板标签关掉/重挂都不影响证据。
+    host.onEvent('agent.error', (e) => {
+      const d = (e && e.data) || {}
+      terminals.push({
+        run_id: str(e.run_id),
+        session_id: str(e.session_id),
+        text: str(d.text),
+        reason: str(d.reason),
+        message: str(d.message),
+        error: true,
         seq: num(e.seq),
         at: Date.now(),
       })
@@ -409,6 +435,7 @@ export const surface = {
           rec.ack.session_id = str(r && r.session_id)
           rec.ack.reason = str(r && r.reason)
           if (rec.ack.session_id) shared.sessionId = rec.ack.session_id
+          if (rec.ack.run_id) shared.lastRunId = rec.ack.run_id
         } catch (e) {
           rec.threw = String((e && e.message) || e)
         }
@@ -422,8 +449,24 @@ export const surface = {
         },
         h('div', { style: { color: theme.tokens.accent, fontWeight: 600, marginBottom: 6 } }, 'agent.run 探针'),
         h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 } },
-          ['use-tool', 'closed-panel', 'write-tool'].map((s) =>
-            h('button', { key: s, 'data-act': s, onClick: () => { void startRun(s) } }, s))),
+          ['use-tool', 'closed-panel', 'write-tool', 'cancel'].map((s) =>
+            h('button', { key: s, 'data-act': s, onClick: () => { void startRun(s) } }, s)),
+          h('button', {
+            key: 'cancel-run',
+            'data-act': 'cancel-run',
+            onClick: async () => {
+              // T14：取消最近一次 agent.run；回执写 globalThis 供 Node 侧读。
+              const ack = { ok: false, run_id: str(shared.lastRunId), reason: '', threw: '' }
+              try {
+                const r = await host.command('agent.cancel', { run_id: shared.lastRunId })
+                ack.ok = !!r && r.ok === true
+                ack.reason = str(r && r.reason)
+              } catch (e) {
+                ack.threw = String((e && e.message) || e)
+              }
+              globalThis.__agentCancelAck = ack
+            },
+          }, 'cancel-run')),
         h('pre', { 'data-run-json': ${JSON.stringify(PLUGIN_ID)}, style: { whiteSpace: 'pre-wrap', margin: 0 } },
           JSON.stringify(facts, null, 2)),
       )
@@ -960,6 +1003,9 @@ try {
   check('T13 审批卡出现（Auto/Full Access 也不能静默放行）', approveVisible,
     approveVisible ? '' : '15s 内没有「批准」按钮')
   if (!approveVisible) throw new VerifyFailure('T13 强制审批卡未出现')
+  const approvalText = await win.locator('.appr-dock').first().innerText().catch(() => '')
+  check('T13 审批卡显示「插件名 · 工具名」',
+    approvalText.includes('运行探针 · write_note'), approvalText.slice(0, 200))
   check('T13 批准前没有第二轮上游请求',
     chatRequests.filter((r) => r.scene === SCENE_WRITE_TOOL && r.round2 === true).length === 0)
   check('T13 批准前面板没有收到 write_note',
@@ -972,6 +1018,27 @@ try {
   check('T13 工具结果 note 回到模型', writeMsgs.some((t) => t.includes('note')), JSON.stringify(writeMsgs))
   check('T13 终态 done 文本 = write ok',
     (await readTerminals()).some((t) => t.run_id === writeRun.ack.run_id && t.text.includes('write ok')))
+
+  // ---- T14：agent.cancel 在请求进行中中断 ----
+  console.log('\nT14 agent.cancel：上游迟迟不回时取消，终态必须是 error{cancelled}')
+  await win.locator('button[data-act="cancel"]').first().click()
+  const cancelRun = await waitRunAck(SCENE_CANCEL)
+  // 等假上游真的收到请求：此时 run 在跑、响应被 CANCEL_DELAY_MS 按住。
+  await waitFor(() => chatRequests.find((r) => r.scene === SCENE_CANCEL), { label: 'cancel 场景的上游请求' })
+  const cancelAt = Date.now()
+  await win.locator('button[data-act="cancel-run"]').first().click()
+  const cancelAck = await waitFor(() => win.evaluate(() => globalThis.__agentCancelAck || null),
+    { timeout: 10000, label: 'agent.cancel 回执' })
+  check('T14 agent.cancel 回执 ok', cancelAck.ok === true, JSON.stringify(cancelAck))
+  const cancelErr = await waitFor(async () => {
+    const ts = await readTerminals()
+    return ts.find((t) => t.run_id === cancelRun.ack.run_id && t.error && t.reason === 'cancelled') || null
+  }, { timeout: 10000, label: '取消的 agent.error{cancelled}' })
+  check('T14 终态是 agent.error{cancelled}', !!cancelErr, JSON.stringify(cancelErr))
+  const cancelDone = (await readTerminals()).find((t) => t.run_id === cancelRun.ack.run_id && !t.error)
+  check('T14 取消后没有 agent.done（终态互斥）', !cancelDone, JSON.stringify(cancelDone))
+  check('T14 取消在延迟响应到点前生效',
+    Date.now() - cancelAt < CANCEL_DELAY_MS - 500, `elapsed=${Date.now() - cancelAt}ms`)
   check('P2b 全程零 pageerror', errs.length === 0, errs.join(' | '))
 
   await app.close()

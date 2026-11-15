@@ -1252,6 +1252,17 @@ func TestSurfaceAgentRunPersistFailureIsBridgeError(t *testing.T) {
 	if bs := m.get(home, sabotagedSID); bs != nil {
 		t.Fatalf("落盘失败的会话仍留在运行态：%s", sabotagedSID)
 	}
+	// 磁盘上也不许留空壳（P2 hardening）：jsonl、<sid>/agents、空 record 目录都要擦掉。
+	root := pluginSessionsDir("demo")
+	if _, err := os.Stat(filepath.Join(root, sabotagedSID+".jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("落盘失败的 jsonl 仍在：%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, sabotagedSID)); !os.IsNotExist(err) {
+		t.Fatalf("落盘失败的 <sid>/ 子树仍在：%v", err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "plugin-demo")); err == nil && len(entries) > 0 {
+		t.Fatalf("空的 record 目录仍在：%v", entries)
+	}
 	// 配额也要归还：同一 surface 的下一次 run 不该被判并发超限。
 	// 这一段真跑一轮模型，换成假 provider（别让单测依赖网络）。
 	surfaceAgentAssembleHook = prev

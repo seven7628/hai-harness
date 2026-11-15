@@ -4,6 +4,7 @@ import { useT } from '../i18n'
 import type { Approval } from '../store/useAppStore'
 import { UnifiedDiff } from './ui'
 import { prettyArgs } from '../lib/toolSummary'
+import { pluginToolLabel } from '../surfaces/plugin/entries'
 import JsonView from './JsonView'
 
 // 审批（HITL）等待窗口的兜底值（秒）：**只在事件没带 timeout_ms 时**用于倒计时
@@ -50,6 +51,9 @@ export default function ApprovalCard({ a, ownerLabel, folded, onToggleFold }: {
     if (left <= 0) approve(a.id, false)
   }, [left, a.id])
 
+  // P2：插件工具在模型侧叫 `plugin__<id>__<name>`；审批卡展示插件名 · 工具名，
+  // 但不改事件里的 Name（那是 provider 的 function name，契约不能为展示让路）。
+  const displayName = pluginToolLabel(a.name)
   const baseArgs = prettyArgs(a.arguments ?? '')
   const edited = args !== baseArgs
   const diff = a.diff
@@ -77,7 +81,7 @@ export default function ApprovalCard({ a, ownerLabel, folded, onToggleFold }: {
         } : undefined}
       >
         {onToggleFold && <span className="chev" aria-hidden="true">{folded ? '▸' : '▾'}</span>}
-        <span style={{ color: 'var(--warning)' }}>✦</span> {t('approval.pending').replace('{name}', a.name)}
+        <span style={{ color: 'var(--warning)' }}>✦</span> {t('approval.pending').replace('{name}', displayName)}
         {ownerLabel && <span className="appr-owner mono">　{ownerLabel}</span>}
         {path && <span className="mono" style={{ color: 'var(--text-3)', fontWeight: 400, fontSize: 12 }}>　{path}</span>}
         {folded && (

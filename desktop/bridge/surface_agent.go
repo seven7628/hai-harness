@@ -23,8 +23,8 @@ package main
 //     emit 的 dispatchMu + out.writeLine（不自己开 writer），插件事件与同一会话的 SDK
 //     事件行同序。
 //
-// P1 明确不做的：`schema` / `tools` 参数（P2 才启用，出现也不报错）、插件工具
-// （plugin__*，P2）、真实 tool.call/waiter（P1 的 tool.result 只回 ok + 审计）。
+// 历史注释：P1 明确不做 `schema` / `tools` 参数（出现也不报错）；P2 启用了 manifest
+// `tools[]` 与 plugin__* 代理工具，但单次 `agent.run` 的 schema/tools 参数仍未实现。
 
 import (
 	"context"
@@ -38,6 +38,7 @@ import (
 
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/session"
 )
 
 const (
@@ -294,6 +295,55 @@ func dropSurfaceAgentSession(ws *workspaceRuntime, sid string, bs *bridgeSession
 	}
 	if bs != nil {
 		stopSession(bs) // 停 run goroutine，别把半成品留在进程里
+		cleanupFailedSurfaceSessionArtifacts(bs, sid)
+	}
+}
+
+// cleanupFailedSurfaceSessionArtifacts 擦掉一个「建出来但没落盘成功」的会话留下的空壳。
+//
+// createIn 的装配顺序会在磁盘上先建出三样东西：会话 jsonl 的父目录（storeDir）、
+// record 目录（recordStoreFor 会 MkdirAll plugin-<id>/）、子 agent 的 <sid>/agents/
+// （subagentStateStoreAt 的 NewFileStore 会 MkdirAll）。首次 Persist 失败时这些目录已经
+// 在盘上，但会话从未回过 id、也没有任何用户数据 —— 不擦就是永久的空 record 子树，
+// 下次启动还会被当成「有会话的插件」扫出来。
+//
+// 只删**这一个 sid** 的路径，且只删空目录：
+//   - jsonl / <sid>/ 是会话独占，删除安全；
+//   - record 用 DeleteSessionRecord（会连带 .bak/.tmp/sidecar），再只 Remove 空的
+//     plugin-<id>/ —— 别的会话的 record 只要存在，Remove 就会失败，目录保留。
+func cleanupFailedSurfaceSessionArtifacts(bs *bridgeSession, sid string) {
+	if bs == nil || bs.runtime == nil {
+		return
+	}
+	if err := session.ValidateSessionID(sid); err != nil {
+		return
+	}
+	ws := bs.runtime
+	_ = os.RemoveAll(filepath.Join(ws.storeDir, sid+".jsonl"))
+	_ = os.RemoveAll(filepath.Join(ws.sessionsRoot(), sid))
+
+	wsKey := sessionRecordKey(ws, ws.path, sessionOpts{})
+	if recStore, err := recordStoreFor(ws, wsKey); err == nil {
+		_ = recStore.DeleteSessionRecord(context.Background(), wsKey, sid)
+	}
+	removeEmptyDirs(recordDirFor(ws, wsKey))
+}
+
+// removeEmptyDirs 自底向上删空目录；遇到任何文件/非空目录就停在那条路径上。
+// 不能用 RemoveAll：record 目录是同一插件所有会话共用的，误删会带走别人的 record。
+func removeEmptyDirs(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			removeEmptyDirs(filepath.Join(dir, ent.Name()))
+		}
+	}
+	// 重读：子目录可能刚被删空。Remove 对非空目录返回 ENOTEMPTY，正好是我们要的保护。
+	if entries, err = os.ReadDir(dir); err == nil && len(entries) == 0 {
+		_ = os.Remove(dir)
 	}
 }
 

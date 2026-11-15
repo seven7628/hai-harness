@@ -2062,7 +2062,11 @@ func sortUint64WithIDs(nums []uint64, ids []string) {
 
 // removeBlockStore 删除 sidecar（record 删除时同步清理）。
 func removeBlockStore(recordPath string) {
-	_ = os.Remove(blockStorePath(recordPath))
+	store := blockStorePath(recordPath)
+	_ = os.Remove(store)
+	// 索引是 sidecar 的纯加速结构，但也是独立文件：只删 .blocks 会留下
+	// .blocks.idx 孤儿（DeleteSessionRecord 后 record 目录永远非空）。
+	_ = os.Remove(blockIndexPath(store))
 }
 
 // ---------------------------------------------------------------------------

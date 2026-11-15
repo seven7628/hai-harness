@@ -182,6 +182,26 @@ export function listPluginEntries(): PluginEntryItem[] {
 }
 
 /**
+ * 模型侧工具名 → 审批卡上的人类可读名：`plugin__<id>__<name>` → `<插件名> · <工具名>`。
+ *
+ * 为什么在这里解而不是让 Go 改 Name：`Name` 是 provider 请求里的 function name，
+ * 审批决策锚是 id 不是 name；为了展示改协议字段会让「模型看到的」和「日志记的」分叉。
+ * 插件名取 index 快照（已按 zh → en 解析）；插件已卸载/没有入口时退回 id，至少能看出
+ * 是谁的工具。非 `plugin__` 前缀（内置工具）原样返回，不改变现有审批文案。
+ */
+export function pluginToolLabel(name: string): string {
+  const prefix = 'plugin__'
+  if (!name.startsWith(prefix)) return name
+  const rest = name.slice(prefix.length)
+  const sep = rest.indexOf('__')
+  if (sep <= 0 || sep + 2 >= rest.length) return name
+  const pluginId = rest.slice(0, sep)
+  const toolName = rest.slice(sep + 2)
+  const pluginName = menu.find((it) => it.pluginId === pluginId)?.pluginName || pluginId
+  return `${pluginName} · ${toolName}`
+}
+
+/**
  * 标签标题：**已声明**的 entry 用 manifest 的 title。
  *
  * 为什么由宿主定，而不是永远问 provider：菜单是宿主画的，菜单项叫「课表」而标签叫别的，

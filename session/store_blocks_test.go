@@ -224,6 +224,9 @@ func TestSidecarRemovedWithRecord(t *testing.T) {
 	if _, err := os.Stat(blockStorePath(path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sidecar 应被删除，stat err = %v", err)
 	}
+	if _, err := os.Stat(blockIndexPath(blockStorePath(path))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sidecar 索引应被删除，stat err = %v", err)
+	}
 }
 
 // TestSidecarBlockOrderByID 读回时 block 必须按 id 递增排序（与 reducer 的投影一致）。
