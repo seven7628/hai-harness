@@ -165,6 +165,10 @@ const stub: Record<string, unknown> = {
   },
   surfaceAudit: async () => ({ ok: true, lines: [] }),
   surfaceCommand: async () => ({ ok: true, data: { workspaces: [{ path: '/mock', title: 'mock' }] } }),
+  // P1b2：插件 Agent 通道（真 main 的三条；探针不发起 run，只保证形状对得上）
+  surfaceAgentToken: async (id: string) => ({ ok: true, token: 'probe-token-' + id }),
+  surfaceAgent: async () => ({ ok: true, data: {} }),
+  onSurfaceAgentEvent: () => () => {},
 }
 ;(window as unknown as { desktop: unknown }).desktop = new Proxy(stub, {
   get(t, k) {

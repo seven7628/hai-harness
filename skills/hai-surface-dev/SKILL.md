@@ -55,16 +55,61 @@ surface provider.
 - **Export exactly one thing**: `export const surface = { kind, apply({ host, React, surfaces }) }`.
 - Register **your own kind only**, once, inside `apply`:
   `surfaces.register({ kind: 'plugin:x', group: 'plugin', title: () => '…', render: () => h(Panel) })`.
-- Read data only through `host.command(name, payload)` — and declare the names in
-  `surface.json.commands`. The whitelist is authoritative in the host: allowed today are
-  `workspace_list`, `session_list`, `git_snapshot`, `ui_inspect`. Anything else returns
-  `{ ok: false, reason: "denied" }` **and is audited**. It never throws — check `ok`.
-- Subscribe only to ops declared in `surface.json.data` (`host.events.on` throws otherwise).
-  Today the useful one is `surfaces_changed`.
+- **Two functions, that is the whole API**: `host.command(name, payload)` and
+  `host.onEvent(type, fn)`. There is no `host.agent`, no `host.composer`, no `window.desktop`,
+  no module you can import the host from. (Older examples used `host.events.on`,
+  `host.openTab`, `host.toast` — those are gone.)
+- Read/write the world only through `host.command`, and declare every name in
+  `surface.json.commands`. Everything the host offers a plugin:
+
+  | command | payload | reply |
+  |---|---|---|
+  | `agent.session` | `{title?}` | `{ok, session_id}` |
+  | `agent.run` | `{session_id?, input, instructions?}` | `{ok, run_id, session_id}` — the **content** arrives as events |
+  | `agent.cancel` | `{run_id}` | `{ok}` |
+  | `tool.result` | `{call_id, ok, result?, error?}` | `{ok}` — only for plugin tools (P2) |
+  | `composer.quote` | `{text, source?}` | `{ok}` — inserts into the current draft, **never sends** |
+  | `ui.open_tab` | `{kind, params?}` | `{ok}` — `kind` must be your own |
+  | `ui.toast` | `{message}` | `{ok}` |
+
+  Replies are **values, never exceptions**: undeclared name → `{ok:false, reason:"not_declared"}`,
+  refused → `{ok:false, reason:"denied"}`, and a bad quote payload → `invalid_input` / `no_session`.
+  Check `ok` and render the reason.
+- **The four old read-only commands are disabled** (D11): `workspace_list`, `session_list`,
+  `git_snapshot`, `ui_inspect`. They can read real project/session metadata, which a panel must not
+  touch. Declaring them in `commands` does nothing — they answer `denied`. Copy the current
+  `templates/surface/`, do not copy old examples.
+- Subscribe only to event types declared in `surface.json.data` — `host.onEvent` **throws** for an
+  undeclared type (so a typo fails at `apply` time instead of silently never firing). Always keep
+  the disposer and call it on unmount:
+
+  ```js
+  useEffect(() => {
+    const off = host.onEvent('agent.delta', (ev) => setText((t) => t + ev.data.text))
+    return off
+  }, [])
+  ```
+
+  | event | data | notes |
+  |---|---|---|
+  | `agent.delta` | `{text}` | incremental text (host batches ~50 ms) |
+  | `agent.tool` | `{name, status, ok?}` | tool name + status only |
+  | `agent.usage` | `{input_tokens, output_tokens}` | once, near the end |
+  | `agent.done` | `{text}` | terminal |
+  | `agent.error` | `{reason, message?}` | terminal |
+  | `surfaces_changed` | `{}` | plugin installed/enabled/removed (also spelled `surfaces.changed`) |
+
+  `surfaces_changed` needs no token and works even when the agent channel is unavailable; every
+  other event only ever carries **your own** runs (the loader filters by plugin id).
 - Theme from `host.theme()` (`{ mode, tokens: { bg, fg, border, accent, ok, warn, err, info } }`).
   Hardcoded colours break one of the two themes.
-- `host.openTab(spec)` opens another tab; `host.toast(msg)` is a one-line message. Both are
-  optional conveniences — a panel that only renders is a fine panel.
+- Opening another tab is `host.command('ui.open_tab', { kind: 'plugin:<your-id>', params })` —
+  your own kind only. A one-line message is `host.command('ui.toast', { message })`. Both are
+  conveniences: a panel that only renders is a fine panel.
+- Quote into the draft with `host.command('composer.quote', { text, source })`: the text lands in
+  the user's composer, `source` becomes a deletable chip on it, and **nothing is sent** (the user
+  presses Enter). `text` is capped at 8 KiB; empty/oversized text is `invalid_input`, no active
+  session is `no_session`.
 
 ## Multiple entrances (`entries`)
 
@@ -117,7 +162,7 @@ surfaces.register({ kind: 'plugin:hello', group: 'plugin', title: (tab) => title
   pure function of `params`.
 - **The tab title of a declared entry is host-owned**: it comes from `entries[].title` so the menu
   and the tab bar agree. `title()` on the provider is what the host uses for the **default** entry
-  (zero `entries`) and for tabs your plugin opens itself (`host.openTab`) — do not fight it for
+  (zero `entries`) and for tabs your plugin opens itself (`ui.open_tab`) — do not fight it for
   declared entries.
 - Disabling or uninstalling the plugin removes all entrances immediately; tabs already open turn
   into tombstones (the host does that — do not try to close them from the plugin).
@@ -199,6 +244,32 @@ export const surface = {
 ```
 
 with `surface.json`: `{"id":"hello","kind":"plugin:hello","version":"1.0.0","entry":"panel.js","commands":[],"data":[]}`.
+
+A panel that talks to the Agent and quotes into the draft (the shape `templates/surface` ships):
+
+```json
+{
+  "commands": ["agent.session", "agent.run", "agent.cancel", "composer.quote", "ui.toast"],
+  "data": ["agent.delta", "agent.done", "agent.error", "surfaces_changed"]
+}
+```
+
+```js
+apply({ host, React }) {
+  const h = React.createElement
+  let sessionId = ''
+  async function ask(input) {
+    if (!sessionId) {
+      const s = await host.command('agent.session', { title: 'my panel' })
+      if (!s.ok) return s.reason
+      sessionId = s.session_id
+    }
+    const r = await host.command('agent.run', { session_id: sessionId, input })
+    return r.ok ? r.run_id : r.reason
+  }
+  host.onEvent('agent.delta', (ev) => render(ev.data.text)) // plus agent.done / agent.error
+}
+```
 
 ## Tool descriptions stay short
 

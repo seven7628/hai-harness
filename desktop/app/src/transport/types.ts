@@ -749,7 +749,7 @@ export interface SurfaceIndexItem {
   entries: SurfaceEntryDecl[]
   /** 声明的宿主命令（白名单的一半；另一半在 bridge） */
   commands: string[]
-  /** 声明的 ui op（host.events.on 的闸门） */
+  /** 声明的事件 type（host.onEvent 的闸门；含 agent.* 与本地 surfaces_changed） */
   data: string[]
   /** `<id>` 目录内的相对路径（缺省 panel.js；可改名，如 dist/panel.js） */
   entry: string
@@ -770,6 +770,29 @@ export interface SurfaceCommandReply {
   /** 固定集合：denied / unknown_id / timeout / error（渲染层预检也是 denied） */
   reason?: string
   data?: unknown
+}
+
+/**
+ * 插件事件信封（09-agent-bridge §5.2）：`agent.*` / `tool.call` / 本地 ui op 共用。
+ *
+ * `seq` 每个 run 单调递增、终态（agent.done / agent.error）之后停投；run_id / session_id
+ * 只在 agent.* 事件上出现（本地 op 没有 run 归属）。
+ */
+export interface SurfaceEvent {
+  type: string
+  seq?: number
+  run_id?: string
+  session_id?: string
+  data?: unknown
+}
+
+/**
+ * 插件 Agent 事件的信封（P1b2，§6.6）：main 把 bridge 的 `surface_agent_event.data`
+ * **原样**转发到 `surface:agent-event`，所以形状就是这两个键。
+ */
+export interface SurfaceAgentEventPayload {
+  surface_id: string
+  event: SurfaceEvent
 }
 
 /**

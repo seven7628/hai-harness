@@ -29,8 +29,8 @@
 //   C 开发档（vite dev server，真 loader 装一个探针插件）
 //     注入 fake claim → 真 loader.syncPlugins → 探针插件在 apply 里自己断言：
 //     C1 插件里 typeof window.desktop === 'undefined'
-//     C2 host.command 是函数；事件入口是函数（**L0 保持 host.events.on**；§6.3 的
-//        host.onEvent 是 P1 改名，本轮不改 loader 的 host API 形态 —— 这里只如实打印）
+//     C2 host.command 是函数；事件入口是 **host.onEvent**（P1b2 起 §5 的形态：host.events
+//        这个对象已删除，且 onEvent 必须返回 disposer）
 //     C3 宿主没有把承载这两个函数的对象交给插件：host 上没有 api 对象本身；
 //        页面上也没有任何属性指向 api（除 dev-only 的 __haiTestBridge，见下）
 //     C4 未声明命令被 **loader** 拒：返回对象、ok:false（现在的 reason 是 denied；
@@ -276,7 +276,17 @@ export const surface = {
     P.hasDesktopKey = Object.prototype.hasOwnProperty.call(window, 'desktop')
     P.commandType = typeof host.command
     P.onEventType = typeof host.onEvent
-    P.eventsOnType = typeof (host.events && host.events.on)
+    // P1：事件入口是 host.onEvent；host.events 这个对象**不存在**了（D5）
+    P.eventsObjectType = typeof host.events
+    // 声明过的本地事件（manifest.data 里有 surfaces_changed）应当能订阅、并拿回 disposer
+    P.onEventReturnsDisposer = false
+    try {
+      const off = host.onEvent('surfaces_changed', () => {})
+      P.onEventReturnsDisposer = typeof off === 'function'
+      off()
+    } catch (e) {
+      P.onEventError = String(e && e.message || e)
+    }
     P.hostKeys = Object.keys(host).sort()
     // 宿主有没有「顺手」把承载这两个函数的对象塞进来？（L0 的核心契约）
     let leaked = null
@@ -310,7 +320,7 @@ setPluginBaseUrlForTest((id: string) => \`/e2e/_hostboundary_run/plugins/\${id}\
 
 const item = {
   id: 'hb', version: '1.0.0', hash: 'h'.padEnd(64, '0'), enabled: true, kind: 'plugin:hb',
-  commands: ['ping'], data: [], entry: 'panel.js',
+  commands: ['ping'], data: ['surfaces_changed'], entry: 'panel.js',
 }
 const report = await syncPlugins({ version: 1, items: [item] } as never, undefined as never, {}, { authoritativeIndex: true })
 
@@ -373,8 +383,9 @@ async function phaseC() {
     JSON.stringify({ runs: p?.runs, report: c.report }))
   check('C1 插件里 window.desktop === undefined', p.desktopType === 'undefined' && p.hasDesktopKey === false, JSON.stringify(p))
   check('C2 host.command 是函数', p.commandType === 'function', p.commandType)
-  check('C2b 事件入口是函数（L0 = host.events.on）', p.eventsOnType === 'function', p.eventsOnType)
-  notes.push(`host.onEvent = ${p.onEventType}（§6.3 的改名是 P1；L0 保持 host.events.on）`)
+  check('C2b 事件入口是 host.onEvent（函数）', p.onEventType === 'function', p.onEventType)
+  check('C2c host.events 这个对象不存在了（D5：只有两个口子）', p.eventsObjectType === 'undefined', String(p.eventsObjectType))
+  check('C2d onEvent 返回 disposer', p.onEventReturnsDisposer === true, JSON.stringify({ off: p.onEventReturnsDisposer, err: p.onEventError }))
   notes.push(`插件看到的 host keys = ${JSON.stringify(p.hostKeys)}`)
   check('C3 host 上没有承载 command 的对象（插件拿不到 api 本身）', p.leakedHostKey === null, String(p.leakedHostKey))
   // 页面上只允许两个「像 api」的对象：探针自己注入的 fake（用来比对身份）与 dev-only 的读取口。
@@ -384,7 +395,7 @@ async function phaseC() {
     p.undeclared && p.undeclared.ok === false && !p.undeclared.threw
       && ['denied', 'not_declared'].includes(p.undeclared.reason),
     JSON.stringify(p.undeclared))
-  if (p.undeclared?.reason === 'denied') notes.push('未声明命令的 reason 目前是 denied（§6.5 的 not_declared 是 P1）')
+  notes.push(`未声明命令的 reason = ${p.undeclared?.reason}（P1 起就是 §6.5 的 not_declared）`)
   check('C4b 已声明命令走通了（reply ok:true）', p.declared?.ok === true, JSON.stringify(p.declared))
   check('C5 claim 的 surfaceCommand 真的被调用一次', c.surfaceCommandCalls === 1, String(c.surfaceCommandCalls))
   check('C6 dev 档 __haiTestBridge === 交接出去的 api', c.testBridgeIsApi === true, c.testBridgeType)

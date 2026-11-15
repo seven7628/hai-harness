@@ -78,7 +78,7 @@ export interface SurfaceIndexItem {
   entries: SurfaceEntryDecl[]
   /** manifest.commands：插件声明要调的宿主命令（白名单的一半） */
   commands: string[]
-  /** manifest.data：插件声明要订阅的 ui op（host.events.on 的闸门） */
+  /** manifest.data：插件声明要订阅的事件 type（host.onEvent 的闸门；本地 op 走 uiBus） */
   data: string[]
   /** manifest.entry：`<id>` 目录内的相对路径（缺省 panel.js；PR-13 允许改名，如 dist/panel.js） */
   entry: string

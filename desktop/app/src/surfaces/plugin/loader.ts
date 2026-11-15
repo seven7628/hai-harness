@@ -25,14 +25,14 @@
 // 当前 workspace / 上报通道）由 startPluginLoader 的 deps 注入。
 import * as React from 'react'
 import type { ReactNode } from 'react'
-import { subscribeUI } from '../../lib/uiBus'
+import { emitUI, subscribeUI } from '../../lib/uiBus'
 import { t as i18nT } from '../../i18n'
 import { registerSurface, unregisterSurface } from '../registry'
 import { noteSurfaceVersion } from '../health'
 import { setSurfaceEntryIndex } from './entries'
 import { reconcileKnownIds } from './storage'
 import { clearSurfaceLoadError, setSurfaceLoadError } from './status'
-import type { SurfaceIndex, SurfaceIndexItem, SurfaceCommandReply } from '../../transport/types'
+import type { SurfaceIndex, SurfaceIndexItem, SurfaceCommandReply, SurfaceAgentEventPayload, SurfaceEvent } from '../../transport/types'
 import type { DistributiveOmit, HostApi, SurfaceKind, SurfaceProvider, SurfaceTab } from '../types'
 import { bridge } from '../../lib/bridge'
 
@@ -63,11 +63,18 @@ export type SurfaceBaseUrl = string | ((id: string) => string)
 export interface PluginHostDeps {
   /** `ui` 通道上报（渲染层 → bridge 的 `surface_status`）。缺省 = 只登记本地错误。 */
   send?: (op: string, data: unknown) => void
-  /** 插件要开标签（`host.openTab`）。缺省 = 静默不动作（宿主不提供该能力时也不该抛）。 */
+  /** 插件要开标签（`host.command('ui.open_tab')`）。缺省 = 回 `denied`（宿主没这个能力）。 */
   openTab?: (spec: DistributiveOmit<SurfaceTab, 'id'>) => void
+  /** 插件要弹一行提示（`host.command('ui.toast')`）。缺省 = 回 `denied`。 */
   toast?: (msg: string) => void
-  /** 当前 workspace（`host.command` 自动带上：看板类面板的命令大多按工作区取数）。 */
+  /** 当前 workspace（旧的只读命令自动带上：看板类面板的命令大多按工作区取数）。 */
   getWorkspace?: () => string | undefined
+  /**
+   * 当前有没有活动会话（`composer.quote` 的 `no_session` 判据，§5.1）。
+   * 缺省 = 不判定（草稿是工作区作用域的，没有会话时也能写；因此缺省按「有」处理，
+   * 只有宿主明确说没有才拒绝 —— 不给自己造一个假的拒绝理由）。
+   */
+  hasActiveSession?: () => boolean
   /** i18n（缺省用 src/i18n 的 t）。 */
   t?: (key: string, vars?: Record<string, unknown>) => string
   /** 主题（缺省读 <html data-theme> + index.css 的 CSS 变量）。 */
@@ -178,35 +185,193 @@ function iconNode(src: string): ReactNode {
   return React.createElement('img', { src, width: 12, height: 12, alt: '', draggable: false, style: { width: 12, height: 12 } })
 }
 
+/** `composer.quote` 的文本上限（字节，§6.2）：超限 = invalid_input，不截断（截断是静默改用户内容）。 */
+const QUOTE_MAX_BYTES = 8 * 1024
+
 /**
- * createHost 插件唯一的宿主能力面（03 §3.6）。
+ * 本层就地处理的命令（不过桥）：`composer.quote` / `ui.open_tab` / `ui.toast`（§6.2）。
+ * 它们是**渲染层的能力**（草稿、标签、toast 都在这一侧），发给 Go 只会变成一条没人实现的命令。
+ */
+const LOCAL_COMMANDS = new Set(['composer.quote', 'ui.open_tab', 'ui.toast'])
+
+/**
+ * 走 bridge 的插件 Agent 命令（§6.6）。与 main 的 `SURFACE_AGENT_COMMANDS` 同一张表 ——
+ * 两边都在白名单里单独写一遍是刻意的：loader 这一份省一次 IPC，main 那一份才是边界
+ *（渲染层与插件同进程，预检只能算礼貌）。
+ */
+const AGENT_COMMANDS = new Set(['agent.session', 'agent.run', 'agent.cancel', 'tool.result'])
+
+/**
+ * D11：四条旧只读命令**已不可用**（`workspace_list` / `session_list` / `git_snapshot` /
+ * `ui_inspect`）。它们能读真实项目/会话元数据，与「插件不碰 Project」冲突。
+ *
+ * 为什么在 loader 里也拒一次（P1c 的 Go 侧宿主表已经清空、会回 denied）：这是**双保险**
+ * 而不是第二份真相 —— 症状差别很大：Go 侧拒 = 一次 IPC + 一条审计；loader 拒 = 面板上
+ * 立刻出现 denied 且不产生任何跨进程流量。安全的判据宁可重复，不要单点。
+ */
+const D11_DENIED = new Set(['workspace_list', 'session_list', 'git_snapshot', 'ui_inspect'])
+
+/**
+ * 本地事件源：`host.onEvent` 里不需要 token/桥就能工作的那几类（§5.2 的 `surfaces.changed`）。
+ *
+ * 两种拼写都认：uiBus 的 op 叫 `surfaces_changed`（PR-12 起就写进各家 manifest），而
+ * 09 §5.2 的表格写作 `surfaces.changed`。同一个事件的两种拼法，映射到**同一个** op。
+ */
+const LOCAL_EVENT_OPS: Record<string, string> = {
+  surfaces_changed: 'surfaces_changed',
+  'surfaces.changed': 'surfaces_changed',
+}
+
+/** 插件 Agent 通道在渲染层的最小形状（= DesktopApi 的子集；单测可注入假实现）。 */
+export interface SurfaceAgentApi {
+  surfaceAgentToken(id: string): Promise<{ ok: boolean; token?: string; reason?: string }>
+  surfaceAgent(p: { token: string; name: string; args?: unknown }): Promise<SurfaceCommandReply>
+  onSurfaceAgentEvent(cb: (p: SurfaceAgentEventPayload) => void): () => void
+}
+
+/**
+ * 读 `composer.quote` 的载荷（§5.1：`{text, source?}`）。
+ *
+ * 只做**形状与上限**校验，不猜业务：空白文本 = invalid_input，超 8 KiB = invalid_input。
+ * source 允许字符串（人读的来源名）或 `{id?, title?}`（同一个来源的稳定指纹，便于去重），
+ * 其它形状**丢弃而不是报错** —— 多一个未知字段不该让整条引用失败。
+ */
+function readQuotePayload(payload: unknown): { ok: true; text: string; source?: { id?: string; title: string } } | { ok: false } {
+  const p = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {}
+  const text = typeof p.text === 'string' ? p.text.trim() : ''
+  if (!text) return { ok: false }
+  // 字节而不是字符：一个中文字 3 字节，用 length 会放过 3 倍大的东西（与 tabs 的持久化上限同一口径）。
+  if (new TextEncoder().encode(text).length > QUOTE_MAX_BYTES) return { ok: false }
+  const raw = p.source
+  let source: { id?: string; title: string } | undefined
+  if (typeof raw === 'string' && raw.trim()) source = { title: raw.trim().slice(0, 200) }
+  else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const s = raw as Record<string, unknown>
+    const title = typeof s.title === 'string' && s.title.trim() ? s.title.trim().slice(0, 200) : ''
+    const sid = typeof s.id === 'string' && s.id.trim() ? s.id.trim().slice(0, 200) : undefined
+    // title 缺省时用 id 兜底（chip 上总得有个字）；两者都没给就当没来源。
+    const label = title || sid
+    if (label) source = { ...(sid ? { id: sid } : {}), title: label }
+  }
+  return { ok: true, text, ...(source ? { source } : {}) }
+}
+
+/**
+ * createHost 插件唯一的宿主能力面（§5：**只有 `command` 与 `onEvent`**）。
+ *
+ * 刻意没有 `events` / `openTab` / `toast` / `agent` / `composer` 这些具名对象：
+ * `composer.quote` / `ui.*` 全部收进 command（§5 的第一条），这样「插件能做什么」只有
+ * 一处白名单（manifest.commands + manifest.data），审计也只认这一个入口。
  *
  * `disposers` 由调用方持有：插件注册的事件订阅在这里登记撤销函数，卸载时逐个执行 ——
- * 否则 uiBus 的订阅表会在每次「卸载→重装」后多留一份僵尸监听（回调里还引用着上一条
- * 闭包里的 host）。
+ * 否则订阅表会在每次「卸载→重装」后多留一份僵尸监听（回调里还引用着上一条闭包里的 host）。
+ *
+ * `agentApi` 缺省就是 claim 到的那个桥（DesktopApi 的结构子集）。单独留一个参数是为了
+ * 单测能在没有 Electron 的 Node 里注入假实现，**不是**给 store 用的注入口。
  */
-function createHost(item: SurfaceIndexItem, deps: PluginHostDeps, disposers: Array<() => void>): HostApi {
+export function createHost(
+  item: SurfaceIndexItem,
+  deps: PluginHostDeps,
+  disposers: Array<() => void>,
+  agentApi: SurfaceAgentApi | null = bridge as SurfaceAgentApi | null,
+): HostApi {
   const declared = new Set(item.commands)
   const ops = new Set(item.data)
   const id = item.id
   const t = deps.t ?? ((k: string, _v?: Record<string, unknown>) => i18nT(k))
 
+  // token **在加载时领一次**（§8.2：main 签发的 per-plugin 身份，loader 闭包持有）。
+  // 领取失败（浏览器档 / 旧主进程 / bridge 不在）不是致命错：`agent.*` 回 denied，
+  // 本地事件与 composer.quote 照常可用 —— 插件不该因为「今天没有桥」整块白屏。
+  const tokenPromise: Promise<string | undefined> = (async () => {
+    try {
+      const r = await agentApi?.surfaceAgentToken(id)
+      return r?.ok === true && typeof r.token === 'string' && r.token ? r.token : undefined
+    } catch {
+      return undefined
+    }
+  })()
+
+  /** 事件订阅的公共收尾：登记 disposer（卸载时统一回收），返回给插件的对象不变。 */
+  const track = (off: () => void): (() => void) => {
+    disposers.push(off)
+    return off
+  }
+
   return {
     React,
     t,
     theme: deps.theme ?? defaultTheme,
-    // command 的**两级闸门**：这里先按 manifest.commands 拒（省一次 IPC），
-    // bridge 再按「manifest ∩ 宿主只读表」判一次（那才是边界）。返回值恒为对象，
-    // **永不抛** —— 插件在 render 里 `await host.command(...)` 时，一次未捕获拒绝
-    // 就是整棵子树卸载（PR-10 的崩溃卡），而那并不是「越权」该有的表现。
     command: async (name: string, payload?: unknown): Promise<SurfaceCommandReply> => {
-      if (!declared.has(name)) return { ok: false, reason: 'denied' }
-      const api = bridge
+      // 闸门 ①：manifest 声明（§5.1：未声明 = `not_declared`，不是 `denied`）。
+      // 两个错误码分开是刻意的：`not_declared` 是插件自己的 bug（漏写 manifest），
+      // `denied` 是宿主拒绝（越权/D11）—— 面板给用户的提示不一样。
+      if (typeof name !== 'string' || !declared.has(name)) return { ok: false, reason: 'not_declared' }
+      // 闸门 ②：D11 四条旧只读命令（声明了也拒，见 D11_DENIED 的注释）。
+      if (D11_DENIED.has(name)) return { ok: false, reason: 'denied' }
+      const args = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {}
+
+      // —— 本层处理（§6.2：不过桥）——
+      if (LOCAL_COMMANDS.has(name)) {
+        if (name === 'composer.quote') {
+          // 「无活动会话」由宿主注入的探针判定：草稿是会话/工作区作用域的，没有会话时
+          // 插进去的文本没有归处（§5.1 的 no_session）。
+          if (deps.hasActiveSession && !deps.hasActiveSession()) return { ok: false, reason: 'no_session' }
+          const q = readQuotePayload(payload)
+          if (!q.ok) return { ok: false, reason: 'invalid_input' }
+          // 只投递、不代发（D7）：Composer 收到后插进草稿并挂一个可删的来源 chip。
+          emitUI('composer_quote', { text: q.text, ...(q.source ? { source: q.source } : {}) })
+          return { ok: true }
+        }
+        if (name === 'ui.toast') {
+          const msg = typeof args.message === 'string' ? args.message.trim() : ''
+          if (!msg) return { ok: false, reason: 'invalid_input' }
+          if (!deps.toast) return { ok: false, reason: 'denied' }
+          deps.toast(msg.slice(0, 500))
+          return { ok: true }
+        }
+        // ui.open_tab：**只能开自己**的 kind（§5.1）。别人的 kind 会让插件互相顶掉面板，
+        // 而 kind 是 manifest 里写的公开信息 —— 这不是防御不明来源，是守 API 的边界。
+        const kind = typeof args.kind === 'string' ? args.kind.trim() : ''
+        if (!kind) return { ok: false, reason: 'invalid_input' }
+        if (kind !== pluginKindOf(id)) return { ok: false, reason: 'denied' }
+        if (!deps.openTab) return { ok: false, reason: 'denied' }
+        const params = args.params && typeof args.params === 'object' && !Array.isArray(args.params)
+          ? (args.params as Record<string, unknown>)
+          : undefined
+        deps.openTab({ kind, ...(params ? { params } : {}) } as DistributiveOmit<SurfaceTab, 'id'>)
+        return { ok: true }
+      }
+
+      // —— 插件 Agent 通道（§6.6）：agent.session / agent.run / agent.cancel / tool.result ——
+      if (AGENT_COMMANDS.has(name)) {
+        const token = await tokenPromise
+        // 领不到 token = 这个宿主没有 Agent 通道（浏览器档/旧主进程）⇒ denied，不报错。
+        if (!token || !agentApi?.surfaceAgent) return { ok: false, reason: 'denied' }
+        try {
+          const reply = await agentApi.surfaceAgent({ token, name, args })
+          const data = reply?.data
+          if (reply?.ok === true) {
+            // §5.1 承诺插件看到 `{ok, session_id}`，§6.6 的 wire 把值放在 `data` 里 ——
+            // 这里做**一次**归一：摊到回执顶层，同时保留 `data`（想按 wire 形状读也可以）。
+            // 归一放在 loader 而不是让每个插件自己 `r.data ?? r`：那会在几十个面板里分叉。
+            return isPlainRecord(data) ? { ok: true, data, ...data } : { ok: true, data }
+          }
+          return { ok: false, reason: reply?.reason || 'denied' }
+        } catch {
+          // 传输层异常收敛成固定文案（插件拿不到内部错误）。
+          return { ok: false, reason: 'error' }
+        }
+      }
+
+      // —— 其余名字：走 P1 之前的只读命令通道（P1c 起宿主表为空，Go 会回 denied）——
+      // 为什么留着：`surface_command` 本身还在（管理面/审计仍需要它），插件侧小幅收紧
+      // 放在 P1c 一起做；README/模板已经不再声明任何旧命令（D11）。
+      const api = agentApi as SurfaceAgentApi & { surfaceCommand?: (p: { id: string; name: string; args?: Record<string, unknown>; workspace?: string }) => Promise<SurfaceCommandReply> }
       if (!api?.surfaceCommand) return { ok: false, reason: 'denied' }
       try {
-        const args = payload && typeof payload === 'object' && !Array.isArray(payload)
-          ? (payload as Record<string, unknown>)
-          : {}
         const reply = await api.surfaceCommand({
           id,
           name,
@@ -221,22 +386,41 @@ function createHost(item: SurfaceIndexItem, deps: PluginHostDeps, disposers: Arr
         return { ok: false, reason: 'error' }
       }
     },
-    events: {
-      on: (type: string, fn: (e: unknown) => void): (() => void) => {
-        if (!ops.has(type)) throw new Error(`事件未在 manifest.data 中声明：${type}`)
-        const off = subscribeUI(type, fn)
-        disposers.push(off)
-        return off
-      },
-    },
-    openTab: (spec) => {
-      if (!deps.openTab) return
-      deps.openTab(spec)
-    },
-    toast: (msg: string) => {
-      deps.toast?.(String(msg))
+    onEvent: (type: string, fn: (e: SurfaceEvent) => void): (() => void) => {
+      // 闸门：manifest.data 声明（未声明 = 抛，与 events.on 的旧语义一致 ——
+      // 写错的事件名必须在 apply 时炸出来，否则就是「订阅成功但永远收不到」）。
+      if (typeof type !== 'string' || !ops.has(type)) throw new Error(`事件未在 manifest.data 中声明：${type}`)
+      if (typeof fn !== 'function') throw new Error('host.onEvent 的第二个参数必须是函数')
+      // 本地事件（surfaces.changed 一类）：不需要 token，走 uiBus。
+      const localOp = LOCAL_EVENT_OPS[type]
+      if (localOp) {
+        return track(subscribeUI(localOp, (data) => {
+          fn({ type, data })
+        }))
+      }
+      // Agent 事件：订阅**一条**独立通道，把自己的 surface_id 过滤掉之后再按 type 分发。
+      // 过滤在第一跳做（而不是让每个监听器自己判）：插件世界里不该出现别的插件的事件。
+      //
+      // `typeof off === 'function'` 这一道看着多余，其实不是：旧主进程 / 探针的假 api 上
+      // 没有这个方法时，取到的可能是一个**返回 Promise 的兜底函数**。disposer 不是函数
+      // 的后果是插件在 effect cleanup 里 `off()` 直接抛 → 整棵子树卸载（PR-10 的崩溃卡），
+      // 而根因只是「宿主版本老」。
+      if (!agentApi?.onSurfaceAgentEvent) return track(() => {})
+      const raw = agentApi.onSurfaceAgentEvent((p) => {
+        if (!p || p.surface_id !== id) return // 别的插件的事件：连监听器都不进
+        if (!p.event || p.event.type !== type) return
+        fn(p.event)
+      })
+      return track(typeof raw === 'function' ? raw : () => {})
     },
   }
+}
+
+/** 「普通对象」判据（摊平 data 前的形状检查；数组/null/类实例都不摊）。 */
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false
+  const proto = Object.getPrototypeOf(v)
+  return proto === Object.prototype || proto === null
 }
 
 /**

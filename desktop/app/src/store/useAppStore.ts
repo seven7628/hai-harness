@@ -10149,6 +10149,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       openTab: (spec) => useAppStore.getState().openTab(spec as unknown as TabSpec),
       toast: (msg) => useAppStore.getState().showToast(msg),
       getWorkspace: () => useAppStore.getState().workspace,
+      // composer.quote 的 no_session 判据（09 §5.1）：草稿键是「会话 → 工作区」两段，
+      // 没有会话时插进去的文本会落到 workspace 作用域那份草稿里 —— 与「当前会话草稿」
+      // 不是同一件事，所以这里如实报 no_session，而不是让它静默写进另一份草稿。
+      hasActiveSession: () => !!useAppStore.getState().activeSessionId,
     })
     // 虚拟 Project（插件）水合：拉 plugin_projects_list → 并入左栏插件分组 → 逐个 list。
     // 排在插件加载器之后（同一个「bridge 已 running」窗口）；失败静默，不影响真实项目。

@@ -124,6 +124,10 @@ const stub: Record<string, unknown> = {
     return await new Promise((res) => { gatedWaiters.push(res) })
   },
   surfaceCommand: async () => ({ ok: true }),
+  // P1b2：插件 Agent 通道（真 main 的三条；探针不发起 run，只保证形状对得上）
+  surfaceAgentToken: async (id: string) => ({ ok: true, token: 'probe-token-' + id }),
+  surfaceAgent: async () => ({ ok: true, data: {} }),
+  onSurfaceAgentEvent: () => () => {},
 }
 ;(window as unknown as { desktop: unknown }).desktop = new Proxy(stub, {
   get(t, k) {

@@ -67,7 +67,7 @@ export default function SurfacesPage() {
   const onOpen = useCallback((item: SurfaceIndexItem) => {
     const first = entryItemsOf(item)[0]
     if (!first) return // 理论上不可达：零 entries 也必然有一条默认入口（D-2 硬约束）
-    // 形状 cast 与 RightPanel / loader 的 host.openTab 同口径（TabInstance 联合里没有 plugin 成员）。
+    // 形状 cast 与 RightPanel / loader 的 ui.open_tab 同口径（TabInstance 联合里没有 plugin 成员）。
     openTab({ kind: first.kind, params: { entry: first.entryId } } as unknown as TabSpec)
   }, [openTab])
 
