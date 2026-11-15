@@ -19,7 +19,7 @@
   <img alt="Go 1.25.5" src="https://img.shields.io/badge/Go-1.25.5-00ADD8.svg">
   <img alt="Platform: macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg">
   <img alt="Client: Electron + React" src="https://img.shields.io/badge/client-Electron%20%2B%20React-47848F.svg">
-  <img alt="Providers: 22 presets / 3 protocols" src="https://img.shields.io/badge/providers-22%20presets%20%2F%203%20protocols-6E6E75.svg">
+  <img alt="Providers: 23 presets / 3 protocols" src="https://img.shields.io/badge/providers-23%20presets%20%2F%203%20protocols-6E6E75.svg">
   <br>
   <a href="README.md">English</a> ·
   <a href="#联系方式">联系方式</a> ·
@@ -28,7 +28,8 @@
   <a href="#执行链路事件与-trace">执行链路</a> ·
   <a href="#纯本地会话存储">本地存储</a> ·
   <a href="#快速开始">快速开始</a> ·
-  <a href="#目录结构">目录结构</a>
+  <a href="#目录结构">目录结构</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 ---
@@ -57,7 +58,7 @@ Electron/React 桌面端 —— 用来说明「嵌入方长什么样」。
 
 | 承诺 | 具体含义 | 落点 |
 |---|---|---|
-| **事件驱动内核** | 每一步都是事件：**28 个事件类型**的封闭集合，每个事件自包含 `run_id` / `request_id` / `timestamp` / `index`；没有隐式全局状态、没有回调迷宫 —— 一个 `events.EventHandler` 就是全部集成面 | `events/`（只有类型、零依赖）、`agents.AgentLoop.RunStream` |
+| **事件驱动内核** | 每一步都是事件：**30 个事件类型**的封闭集合，每个事件自包含 `run_id` / `request_id` / `timestamp` / `index`；没有隐式全局状态、没有回调迷宫 —— 一个 `events.EventHandler` 就是全部集成面 | `events/`（只有类型、零依赖）、`agents.AgentLoop.RunStream` |
 | **可回溯、可重放** | **事件日志本身就是 trace store** —— 每个 `run` / `llm` / `tool` / `compress` / `wait` span 的起止都已经在盘上，历史链路是「重建」而不是「重新埋点」；`agent_end` 带结束原因、聚合用量、时长与产出；`request_id` 直接取上游响应 id，一笔成本能追回一次具体调用 | `desktop/bridge/trace.go`、`~/.go-code/events/*.jsonl` |
 | **纯本地会话存储** | 会话、事件、用量、设置、技能、浏览器 profile 全部落在 `~/.go-code/`；文件 `0600`/`0700`、逐行 `fsync` 追加、`flock` 排他、原子提交（`tmp → .bak → rename → fsync(dir)`）。内核与客户端里没有任何服务端、遥测或上传路径 | `session/store_file.go`、`session/store_record.go`、`desktop/bridge/appdata.go` |
 | **为长时运行而建** | 只重写「发给模型的上下文」的压缩、逐轮检查点、跨 Run 存活的后台任务、输入队列背压、成本预算、优雅退出、迭代护栏 —— 九项机制让「跑几小时」变成常态而不是事故 | `agents/llm_compressor.go`、`session/`、`subagent/`、`cron/` |
@@ -111,7 +112,8 @@ span 正文**不复制**：详情抽屉按锚点（`tool_id` / `request_id`）�
 │   └── <sessionId>/agents/<taskId>.jsonl   后台任务 journal
 ├── events/<workspaceKey>/<sessionId>.jsonl  事件日志 = trace store（流式增量不落盘）
 ├── metrics.jsonl                     每次模型调用一行：provider · model · 原始用量 · kind
-├── settings.json                     应用设置（0600）—— provider key 以明文存储
+├── keys.json                         provider API key（0600；钥匙串可用时 safeStorage 加密）
+├── settings.json                     应用设置（0600）—— 只存非密钥配置
 ├── cron.json / cron_runs.jsonl        定时任务定义 + 运行账本
 ├── skills/ plugins/ runtime/          全局技能、已装插件、受管 Python 运行时
 ├── browser-profile/                   Browser Use 的持久浏览器 profile
@@ -148,7 +150,7 @@ span 正文**不复制**：详情抽屉按锚点（`tool_id` / `request_id`）�
 │  session/    长时容器：输入队列 · 历史 · 用量/成本 · 审批 · 命令 · 持久化与恢复 · 优雅退出│
 │  agents/     运行引擎：ReAct 循环 · 压缩 · 重试退避 · 系统提示分层 · 模式 · Hooks · 提醒 │
 │  tools/      工具协议 + 执行引擎（分桶 / 并发 / 超时 / panic 兜底）+ 内置工作区工具      │
-│  provider/   3 种协议 · 22 个厂商预设 · 模型注册表 · 错误分类 · OAuth 订阅登录          │
+│  provider/   3 种协议 · 23 个厂商预设 · 模型注册表 · 错误分类 · OAuth 订阅登录          │
 │  events/     对外唯一契约（只有类型，无循环依赖）                                       │
 │  core/       零依赖共享类型（消息 / 工具 / 用量 / 成本 / diff）                          │
 └────────────────────────────────────────────────────────────────────────────────────────┘
@@ -211,21 +213,22 @@ sequenceDiagram
 - **上下文与记忆** —— `AGENTS.md` / `CLAUDE.md` 分层发现（用户级 `~/.agents/AGENTS.md` 单文件、
   非递归；工作区根递归；按优先级从低到高拼接）、四层系统提示（基础契约 → 产品层 →
   工作记忆 → 技能清单）、缓存友好的字节稳定前缀、压缩与恢复都幸存的 `todo_*`、
-  **Agent Skills**（`SKILL.md` + 渐进披露 + 全局/工作区分层注册表 + 远程安装/更新/市场）。
+  **Agent Skills**（`SKILL.md` + 渐进披露 + 全局/工作区分层注册表 + 远程安装/更新/市场）；桌面端内置 `create-mode` 技能，用于自定义扩展开发。
 - **集成** —— MCP 客户端（分层配置 + stdio/http/streamable_http/sse + 每台服务器的请求头
   Headers（需鉴权的远端端点）+ fsnotify 热重载 + 坏配置 last-known-good 兜底）、进程内 cron
   调度器 + 运行账本、飞书 IM 网关、macOS Computer Use 辅助进程、插件系统、可选的会话互联（P2P）。
 - **可观测性** —— 单次调用与单次 Run 的用量/成本、缓存命中口径、上下文构成拆解、
   `agent_end` 上的产出收集，以及跨会话看板用的 metrics 账本。
 
-**Provider** —— 一个 `Provider` 接口承载 3 种协议、**22 个厂商预设**，模型注册表带窗口、输出上限、
+**Provider** —— 一个 `Provider` 接口承载 3 种协议、**23 个厂商预设**，模型注册表带窗口、输出上限、
 价表、推理/思考档位与模态标记。OAuth（PKCE + device flow）订阅登录支持 Anthropic、OpenAI Codex、
 GitHub Copilot、Kimi Coding、OpenRouter、xAI；错误被分类为
 `rate_limit` / `permanent` / `canceled` / `context_exceeded` / `generic` 语义标签而非裸字符串。
 
 **桌面端（参考宿主）** —— Electron 33 + React 18 + Vite 6 + TypeScript + Tailwind 4 + Zustand：
 叙述/活动双通道、Agent 转录、可编辑参数的审批中心、diff 查看、待办面板、链路瀑布图、用量看板、
-技能/MCP/Hooks 设置、Git 面板、定时任务页、浏览器面板、右侧标签体系；由**单个 Go bridge 进程**
+技能/MCP/Hooks 设置、Git 面板、定时任务页、浏览器面板、可安装面板插件的右侧标签体系；
+客户端还内置 **CreateMode** 技能，用于做自定义面板/工具开发。由**单个 Go bridge 进程**
 承载多工作区，并把 SDK 事件扁平化成 stdout 上的 NDJSON。
 
 ## 快速开始
@@ -364,8 +367,10 @@ func main() {
 - **不可信仓库**：项目层配置是会被执行的 —— `.mcp.json` 里的 stdio 服务器与
   `.go-code/hooks.json` 里的命令会以你的权限运行（hook 额外需要按内容哈希的信任决定）。
   打开来路不明的仓库前请先审阅这些文件。
-- **凭据**：API key 以明文存放在本机 `settings.json`（`0600`）并注入请求 transport，
-  OAuth token 也在同一个本地存储里；除所属 provider 外不会发往任何地方。
+- **凭据**：provider API key 存放在本机 `~/.go-code/keys.json`（`0600`），在系统钥匙串可用时
+  通过 Electron `safeStorage` 加密；没有钥匙串的环境会降级为 base64（**不是加密**），仅用于
+  本地开发兼容。`settings.json` 只保留非密钥配置。key 只在启动或切换 provider 时进入 bridge
+  内存，不写入会话日志，也不进入仓库文件。
 - **漏洞报告**：可利用问题请走 GitHub 的 *Security → Report a vulnerability*（私有 advisory），
   不要开公开 issue。
 
@@ -384,8 +389,13 @@ npm run build                 # 生产打包 + bridge 二进制
 
 本仓库是开发仓库的**可发布子集**：内核、bridge、客户端。Go 测试已部分入库；push/PR CI 目前
 跑编译门（`go test ./... -run '^$'`）以及 `agenthub`、`agents`、`subagent`、`provider`、`tools`、
-`mcp` 的单元套件。完整的已入库/仍缺失清单见 `docs/agent-hub/test-baseline.md`。内部设计文档与
-开发期工具链不在发布范围。风格：Go 用 `gofmt`；TypeScript 两空格缩进、单引号、ESM。
+`mcp` 的单元套件。完整的已入库/仍缺失清单见 `docs/agent-hub/test-baseline.md`。生成型看板、
+本机日志与调研截图不入库。风格：Go 用 `gofmt`；TypeScript 两空格缩进、单引号、ESM。
+
+## 更新日志
+
+最近改动见 [CHANGELOG.md](CHANGELOG.md)。项目遵循
+[Keep a Changelog](https://keepachangelog.com/) 与 [Semantic Versioning](https://semver.org/)。
 
 ## 目录结构
 

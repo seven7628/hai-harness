@@ -19,7 +19,7 @@
   <img alt="Go 1.25.5" src="https://img.shields.io/badge/Go-1.25.5-00ADD8.svg">
   <img alt="Platform: macOS | Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg">
   <img alt="Client: Electron + React" src="https://img.shields.io/badge/client-Electron%20%2B%20React-47848F.svg">
-  <img alt="Providers: 22 presets / 3 protocols" src="https://img.shields.io/badge/providers-22%20presets%20%2F%203%20protocols-6E6E75.svg">
+  <img alt="Providers: 23 presets / 3 protocols" src="https://img.shields.io/badge/providers-23%20presets%20%2F%203%20protocols-6E6E75.svg">
   <br>
   <a href="README.zh-CN.md">中文文档</a> ·
   <a href="#contact">Contact</a> ·
@@ -28,7 +28,8 @@
   <a href="#the-execution-chain-events--trace">Execution chain</a> ·
   <a href="#local-only-session-storage">Local storage</a> ·
   <a href="#quick-start">Quick start</a> ·
-  <a href="#repository-layout">Layout</a>
+  <a href="#repository-layout">Layout</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 ---
@@ -59,7 +60,7 @@ Four commitments shape the code. They are the reason to pick this harness over a
 
 | Commitment | What it means | Where it shows up |
 |---|---|---|
-| **Event-driven core** | Every step is an event: a closed set of **28 event types**, each self-contained with `run_id` / `request_id` / `timestamp` / `index`. No hidden global state, no callback soup — one `events.EventHandler` is the entire integration surface. | `events/` (types only, zero dependencies), `agents.AgentLoop.RunStream` |
+| **Event-driven core** | Every step is an event: a closed set of **30 event types**, each self-contained with `run_id` / `request_id` / `timestamp` / `index`. No hidden global state, no callback soup — one `events.EventHandler` is the entire integration surface. | `events/` (types only, zero dependencies), `agents.AgentLoop.RunStream` |
 | **Traceable, replayable runs** | The event log **is** the trace store — every `run` / `llm` / `tool` / `compress` / `wait` span start & end is already on disk, so history can be rebuilt instead of re-instrumented. `agent_end` carries finish reason, aggregated usage, duration and artifacts; `request_id` is the upstream provider response id, so a cost entry can be traced back to an exact call. | `desktop/bridge/trace.go`, `~/.go-code/events/*.jsonl` |
 | **Local-only session storage** | Sessions, events, metrics, settings, skills and browser profiles all live under `~/.go-code/`. Files are `0600`/`0700`, appended with `fsync`, guarded by `flock`, and committed atomically (`tmp → .bak → rename → fsync(dir)`). There is no server, no telemetry, no upload path in the harness or the client. | `session/store_file.go`, `session/store_record.go`, `desktop/bridge/appdata.go` |
 | **Built to run long** | Compaction that only rewrites what is sent to the model, per-round checkpoints, background agents that outlive a run, input-queue backpressure, a cost budget, graceful shutdown and iteration guardrails — the nine mechanisms that make an hours-long session boring instead of scary. | `agents/llm_compressor.go`, `session/`, `subagent/`, `cron/` |
@@ -116,7 +117,8 @@ read paths.
 │   └── <sessionId>/agents/<taskId>.jsonl   background-task journals
 ├── events/<workspaceKey>/<sessionId>.jsonl  the event log = the trace store (chunks are not persisted)
 ├── metrics.jsonl                     one line per model call: provider · model · raw usage · kind
-├── settings.json                     app settings (0600) — provider keys are stored in plaintext
+├── keys.json                         provider API keys (0600; safeStorage-encrypted when available)
+├── settings.json                     app settings (0600) — non-secret configuration only
 ├── cron.json / cron_runs.jsonl        scheduled jobs + run ledger
 ├── skills/ plugins/ runtime/          global skills, installed plugins, managed Python runtime
 ├── browser-profile/                   persistent browser profile for Browser Use
@@ -208,11 +210,11 @@ sequenceDiagram
 - **Sub-agents & background tasks** — synchronous read-only explorers, asynchronous `agent_spawn` / `agent_send` / `agent_interrupt` / `TaskList` / `TaskOutput` with journals on disk, parent/child event trees via `parent_run_id`, and `promote_task` to detach a slow tool call into the background.
 - **Workspace tools** — `read_file` / `write_file` / `edit_file` (atomic write + diff) / `grep` / `glob` / `bash` (process-group isolation, minimal env, timeout kills the group, static guardrails for destructive commands) / `run_python` (managed runtime) / `git_worktree` / `ask_user`.
 - **Safety layers** — `sandbox.Sandbox` execution backend with a macOS **Seatbelt** implementation (sensitive-path denies, workspace containment, managed-plugin carve-outs, release gate), SSRF-guarded `http_get`, path containment, `0600`/`0700` files, credential redaction in tool output.
-- **Context & memory** — `AGENTS.md` / `CLAUDE.md` discovery (user-level `~/.agents/AGENTS.md`, single file + non-recursive; workspace roots recursive; concatenated lowest-priority-first), 4-layer system prompt (base contract → product → working memory → skills), cache-friendly byte-stable prefixes, `todo_*` that survives compaction and recovery, **Agent Skills** (`SKILL.md`, progressive disclosure, layered global/workspace registry, remote install/update/marketplaces).
+- **Context & memory** — `AGENTS.md` / `CLAUDE.md` discovery (user-level `~/.agents/AGENTS.md`, single file + non-recursive; workspace roots recursive; concatenated lowest-priority-first), 4-layer system prompt (base contract → product → working memory → skills), cache-friendly byte-stable prefixes, `todo_*` that survives compaction and recovery, **Agent Skills** (`SKILL.md`, progressive disclosure, layered global/workspace registry, remote install/update/marketplaces); the desktop client bundles the `create-mode` skill for custom extension development.
 - **Integrations** — MCP client (layered config, stdio/http/streamable_http/sse transports, per-server request headers for authenticated endpoints, fsnotify hot reload, last-known-good recovery), in-process cron scheduler with a run ledger, Feishu/Lark IM gateway, macOS Computer Use helper, plugin system, optional peer-to-peer session mesh.
 - **Observability** — usage/cost per call and per run, cache-hit accounting, context breakdown, artifact collection at `agent_end`, and a metrics ledger for cross-session dashboards.
 
-**Providers** — 3 protocols over one `Provider` interface, **22 vendor presets**, and a model registry with
+**Providers** — 3 protocols over one `Provider` interface, **23 vendor presets**, and a model registry with
 context windows, output caps, pricing, reasoning/thinking levels and modality flags. Subscription
 logins via OAuth (PKCE + device flow) for Anthropic, OpenAI Codex, GitHub Copilot, Kimi Coding,
 OpenRouter and xAI; errors are classified (`rate_limit` / `permanent` / `canceled` / `context_exceeded` /
@@ -221,8 +223,9 @@ OpenRouter and xAI; errors are classified (`rate_limit` / `permanent` / `cancele
 **Desktop client (reference shell)** — Electron 33 + React 18 + Vite 6 + TypeScript + Tailwind 4 +
 Zustand; narrative/activity split panels, transcript, approval center with editable arguments, diff
 viewer, todo panel, trace waterfall, usage dashboards, skills & MCP & hooks settings, git panel,
-cron pages, browser panel, right-side tab system; driven by a single Go bridge process that hosts
-many workspaces and flattens SDK events to NDJSON on stdout.
+cron pages, browser panel, right-side tab system with installable panel plugins; the client also
+ships the bundled **CreateMode** skill for custom panel/tool development. Driven by a single Go
+bridge process that hosts many workspaces and flattens SDK events to NDJSON on stdout.
 
 ## Quick start
 
@@ -365,9 +368,11 @@ models for endpoints that have no built-in list. Any OpenAI-compatible gateway w
 - **Untrusted repositories**: project-level configuration is executed — `.mcp.json` stdio servers and
   `.go-code/hooks.json` commands run with your privileges (hooks additionally require a content-hash
   trust decision). Review them before opening a repository you do not control.
-- **Credentials**: API keys are stored locally in `settings.json` (`0600`) in plaintext and injected
-  into the request transport; OAuth tokens live in the same local store. They are never sent anywhere
-  except the provider they belong to.
+- **Credentials**: provider API keys live in `~/.go-code/keys.json` (`0600`), encrypted with the OS
+  keychain through Electron `safeStorage` when available. On systems without a keychain the store
+  falls back to base64 (**not** encryption) so local development still works; `settings.json` keeps
+  only non-secret configuration. Keys enter the bridge at startup or on provider switch and are never
+  written to session logs or repository files.
 - **Reporting**: please use GitHub's *Security → Report a vulnerability* (private advisory) instead of
   a public issue for anything exploitable.
 
@@ -388,8 +393,13 @@ This repository is the **publishable subset** of the development tree: harness, 
 A subset of the Go tests is checked in; the push/PR CI currently runs a compile gate
 (`go test ./... -run '^$'`) plus the unit suites for `agenthub`, `agents`, `subagent`, `provider`,
 `tools` and `mcp`. The full tracked/missing inventory lives in
-`docs/agent-hub/test-baseline.md`. Internal design documents and dev-time tooling are not published. Style: `gofmt` for Go; two-space indent, single
-quotes and ESM for TypeScript.
+`docs/agent-hub/test-baseline.md`. Generated dashboards, machine-local logs and research screenshots
+are not tracked. Style: `gofmt` for Go; two-space indent, single quotes and ESM for TypeScript.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the latest changes. The project follows
+[Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
 ## Repository layout
 

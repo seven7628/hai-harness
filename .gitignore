@@ -186,3 +186,5 @@ tsc_out.txt
 /design-review/
 /lunar-seat/
 /evals/
+# 竞品截图/设计调研是过程证据，不随发布版入库
+/design/**/research/
