@@ -3393,6 +3393,10 @@ export interface AppState {
   // 虚拟 Project（插件）水合：拉 plugin_projects_list → 并入项目树 → 逐个 list 会话。
   // 失败静默（已加载的虚拟项目保持原样；插件不可用不该影响真实项目）。
   loadPluginProjects(): void
+  // 插件**新建会话**后的左栏刷新（A）：150ms 合并成一次 plugin_projects_list。
+  // 与 loadPluginProjects 分开是刻意的 —— 启动/手动路径要立刻发，只有插件侧的高频新建
+  // 才需要合并（连开三个会话不该发三次列表，也不该等三次回执）。
+  schedulePluginProjectsRefresh(): void
   toggleWorkspacePin(path: string): void // 工作区置顶/取消置顶（最多 5 个，持久化）
   toggleSessionPin(path: string, sid: string): void // 会话置顶/取消置顶（每工作区最多 5 个，持久化到 bridge）
   removeRecentSession(path: string, sid: string): void // 从顶部快捷栏移除该会话（仅移除快捷项，不删除会话）
@@ -9832,6 +9836,10 @@ let wired = false
 let uiSnapStop: (() => void) | undefined
 // 插件加载器的停止函数（PR-14）。只停监听、不卸载已加载插件 —— 见 startPluginLoader 注释。
 let pluginLoaderStop: (() => void) | undefined
+// 左栏插件分组的去抖刷新（A）。放在模块级而不是 state 里：它是一次性的定时器句柄，
+// 不属于任何「渲染要读的东西」，进 state 只会让每个订阅者都因为一次 setTimeout 重渲染。
+const PLUGIN_PROJECTS_REFRESH_MS = 150
+let pluginProjectsRefreshTimer: ReturnType<typeof setTimeout> | undefined
 function wire(): void {
   if (wired) return
   wired = true
@@ -10153,6 +10161,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 没有会话时插进去的文本会落到 workspace 作用域那份草稿里 —— 与「当前会话草稿」
       // 不是同一件事，所以这里如实报 no_session，而不是让它静默写进另一份草稿。
       hasActiveSession: () => !!useAppStore.getState().activeSessionId,
+      // 插件自己新建了会话（agent.session / 无 session_id 的 agent.run）→ 左栏插件分组
+      // 立刻重拉一次。走 schedule 而不是 loadPluginProjects：一次操作可能连建多个会话，
+      // 合并成一次列表；而**启动那一刻**的水合（下面几行的 loadPluginProjects）不合并。
+      refreshPluginProjects: () => useAppStore.getState().schedulePluginProjectsRefresh(),
     })
     // 虚拟 Project（插件）水合：拉 plugin_projects_list → 并入左栏插件分组 → 逐个 list。
     // 排在插件加载器之后（同一个「bridge 已 running」窗口）；失败静默，不影响真实项目。
@@ -10282,6 +10294,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   // 时机：bridge 进入 running（与 startPluginLoader 同一处，见 start）；重复调用幂等。
   loadPluginProjects: () => {
     send({ type: 'plugin_projects_list', payload: {} })
+  },
+
+  // 插件新建会话后的左栏刷新（A）：150ms 内的多次请求合并成一次 plugin_projects_list。
+  // 复用 loadPluginProjects（同一条 dispatcher 路径）：刷新与启动水合**必须**并进同一套
+  // 合并逻辑（mergePluginProjects），否则「插件刚建的会话」会出现两份或带上过期标题。
+  // 只做尾触发（每次调用重置定时器）而不是节流：插件连开三个会话时，用户要看到的是
+  // 「三条都在」，不是「第一条 + 一条迟到的第二条」。
+  // 自发自收不会成环：本项目唯一发 plugin_projects_list 的地方就是这里与启动那一刻，
+  // 回执只更新项目树/会话列表，不再触发本 action（scripts/test-plugin-projects.mjs 钉住）。
+  schedulePluginProjectsRefresh: () => {
+    if (pluginProjectsRefreshTimer) clearTimeout(pluginProjectsRefreshTimer)
+    pluginProjectsRefreshTimer = setTimeout(() => {
+      pluginProjectsRefreshTimer = undefined
+      get().loadPluginProjects()
+    }, PLUGIN_PROJECTS_REFRESH_MS)
   },
 
   // 切换活跃工作区：注册（缺失则加入项目树）→ 激活 → 水合该工作区会话列表。
