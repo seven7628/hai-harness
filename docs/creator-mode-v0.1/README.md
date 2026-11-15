@@ -39,7 +39,7 @@
 | D-K | 表格不引前端依赖，增强服务端 HTML（sheet 导航/冻结/数字格式） |
 | D-L | 音视频自研：`hai-media://` 支持 Range + `ffprobe` 探测 + 可选转码 |
 | D-M | 转换服务统一限额：并发 2 / 60s / 50-100 MiB / 内容寻址缓存 / 输出保留 24h |
-| D-N | **取消 `CreatorMode`**：4 个工具常驻 + `hai-surface-dev` skill 路由 + 安装审批（对齐 OpenCode） |
+| D-N | **取消 `CreatorMode`**：4 个工具常驻 + `create-mode` skill 路由 + 安装审批（对齐 OpenCode） |
 
 **状态归属一句话**：注册表只装"活着的"，index 只记"装过的"；dirty 属于标签、聚合值现算；`ui` 快照只给当前会话；`rightTab` 只有一个写者；转换缓存只有转换服务能写。
 

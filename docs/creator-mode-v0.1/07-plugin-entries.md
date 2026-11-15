@@ -118,7 +118,7 @@
 - `templates/surface/surface.json`：3 个 entries（总览 10 / 课表 20 / 资源 30）。
 - `templates/surface/panel.js`：一个 render 入口按 `tab.params.entry` 分发三页（零依赖、无 JSX）；
   没有 params 时落回总览 —— 老标签与「按 kind 直接打开」都不会空白。
-- `skills/hai-surface-dev/SKILL.md`：「Multiple entrances (`entries`)」一节（怎么写、`params` 怎么读、入口在哪三处、
+- `desktop/vendor/create-mode-skills/create-mode/SKILL.md`：「Multiple entrances (`entries`)」一节（怎么写、`params` 怎么读、入口在哪三处、
   零入口的默认入口语义、内部路由归插件）。
 
 **D. 测试与变异**

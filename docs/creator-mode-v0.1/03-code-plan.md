@@ -1228,12 +1228,12 @@ func (t *SurfaceInstallTool) Description() string {
 }   // ≤120 字；教程在 skill 正文，不在工具描述里
 ```
 
-`skills/hai-surface-dev/SKILL.md`（正文骨架，frontmatter 里的 `requires` 走已有能力面过滤）：
+`desktop/vendor/create-mode-skills/create-mode/SKILL.md`（正文骨架，frontmatter 里的 `requires` 走已有能力面过滤）：
 
 ```md
 ---
-name: hai-surface-dev
-description: 当用户要求给桌面端右栏加一个面板、改一段 UI、做一个看板/工具页，或调试已装 Surface 插件时使用。
+name: create-mode
+description: 'Build custom HAI CreateMode extensions by combining the exposed panel, agent, and host APIs — dashboards, document panels, tools, and workflows. Use when a developer wants to create, extend, or debug a custom right panel, plugin, surface, PDF viewer, or integration (插件、面板、右栏、看板、文档面板、PDF 阅读器、自定义开发).'
 requires:
   tools: [ui_inspect, surface_install]
 ---

@@ -1,12 +1,12 @@
 # Creator Mode / Surface Skill 效果评估（2026-11-15）
 
 > 范围：Creator Mode 已被 D-N 取消，能力由「常驻 surface 工具 + skill 路由 + 审批」提供。
-> 本报告评估仓内与这条链路强相关的 `skills/hai-surface-dev/SKILL.md` 及其机制；外部
+> 本报告评估仓内与这条链路强相关的 `desktop/vendor/create-mode-skills/create-mode/SKILL.md` 及其机制；外部
 > skills（office/visual/ego 等）不在本轮行为评估内。
 
 ## 结论先行
 
-**机制是通的，默认配置下「效果」接近 0。** `hai-surface-dev` 的 `requires.tools` 要求
+**机制是通的，默认配置下「效果」接近 0。** `create-mode` 的 `requires.tools` 要求
 `ui_inspect + surface_install`，而 `features.surfaceTools` 默认 **false**；没有这两个工具时
 技能不会出现在系统提示词里，`load_skill` 也会拒绝加载。结果是：用户不手动改
 `settings.json`，模型既看不到「怎么装插件」，也调不到安装工具。
@@ -15,15 +15,15 @@
 
 | 检查 | 证据 | 结果 |
 |---|---|---|
-| 技能可解析 | `TestSurfaceSkillLoadable` | PASS |
+| 技能可解析 | `TestCreateModeSkillLoadable` | PASS |
 | 清单/加载同源 | `skills.Registry.LoadFor` | 通过；能力不足时返回 `requires tool: ui_inspect, tool: surface_install` |
-| 能力门矩阵 | 真实注册表 + 空/单工具/双工具 | 空 → `[]`；仅 `ui_inspect` → `[]`；仅 `surface_install` → `[]`；双工具 → `[hai-surface-dev(enabled=true)]` |
+| 能力门矩阵 | 真实注册表 + 空/单工具/双工具 | 空 → `[]`；仅 `ui_inspect` → `[]`；仅 `surface_install` → `[]`；双工具 → `[create-mode(enabled=true)]` |
 | 默认开关 | `loadSurfaceToolsEnabled` 缺省 false；本机 `settings.json` 无 `features` | 默认不提供 surface 工具 → 技能不可见 |
 | 可视化开关 | 设置 →「面板插件」→「AI 创建面板」开关 + `settings:set` + `reload_settings` | **已补（2026-11-15）**；默认仍 false，但用户能看到入口 |
-| 发现阶段成本 | description 236 字符；正文 7,229 bytes / 133 行（文件 7,229 bytes）；L3 5 refs + 2 scripts + 3 assets | 清单只注入一句；正文按需加载；细节按需读 L3 |
+| 发现阶段成本 | description 299 字符；正文 7,517 bytes / 135 行（文件 7,517 bytes）；L3 5 refs + 2 scripts + 3 assets | 清单只注入一句；正文按需加载；细节按需读 L3 |
 | 模板可安装 | `TestSurfaceTemplateInstalls` | PASS（`applied` + 幂等 `already_installed`） |
 | 技能最小示例可安装 | 按 SKILL 的 minimum example 造目录跑真安装器 | `status=applied` |
-| 历史使用证据 | 本地 `~/.go-code/events` / `sessions` 检索 `hai-surface-dev` | 未发现加载记录；无法用历史会话做效果回归 |
+| 历史使用证据 | 本地 `~/.go-code/events` / `sessions` 检索 `hai-surface-dev`（当时名；现 `create-mode`） | 未发现加载记录；无法用历史会话做效果回归 |
 
 ## 发现
 
@@ -32,7 +32,7 @@
 2026-11-15 已补设置页可见开关；默认仍 false（fail-closed）。剩余问题是「开关默认关时，技能仍不可见」，这是**有意的成本/安全选择**，但空态必须把开关指出来：
 
 1. `surfaceTools=false` 时引擎不注册 `surface_install`；
-2. `requires.tools` 过滤把 `hai-surface-dev` 从清单和 `load_skill` 一起拿掉；
+2. `requires.tools` 过滤把 `create-mode` 从清单和 `load_skill` 一起拿掉；
 3. 插件页空态只说「模型调用 surface_install」，但没有告诉我怎么把工具打开；
 4. 技能正文里虽然写了开关，但正文加载不了 —— 形成鸡生蛋循环。
 
@@ -63,7 +63,7 @@ description 有「插件 / 面板 / 看板 / 右栏 / right panel / surface / da
 - 渐进披露正确：清单只带 name + description，正文按需进入上下文；
 - 模板与最小示例都能过真安装器，不是「文档里的死例子」；
 - 正文覆盖了 no JSX / host.command / onEvent / D11 / entries / tools / 审批 / 自检命令；
-- 技能正文 7.2KB，只在需要时加载，常驻成本主要是 236 字符 description，方向正确。
+- 技能正文 7.3KB，只在需要时加载，常驻成本主要是 299 字符 description，方向正确。
 
 ## 建议
 
@@ -81,7 +81,7 @@ description 有「插件 / 面板 / 看板 / 右栏 / right panel / surface / da
 ## 复跑
 
 ```bash
-go test ./desktop/bridge -run 'TestSurfaceSkillLoadable|TestSurfaceTemplateInstalls' -count=1 -v
+go test ./desktop/bridge -run 'TestCreateModeSkillLoadable|TestSurfaceTemplateInstalls' -count=1 -v
 go test ./skills ./agents -run 'Skill' -count=1
 # 能力矩阵（临时脚本）：
 # 空 / ui_inspect only / surface_install only → 技能均不可见；两者都有 → enabled
@@ -98,13 +98,13 @@ go test ./skills ./agents -run 'Skill' -count=1
 
 | 要求 | 我们 | 判定 |
 |---|---|---|
-| 目录 + SKILL.md + YAML name/description | `skills/hai-surface-dev/SKILL.md` | 通过 |
-| name ≤64 / lowercase / hyphen / 非保留词 | `hai-surface-dev` 本身合法 | 通过（但解析器不校验长度/字符/保留词） |
-| description ≤1024 / 无 XML | 236 字符、无 XML | 通过 |
+| 目录 + SKILL.md + YAML name/description | `desktop/vendor/create-mode-skills/create-mode/SKILL.md` | 通过 |
+| name ≤64 / lowercase / hyphen / 非保留词 | `create-mode` 本身合法 | 通过（但解析器不校验长度/字符/保留词） |
+| description ≤1024 / 无 XML | 299 字符、无 XML | 通过 |
 | Level 1：只注入 name + description | `Registry.ListFor` / `Descriptor` | 通过 |
 | Level 2：触发后才加载正文 | `load_skill` → `InstructionsBlock` | 通过 |
-| 正文 <500 行 | 133 行 | 通过 |
-| 正文体积接近官方 <5k tokens 建议 | 7.1KB（约 1.8k tokens）；细节在 L3 | 通过 |
+| 正文 <500 行 | 135 行 | 通过 |
+| 正文体积接近官方 <5k tokens 建议 | 7.3KB（约 1.9k tokens）；细节在 L3 | 通过 |
 | Level 3：references/scripts/assets，一层深 | 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；资源在技能目录内 | 通过（模板仍与根 `templates/surface` 双份，测试防漂移） |
 | 脚本执行而非读入上下文 | `scripts/validate-plugin.mjs` + `scripts/install-smoke.sh`，SKILL 只给路径 | 通过 |
 | 多模型测试 | 无 Haiku/Sonnet/Opus 结果 | **未验证** |
@@ -121,15 +121,15 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 - 上下文层：metadata（`ListFor`）→ 正文（`load_skill`）→ `Resources` 清单；
   `InstructionsBlock` 与 `/skill` 命令共用同一段字节。
 - 能力层：`requires.input` / `requires.tools` + `Capabilities` 过滤，宿主 UI 还能显示「为什么不可用」。
-- 版本层：`version` 用于随包技能覆盖用户旧副本（office/visual/ego 同步链路）。
+- 版本层：`version` 用于随包技能覆盖用户旧副本（office/visual/ego/create-mode 同步链路）。
 
 ### 这个技能的内容分层：已修
 
-- L2 现在 133 行 / 7.1KB，只留导航 + 六步流程 + 硬规则；L3 按需加载。
+- L2 现在 135 行 / 7.3KB，只留导航 + 六步流程 + 硬规则；L3 按需加载。
 - `references/`：panel-api、tools、entries、examples、verification 五个文件，均一层深。
 - `scripts/`：`validate-plugin.mjs`（静态 preflight）+ `install-smoke.sh`（真安装器）。
 - `assets/`：模板三件套（surface.json / panel.js / icon.svg）随技能分发；根
-  `templates/surface` 仍是安装器/e2e 的权威入口，`TestSurfaceSkillLoadable` 逐字节防漂移。
+  `templates/surface` 仍是安装器/e2e 的权威入口，`TestCreateModeSkillLoadable` 逐字节防漂移。
 - 仍保留的仓路径：`install-smoke.sh` 需要 repo 的 `desktop/bridge`；这是开发环境脚本，
   不是可移植技能的硬依赖（安装器检查仍可由宿主工具完成）。
 
@@ -139,7 +139,7 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 |---|---|---|
 | `01-design.md` §5.1 | D-N：4 常驻工具 + 1 skill + 审批；工具 schema 成本纪律 | 定义清楚，但默认值/工具数量约束与代码有漂移 |
 | `03-code-plan.md` §3.7 | 工具注册骨架、skill frontmatter 骨架、模板/插件页 | 2026-11-15 已改为默认 **false** + 设置页开关，与实现/SKILL/测试一致 |
-| `skills/hai-surface-dev/SKILL.md` | 操作规范、D11、host API、entries、tools、自检 | 是当前事实上的规范；但只有 1 个技能，无独立 skill spec |
+| `desktop/vendor/create-mode-skills/create-mode/SKILL.md` | 操作规范、D11、host API、entries、tools、自检 | 是当前事实上的规范；但只有 1 个技能，无独立 skill spec |
 | `templates/surface/*` | 可运行示例，真安装器可过 | 模板在技能目录外，不算技能资产 |
 | `surface_skill_content_test.go` | 解析、description 80–300、requires 两向、模板安装、命令白名单 | 守住了静态形状，不守触发/行为/多模型效果 |
 
@@ -147,8 +147,8 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 「CreateMode Skill 规范」把 frontmatter、触发词、分层、token 预算、安全边界、验收指标
 写成可执行契约。默认值漂移（design true vs code false）就是缺少单一事实源的症状。
 
-> **2026-11-15 落地**：新增 `11-skill-spec.md`（单一规范）；`hai-surface-dev` 已拆成
-> `SKILL.md`（133 行 / 7.1KB）+ 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；
+> **2026-11-15 落地**：新增 `11-skill-spec.md`（单一规范）；`create-mode` 已拆成
+> `SKILL.md`（135 行 / 7.3KB）+ 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；
 > 设置页开关已补；默认值四处统一为 false。下面「建议的规范骨架」保留为方法论记录。
 
 ## 建议的规范骨架（下一步）
@@ -159,7 +159,7 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
    - 正文 <500 行、<5k token；L3 资源一层深、必须相对技能目录；
    - 安装/审批/D11/密钥/网络边界；
    - 触发集与四类 golden task 的验收指标。
-2. ~~把 `hai-surface-dev` 拆出 `references/` 与 `scripts/`，SKILL.md 只留导航 + 六步流程。~~ —— 已完成。
+2. ~~把 `create-mode` 拆出 `references/` 与 `scripts/`，SKILL.md 只留导航 + 六步流程。~~ —— 已完成。
 3. ~~统一 `features.surfaceTools` 默认值并提供可视化开关~~ —— 已完成（默认 false；设置页开关；文档同步）。
 4. 做有/无 skill 的行为 A/B（真实 Provider 或本地端点），至少 Haiku/Sonnet/Opus 各一轮。
 
@@ -218,14 +218,14 @@ install-smoke 0（`applied`，entries 3）；浏览器 T1–T9 32 ✅ / 0 ❌；
 | | ON（技能在册） | OFF（技能不在册） |
 |---|---|---|
 | 收敛 | ✅ 99.6s | ❌ 撞 8min 上限仍在跑 |
-| 首动作 | `load_skill hai-surface-dev` → 完整 SKILL.md | 仓库考古（含直接读磁盘技能） |
+| 首动作 | `load_skill hai-surface-dev`（当时名；现 `create-mode`）→ 完整 SKILL.md | 仓库考古（含直接读磁盘技能） |
 | 插件 | `hello-panel/`，validate 0 | `hello-plugin/`，validate 0 |
 | 安装 | `surface_install` → **applied** | **0 次** surface_install；`surfaces/` 空 |
 | 工具/审批 | 18 / 5 | 27 / 16 |
 | pageerror | 0 | 0 |
 
 **怎么读**：这是 n=1 的真实模型观察，不是统计结论。ON 明确走了「技能 → 骨架 → 安装 →
-复核」；OFF **并不干净**——模型 `cd` 进仓库后直接 `read_file skills/hai-surface-dev/SKILL.md`，
+复核」；OFF **并不干净**——模型 `cd` 进仓库后直接 `read_file skills/hai-surface-dev/SKILL.md`（当时的仓库路径），
 等于“技能在磁盘、不在注册表”。所以差异更像「在册 → 走流程」vs「不在册 → 先环境考古」，
 不能归因成「不会写代码」。OFF 的 8min 是人为上限，且卡在 install-smoke 的 Go module 联网；
 两侧都产出了合法 validate 产物，但只有 ON 完成真实安装。§6 的「行为未验证」现在改为

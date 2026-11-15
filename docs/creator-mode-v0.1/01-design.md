@@ -12,7 +12,7 @@
 
 - **右栏是唯一的外部能力工作台**：三态布局（收起 → 中间占满 / 各半 → 左栏自动收缩成图标条 / 放大中间或右侧）+ 多标签并存（浏览器、文件、Git、PPT 可同时开着，用户逐个关）+ 内嵌编辑；左栏只做导航、中间只做会话；
 - 右栏从「4 个硬编码 kind」变成「能力容器」：内置能力（执行链路 / Git / 文件 / 浏览器 / PPT）与插件能力走**同一套 provider 契约**，谁都不特殊；
-- "能创造"不靠切模式，只新增三件事：**能看见**（`ui_inspect` 读运行中的 surface/tab 快照）、**能装**（`surface_install` 受管安装 + 结构化回执）、**知道怎么装才对**（`hai-surface-dev` skill）；四个工具常驻，skill 负责路由（D-N）；
+- "能创造"不靠切模式，只新增三件事：**能看见**（`ui_inspect` 读运行中的 surface/tab 快照）、**能装**（`surface_install` 受管安装 + 结构化回执）、**知道怎么装才对**（`create-mode` skill）；四个工具常驻，skill 负责路由（D-N）；
 - 边界先划死：V0.1 只做**右栏 Surface**、只接受**同源可信 ESM**、**不做 Host 侧动态工具**、**不做 iframe**、**不做插件市场**。
 
 验收线（可执行）：
@@ -402,8 +402,8 @@ eng.RegisterTool(ctx, &builtin.SurfaceRemoveTool{Reg: m.surfaces})    // Require
 
 ```md
 ---
-name: hai-surface-dev
-description: 当用户要求给桌面端右栏加面板、改界面、做看板或工具页，或调试已装 Surface 插件时使用。
+name: create-mode
+description: 'Build custom HAI CreateMode extensions by combining the exposed panel, agent, and host APIs — dashboards, document panels, tools, and workflows. Use when a developer wants to create, extend, or debug a custom right panel, plugin, surface, PDF viewer, or integration (插件、面板、右栏、看板、文档面板、PDF 阅读器、自定义开发).'
 requires:
   tools: [ui_inspect, surface_install]
 ---
@@ -412,7 +412,7 @@ requires:
 
 - `requires.tools` 走已有的**技能能力面过滤**（`skills/capabilities.go`）：没有 surface 工具的会话（如 Explore 子 agent）看不到这个 skill；
 - 系统提示词只注入 description 一行；正文按需加载；
-- 用户可 `@hai-surface-dev` 手动点名。
+- 用户可 `@create-mode` 手动点名。
 
 **审批不变**：`surface_install` / `surface_remove` 每次都要批准（`RequiresApproval → true`），与模式无关。
 
@@ -585,7 +585,7 @@ export const surface = {
 
 > 为什么不用 JSX：V0.1 拒绝引入构建步骤（`esbuild` 目前只是 Vite 的传递依赖，没有作为直接依赖锁定版本；把它提成正式依赖并维护一条编译链，是 M2 的成本，不是 V0.1 的）。`createElement` 是唯一"模型写什么、运行时就是什么"的形态；等插件复杂到需要 TSX 时，M2 再加安装期编译。
 
-### 5.7 Skill：`hai-surface-dev`（知识包，不是文档）
+### 5.7 Skill：`create-mode`（知识包，不是文档）
 
 照 DSH `dsh-doc` 的形状写，五段：
 
@@ -689,7 +689,7 @@ internal/officekit/{kit,render}.go         新增：kit 探测 / soffice→PDF /
 desktop/app/electron/media-protocol.ts     新增：hai-media:// + Range
 tools/builtin/ui_inspect.go                新增：只读工具（含 editors）
 tools/builtin/office_tools.go              新增：office_convert / office_render
-skills/hai-surface-dev/SKILL.md            新增：六步交付纪律（requires.tools）
+desktop/vendor/create-mode-skills/create-mode/SKILL.md            新增：六步交付纪律（requires.tools）
   templates/surface/*                        新增：surface.json / panel.js / icon.svg
 desktop/app/src/components/PluginsPage.tsx 新增（或并入 Settings）：列出/禁用/卸载
 ```
@@ -730,7 +730,7 @@ desktop/app/src/components/PluginsPage.tsx 新增（或并入 Settings）：列�
 | **D-F** | 编辑器选 CodeMirror 6（不是 Monaco），不做 LSP/多光标 | §4.5 |
 | **D-G** | 文件写锁提取为 `internal/atomicfile`（与 `tools/builtin` 共用 flock 实现，不复制） | 代码方案 §2.7 |
 | **D-H** | `ui` 快照只含当前会话标签，其它会话只给计数 | §5.3 |
-| **D-N** | **取消 `CreatorMode`**：4 个工具常驻 + `hai-surface-dev` skill 路由 + 安装审批；模式不是创造的前提 | §5.1、06 |
+| **D-N** | **取消 `CreatorMode`**：4 个工具常驻 + `create-mode` skill 路由 + 安装审批；模式不是创造的前提 | §5.1、06 |
 | **D-I** | **取消 `office` kind**：文档/媒体是 `file{mode:'preview'}` 的渲染器 | §4.7 |
 | **D-J** | Office 保真**沿用 DSH**：LibreOffice kit（可下载、不内置）→ PDF；缺失则近似 + 明确横幅。**不采用** Keynote/PowerPoint 脚本 | §4.7、05 §8 |
 | **D-K** | 表格不引前端依赖，增强服务端 HTML（sheet 导航/冻结/数字格式） | §4.7、05 |

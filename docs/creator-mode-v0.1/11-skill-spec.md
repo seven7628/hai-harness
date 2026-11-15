@@ -2,7 +2,7 @@
 
 > CreatorMode 代码模式已取消（D-N）。创造能力 = 常驻 surface 工具 + skill 路由 + 审批。
 > 本文是这条链路里 **skill 的单一规范**：定义、frontmatter、分层、token 预算、安全边界和
-> 验收方式。`skills/hai-surface-dev/SKILL.md` 是本文的第一个实现。
+> 验收方式。`desktop/vendor/create-mode-skills/create-mode/SKILL.md` 是本文的第一个实现。
 
 ## 1. 定义
 
@@ -23,9 +23,9 @@
 
 ```yaml
 ---
-name: hai-surface-dev
-version: 1.1.3
-description: 'Builds or debugs a panel ... Use for 插件/面板/PDF 阅读器/文档面板.'
+name: create-mode
+version: 1.2.0
+description: 'Build custom HAI CreateMode extensions by combining the exposed panel, agent, and host APIs — dashboards, document panels, tools, and workflows. Use when a developer wants to create, extend, or debug a custom right panel, plugin, surface, PDF viewer, or integration (插件、面板、右栏、看板、文档面板、PDF 阅读器、自定义开发).'
 requires:
   tools: [ui_inspect, surface_install]
 ---
@@ -40,9 +40,24 @@ requires:
 | `allowed-tools` | 否 | 与 Anthropic 兼容的保留字段；本项目的装载器不据此放宽权限 | Anthropic 标准 |
 | `license` | 否 | 原样保留 | Anthropic 标准 |
 
-`requires.tools` 必须列**真实工具名**；当前 surface skill 的最低集合是
+`requires.tools` 必须列**真实工具名**；当前 CreateMode skill 的最低集合是
 `ui_inspect + surface_install`。`ui_inspect` 是宿主工具，D11 只禁止它在插件的
 `surface.json.commands` 里声明，不要在 skill 里写成「不能用 ui_inspect」。
+
+### 2.1 随包分发（内置技能）
+
+CreateMode 技能是应用内置技能，不只活在仓库里：
+
+| 环节 | 位置 / 机制 |
+|---|---|
+| 源目录 | `desktop/vendor/create-mode-skills/create-mode/`（集合目录，每个子目录一个技能） |
+| 打包 | `desktop/app/package.json` 的 `extraResources`：`../vendor/create-mode-skills` → `Resources/create-mode-skills` |
+| 注入 | Electron main 设置 `GO_CODE_CREATE_MODE_SKILLS_DIR`（dev 指向仓库，打包指向 Resources） |
+| 落盘 | bridge 启动调用 `ensureCreateModeSkillsSynced()`，逐子目录同步到 `~/.agents/skills/<name>` |
+| 更新 | 按 frontmatter `version` 决定是否覆盖用户副本（与 office/visual 技能同一套 `syncBundledSkills`） |
+
+因此打包版用户打开 `settings.features.surfaceTools` 后，技能清单里就能看到 `create-mode`，
+不依赖仓库工作区或用户手动拷贝。同步发生在 `buildSkillsRegistry()` 之前，首次启动即可见。
 
 ## 3. 分层与预算
 
@@ -55,13 +70,13 @@ requires:
 | L3 `assets/` | 模板、图标等 | 单文件 ≤256 KiB | 技能目录内相对路径；不能指向仓库根的外部路径 |
 
 **渐进披露的验收**：删除 `references/` 后 L2 仍能完成最小面板；删除 L2 的导航则模型必须
-知道该读哪个文件。当前 `hai-surface-dev` 的 L2 为 133 行 / 7.1 KiB，L3 为 5 个 reference +
+知道该读哪个文件。当前 `create-mode` 的 L2 为 135 行 / 7.3 KiB，L3 为 5 个 reference +
 2 个 script + 3 个 asset。
 
 ## 4. 内容要求
 
 1. **触发**：description 必须覆盖用户真实说法，至少包含：插件、面板、右栏、看板、
-   PDF 阅读器、文档面板、right panel、plugin、surface。不要只写内部术语。
+   PDF 阅读器、文档面板、自定义开发、right panel、plugin、surface。不要只写内部术语。
 2. **六步流程**：先看现状（`ui_inspect`）→ 问清歧义 → 写 manifest/panel.js → 安装
    （`surface_install`，审批）→ 真机验证 → 回报限制。每一步都要有失败时的可读原因。
 3. **硬规则**：no JSX / no bundler；`kind = plugin:<id>`；只注册自己的 kind；只用

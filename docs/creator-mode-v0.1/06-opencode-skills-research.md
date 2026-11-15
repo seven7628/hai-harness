@@ -130,8 +130,8 @@ description: Prepare release notes, version bumps, and GitHub releases
 
 ```md
 ---
-name: hai-surface-dev
-description: 当用户要求给桌面端右栏加面板、改界面、做看板/工具页，或调试已装 Surface 插件时使用。
+name: create-mode
+description: 'Build custom HAI CreateMode extensions by combining the exposed panel, agent, and host APIs — dashboards, document panels, tools, and workflows. Use when a developer wants to create, extend, or debug a custom right panel, plugin, surface, PDF viewer, or integration (插件、面板、右栏、看板、文档面板、PDF 阅读器、自定义开发).'
 requires:
   tools: [ui_inspect, surface_install]
 ---
@@ -139,7 +139,7 @@ requires:
 ```
 
 - `requires.tools` 用我们已有的 **技能能力面过滤**（`skills/capabilities.go`）：没有 surface 工具的会话（例如 Explore 子 agent）不会看到这个 skill；
-- 用户可在输入框 `@hai-surface-dev` 手动点名；
+- 用户可在输入框 `@create-mode` 手动点名；
 - 系统提示词只注入**一行描述**，正文按需加载。
 
 ### 4.4 备选优化：技能触发解锁（如果上下文成本在意）

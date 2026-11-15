@@ -583,7 +583,7 @@ unset HAI_E2E_SURFACE_API_KEY
 
 ---
 
-## 11. Skill 同步（`skills/hai-surface-dev/SKILL.md` 新增一节）
+## 11. Skill 同步（`desktop/vendor/create-mode-skills/create-mode/SKILL.md` 新增一节）
 
 1. 两个口子：`command` / `onEvent`；一张「什么时候用哪个」表；**旧只读命令已移除**（D11）。
 2. manifest 声明示例 + 安装页会展示什么。
@@ -594,6 +594,12 @@ unset HAI_E2E_SURFACE_API_KEY
 7. 反例：不要试图读 `window.desktop`、不要假装宿主会持久化、不要改全局工具集。
 
 > **P2 已同步**：SKILL 新增 “Exposing tools to the agent” 一节（manifest/tool.result 对齐、`read_only`、`requires_panel`、超时/截断、D10）；`templates/surface/surface.json` 带一个只读 `template_echo` 样本与 `tool.call` 处理，`e2e:plugin-loader` 仍全绿。
+>
+> **P4（内置分发）**：技能源移到 `desktop/vendor/create-mode-skills/create-mode/`，
+> electron-builder `extraResources` 打到 `Resources/create-mode-skills`；Electron main 注入
+> `GO_CODE_CREATE_MODE_SKILLS_DIR`，bridge 启动 `ensureCreateModeSkillsSynced()` 同步到
+> `~/.agents/skills/create-mode`（按 `version` 覆盖）。内容测试与分发测试见
+> `TestCreateModeSkill*`，详见 `11-skill-spec.md §2.1`。
 
 ---
 

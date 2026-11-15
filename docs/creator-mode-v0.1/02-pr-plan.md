@@ -42,7 +42,7 @@
 | 11 | 删除 legacy：`TAB_KINDS` / `makeTab` switch / `rightTab`（→ R11b，已删） | 清理 | 0.5d | 10 | 中 |
 | 12 | `ui` 通道 + `ui_inspect` 工具 | 新增 | 1.5d | 11 | 中 |
 | 13 | 安装器（index/manifest/install/remove/audit） | 新增 | 2d | 12 | 中 |
-| 14 | 常驻工具接线 + `hai-surface-dev` skill + 模板 + 插件页（**无 mode**） | 新增 | 1.5d | 13 | 低 |
+| 14 | 常驻工具接线 + `create-mode` skill + 模板 + 插件页（**无 mode**） | 新增 | 1.5d | 13 | 低 |
 | 15 | 验收收口：e2e 补全 + 文档回写 | 收尾 | 1d | 14 | 低 |
 | 16 | （缓冲）修复与打磨 | 缓冲 | 2d | — | — |
 
@@ -386,7 +386,7 @@
 ### PR-13 安装器 / PR-14 常驻工具 + skill + 模板 + 插件页（无 mode）
 
 - **13**：`desktop/bridge/surfaces.go`：`~/.go-code/surfaces/index.json`（有序 + hash + source + enabled）、`.bak` 快照、`.trash`、`audit.jsonl`；manifest 校验；`surface_install/list/remove` 三个工具；失败不写 index。
-- **14**：把 4 个工具注册进标准工具集（`settings.features.surfaceTools` 开关，**不改 `mode.go`**）；`skills/hai-surface-dev/SKILL.md`（`requires.tools` 走能力面过滤）；`templates/surface/{surface.json,panel.js,icon.svg}`；`PluginsPage`（列表 / 禁用 / 卸载 / 权限与 audit 对照）。
+- **14**：把 4 个工具注册进标准工具集（`settings.features.surfaceTools` 开关，**不改 `mode.go`**）；`desktop/vendor/create-mode-skills/create-mode/SKILL.md`（`requires.tools` 走能力面过滤）；`templates/surface/{surface.json,panel.js,icon.svg}`；`PluginsPage`（列表 / 禁用 / 卸载 / 权限与 audit 对照）。
 - 工具描述瘦身纪律：每个 ≤120 字、参数 ≤3 字段（常驻 schema 的成本约束，见设计稿 §5.1）。
 
 **验收**：设计稿 §5.8 的 A–G 七条全绿。
