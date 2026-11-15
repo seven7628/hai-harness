@@ -73,21 +73,31 @@ import { createRoot } from 'react-dom/client'
 import SettingsModal from '../../src/components/SettingsModal'
 import Narrative from '../../src/components/Narrative'
 import { useAppStore } from '../../src/store/useAppStore'
+// 语言 seam（P8-01b）：i18n 的 useT 只认 HostLangProvider，不再自己读 store。
+// 生产里 src/main.tsx 的根就是它；探针必须同构，否则 ⑥ 的 en 断言测的是
+// 「没有 provider 时的默认 zh」（与 verify_surface_boundary 的 67af7d5 同一修法）。
+import { HostLangProvider } from '../../src/host/lang'
 import '../../src/index.css'
 
 const WS = '/tmp/usage-stats-probe-ws'
 ;(window as unknown as { __store: unknown }).__store = useAppStore
 
-createRoot(document.getElementById('root')!).render(
-  <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
-    {/* 与 CenterPanel 同构：.narrative-wrap（flex 列 + min-height:0）里装 .narrative，
-        否则 .narrative 高度退化成内容高，空态垂直居中（auto 外边距）测不出来 */}
-    <div style={{ flex: '1 1 auto', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-      <Narrative />
-    </div>
-    <SettingsModal />
-  </div>,
-)
+function ProbeRoot() {
+  const lang = useAppStore((s) => s.settings.lang)
+  return (
+    <HostLangProvider lang={lang}>
+      <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
+        {/* 与 CenterPanel 同构：.narrative-wrap（flex 列 + min-height:0）里装 .narrative，
+            否则 .narrative 高度退化成内容高，空态垂直居中（auto 外边距）测不出来 */}
+        <div style={{ flex: '1 1 auto', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+          <Narrative />
+        </div>
+        <SettingsModal />
+      </div>
+    </HostLangProvider>
+  )
+}
+createRoot(document.getElementById('root')!).render(<ProbeRoot />)
 
 void (async () => {
   await useAppStore.getState().start(WS)
