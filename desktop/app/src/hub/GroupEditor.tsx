@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '../i18n'
 import AgentSigil from './AgentSigil'
-import { asGroupMode, GROUP_MODE_HINT, GROUP_MODES, type GroupMode } from './groupMode'
+import Sel from '../components/Sel'
+import { asGroupMode, GROUP_MODE_HINT_KEY, GROUP_MODE_LABEL_KEY, GROUP_MODES, type GroupMode } from './groupMode'
 import { useHubStore } from './useHubStore'
 import type { HubGroup } from './types'
 
@@ -91,7 +92,7 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
   function toggle(id: string): void {
     // 群主不能从成员表里去掉：先转让群主（bridge 会拒绝「移除 owner」，这里提前挡住）。
     if (editing && id === owner && picked.includes(id)) {
-      setLocalError('群主不能移除：先在「群主」里转让给别人')
+      setLocalError(t('hub.group.err.ownerLocked'))
       return
     }
     const next = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id]
@@ -105,23 +106,23 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
     if (busy) return
     const trimmed = name.trim()
     if (!trimmed) {
-      setLocalError('请填写群名称')
+      setLocalError(t('hub.group.err.name'))
       return
     }
     if (picked.length === 0) {
-      setLocalError('至少选择 1 个成员')
+      setLocalError(t('hub.group.err.members'))
       return
     }
     if (picked.length > MAX_GROUP_MEMBERS) {
-      setLocalError(`群成员上限 ${MAX_GROUP_MEMBERS} 人（当前选了 ${picked.length} 人）`)
+      setLocalError(t('hub.group.err.max').replace('{max}', String(MAX_GROUP_MEMBERS)).replace('{n}', String(picked.length)))
       return
     }
     if (groups.some((g) => g.id !== group?.id && (g.name ?? '').trim() === trimmed)) {
-      setLocalError('已有同名群组，换个名字')
+      setLocalError(t('hub.group.err.duplicate'))
       return
     }
     if (owner && !picked.includes(owner)) {
-      setLocalError('群主必须是群成员')
+      setLocalError(t('hub.group.err.ownerMember'))
       return
     }
     setLocalError(null)
@@ -155,7 +156,7 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
   }
 
   const error = localError ?? (attempted ? storeError : null)
-  const title = editing ? '编辑群组' : '新建群组'
+  const title = editing ? t('hub.group.edit') : t('hub.group.new')
 
   return (
     <div className="hub-modal-scrim" role="dialog" aria-modal="true" aria-labelledby="hub-group-modal-title" onClick={onClose}>
@@ -168,12 +169,12 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
         <div className="hub-modal-body">
           <div className="hub-group-form">
             <label className="hub-group-field">
-              <span>群名称</span>
+              <span>{t('hub.group.name')}</span>
               <input
                 autoFocus
                 value={name}
                 maxLength={32}
-                placeholder="例如：竞品研究"
+                placeholder={t('hub.group.name.ph')}
                 onChange={(e) => {
                   setName(e.target.value)
                   if (localError) setLocalError(null)
@@ -183,12 +184,14 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
 
             <div className="hub-group-field">
               <span>
-                成员
+                {t('hub.group.membersLabel')}
                 <span className="hub-group-required">
-                  （至少 1 人，最多 {MAX_GROUP_MEMBERS} 人；已选 {picked.length}）
+                  {t('hub.group.membersHint')
+                    .replace('{max}', String(MAX_GROUP_MEMBERS))
+                    .replace('{n}', String(picked.length))}
                 </span>
               </span>
-              <div className="hub-group-members" role="group" aria-label="群成员">
+              <div className="hub-group-members" role="group" aria-label={t('hub.group.membersAria')}>
                 {roster.map((a) => {
                   const on = picked.includes(a.id)
                   const isOwner = on && a.id === owner
@@ -198,7 +201,7 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
                         type="checkbox"
                         checked={on}
                         disabled={isOwner && editing}
-                        title={isOwner && editing ? '群主不能移除：先在「群主」里转让' : undefined}
+                        title={isOwner && editing ? t('hub.group.ownerLockedHint') : undefined}
                         onChange={() => toggle(a.id)}
                       />
                       {/* 22px：只是选人，不画运行状态点（点在这个尺寸上会和勾选框抢位置）。 */}
@@ -206,14 +209,16 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
                       <span className="hub-group-member-name">{a.name || t('hub.unnamed')}</span>
                       <span className="hub-group-member-role">{a.role || '—'}</span>
                       {on && editing ? (
-                        <span className={`hub-chip${isOwner ? ' owner' : ''}`}>{isOwner ? '群主' : '成员'}</span>
+                        <span className={`hub-chip${isOwner ? ' owner' : ''}`}>
+                          {isOwner ? t('hub.group.role.owner') : t('hub.group.role.member')}
+                        </span>
                       ) : null}
                       {on && editing && !isOwner ? (
                         <button
                           type="button"
                           className="hub-group-member-remove"
-                          aria-label={`移除 ${a.name || a.id}`}
-                          title="移除成员"
+                          aria-label={t('hub.group.removeAria').replace('{name}', a.name || a.id)}
+                          title={t('hub.group.remove')}
                           onClick={(e) => {
                             e.preventDefault()
                             e.stopPropagation()
@@ -231,27 +236,30 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
                 ) : null}
               </div>
               {editing ? (
-                <span className="hub-group-hint">取消勾选 = 从群里移除；群主需先转让（群主那一行的勾选框已锁定）。</span>
+                <span className="hub-group-hint">{t('hub.group.membersHint2')}</span>
               ) : null}
             </div>
 
             <label className="hub-group-field">
-              <span>群主</span>
-              <select value={owner} onChange={(e) => setOwner(e.target.value)} disabled={picked.length === 0}>
-                {picked.length === 0 ? <option value="">先选成员</option> : null}
-                {picked.map((id) => <option key={id} value={id}>{nameOf(id)}</option>)}
-              </select>
-              {editing ? <span className="hub-group-hint">转让群主：选一个新群主，保存后旧群主变普通成员。</span> : null}
+              <span>{t('hub.group.ownerField')}</span>
+              <Sel
+                value={owner}
+                onChange={setOwner}
+                disabled={picked.length === 0}
+                placeholder={t('hub.group.owner.pick')}
+                options={picked.map((id) => ({ value: id, label: nameOf(id) }))}
+              />
+              {editing ? <span className="hub-group-hint">{t('hub.group.ownerHint')}</span> : null}
             </label>
 
             <label className="hub-group-field">
-              <span>协作模式</span>
-              <select value={mode} onChange={(e) => setMode(asGroupMode(e.target.value))}>
-                {GROUP_MODES.map((m) => (
-                  <option key={m} value={m}>{m === 'ask' ? 'ask（推荐）' : m}</option>
-                ))}
-              </select>
-              <span className="hub-group-hint">{GROUP_MODE_HINT[mode]}</span>
+              <span>{t('hub.group.modeField')}</span>
+              <Sel
+                value={mode}
+                onChange={(v) => setMode(asGroupMode(v))}
+                options={GROUP_MODES.map((m) => ({ value: m, label: t(GROUP_MODE_LABEL_KEY[m]) }))}
+              />
+              <span className="hub-group-hint">{t(GROUP_MODE_HINT_KEY[mode])}</span>
             </label>
 
             {error ? <div className="hub-error" role="alert">{error}</div> : null}
@@ -261,7 +269,7 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
         <footer className="hub-modal-foot">
           <button className="hub-link" onClick={onClose} disabled={busy}>{t('hub.cancel')}</button>
           <button className="hub-primary" onClick={() => void submit()} disabled={busy}>
-            {busy ? (editing ? '保存中…' : '创建中…') : (editing ? '保存' : '创建')}
+            {busy ? (editing ? t('hub.group.saving') : t('hub.group.creating')) : (editing ? t('hub.group.save') : t('hub.group.create'))}
           </button>
         </footer>
       </div>

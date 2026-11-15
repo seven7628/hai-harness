@@ -1381,6 +1381,38 @@ button.hub-pill.hub-budget-chip:hover { border-color: var(--border-strong); colo
   padding: 6px 8px;
 }
 .hub-group-field > select { height: 31px; }
+/* 统一自绘下拉（Sel.tsx）在 Hub 弹层里的度量：与上面原生输入同高/同边框/同圆角。
+   原生 <select> 的弹层是 macOS 系统渲染，无法跟随 ink/paper/system 主题。 */
+.hub-form .sel,
+.hub-group-field > .sel { width: 100%; min-width: 0; }
+.hub-form .sel-btn,
+.hub-group-field > .sel .sel-btn {
+  height: 31px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+}
+.hub-form .sel-btn:hover:not(:disabled),
+.hub-group-field > .sel .sel-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--elevated);
+}
+.hub-form .sel-btn.open,
+.hub-group-field > .sel .sel-btn.open {
+  border-color: var(--accent);
+  background: var(--elevated);
+}
+.hub-form .sel-popup,
+.hub-group-field > .sel .sel-popup {
+  z-index: 120;
+  background: var(--elevated);
+  border-color: var(--border-strong);
+  font-size: 12.5px;
+}
 .hub-group-hint { font-size: 11.5px; line-height: 1.45; color: var(--text-2); }
 .hub-group-members {
   display: flex;

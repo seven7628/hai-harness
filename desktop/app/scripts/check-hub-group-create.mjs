@@ -152,12 +152,14 @@ try {
   await boxes.nth(0).check()
   await boxes.nth(1).check()
 
-  const selects = groupModal().locator('.hub-group-field select')
-  const ownerValue = await selects.nth(0).inputValue()
+  const sels = groupModal().locator('.hub-group-field .sel')
+  const ownerValue = await sels.nth(0).getAttribute('data-value')
   check(ownerValue !== '', '群主默认选中第一个成员')
-  const ownerOptions = await selects.nth(0).locator('option').count()
+  await sels.nth(0).locator('.sel-btn').click()
+  const ownerOptions = await sels.nth(0).locator('.sel-opt').count()
   check(ownerOptions === 2, `群主选项 = 已选成员数（got=${ownerOptions}）`)
-  const modeValue = await selects.nth(1).inputValue()
+  await sels.nth(0).locator('.sel-btn').click() // 收起下拉（Esc 会被弹层当成关闭整个 modal）
+  const modeValue = await sels.nth(1).getAttribute('data-value')
   check(modeValue === 'ask', `协作模式默认 ask（got=${modeValue}）`)
   await shot('modal-filled.png')
 

@@ -56,7 +56,7 @@ export default function Sel({
 
   const cur = options.find((o) => o.value === value)
   return (
-    <div className={`sel ${className ?? ''}`} ref={ref} style={style}>
+    <div className={`sel ${className ?? ''}`} ref={ref} style={style} data-value={value}>
       <button
         type="button"
         className={`sel-btn ${open ? 'open' : ''}`}
@@ -77,6 +77,7 @@ export default function Sel({
               role="option"
               aria-selected={o.value === value}
               className={`sel-opt ${o.value === value ? 'cur' : ''}`}
+              data-value={o.value}
               disabled={o.disabled}
               onClick={() => {
                 onChange(o.value)

@@ -4,6 +4,7 @@ import type { HubAgent } from './types'
 import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
 import AgentSigil from './AgentSigil'
+import Sel from '../components/Sel'
 import { useAgentState } from './useAgentState'
 import { buildAgentPatch, buildAgentProfile, initialDailyBudget, type AgentForm } from './agentPatch'
 import {
@@ -372,7 +373,7 @@ export default function AgentEditor({
               {tab === 'basic' ? (
                 <div className="hub-form">
                   <label>{t('hub.field.name')}
-                    <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Researcher" />
+                    <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t('hub.field.name.ph')} />
                   </label>
                   <p className="hub-avatar-note">{t('hub.avatar.autoNote')}</p>
                   <label>{t('hub.field.accent')}
@@ -385,63 +386,52 @@ export default function AgentEditor({
                     <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
                   </label>
                   <label>{t('hub.field.provider')}
-                    <select value={provider} onChange={(e) => changeProvider(e.target.value)}>
-                      {providers.length === 0 ? (
-                        <option value="" disabled>{t('hub.provider.empty')}</option>
-                      ) : provider === '' ? (
-                        <option value="" disabled>{t('hub.provider.choose')}</option>
-                      ) : null}
-                      {/* 当前 Provider 不在设置里（改名/已删）：保留可见，绝不静默改写。 */}
-                      {unknownProvider ? (
-                        <option value={unknownProvider} disabled>
-                          {unknownProvider} · {t('hub.option.unlisted')}
-                        </option>
-                      ) : null}
-                      {providers.map((p) => (
-                        <option key={p.id} value={p.id}>{p.label}</option>
-                      ))}
-                    </select>
+                    <Sel
+                      value={provider}
+                      onChange={changeProvider}
+                      placeholder={providers.length === 0 ? t('hub.provider.empty') : t('hub.provider.choose')}
+                      options={[
+                        // 当前 Provider 不在设置里（改名/已删）：保留可见，绝不静默改写。
+                        ...(unknownProvider ? [{ value: unknownProvider, label: `${unknownProvider} · ${t('hub.option.unlisted')}`, disabled: true }] : []),
+                        ...providers.map((p) => ({ value: p.id, label: p.label })),
+                      ]}
+                    />
                     {providers.length === 0 && unknownProvider ? (
                       <span className="hub-hint">{t('hub.provider.empty')}</span>
                     ) : null}
                   </label>
                   <label>{t('hub.field.model')}
-                    <select value={model} onChange={(e) => setModel(e.target.value)}>
-                      {provider === '' ? (
-                        <option value="" disabled>{t('hub.provider.empty')}</option>
-                      ) : models.length === 0 ? (
-                        <option value="" disabled>{t('hub.model.empty')}</option>
-                      ) : model === '' ? (
-                        <option value="" disabled>{t('hub.model.choose')}</option>
-                      ) : null}
-                      {/* 当前 Model 不在该 Provider 的列表里：保留可见，避免保存时被顺手改掉。 */}
-                      {unknownModel ? (
-                        <option value={unknownModel} disabled>
-                          {unknownModel} · {t('hub.option.unlisted')}
-                        </option>
-                      ) : null}
-                      {models.map((m) => (
-                        <option key={m} value={m}>{m}</option>
-                      ))}
-                    </select>
+                    <Sel
+                      value={model}
+                      onChange={setModel}
+                      placeholder={
+                        provider === '' ? t('hub.provider.empty')
+                          : models.length === 0 ? t('hub.model.empty')
+                            : t('hub.model.choose')
+                      }
+                      options={[
+                        // 当前 Model 不在该 Provider 的列表里：保留可见，避免保存时被顺手改掉。
+                        ...(unknownModel ? [{ value: unknownModel, label: `${unknownModel} · ${t('hub.option.unlisted')}`, disabled: true }] : []),
+                        ...models.map((m) => ({ value: m, label: m })),
+                      ]}
+                    />
                     {provider !== '' && models.length === 0 && unknownModel ? (
                       <span className="hub-hint">{t('hub.model.empty')}</span>
                     ) : null}
                   </label>
                   <label>{t('hub.field.effort')}
-                    <select value={effort} onChange={(e) => setEffort(e.target.value)}>
-                      {efforts.map((choice) => (
-                        <option key={choice.value || 'default'} value={choice.value}>
-                          {choice.value ? choice.label : t('hub.effort.default')}
-                        </option>
-                      ))}
-                      {/* 未知档位（旧数据/手写配置）原样保留，不转成任何档位。 */}
-                      {unknownEffort ? (
-                        <option value={unknownEffort} disabled>
-                          {unknownEffort} · {t('hub.option.unlisted')}
-                        </option>
-                      ) : null}
-                    </select>
+                    <Sel
+                      value={effort}
+                      onChange={setEffort}
+                      options={[
+                        ...efforts.map((choice) => ({
+                          value: choice.value,
+                          label: choice.value ? choice.label : t('hub.effort.default'),
+                        })),
+                        // 未知档位（旧数据/手写配置）原样保留，不转成任何档位。
+                        ...(unknownEffort ? [{ value: unknownEffort, label: `${unknownEffort} · ${t('hub.option.unlisted')}`, disabled: true }] : []),
+                      ]}
+                    />
                   </label>
 
                   {/* 预算/压缩/记忆收进折叠区：第一屏只留身份 + 模型。 */}
@@ -506,11 +496,15 @@ export default function AgentEditor({
               {tab === 'tools' ? (
                 <div className="hub-form">
                   <label>{t('hub.field.preset')}
-                    <select value={preset} onChange={(e) => setPreset(e.target.value)}>
-                      <option value="all">{t('hub.preset.all')}</option>
-                      <option value="readonly">{t('hub.preset.readonly')}</option>
-                      <option value="custom">{t('hub.preset.custom')}</option>
-                    </select>
+                    <Sel
+                      value={preset}
+                      onChange={setPreset}
+                      options={[
+                        { value: 'all', label: t('hub.preset.all') },
+                        { value: 'readonly', label: t('hub.preset.readonly') },
+                        { value: 'custom', label: t('hub.preset.custom') },
+                      ]}
+                    />
                   </label>
                   <label className="wide">{t('hub.field.disable')}
                     <textarea

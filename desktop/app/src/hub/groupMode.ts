@@ -18,16 +18,17 @@ export function asGroupMode(raw: unknown): GroupMode {
   return raw === 'auto' || raw === 'readonly' ? raw : 'ask'
 }
 
-/** 各模式的行为说明（新建弹层的 hint + 头部菜单的 title）。 */
-export const GROUP_MODE_HINT: Record<GroupMode, string> = {
-  ask: 'ask：有副作用的动作（bash/写文件/派任务/交接…）先征询你，只读与群内发言直接放行。',
-  auto: 'auto：不加群级审批，工具调用直接执行；沙箱与智能体自身的工具策略照常生效。',
-  readonly: 'readonly：成员只能读和发言，有副作用的工具会被拒绝（需要时再改成 ask/auto）。',
+/** 各模式的行为说明（新建弹层的 hint + 头部菜单的 title）。
+ *  存 i18n key 而不是中文：GroupEditor 与 GroupView 两条入口必须共用同一份文案。 */
+export const GROUP_MODE_HINT_KEY: Record<GroupMode, string> = {
+  ask: 'hub.group.mode.ask.hint',
+  auto: 'hub.group.mode.auto.hint',
+  readonly: 'hub.group.mode.readonly.hint',
 }
 
-/** 菜单/徽标用的短标签。 */
-export const GROUP_MODE_LABEL: Record<GroupMode, string> = {
-  ask: 'ask',
-  auto: 'auto',
-  readonly: 'readonly',
+/** 菜单/徽标用的短标签（同样是 i18n key）。 */
+export const GROUP_MODE_LABEL_KEY: Record<GroupMode, string> = {
+  ask: 'hub.group.mode.ask.label',
+  auto: 'hub.group.mode.auto.label',
+  readonly: 'hub.group.mode.readonly.label',
 }

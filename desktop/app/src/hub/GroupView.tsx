@@ -23,7 +23,7 @@ import { buildThreadItems, routingSummary, roundKey, type ThreadItem } from './g
 import { triggerSeqBySender } from './groupProjection'
 import { canAutoFollow, scrollToSeq, seqJumpPlan } from './seqJump'
 import { groupTimelineMarkdown } from './exportMarkdown'
-import { asGroupMode, GROUP_MODE_HINT, GROUP_MODES, type GroupMode } from './groupMode'
+import { asGroupMode, GROUP_MODE_HINT_KEY, GROUP_MODE_LABEL_KEY, GROUP_MODES, type GroupMode } from './groupMode'
 import { hubPerfMemoEnabled } from './perfFlags'
 import { useScrollbarWidth } from './useScrollbarWidth'
 import { useHeaderMenu } from './useHeaderMenu'
@@ -505,7 +505,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
             className="icon-btn"
             ref={headerMenu.triggerRef}
             onClick={headerMenu.toggle}
-            aria-label="更多操作"
+            aria-label={t('hub.more')}
             aria-haspopup="menu"
             aria-expanded={headerMenu.open}
           >
@@ -528,7 +528,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                   <span className="header-menu-sep" />
                   {/* 协作模式：三选一（radio）。文案与 GroupEditor 同源（groupMode.ts），
                       点哪一项就真的把群策略改成哪一项 —— 不是只改显示的假开关。 */}
-                  <span className="header-menu-label">协作模式</span>
+                  <span className="header-menu-label">{t('hub.group.modeField')}</span>
                   {GROUP_MODES.map((m) => (
                     <button
                       key={m}
@@ -536,10 +536,12 @@ export default function GroupView({ group }: { group: HubGroup }) {
                       role="menuitemradio"
                       aria-checked={asGroupMode(group.policy?.mode) === m}
                       disabled={modeSaving !== null}
-                      title={GROUP_MODE_HINT[m]}
+                      title={t(GROUP_MODE_HINT_KEY[m])}
                       onClick={() => void setGroupMode(m)}
                     >
-                      {modeSaving === m ? `${m} · 保存中…` : m}
+                      {modeSaving === m
+                        ? t('hub.group.modeSaving').replace('{mode}', t(GROUP_MODE_LABEL_KEY[m]))
+                        : t(GROUP_MODE_LABEL_KEY[m])}
                     </button>
                   ))}
                   <span className="header-menu-sep" />
