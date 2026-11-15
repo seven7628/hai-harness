@@ -18,8 +18,9 @@ concurrency:
 jobs:
   macos-arm64:
     name: macOS arm64 (.dmg / .zip) → Release
-    # Apple Silicon runner，与 electron-builder --mac --arm64 对齐（macOS 13 及更早是 Intel）
-    runs-on: macos-14
+    # Apple Silicon runner，与 electron-builder --mac --arm64 对齐。
+    # macOS 14 已从 GitHub-hosted runner 下线（2026-11）；macos-15 也是 arm64。
+    runs-on: macos-15
     env:
       # 未配 Developer ID：显式关掉签名身份自动发现，避免 electron-builder 去找证书
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
