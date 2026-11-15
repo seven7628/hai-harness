@@ -10165,14 +10165,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       refreshPluginProjects: () => useAppStore.getState().schedulePluginProjectsRefresh(),
       // P2b 的 requires_panel 宿主门禁（loader 的 panelBlocked 读它）。
       //
-      // 判据是「**任意作用域**的标签集里有这个 kind」：插件面板很可能开在别的会话作用域
-      //（用户切了会话，右栏还是那套标签），只看当前 activeId/rightTab 会把在场判成不在，
-      // 模型收到一个假的 panel_not_open。关掉最后一个插件标签 ⇒ 任何作用域里都没有它 ⇒
-      // 门禁生效。这里只读状态，不打日志：一次工具调用问一次，别把它变成噪音源。
-      isSurfaceOpen: (kind) =>
-        Object.values(useAppStore.getState().tabsByScope).some((set) =>
-          (set?.tabs ?? []).some((tab) => tab.kind === kind),
-        ),
+      // 判据是「**当前作用域**的标签集里有这个 kind」，不是所有作用域：
+      // tabsByScope 会在会话/工作区之间同步同一套标签，别的 scope 里那份是**不可见副本**；
+      // 把隐藏副本算成「面板开着」会让关闭后的工具调用仍被投递（P2b 全链真踩过）。
+      // 当前 scope 里有这个 kind（哪怕不是激活标签）才算在场。这里只读状态，不打日志。
+      isSurfaceOpen: (kind) => {
+        const s = useAppStore.getState()
+        const set0 = s.tabsByScope[tabScopeKey(s)]
+        return (set0?.tabs ?? []).some((tab) => tab.kind === kind)
+      },
     })
     // 虚拟 Project（插件）水合：拉 plugin_projects_list → 并入左栏插件分组 → 逐个 list。
     // 排在插件加载器之后（同一个「bridge 已 running」窗口）；失败静默，不影响真实项目。
