@@ -89,10 +89,20 @@ func BuildDigest(msgs []Message, limit int, maxRunes int) string {
 	var b strings.Builder
 	for _, m := range msgs[start:] {
 		who := string(m.Sender.AgentID)
-		if m.Sender.Kind == SenderHuman {
+		switch m.Sender.Kind {
+		case SenderHuman:
 			who = "人"
-		} else if m.Sender.Kind == SenderSystem || who == "" {
+		case SenderExternal:
+			who = m.Sender.Name
+			if who == "" {
+				who = "外部用户"
+			}
+		case SenderSystem:
 			who = "系统"
+		default:
+			if who == "" {
+				who = "系统"
+			}
 		}
 		text := strings.TrimSpace(strings.ReplaceAll(m.Text, "\n", " "))
 		if text == "" {

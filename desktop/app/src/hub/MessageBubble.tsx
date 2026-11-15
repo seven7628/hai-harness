@@ -194,7 +194,11 @@ export function GroupBubble({
   const kind = msg.sender?.kind ?? 'system'
   const senderId = kind === 'agent' ? (msg.sender?.agent_id ?? '') : ''
   const agent = senderId ? roster.find((a) => a.id === senderId) : undefined
-  const who = kind === 'human' ? '你' : ((names[senderId] ?? senderId) || '智能体')
+  const who = kind === 'human'
+    ? '你'
+    : kind === 'external'
+      ? (msg.sender?.name || t('hub.externalUser'))
+      : ((names[senderId] ?? senderId) || '智能体')
   const roleParts = [agent?.role, agent?.groupRole === 'owner' ? '群主' : ''].filter(Boolean)
   const role = roleParts.join(' · ')
   const time = formatClockTime(msg.created_at)
@@ -248,7 +252,7 @@ export function GroupBubble({
     />
   ) : undefined
 
-  if (kind === 'human') {
+  if (kind === 'human' || kind === 'external') {
     return (
       <UserMessage
         dataSeq={seq}
@@ -260,6 +264,8 @@ export function GroupBubble({
         retryDisabled={groupSending}
         time={time}
         dateTime={msg.created_at}
+        avatarLabel={kind === 'external' ? who : '你'}
+        senderLabel={kind === 'external' ? who : undefined}
       >
         <CollapsibleMarkdown
           text={linkedText}

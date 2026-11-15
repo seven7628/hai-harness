@@ -86,6 +86,8 @@ export function UserMessage({
   retryDisabled,
   dataSeq,
   className = '',
+  avatarLabel = '你',
+  senderLabel,
   children,
 }: {
   time?: string
@@ -99,6 +101,10 @@ export function UserMessage({
   retryDisabled?: boolean
   dataSeq?: string
   className?: string
+  /** 右侧头像文字：Hub 里的人类固定「你」；渠道外部用户用昵称首字。 */
+  avatarLabel?: string
+  /** 渠道外部用户的昵称（显示在气泡上方；Hub 人类不显示）。 */
+  senderLabel?: string
   children: ReactNode
 }) {
   const t = useT()
@@ -108,6 +114,7 @@ export function UserMessage({
       data-seq={dataSeq}
     >
       <div className="msg-main">
+        {senderLabel ? <div className="user-who">{senderLabel}</div> : null}
         <div className="user-bubble">{children}</div>
         {ownerOnly || pending || failed || time ? (
           <div className="user-meta">
@@ -123,7 +130,7 @@ export function UserMessage({
           </div>
         ) : null}
       </div>
-      <span className="owner-avatar" aria-hidden="true">你</span>
+      <span className="owner-avatar" aria-hidden="true" title={avatarLabel}>{avatarLabel.slice(0, 1)}</span>
     </div>
   )
 }

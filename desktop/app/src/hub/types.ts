@@ -40,8 +40,10 @@ export interface HubDMInfo {
 }
 
 export interface HubSender {
-  kind?: string // human | agent | system
+  kind?: string // human | agent | system | external
   agent_id?: string
+  /** 渠道外部用户的昵称（kind=external）；Hub 内 human 不带。 */
+  name?: string
 }
 
 /**

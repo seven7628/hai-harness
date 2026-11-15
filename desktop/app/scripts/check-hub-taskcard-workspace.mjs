@@ -92,6 +92,11 @@ const agentMsg = {
   },
 }
 
+const externalMsg = {
+  seq: 9, kind: 'text', sender: { kind: 'external', name: '飞书张三' },
+  text: '客户在飞书问：这个版本什么时候发？', created_at: '2026-03-10T12:02:00Z',
+}
+
 useHubStore.setState({ tasks: [wsTask, agentTask] })
 window.__spy = {}
 useHubStore.setState({ closeHub: () => { window.__spy.closed = true } })
@@ -103,6 +108,8 @@ function App() {
       React.createElement(GroupBubble, { msg: wsMsg, names: {}, roster, onSelectAgent: () => {} })),
     React.createElement('div', { id: 'card-agent' },
       React.createElement(GroupBubble, { msg: agentMsg, names: {}, roster, onSelectAgent: () => {} })),
+    React.createElement('div', { id: 'ext-msg' },
+      React.createElement(GroupBubble, { msg: externalMsg, names: {}, roster, onSelectAgent: () => {} })),
   )
 }
 
@@ -142,6 +149,14 @@ try {
   check(agentText.includes('Writer') && agentText.includes('群派发A 派发'),
     `agent 目标卡保持「<执行者> + <派发者> 派发」（got=${agentText}）`)
   check(!agentText.includes('发起'), `agent 目标卡不写「发起」（got=${agentText}）`)
+
+  // 4b) 渠道外部用户：不能冒充「你」，昵称与头像首字都来自 sender.name。
+  const ext = page.locator('#ext-msg')
+  const who = await ext.locator('.user-who').innerText()
+  check(who === '飞书张三', `外部用户显示渠道昵称（got=${who}）`)
+  const avatar = await ext.locator('.owner-avatar').innerText()
+  check(avatar === '飞', `外部用户头像取昵称首字（got=${avatar}）`)
+  check((await ext.locator('.user-bubble').innerText()).includes('什么时候发'), '外部用户正文进入气泡')
 
   // 5) 「打开会话」= 切到那个 Project 会话（不是发起者 DM）。
   await wsCard.locator('button', { hasText: '打开会话' }).click()

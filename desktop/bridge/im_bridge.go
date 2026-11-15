@@ -53,7 +53,7 @@ type imBridge struct {
 	// askFn 驱动投递目标（项目会话 / 智能体 DM / 群会话）：t 已按路由解析好归属与目标，
 	// 实现方按 t 决定怎么取会话（见 attachManager）。签名带 imTarget 而不是裸 wsPath，
 	// 是因为 owner 隔离后「投递给谁」有三种形态，用 workspace 表达不下。
-	askFn       func(t imTarget, text string, images []core.Content)
+	askFn       func(t imTarget, text string, images []core.Content, senderName string)
 	approveFn   func(wsPath, sessionID, approvalID string, approve bool) error
 	interruptFn func(wsPath, sessionID string)
 	// bindConfirmFn 陌生 Chat 首次消息 → 桌面端弹窗（返回确认的 workspace；空=拒绝）
@@ -344,7 +344,7 @@ func (b *imBridge) OnInMessage(msg im.InMessage) {
 			WsPath:    wsPath,
 			SessionID: sessionID,
 			Kind:      route.TargetKind(),
-		}, msg.Text, imImageBlocks(msg.Attachments))
+		}, msg.Text, imImageBlocks(msg.Attachments), msg.UserName)
 	}
 }
 
@@ -415,6 +415,59 @@ func (b *imBridge) Attach() {
 	}
 }
 
+// imExternalAttachments 把 IM 图片块转成 Hub 附件（只保留图片；文件引用由渠道侧降级为文本）。
+func imExternalAttachments(images []core.Content) []agenthub.Attachment {
+	out := make([]agenthub.Attachment, 0, len(images))
+	for _, c := range images {
+		if c.Type != core.ContentTypeImage || strings.TrimSpace(c.Content) == "" {
+			continue
+		}
+		out = append(out, agenthub.Attachment{Kind: agenthub.AttachmentKindImage, DataURL: c.Content, MIME: c.MimeType})
+	}
+	return out
+}
+
+// hubSendExternal 把渠道消息交给 hub_send 的同一条处理路径（落 DM 账本 → Ask → 事件）。
+// internal=true 抑制 command_response：这条路径没有前端在等响应。
+func (m *manager) hubSendExternal(agentID, text string, images []core.Content, senderName, ws string) {
+	if m == nil || strings.TrimSpace(agentID) == "" {
+		return
+	}
+	m.hubSend(command{
+		Type: CmdHubSend,
+		Payload: map[string]any{
+			"workspace":   ws,
+			"agent_id":    agentID,
+			"text":        text,
+			"attachments": imExternalAttachments(images),
+			"sender_kind": string(agenthub.SenderExternal),
+			"sender_name": senderName,
+		},
+		internal: true,
+	})
+}
+
+// hubGroupSendExternal 把渠道消息交给 hub_group_send 的同一条处理路径
+// （落群日志 → @ 路由 → 回执/接龙 → hub_message/hub_round）。
+func (m *manager) hubGroupSendExternal(groupID, executorID, text string, images []core.Content, senderName, ws string) {
+	if m == nil || strings.TrimSpace(groupID) == "" {
+		return
+	}
+	payload := map[string]any{
+		"workspace":   ws,
+		"group_id":    groupID,
+		"text":        text,
+		"attachments": imExternalAttachments(images),
+		"sender_kind": string(agenthub.SenderExternal),
+		"sender_name": senderName,
+	}
+	if strings.TrimSpace(executorID) != "" {
+		// 显式把渠道接待者作为本轮目标：无 @ 的外部消息也要有人接。
+		payload["mentions"] = []string{executorID}
+	}
+	m.hubGroupSend(command{Type: CmdHubGroupSend, Payload: payload, internal: true})
+}
+
 // preferredModel 新会话默认模型：最近一次 switch_model 的选择优先，
 // 否则回退 provider 默认模型（与前端 globalPrefs 语义对齐：IM 会话复用桌面端当前选择）。
 func (m *manager) preferredModel() string {
@@ -430,37 +483,28 @@ func (m *manager) preferredModel() string {
 // m 为 manager；wsPath 用于会话路由。
 func (b *imBridge) attachManager(m *manager, wsPath string) {
 	ctx := context.Background()
-	b.askFn = func(t imTarget, text string, images []core.Content) {
-		// owner 隔离后「投给谁」有三种形态，各走既有的会话装配入口（不另造会话）：
-		//   group     → hubGroupSession(agent, group)（群会话）
-		//   agent     → hubDMSession(agent)（智能体 DM）
-		//   workspace → 项目会话（get 或 create）
-		var bs *bridgeSession
+	b.askFn = func(t imTarget, text string, images []core.Content, senderName string) {
+		// Hub 路由必须走 hub_send / hub_group_send 的同一条业务路径：只 Ask 模型会让
+		// 飞书消息进不了 Hub 账本/时间线，也没有 @ 路由/接龙。项目路由保持原样。
 		switch t.Kind {
-		case "group":
-			var err error
-			bs, err = m.hubGroupSession(t.Route.Agent, t.Route.Group)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "✗ im hub group session %s: %v\n", t.SessionID, err)
-				return
-			}
 		case "agent":
+			m.hubSendExternal(t.Route.Agent, text, images, senderName, t.WsPath)
+			return
+		case "group":
+			// 群路由的 agent 是这条渠道的「接待者」：外部消息没有 @ 也要唤醒它，
+			// 否则绑定后飞书群里说话会只落日志、没人回应（与桌面群「无 @ 只记录」不同）。
+			m.hubGroupSendExternal(t.Route.Group, t.Route.Agent, text, images, senderName, t.WsPath)
+			return
+		}
+		// 项目路由：保持既有会话装配入口（不另造会话）。
+		bs := m.get(t.WsPath, t.SessionID)
+		if bs == nil {
+			// 会话不存在 → 创建（IM 发起）
 			var err error
-			bs, err = m.hubDMSession(t.Route.Agent)
+			bs, err = m.create(t.WsPath, t.SessionID, "")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "✗ im hub dm session %s: %v\n", t.SessionID, err)
+				fmt.Fprintf(os.Stderr, "✗ im create session %s: %v\n", t.SessionID, err)
 				return
-			}
-		default:
-			bs = m.get(t.WsPath, t.SessionID)
-			if bs == nil {
-				// 会话不存在 → 创建（IM 发起）
-				var err error
-				bs, err = m.create(t.WsPath, t.SessionID, "")
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "✗ im create session %s: %v\n", t.SessionID, err)
-					return
-				}
 			}
 		}
 		// 内容块：文本块（有文本时）+ 图片块（IM 图片附件）。纯图片消息（无文本）

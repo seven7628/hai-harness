@@ -5,6 +5,7 @@ import { useT } from '../i18n'
 import { useAppStore } from '../store/useAppStore'
 import AgentSigil from './AgentSigil'
 import Sel from '../components/Sel'
+import ChannelBindings from './ChannelBindings'
 import { useAgentState } from './useAgentState'
 import { buildAgentPatch, buildAgentProfile, initialDailyBudget, type AgentForm } from './agentPatch'
 import {
@@ -12,20 +13,21 @@ import {
   newAgentDefaults, providerOptions, unlistedValue,
 } from './agentModelOptions'
 
-// 智能体资料页（§8.5）：新建/编辑，5 个页签。
+// 智能体资料页（§8.5）：新建/编辑，6 个页签。
 //
 // 页签与数据源：
 //   基本       profile 标量（名字/头像/色/角色/职责/provider/model/档位/压缩阈值）
 //   人格       instructions 与 persona（hub 会话的人格由 Hub 装配决定，persona 只展示）
 //   工具与权限 tools.preset / disable / allow / disable_network / mcp.disable（前端只编辑
 //              最常用的三项，其余保持原值 —— 全量编辑器留到工具面板）
+//   渠道       im_route_list / im_route_set / im_route_del（复用 im-config.json 路由）
 //   记忆       hub_agent_memory（列表/读）+ hub_agent_memory_write（写前备份）
 //   版本       hub_agent_versions / hub_agent_rollback / hub_agent_prompt_preview
 //
 // 保存语义：create 走 hub_agent_create（服务端分配 id）；update 走 hub_agent_update 的
 // patch（只发改过的字段，避免把列表里没带的字段写成零值）。
 
-type Tab = 'basic' | 'persona' | 'tools' | 'memory' | 'versions'
+type Tab = 'basic' | 'persona' | 'tools' | 'channels' | 'memory' | 'versions'
 
 interface MemoryEntry {
   name: string
@@ -118,6 +120,7 @@ export default function AgentEditor({
       { key: 'basic', label: t('hub.tab.basic') },
       { key: 'persona', label: t('hub.tab.persona') },
       { key: 'tools', label: t('hub.tab.tools') },
+      { key: 'channels', label: t('hub.tab.channels') },
       { key: 'memory', label: t('hub.tab.memory') },
       { key: 'versions', label: t('hub.tab.versions') },
     ],
@@ -516,6 +519,14 @@ export default function AgentEditor({
                   </label>
                   <p className="hub-muted">{t('hub.toolsNote')}</p>
                 </div>
+              ) : null}
+
+              {tab === 'channels' ? (
+                isNew ? (
+                  <p className="hub-muted">{t('hub.channel.needSave').replace('{kind}', t('hub.channel.kind.agent'))}</p>
+                ) : (
+                  <ChannelBindings ownerKind="agent" ownerId={agentID} />
+                )
               ) : null}
 
               {tab === 'memory' ? (

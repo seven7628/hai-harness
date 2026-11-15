@@ -29,7 +29,7 @@ func imTestBridge(t *testing.T, cfg im.Config) (*imBridge, *[]imTarget) {
 	rt.SetConfig(cfg)
 	b := newIMBridge(rt)
 	asked := []imTarget{}
-	b.askFn = func(target imTarget, text string, images []core.Content) { asked = append(asked, target) }
+	b.askFn = func(target imTarget, text string, images []core.Content, _ string) { asked = append(asked, target) }
 	return b, &asked
 }
 
@@ -64,6 +64,23 @@ func TestIMOwnerGateBlocksOnlyThatOwner(t *testing.T) {
 	}
 	if (*asked)[0].SessionID != "im-feishu-chat-ws" {
 		t.Fatalf("项目会话 id = %q", (*asked)[0].SessionID)
+	}
+}
+
+func TestIMPassesExternalSenderName(t *testing.T) {
+	cfg := im.Config{
+		Enabled: true,
+		Gateways: []im.GatewayConfig{{
+			ID: "gw1", Type: "feishu", Enabled: true, AllowUsers: []string{"*"},
+			Routes: []im.RouteConfig{{Chat: im.Chat{Gateway: "feishu", ChatID: "dm"}, Agent: "a"}},
+		}},
+	}
+	b, _ := imTestBridge(t, cfg)
+	var got string
+	b.askFn = func(_ imTarget, _ string, _ []core.Content, senderName string) { got = senderName }
+	b.OnInMessage(im.InMessage{Chat: im.Chat{Gateway: "feishu", ChatID: "dm"}, UserID: "u", UserName: "飞书张三", Text: "x"})
+	if got != "飞书张三" {
+		t.Fatalf("senderName = %q, want 飞书张三", got)
 	}
 }
 

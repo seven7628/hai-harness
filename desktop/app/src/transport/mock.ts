@@ -1,4 +1,4 @@
-import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, IMConfig, OfficeKitStatus } from './types'
+import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, IMConfig, IMChat, IMRouteCfg, OfficeKitStatus } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
 import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
@@ -1855,6 +1855,8 @@ class MockTransport implements Transport {
     events: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo claude-session-start', timeout: 5 }] }] },
   }
   // 信任库（mock）：命令 → 状态；未登记的项目命令默认 untrusted（安全默认，与真实现一致）
+  // 归属级 IM 启用状态（plugin_enable/disable 的 owner 维度；与 im-config 的 owners 同语义）。
+  private mockIMOwnerEnabled: Record<string, boolean> = {}
   // mockIMConfig IM 配置的 mock 真相源（im_config_set 写它、im_config_get 读它）。
   // 三种投递目标各一条：workspace / agent DM / 群（群还需要执行者 agent）。
   private mockIMConfig: IMConfig = {
@@ -3538,6 +3540,61 @@ class MockTransport implements Transport {
         const cfg = (cmd.payload as { config?: IMConfig } | undefined)?.config
         if (cfg) this.mockIMConfig = JSON.parse(JSON.stringify(cfg)) as IMConfig
         this.respond(cmd, {})
+        break
+      }
+      case 'im_route_list': { // 路由表（按 owner 过滤；AgentEditor/GroupEditor 渠道绑定）
+        const ownerFilter = String(cmd.payload?.owner ?? '')
+        const routes: Array<Record<string, unknown>> = []
+        for (const gw of this.mockIMConfig.gateways) {
+          for (const r of gw.routes ?? []) {
+            const ro = r.owner || (r.group ? `group:${r.group}` : r.agent ? `agent:${r.agent}` : r.workspace ? `workspace:${r.workspace}` : '')
+            if (ownerFilter && ro !== ownerFilter) continue
+            routes.push({
+              gateway_id: gw.id,
+              chat: r.chat,
+              workspace: r.workspace,
+              agent: r.agent,
+              group: r.group,
+              owner: ro,
+              ownerLabel: ro,
+              ownerEnabled: this.mockIMOwnerEnabled[ro] ?? true,
+              target: r.group ? 'group' : r.agent ? 'agent' : r.workspace ? 'workspace' : '',
+            })
+          }
+        }
+        this.respond(cmd, { routes, owner: ownerFilter, owners: this.mockIMOwnerEnabled })
+        break
+      }
+      case 'im_route_set': { // 增/改路由（同 Chat 替换）
+        const gatewayID = String(cmd.payload?.gateway_id ?? '')
+        const route = (cmd.payload as { route?: IMRouteCfg } | undefined)?.route
+        const gw = this.mockIMConfig.gateways.find((g) => g.id === gatewayID)
+        if (!gw || !route?.chat?.chat_id) { this.respondErr(cmd, '路由缺少 chat 或 gateway'); break }
+        gw.routes = gw.routes ?? []
+        const i = gw.routes.findIndex((r) => r.chat.gateway === route.chat.gateway && r.chat.chat_id === route.chat.chat_id && (r.chat.thread_id ?? '') === (route.chat.thread_id ?? ''))
+        if (i >= 0) gw.routes[i] = route
+        else gw.routes.push(route)
+        const ro = route.group ? `group:${route.group}` : route.agent ? `agent:${route.agent}` : route.workspace ? `workspace:${route.workspace}` : ''
+        if (ro) this.mockIMOwnerEnabled[ro] = true
+        this.respond(cmd, { owner: ro, ownerEnabled: true })
+        break
+      }
+      case 'im_route_del': {
+        const gatewayID = String(cmd.payload?.gateway_id ?? '')
+        const chat = (cmd.payload as { chat?: IMChat } | undefined)?.chat
+        const gw = this.mockIMConfig.gateways.find((g) => g.id === gatewayID)
+        if (gw && chat) {
+          gw.routes = (gw.routes ?? []).filter((r) => !(r.chat.gateway === chat.gateway && r.chat.chat_id === chat.chat_id && (r.chat.thread_id ?? '') === (chat.thread_id ?? '')))
+        }
+        this.respond(cmd, {})
+        break
+      }
+      case 'plugin_enable':
+      case 'plugin_disable': {
+        const owner = String(cmd.payload?.owner ?? '')
+        const id = String(cmd.payload?.id ?? '')
+        if (id === 'im' && owner) this.mockIMOwnerEnabled[owner] = cmd.type === 'plugin_enable'
+        this.respond(cmd, { owner, ownerEnabled: id === 'im' && owner ? this.mockIMOwnerEnabled[owner] : undefined })
         break
       }
       case 'im_chat_list': // 群列表（路由绑定下拉）

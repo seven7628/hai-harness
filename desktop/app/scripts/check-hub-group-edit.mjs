@@ -74,6 +74,10 @@ await openGroup()
 const headerSubBefore = await page.locator('.hub-demo .chat-sub').first().innerText().catch(() => '')
 await openEditor()
 {
+  // 渠道区块复用 im_route_list：mock 里 grp_mock1 已有一条飞书群路由。
+  const channelRows = modal().locator('.hub-channels .hub-channel-row')
+  check((await channelRows.count()) === 1, `群组渠道区块显示已绑定路由（got=${await channelRows.count()}）`)
+  check((await channelRows.first().innerText()).includes('oc_mock_team'), '渠道行锚定群路由的 chat_id')
   const title = await modal().locator('.hub-modal-title').innerText()
   check(title.includes('编辑群组'), `标题是编辑模式（got=${title}）`)
   const name = await modal().locator('input[type="text"], input:not([type])').first().inputValue()

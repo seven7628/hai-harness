@@ -2558,6 +2558,9 @@ func sendErrCode(err error) string {
 }
 
 func (m *manager) respCode(c command, ok bool, errMsg, code string, data map[string]any) {
+	if c.internal {
+		return
+	}
 	if data == nil {
 		data = map[string]any{}
 	}
@@ -7417,6 +7420,9 @@ type command struct {
 	Id      int            `json:"id"`
 	Type    Command        `json:"type"` // 类型化命令名（V2 P2-PROTOCOL-03：编译期拼写检查）
 	Payload map[string]any `json:"payload"`
+	// internal 仅供 bridge 内部复用命令处理路径（IM 入向 → hub_send/hub_group_send）：
+	// 不向 stdout 写 command_response —— 没有前端在等这个 id，写了只会污染事件流。
+	internal bool
 }
 
 func strSlice(m map[string]any, k string) []string {

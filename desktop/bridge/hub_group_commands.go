@@ -819,9 +819,13 @@ func (m *manager) hubGroupSend(c command) {
 		m.resp(c, false, "群组已删除", nil)
 		return
 	}
+	sender := agenthub.Sender{Kind: agenthub.SenderHuman}
+	if str(c.Payload, "sender_kind") == string(agenthub.SenderExternal) {
+		sender = agenthub.Sender{Kind: agenthub.SenderExternal, Name: str(c.Payload, "sender_name")}
+	}
 	msg := &agenthub.Message{
 		GroupID: g.ID, Kind: agenthub.KindText,
-		Sender: agenthub.Sender{Kind: agenthub.SenderHuman},
+		Sender: sender,
 		// 纯图消息存 `[图片]`：快照/perception 以正文非空判「可用消息」，
 		// 占位符让附件消息像普通消息一样进入上下文；路由仍用原始 text。
 		Text: hubDisplayText(text, atts), Attachments: atts,

@@ -263,6 +263,40 @@ const rect = (el) => el ? el.getBoundingClientRect() : null
         }
       })
       check(`@${width} 编辑器已打开`, !!m)
+      if (m && width === 1280) {
+        // 渠道 tab 复用 im_route_*：至少把 mock 里 agent ag_mockres1 的绑定画出来。
+        const channelTab = page.locator('.hub-tabs button').filter({ hasText: '渠道' }).first()
+        check('编辑器有「渠道」tab', (await channelTab.count()) === 1)
+        if (await channelTab.count()) {
+          await channelTab.click()
+          await page.waitForTimeout(500)
+          check('渠道 tab 渲染 ChannelBindings', (await page.locator('.hub-channels').count()) === 1)
+          check('已绑定的飞书会话出现在列表', (await page.locator('.hub-channel-row').count()) >= 1,
+            `rows=${await page.locator('.hub-channel-row').count()}`)
+          check('渠道 tab 无读取错误', (await page.locator('.hub-channels .hub-error').count()) === 0)
+          check('渠道说明的 {kind} 已本地化', !(await page.locator('.hub-channels-head .hub-sub').innerText()).includes('{kind}'))
+          // 真走一次 im_route_set：选会话 → 保存 → 列表多一条。
+          await page.locator('.hub-channel-add').click()
+          await page.waitForTimeout(400)
+          const chatSel = page.locator('.hub-channel-form .sel').nth(1)
+          check('绑定表单有会话下拉', (await chatSel.count()) === 1)
+          await chatSel.locator('.sel-btn').click()
+          await page.waitForTimeout(100)
+          await chatSel.locator('.sel-opt').first().click()
+          await page.locator('.hub-channel-form .hub-primary').click()
+          await page.waitForTimeout(700)
+          check('绑定后列表出现第二条路由', (await page.locator('.hub-channel-row').count()) === 2,
+            `rows=${await page.locator('.hub-channel-row').count()}`)
+          check('绑定没有报错', (await page.locator('.hub-channels .hub-error').count()) === 0)
+          // 归属级开关：plugin_enable/disable 带 owner，不能停掉别人的共享连接。
+          await page.locator('.hub-channels-head .hub-link').click()
+          await page.waitForTimeout(400)
+          check('停用后按钮切成「启用渠道」', (await page.locator('.hub-channels-head .hub-link').innerText()).includes('启用渠道'),
+            await page.locator('.hub-channels-head .hub-link').innerText())
+          await page.locator('.hub-tabs button').filter({ hasText: '基本' }).first().click()
+          await page.waitForTimeout(200)
+        }
+      }
       if (m) {
         check(`@${width} 对话框宽度 ≤720`, m.modal.w <= 720, `${m.modal.w}px`)
         check(`@${width} 水平居中`, Math.abs(m.modal.x - (m.vw - m.modal.w) / 2) <= 2, `x=${m.modal.x}`)

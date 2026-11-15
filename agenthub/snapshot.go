@@ -194,6 +194,11 @@ func snapshotWho(g *Group, m Message) string {
 		return "人"
 	case SenderSystem:
 		return "系统"
+	case SenderExternal:
+		if m.Sender.Name != "" {
+			return m.Sender.Name
+		}
+		return "外部用户"
 	}
 	who := string(m.Sender.AgentID)
 	if who == "" {

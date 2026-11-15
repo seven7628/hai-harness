@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useT } from '../i18n'
 import AgentSigil from './AgentSigil'
 import Sel from '../components/Sel'
+import ChannelBindings from './ChannelBindings'
 import { asGroupMode, GROUP_MODE_HINT_KEY, GROUP_MODE_LABEL_KEY, GROUP_MODES, type GroupMode } from './groupMode'
 import { useHubStore } from './useHubStore'
 import type { HubGroup } from './types'
@@ -9,7 +10,7 @@ import type { HubGroup } from './types'
 // 群组弹层：新建 + 编辑共用一份（P6-17）。
 //
 // 骨架与 AgentEditor 同一套：.hub-modal-scrim（role=dialog、点遮罩关闭）+ .hub-modal。
-// 与资料页不同的是单列、高度自适应 —— 群名/成员/群主/协作模式四个字段。
+// 与资料页不同的是单列、高度自适应 —— 群名/成员/群主/协作模式 + 渠道绑定。
 //
 // 编辑模式（传 group）：成员表的勾选是**增删的唯一入口** ——
 //   · 原本在群里、取消勾选 = 移除（群主不可取消，先转让）；
@@ -261,6 +262,22 @@ export default function GroupEditor({ onClose, group }: { onClose: () => void; g
               />
               <span className="hub-group-hint">{t(GROUP_MODE_HINT_KEY[mode])}</span>
             </label>
+
+            <div className="hub-group-field">
+              <span>{t('hub.tab.channels')}</span>
+              {group ? (
+                <ChannelBindings
+                  ownerKind="group"
+                  ownerId={group.id}
+                  executorId={owner || picked[0]}
+                  members={picked.map((id) => ({ id, label: nameOf(id) }))}
+                />
+              ) : (
+                <span className="hub-group-hint">
+                  {t('hub.channel.needSave').replace('{kind}', t('hub.channel.kind.group'))}
+                </span>
+              )}
+            </div>
 
             {error ? <div className="hub-error" role="alert">{error}</div> : null}
           </div>

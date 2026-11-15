@@ -1203,9 +1203,13 @@ func (m *manager) hubSend(c command) {
 		m.resp(c, false, err.Error(), nil)
 		return
 	}
+	sender := agenthub.Sender{Kind: agenthub.SenderHuman}
+	if str(c.Payload, "sender_kind") == string(agenthub.SenderExternal) {
+		sender = agenthub.Sender{Kind: agenthub.SenderExternal, Name: str(c.Payload, "sender_name")}
+	}
 	msg := &agenthub.Message{
 		Kind:        agenthub.KindText,
-		Sender:      agenthub.Sender{Kind: agenthub.SenderHuman},
+		Sender:      sender,
 		Text:        hubDisplayText(text, atts),
 		Attachments: atts,
 	}

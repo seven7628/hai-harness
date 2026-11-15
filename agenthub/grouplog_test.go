@@ -298,3 +298,17 @@ func TestGroupActivityRepairsTailBeforeFirstAppend(t *testing.T) {
 		t.Fatalf("append-before-read after restart = %+v, %v", got, err)
 	}
 }
+
+func TestBuildDigestExternalSenderName(t *testing.T) {
+	msgs := []Message{
+		{Seq: 1, Kind: KindText, Sender: Sender{Kind: SenderExternal, Name: "飞书张三"}, Text: "这个版本什么时候发"},
+		{Seq: 2, Kind: KindText, Sender: Sender{Kind: SenderExternal}, Text: "没有昵称"},
+	}
+	got := BuildDigest(msgs, 10, 200)
+	if !strings.Contains(got, "飞书张三: 这个版本什么时候发") {
+		t.Fatalf("digest = %q", got)
+	}
+	if !strings.Contains(got, "外部用户: 没有昵称") {
+		t.Fatalf("digest fallback = %q", got)
+	}
+}

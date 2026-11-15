@@ -2807,6 +2807,15 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 /* demo 的 .user-meta 只有右对齐；真实数据会同时出现「仅你可看」+ 时间，
    没有 gap 会拼成「仅你可看00:47」。保持右对齐，两个元信息之间留 6px。 */
 .hub-demo .user-meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+/* 渠道外部用户：气泡仍是人类侧（右对齐），但头像/昵称用渠道身份，不能冒充「你」。 */
+.hub-demo .user-who {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 2px 3px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+}
 .hub-demo .user-meta .user-owner-only { color: var(--warn); }
 .hub-demo .user-meta .user-failed { color: var(--danger); }
 /* 失败气泡的行内重试：与「发送失败」同一行（沿用首发 cid，不新开气泡，HUB-FAIL-01）。 */
@@ -3702,3 +3711,63 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
   .hub-inline-need header { flex-wrap: wrap; }
   .hub-inline-need-attr { flex: 1 0 100%; max-width: 100%; margin-left: 0; }
 }
+
+/* —— 渠道绑定（AgentEditor「渠道」tab / GroupEditor 区块）——
+   绑定数据在 im-config.json，这里只是路由的列表/表单投影；不新建样式体系。 */
+.hub-channels { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.hub-channels-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hub-channels-head .hub-sub { flex: 1 1 220px; min-width: 0; }
+.hub-channel-off { color: var(--text-3); }
+.hub-channel-list { display: flex; flex-direction: column; gap: 4px; }
+.hub-channel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.hub-channel-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success, #4caf7a);
+}
+.hub-channel-dot[data-on='0'] { background: var(--text-3); }
+.hub-channel-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.hub-channel-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--ink); }
+.hub-channel-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.hub-channel-add { align-self: flex-start; }
+.hub-channel-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+}
+.hub-channel-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); min-width: 0; }
+.hub-channel-form input,
+.hub-channel-form .sel-btn {
+  height: 31px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+}
+.hub-channel-form .sel { width: 100%; }

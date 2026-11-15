@@ -79,7 +79,7 @@ func TestBridgeMessageRoutesToAsk(t *testing.T) {
 
 	var asked string
 	var askedWS string
-	b.askFn = func(t imTarget, text string, _ []core.Content) {
+	b.askFn = func(t imTarget, text string, _ []core.Content, _ string) {
 		asked = text
 		askedWS = t.Route.Workspace
 	}
@@ -100,7 +100,7 @@ func TestBridgeRejectsUnauthorized(t *testing.T) {
 	b, _ := newTestBridge(t, cfg)
 
 	called := false
-	b.askFn = func(t imTarget, text string, _ []core.Content) { called = true }
+	b.askFn = func(t imTarget, text string, _ []core.Content, _ string) { called = true }
 	b.OnInMessage(im.InMessage{Chat: im.Chat{Gateway: "testgw", ChatID: "c1"}, UserID: "u2", Text: "hi"})
 	if called {
 		t.Fatal("未授权用户不应触发 ask")
@@ -254,7 +254,7 @@ func TestE2EIMFullConversation(t *testing.T) {
 
 	// 记录桥的 ask 调用（模拟真实 Session.Ask）
 	var asks []string
-	b.askFn = func(t imTarget, text string, _ []core.Content) { asks = append(asks, text) }
+	b.askFn = func(t imTarget, text string, _ []core.Content, _ string) { asks = append(asks, text) }
 
 	// ① 用户发任务
 	b.OnInMessage(im.InMessage{
@@ -353,7 +353,7 @@ func TestE2EIMRejectsUnknownChat(t *testing.T) {
 	b, _ := newTestBridge(t, cfg)
 
 	called := false
-	b.askFn = func(t imTarget, text string, _ []core.Content) { called = true }
+	b.askFn = func(t imTarget, text string, _ []core.Content, _ string) { called = true }
 	// 无 bindConfirmFn（未装配）→ 陌生聊天被拒
 	b.OnInMessage(im.InMessage{
 		Chat: im.Chat{Gateway: "testgw", ChatID: "oc_unknown"}, UserID: "ou_1", Text: "hi",
@@ -491,7 +491,7 @@ func TestBridgeAcceptsImageOnlyMessage(t *testing.T) {
 
 	called := false
 	var gotImages []core.Content
-	b.askFn = func(t imTarget, text string, images []core.Content) {
+	b.askFn = func(t imTarget, text string, images []core.Content, _ string) {
 		called = true
 		gotImages = images
 	}
@@ -519,7 +519,7 @@ func TestBridgeRejectsTrulyEmptyMessage(t *testing.T) {
 	}}
 	b, _ := newTestBridge(t, cfg)
 	called := false
-	b.askFn = func(t imTarget, text string, _ []core.Content) { called = true }
+	b.askFn = func(t imTarget, text string, _ []core.Content, _ string) { called = true }
 	b.OnInMessage(im.InMessage{
 		Chat: im.Chat{Gateway: "testgw", ChatID: "c1"}, UserID: "u1", Text: "   ",
 		Attachments: []im.Attachment{{Type: "file", URL: "https://x/a.pdf"}}, // 非图片附件不算内容

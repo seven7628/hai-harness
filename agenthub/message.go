@@ -12,12 +12,16 @@ const (
 	SenderHuman  SenderKind = "human"
 	SenderAgent  SenderKind = "agent"
 	SenderSystem SenderKind = "system"
+	// SenderExternal 是渠道（飞书等）进来的外部用户：不是 Hub 里的人，
+	// 但也不是系统消息 —— 群/DM 转录要显示他的昵称，审批与 @ 路由按外部用户处理。
+	SenderExternal SenderKind = "external"
 )
 
-// Sender 是消息作者。agent 消息必须有 AgentID，human/system 没有。
+// Sender 是消息作者。agent 消息必须有 AgentID；external 消息带 Name（渠道昵称）。
 type Sender struct {
 	Kind    SenderKind `json:"kind"`
 	AgentID AgentID    `json:"agent_id,omitempty"`
+	Name    string     `json:"name,omitempty"`
 }
 
 // Intent 是消息意图；用于 UI 与护栏，不替代正文。
