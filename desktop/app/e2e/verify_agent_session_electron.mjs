@@ -84,6 +84,8 @@ export const surface = {
           merge({
             env: {
               desktop: typeof window.desktop,
+              // 「隐藏」和「没有」是两件事：属性存在与否才是后者（D6 的边界）。
+              hasDesktopKey: Object.prototype.hasOwnProperty.call(window, 'desktop'),
               claim: typeof window.__haiClaimHostApi,
               // 第二次 claim 必须是 null（D6 一次性交接）—— 直接在这里调用一次。
               secondClaim: typeof window.__haiClaimHostApi === 'function' ? window.__haiClaimHostApi() : 'missing',
@@ -280,7 +282,9 @@ try {
 
   // ---- T5：宿主边界（生产档真 preload：不是隐藏，是没有）----
   console.log('\nT5 宿主边界（在生产档里由插件自己看到的那一份）')
-  check('window.desktop 不存在', probe.env?.desktop === 'undefined', String(probe.env?.desktop))
+  check('claim 函数是 preload 唯一暴露面', probe.env?.claim === 'function', String(probe.env?.claim))
+  check('window.desktop 不存在（不是隐藏：连属性都没有）',
+    probe.env?.desktop === 'undefined' && probe.env?.hasDesktopKey === false, JSON.stringify(probe.env))
   check('__haiClaimHostApi() 第二次调用返回 null（D6 一次性交接）',
     probe.env?.secondClaim === null, String(probe.env?.secondClaim))
   check('host keys 恰好 [React, command, onEvent, t, theme]',
