@@ -948,32 +948,30 @@ try {
   await openPluginPanel()
   await win.locator('button[data-act="write-tool"]').first().click()
   const writeRun = await waitRunAck(SCENE_WRITE_TOOL)
-  let approved = false
+  // P2c：read_only:false 的插件工具实现 MandatoryApproval —— 即使会话是「自动执行」，
+  // 也必须出现审批卡；批准前面板不得收到 write_note、上游不得有第二轮。
+  const approve = win.getByRole('button', { name: '批准', exact: true }).first()
+  let approveVisible = true
   try {
-    const approve = win.getByRole('button', { name: '批准', exact: true }).first()
-    await approve.waitFor({ state: 'visible', timeout: 10000 })
-    approved = true
-    check('T13 批准前没有第二轮上游请求',
-      chatRequests.filter((r) => r.scene === SCENE_WRITE_TOOL && r.round2 === true).length === 0)
-    await approve.click()
+    await approve.waitFor({ state: 'visible', timeout: 15000 })
   } catch {
-    const dbgCalls = (await readToolCalls()).filter((c) => c.tool === 'write_note')
-    const dbgTerms = (await readTerminals()).filter((t) => t.run_id === writeRun.ack.run_id)
-    const dbgReqs = chatRequests.filter((r) => r.scene === SCENE_WRITE_TOOL)
-    const dbgBody = await win.locator('body').innerText().catch(() => '')
-    console.log(`  ⚠️ T13 审批卡未在 10s 内出现（product gap，本轮不伪造批准）`)
-    console.log(`  T13 debug calls=${JSON.stringify(dbgCalls)} terms=${JSON.stringify(dbgTerms)} reqs=${dbgReqs.length}`)
-    console.log(`  T13 DOM 尾部=${JSON.stringify(dbgBody.slice(-1200))}`)
+    approveVisible = false
   }
-  if (approved) {
-    await waitTerminal(writeRun.ack.run_id, 'write ok')
-    const writeCalls = (await readToolCalls()).filter((c) => c.tool === 'write_note')
-    check('T13 批准后 tool.call 到达面板', writeCalls.length === 1, JSON.stringify(writeCalls))
-    const writeMsgs = toolTextOf(SCENE_WRITE_TOOL)
-    check('T13 工具结果 note 回到模型', writeMsgs.some((t) => t.includes('note')), JSON.stringify(writeMsgs))
-    check('T13 终态 done 文本 = write ok',
-      (await readTerminals()).some((t) => t.run_id === writeRun.ack.run_id && t.text.includes('write ok')))
-  }
+  check('T13 审批卡出现（Auto/Full Access 也不能静默放行）', approveVisible,
+    approveVisible ? '' : '15s 内没有「批准」按钮')
+  if (!approveVisible) throw new VerifyFailure('T13 强制审批卡未出现')
+  check('T13 批准前没有第二轮上游请求',
+    chatRequests.filter((r) => r.scene === SCENE_WRITE_TOOL && r.round2 === true).length === 0)
+  check('T13 批准前面板没有收到 write_note',
+    (await readToolCalls()).filter((c) => c.tool === 'write_note').length === 0)
+  await approve.click()
+  await waitTerminal(writeRun.ack.run_id, 'write ok')
+  const writeCalls = (await readToolCalls()).filter((c) => c.tool === 'write_note')
+  check('T13 批准后 tool.call 到达面板', writeCalls.length === 1, JSON.stringify(writeCalls))
+  const writeMsgs = toolTextOf(SCENE_WRITE_TOOL)
+  check('T13 工具结果 note 回到模型', writeMsgs.some((t) => t.includes('note')), JSON.stringify(writeMsgs))
+  check('T13 终态 done 文本 = write ok',
+    (await readTerminals()).some((t) => t.run_id === writeRun.ack.run_id && t.text.includes('write ok')))
   check('P2b 全程零 pageerror', errs.length === 0, errs.join(' | '))
 
   await app.close()
