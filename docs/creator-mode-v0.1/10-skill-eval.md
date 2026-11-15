@@ -20,7 +20,7 @@
 | 能力门矩阵 | 真实注册表 + 空/单工具/双工具 | 空 → `[]`；仅 `ui_inspect` → `[]`；仅 `surface_install` → `[]`；双工具 → `[hai-surface-dev(enabled=true)]` |
 | 默认开关 | `loadSurfaceToolsEnabled` 缺省 false；本机 `settings.json` 无 `features` | 默认不提供 surface 工具 → 技能不可见 |
 | 可视化开关 | 设置 →「面板插件」→「AI 创建面板」开关 + `settings:set` + `reload_settings` | **已补（2026-11-15）**；默认仍 false，但用户能看到入口 |
-| 发现阶段成本 | description 236 字符；正文 6,950 bytes / 130 行（文件 6,950 bytes）；L3 5 refs + 2 scripts + 3 assets | 清单只注入一句；正文按需加载；细节按需读 L3 |
+| 发现阶段成本 | description 236 字符；正文 7,229 bytes / 133 行（文件 7,229 bytes）；L3 5 refs + 2 scripts + 3 assets | 清单只注入一句；正文按需加载；细节按需读 L3 |
 | 模板可安装 | `TestSurfaceTemplateInstalls` | PASS（`applied` + 幂等 `already_installed`） |
 | 技能最小示例可安装 | 按 SKILL 的 minimum example 造目录跑真安装器 | `status=applied` |
 | 历史使用证据 | 本地 `~/.go-code/events` / `sessions` 检索 `hai-surface-dev` | 未发现加载记录；无法用历史会话做效果回归 |
@@ -63,7 +63,7 @@ description 有「插件 / 面板 / 看板 / 右栏 / right panel / surface / da
 - 渐进披露正确：清单只带 name + description，正文按需进入上下文；
 - 模板与最小示例都能过真安装器，不是「文档里的死例子」；
 - 正文覆盖了 no JSX / host.command / onEvent / D11 / entries / tools / 审批 / 自检命令；
-- 技能正文 20KB，只在需要时加载，常驻成本主要是 230 字符 description，方向正确。
+- 技能正文 7.2KB，只在需要时加载，常驻成本主要是 236 字符 description，方向正确。
 
 ## 建议
 
@@ -100,11 +100,11 @@ go test ./skills ./agents -run 'Skill' -count=1
 |---|---|---|
 | 目录 + SKILL.md + YAML name/description | `skills/hai-surface-dev/SKILL.md` | 通过 |
 | name ≤64 / lowercase / hyphen / 非保留词 | `hai-surface-dev` 本身合法 | 通过（但解析器不校验长度/字符/保留词） |
-| description ≤1024 / 无 XML | 230 字符、无 XML | 通过 |
+| description ≤1024 / 无 XML | 236 字符、无 XML | 通过 |
 | Level 1：只注入 name + description | `Registry.ListFor` / `Descriptor` | 通过 |
 | Level 2：触发后才加载正文 | `load_skill` → `InstructionsBlock` | 通过 |
-| 正文 <500 行 | 130 行 | 通过 |
-| 正文 token 成本接近官方 <5k 建议 | 5.3KB；细节在 L3 | 通过 |
+| 正文 <500 行 | 133 行 | 通过 |
+| 正文体积接近官方 <5k tokens 建议 | 7.1KB（约 1.8k tokens）；细节在 L3 | 通过 |
 | Level 3：references/scripts/assets，一层深 | 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；资源在技能目录内 | 通过（模板仍与根 `templates/surface` 双份，测试防漂移） |
 | 脚本执行而非读入上下文 | `scripts/validate-plugin.mjs` + `scripts/install-smoke.sh`，SKILL 只给路径 | 通过 |
 | 多模型测试 | 无 Haiku/Sonnet/Opus 结果 | **未验证** |
@@ -125,7 +125,7 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 
 ### 这个技能的内容分层：已修
 
-- L2 现在 130 行 / 6.8KB，只留导航 + 六步流程 + 硬规则；L3 按需加载。
+- L2 现在 133 行 / 7.1KB，只留导航 + 六步流程 + 硬规则；L3 按需加载。
 - `references/`：panel-api、tools、entries、examples、verification 五个文件，均一层深。
 - `scripts/`：`validate-plugin.mjs`（静态 preflight）+ `install-smoke.sh`（真安装器）。
 - `assets/`：模板三件套（surface.json / panel.js / icon.svg）随技能分发；根
@@ -148,7 +148,7 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 写成可执行契约。默认值漂移（design true vs code false）就是缺少单一事实源的症状。
 
 > **2026-11-15 落地**：新增 `11-skill-spec.md`（单一规范）；`hai-surface-dev` 已拆成
-> `SKILL.md`（130 行 / 6.8KB）+ 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；
+> `SKILL.md`（133 行 / 7.1KB）+ 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；
 > 设置页开关已补；默认值四处统一为 false。下面「建议的规范骨架」保留为方法论记录。
 
 ## 建议的规范骨架（下一步）
@@ -208,3 +208,25 @@ install-smoke 0（`applied`，entries 3）；浏览器 T1–T9 32 ✅ / 0 ❌；
 等 Go 用例 0。仍只余 minor：示例 fixture 保留 api/placement（只读，警告即可）。Electron 门
 首红已定位并修复为脚本前置（旧 checkout 的 dist），main 上复跑 PASS。报告：
 `/tmp/creator-skill-eval/recheck-report.md`。
+
+## 真实 Provider 行为 A/B（2026-11-15，n=1）
+
+环境：`opencode4 · deepseek-v4.1-flash`，临时 HOME + safeStorage 解密的真实 key（harness
+只 symlink keys.json，不读/不打印 key），`features.surfaceTools=true`，同一条 prompt，
+两条件各自独立工作区；产物/报告在 `/tmp/creator-skill-eval/ab-20261115-021836/`。
+
+| | ON（技能在册） | OFF（技能不在册） |
+|---|---|---|
+| 收敛 | ✅ 99.6s | ❌ 撞 8min 上限仍在跑 |
+| 首动作 | `load_skill hai-surface-dev` → 完整 SKILL.md | 仓库考古（含直接读磁盘技能） |
+| 插件 | `hello-panel/`，validate 0 | `hello-plugin/`，validate 0 |
+| 安装 | `surface_install` → **applied** | **0 次** surface_install；`surfaces/` 空 |
+| 工具/审批 | 18 / 5 | 27 / 16 |
+| pageerror | 0 | 0 |
+
+**怎么读**：这是 n=1 的真实模型观察，不是统计结论。ON 明确走了「技能 → 骨架 → 安装 →
+复核」；OFF **并不干净**——模型 `cd` 进仓库后直接 `read_file skills/hai-surface-dev/SKILL.md`，
+等于“技能在磁盘、不在注册表”。所以差异更像「在册 → 走流程」vs「不在册 → 先环境考古」，
+不能归因成「不会写代码」。OFF 的 8min 是人为上限，且卡在 install-smoke 的 Go module 联网；
+两侧都产出了合法 validate 产物，但只有 ON 完成真实安装。§6 的「行为未验证」现在改为
+「单模型单 rep 已验证，样本与隔离仍不足」，不能用它代替多模型结论。

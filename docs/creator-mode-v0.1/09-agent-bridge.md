@@ -195,6 +195,7 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 | `agent.session` | `{ title? }` | `{ok, session_id}` | 建插件会话（随机 id） |
 | `agent.run` | `{ run_id?, session_id?, input, instructions? }` | `{ok, run_id, session_id}` | 立即回；流式走事件（`schema`/`tools` 参数未实现，见下） |
 | `agent.cancel` | `{ run_id }` | `{ok}` | 取消 |
+| `agent.snapshot` | `{ session_id }` | `{ok, session_id, status, seq, quota, …}` | 只读**自有**会话状态（P3a；无正文） |
 | `tool.result` | `{ call_id, ok, result?, error? }` | `{ok}` | 回工具调用 |
 | `composer.quote` | `{ text, source? }` | `{ok, reason?}` | 只插草稿 |
 | `ui.open_tab` | `{ kind, params? }` | `{ok}` | 只能开自己的 kind |
@@ -213,6 +214,7 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 | `agent.usage` | `{input_tokens, output_tokens}` | 结束时一次 |
 | `agent.done` | `{text, json?}` | 终态；`json` 仅当 schema 通过 |
 | `agent.error` | `{reason, message?}` | 终态 |
+| `agent.state` | `{session_id, status, seq, run_id?, reason?, message?}` | 会话状态迁移；用户从宿主 UI 驱动插件会话也投（P3a） |
 | `tool.call` | `{call_id, tool, args, deadline_ms, read_only, requires_panel}` | Agent 调插件工具；用 `tool.result` 回；`requires_panel:true` 且当前 scope 无该 kind 标签时宿主直接回 `panel_not_open`，不投给插件 |
 | `surfaces.changed` | `{}` | 插件装卸/启停（安全的全量生命周期） |
 
@@ -222,8 +224,8 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 
 ```json
 {
-  "commands": ["agent.run", "agent.session", "agent.cancel", "tool.result", "composer.quote", "ui.toast"],
-  "data": ["agent.delta", "agent.tool", "agent.done", "agent.error", "tool.call", "surfaces.changed"],
+  "commands": ["agent.run", "agent.session", "agent.cancel", "agent.snapshot", "tool.result", "composer.quote", "ui.toast"],
+  "data": ["agent.delta", "agent.tool", "agent.done", "agent.error", "agent.state", "tool.call", "surfaces.changed"],
   "tools": [
     {
       "name": "course_week",
@@ -339,6 +341,7 @@ onSurfaceAgentEvent(cb: (p: { surface_id: string; event: SurfaceAgentEvent }) =>
 
 - main 把 `data` 原样转发到渲染层 `surface:agent-event`；loader 按 `surface_id === item.id` 过滤。
 - `seq` 每个 run 单调递增；终态（`agent.done` / `agent.error`）之后停投。
+- `agent.state` 的 `seq` 是**会话级**（P3a），不与同一信封里的 run `seq` 比较；它没有终态停投语义，只在状态迁移时发。
 - `tool.call` 同信封，`data:{call_id, tool, args, deadline_ms}`（P2 才启用）。
 
 **命令参数/回执**
@@ -348,6 +351,7 @@ onSurfaceAgentEvent(cb: (p: { surface_id: string; event: SurfaceAgentEvent }) =>
 | `agent.session` | `{title?}` | `{session_id}` |
 | `agent.run` | `{session_id?, input, instructions?}` | `{run_id, session_id}` |
 | `agent.cancel` | `{run_id}` | `{}` |
+| `agent.snapshot` | `{session_id}` | `{session_id, status, seq, quota, run_id?, started_at?, last_error?}`（P3a） |
 | `tool.result` | `{call_id, ok, result?, error?}` | `{}`（P2；未知/已超时 call_id 幂等忽略并审计） |
 
 - `agent.run` 不带 `session_id` = 新建插件会话（D4）；带 = 必须属于同一 `surface_id`，否则 `denied`。
@@ -363,12 +367,29 @@ onSurfaceAgentEvent(cb: (p: { surface_id: string; event: SurfaceAgentEvent }) =>
 | `agent.usage` | `{input_tokens, output_tokens}` |
 | `agent.done` | `{text}` |
 | `agent.error` | `{reason, message?}`；reason ∈ `cancelled` / `quota` / `no_session` / `invalid_input` / `bridge_error` |
+| `agent.state` | `{session_id, status, seq, run_id?, reason?, message?}`；status ∈ `idle` / `running`（`not_loaded` 只在 snapshot 里出现），seq 是**会话级**（P3a） |
 | `tool.call` | `{call_id, tool, args, deadline_ms}`（P2） |
 
 **拒绝**
 
 - `surface_agent` 的 `command_response`：`{ok:false, code, data:{ok:false, reason}}`，code/reason 用 §6.5 的封闭集合。
 - 未声明命令：`not_declared`（不是 `denied`）；D11 四条：`denied`。
+
+### 6.7 P3a：只读会话状态（2026-11-15）
+
+问题不是「没有事件」，而是事件只在 `agent.run` 发起时投递：用户从左栏打开插件会话直接
+提问，`surfaceAgentRun` 槽为空，旧钩子直接 return，面板永远不知道会话在跑。
+
+- 新命令 `agent.snapshot({session_id})`：只读**插件自有**会话；项目/Hub/别家会话一律
+  `denied`，不存在的 id `no_session`；无隐式“当前会话”。回执只含状态、序号、配额与
+  最近一次错误文案（≤200 字符），总量 ≤2 KiB，绝不带 messages/正文。
+- 新事件 `agent.state`：只在根 run 开始/结束/取消时投递 `{session_id,status,seq,run_id?,
+  reason?,message?}`；`status ∈ idle/running`（`not_loaded` 只在 snapshot 里），`seq` 是
+  会话级，不与 run 的 seq 比较。**用户驱动的 run 也会投递**（这是本节存在的理由）。
+- 限流 5/s burst 5；归属判定在限流之前；不读 jsonl、不猜内容；`not_loaded` 是重启后
+  会话尚未装配时的诚实值。
+- 不改通用 channel、不做 iframe（见 P3 预研报告）；`agent.snapshot` 不替代 `agent.run`
+  的流式事件，后者仍只描述插件自己发起的 run。
 
 ---
 

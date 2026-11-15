@@ -24,7 +24,7 @@
 ```yaml
 ---
 name: hai-surface-dev
-version: 1.1.2
+version: 1.1.3
 description: 'Builds or debugs a panel ... Use for 插件/面板/PDF 阅读器/文档面板.'
 requires:
   tools: [ui_inspect, surface_install]
@@ -55,7 +55,7 @@ requires:
 | L3 `assets/` | 模板、图标等 | 单文件 ≤256 KiB | 技能目录内相对路径；不能指向仓库根的外部路径 |
 
 **渐进披露的验收**：删除 `references/` 后 L2 仍能完成最小面板；删除 L2 的导航则模型必须
-知道该读哪个文件。当前 `hai-surface-dev` 的 L2 为 130 行 / 6.8 KiB，L3 为 5 个 reference +
+知道该读哪个文件。当前 `hai-surface-dev` 的 L2 为 133 行 / 7.1 KiB，L3 为 5 个 reference +
 2 个 script + 3 个 asset。
 
 ## 4. 内容要求
