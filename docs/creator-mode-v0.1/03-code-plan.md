@@ -1212,7 +1212,7 @@ function createHost(m: Manifest, disposers: Array<() => void>): HostApi {
 
 ```go
 // desktop/bridge/tools_registry.go —— 与 bash/edit_file 一起注册，不挂 mode
-if m.settings.Features.SurfaceTools {          // 默认 true，可关
+if m.settings.Features.SurfaceTools {          // 默认 false（2026-11-15 定稿），设置页可开
     eng.RegisterTool(ctx, &builtin.UIInspectTool{Cache: m.uiCache})
     eng.RegisterTool(ctx, &builtin.SurfaceInstallTool{Reg: m.surfaces})  // RequiresApproval: true
     eng.RegisterTool(ctx, &builtin.SurfaceListTool{Reg: m.surfaces})

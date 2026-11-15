@@ -184,7 +184,7 @@ e2e 约定（对齐现有 39 个 `verify_*.mjs` / 57 个 `e2e/*.mjs`）：
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
-| `settings.features.surfaceTools` | `true`（PR-14 起） | 关掉 = 4 个工具不进工具集 |
+| `settings.features.surfaceTools` | `false`（PR-14 起；2026-11-15 起设置页有可见开关） | 打开 = 4 个工具进工具集，`hai-surface-dev` 才可见；默认 fail-closed |
 | `surfaces.plugin.enabled` | `false`（PR-13 起） | 关掉 = 不加载任何第三方面板 |
 | `surfaces.preview.kit` | `auto` | `off` 强制走近似渲染 |
 

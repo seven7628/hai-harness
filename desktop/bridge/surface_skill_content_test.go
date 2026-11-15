@@ -67,10 +67,96 @@ func TestSurfaceSkillLoadable(t *testing.T) {
 		t.Fatal("技能正文为空")
 	}
 	body := s.Instructions
-	for _, must := range []string{"features", "surfaceTools", "createElement", "plugin:"} {
+	// L2 只留导航 + 硬规则，细节在 references/scripts；否则每次激活都把 20KB 全塞进上下文。
+	if len(body) > 12<<10 {
+		t.Fatalf("SKILL.md 正文 %d bytes，超过瘦身后的 12 KiB 上限（应把细节移进 references/）", len(body))
+	}
+	for _, must := range []string{
+		"features", "surfaceTools", "createElement", "plugin:",
+		"references/panel-api.md", "references/tools.md", "references/verification.md",
+		"scripts/validate-plugin.mjs", "scripts/install-smoke.sh",
+	} {
 		if !strings.Contains(body, must) {
-			t.Fatalf("技能正文没提 %q —— 这三件事（开关 / 无 JSX / kind 前缀）是装不上的前三位原因:\n%s",
-				must, body)
+			t.Fatalf("技能正文没提 %q —— 导航必须把模型带到可执行的细节入口:\n%s", must, body)
+		}
+	}
+	// L3：资源必须真的在技能目录里，且被 Registry 收进 Resources（否则模型看不到）。
+	resources := map[string]bool{}
+	for _, r := range s.Resources {
+		resources[filepath.ToSlash(r)] = true
+	}
+	for _, rel := range []string{
+		"references/panel-api.md", "references/tools.md", "references/entries.md",
+		"references/examples.md", "references/verification.md",
+		"scripts/validate-plugin.mjs", "scripts/install-smoke.sh",
+		"assets/surface.json", "assets/panel.js", "assets/icon.svg",
+	} {
+		if _, err := os.Stat(filepath.Join(surfaceSkillRoot, surfaceSkillName, rel)); err != nil {
+			t.Fatalf("技能资源 %q 不存在: %v", rel, err)
+		}
+		// Resources 是绝对/相对混合的完整路径（注册表各层不同根），按后缀匹配；
+		// 目录（assets 下的文件）必须是一层深，Registry 才列得到。
+		found := false
+		for r := range resources {
+			if strings.HasSuffix(r, "/"+rel) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("技能资源 %q 没进 Registry.Resources（L3 渐进披露会看不到）: %v", rel, s.Resources)
+		}
+	}
+	// 两份模板不能漂移：根 templates/surface 是安装器/e2e 的权威入口，
+	// assets/ 是随技能分发的那一份；只改一边会让模型拿到旧骨架。
+	for _, name := range []string{"surface.json", "panel.js", "icon.svg"} {
+		want, err := os.ReadFile(filepath.Join(surfaceTemplatesDir, name))
+		if err != nil {
+			t.Fatalf("读根模板 %s 失败: %v", name, err)
+		}
+		got, err := os.ReadFile(filepath.Join(surfaceSkillRoot, surfaceSkillName, "assets", name))
+		if err != nil {
+			t.Fatalf("读技能模板 %s 失败: %v", name, err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("技能模板 %s 与根模板不一致（改模板时必须同步 assets/）", name)
+		}
+	}
+}
+
+// TestSurfaceTemplateContracts 守住「模板也遵守文档」里最容易被复制传播的两条：
+//   - 主题 token 只能是宿主真实提供的 8 个（不存在 bg2/muted；JS 里 undefined 不会报错，
+//     只会在界面上静默变透明/继承，安装器也看不出来）；
+//   - manifest 的 name 是语言对象、且不再携带未被消费的 api/placement（避免新插件照抄死字段）。
+func TestSurfaceTemplateContracts(t *testing.T) {
+	allowed := map[string]bool{"bg": true, "fg": true, "border": true, "accent": true, "ok": true, "warn": true, "err": true, "info": true}
+	dirs := []string{surfaceTemplatesDir, filepath.Join(surfaceSkillRoot, surfaceSkillName, "assets")}
+	tokenRE := regexp.MustCompile(`\btokens\.([A-Za-z_][A-Za-z0-9_]*)`)
+	for _, dir := range dirs {
+		raw, err := os.ReadFile(filepath.Join(dir, "surface.json"))
+		if err != nil {
+			t.Fatalf("读 %s/surface.json: %v", dir, err)
+		}
+		var mf map[string]any
+		if err := json.Unmarshal(raw, &mf); err != nil {
+			t.Fatalf("%s/surface.json 不是合法 JSON: %v", dir, err)
+		}
+		if _, ok := mf["name"].(map[string]any); !ok {
+			t.Fatalf("%s/surface.json 的 name 必须是语言对象（裸字符串会让安装器报误导性 JSON 错误）", dir)
+		}
+		for _, dead := range []string{"api", "placement"} {
+			if _, ok := mf[dead]; ok {
+				t.Fatalf("%s/surface.json 不应再带未被消费的 %q（见 panel-api.md 字段表）", dir, dead)
+			}
+		}
+		panel, err := os.ReadFile(filepath.Join(dir, "panel.js"))
+		if err != nil {
+			t.Fatalf("读 %s/panel.js: %v", dir, err)
+		}
+		for _, m := range tokenRE.FindAllStringSubmatch(string(panel), -1) {
+			if !allowed[m[1]] {
+				t.Fatalf("%s/panel.js 使用不存在的主题 token %q（宿主只有 bg/fg/border/accent/ok/warn/err/info）", dir, m[1])
+			}
 		}
 	}
 }
@@ -243,5 +329,29 @@ func TestSurfaceTemplateManifestKindMatchesID(t *testing.T) {
 	}
 	if !strings.Contains(string(panel), "kind: 'plugin:"+mf.ID+"'") {
 		t.Fatalf("模板 panel.js 的 kind 与 manifest（plugin:%s）不一致", mf.ID)
+	}
+}
+
+// TestSurfaceSkillHiddenWithoutSurfaceTools 锁住「默认关时技能不可见」这条因果链：
+// `features.surfaceTools` 缺省 false → 引擎没有 surface_install → requires.tools 过滤掉
+// hai-surface-dev。这不是文案问题，改能力面/开关时必须同时看这个用例。
+func TestSurfaceSkillHiddenWithoutSurfaceTools(t *testing.T) {
+	reg, err := skills.NewRegistry(surfaceSkillRoot)
+	if err != nil {
+		t.Fatalf("加载 %s 失败: %v", surfaceSkillRoot, err)
+	}
+	hasSkill := func(tools []string) bool {
+		for _, d := range reg.ListFor(skills.NewCapabilities("m", []string{"text"}, tools)) {
+			if d.Name == surfaceSkillName {
+				return true
+			}
+		}
+		return false
+	}
+	if hasSkill([]string{"ui_inspect", "read_file", "write_file"}) {
+		t.Fatal("只有 ui_inspect 时 surface skill 仍可见 —— requires.tools 没起作用")
+	}
+	if !hasSkill([]string{"ui_inspect", "surface_install", "read_file"}) {
+		t.Fatal("surface_install + ui_inspect 都在时 surface skill 仍不可见 —— 技能被误过滤")
 	}
 }

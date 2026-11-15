@@ -19,17 +19,17 @@
 | 清单/加载同源 | `skills.Registry.LoadFor` | 通过；能力不足时返回 `requires tool: ui_inspect, tool: surface_install` |
 | 能力门矩阵 | 真实注册表 + 空/单工具/双工具 | 空 → `[]`；仅 `ui_inspect` → `[]`；仅 `surface_install` → `[]`；双工具 → `[hai-surface-dev(enabled=true)]` |
 | 默认开关 | `loadSurfaceToolsEnabled` 缺省 false；本机 `settings.json` 无 `features` | 默认不提供 surface 工具 → 技能不可见 |
-| 可视化开关 | renderer 检索 `surfaceTools` 仅命中 i18n 文案 | 未发现设置页开关；只能手改 `settings.json` |
-| 发现阶段成本 | description 230 字符；正文 20,828 bytes / 390 行 / 11 节 / 11 个代码块 | 清单只注入一句；正文按需加载，渐进披露成立 |
+| 可视化开关 | 设置 →「面板插件」→「AI 创建面板」开关 + `settings:set` + `reload_settings` | **已补（2026-11-15）**；默认仍 false，但用户能看到入口 |
+| 发现阶段成本 | description 236 字符；正文 6,950 bytes / 130 行（文件 6,950 bytes）；L3 5 refs + 2 scripts + 3 assets | 清单只注入一句；正文按需加载；细节按需读 L3 |
 | 模板可安装 | `TestSurfaceTemplateInstalls` | PASS（`applied` + 幂等 `already_installed`） |
 | 技能最小示例可安装 | 按 SKILL 的 minimum example 造目录跑真安装器 | `status=applied` |
 | 历史使用证据 | 本地 `~/.go-code/events` / `sessions` 检索 `hai-surface-dev` | 未发现加载记录；无法用历史会话做效果回归 |
 
 ## 发现
 
-### P0：默认关 + requires.tools = 技能自锁
+### P0（已修一半）：默认关 + requires.tools = 技能自锁
 
-这是当前最大的效果问题，不是文案问题：
+2026-11-15 已补设置页可见开关；默认仍 false（fail-closed）。剩余问题是「开关默认关时，技能仍不可见」，这是**有意的成本/安全选择**，但空态必须把开关指出来：
 
 1. `surfaceTools=false` 时引擎不注册 `surface_install`；
 2. `requires.tools` 过滤把 `hai-surface-dev` 从清单和 `load_skill` 一起拿掉；
@@ -67,10 +67,8 @@ description 有「插件 / 面板 / 看板 / 右栏 / right panel / surface / da
 
 ## 建议
 
-1. **先解决 P0（二选一）**：
-   - 把 `features.surfaceTools` 默认改为 true（接受 600–900 token 常驻 schema）；或
-   - 保持默认 false，但在设置页/插件页空态提供可见开关，并加一个只依赖 `ui_inspect`
-     的引导提示，告诉用户如何打开 surface 工具。
+1. **P0 已选方案**：保持默认 false（fail-closed），设置页「面板插件 → AI 创建面板」提供
+   可见开关。仍需在插件空态加一句「没有插件？先打开 AI 创建面板」的引导。
 2. **修 D11 措辞**：明确「`ui_inspect` 仍是宿主工具；只是不能在插件的 `commands` 里声明」。
 3. **扩 description 触发词**：加入 PDF 阅读器、文档面板、给应用加功能、sidebar、plugin。
 4. **建行为评测**（需要真实 Provider 或本地可用的 OpenAI 兼容端点）：
@@ -105,10 +103,10 @@ go test ./skills ./agents -run 'Skill' -count=1
 | description ≤1024 / 无 XML | 230 字符、无 XML | 通过 |
 | Level 1：只注入 name + description | `Registry.ListFor` / `Descriptor` | 通过 |
 | Level 2：触发后才加载正文 | `load_skill` → `InstructionsBlock` | 通过 |
-| 正文 <500 行 | 390 行 | 通过 |
-| 正文 token 成本接近官方 <5k 建议 | 20.8KB，约 3.2k words / 多个代码块 | **边界**，可能超过 5k token，建议拆分 |
-| Level 3：references/scripts/assets，一层深 | 框架支持 `Resources` 收集，但本技能一个都没有；模板在仓根 `templates/surface`，不是技能相对资源 | **未做到**（可移植性差） |
-| 脚本执行而非读入上下文 | 框架支持资源清单；本技能没有 bundled script | **未做到**（自检命令是仓库路径，不是技能脚本） |
+| 正文 <500 行 | 130 行 | 通过 |
+| 正文 token 成本接近官方 <5k 建议 | 5.3KB；细节在 L3 | 通过 |
+| Level 3：references/scripts/assets，一层深 | 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；资源在技能目录内 | 通过（模板仍与根 `templates/surface` 双份，测试防漂移） |
+| 脚本执行而非读入上下文 | `scripts/validate-plugin.mjs` + `scripts/install-smoke.sh`，SKILL 只给路径 | 通过 |
 | 多模型测试 | 无 Haiku/Sonnet/Opus 结果 | **未验证** |
 
 另外，我们的 `requires`（能力面过滤）、`version`、`manifest` 注入是宿主扩展；它们不破坏
@@ -125,30 +123,33 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
 - 能力层：`requires.input` / `requires.tools` + `Capabilities` 过滤，宿主 UI 还能显示「为什么不可用」。
 - 版本层：`version` 用于随包技能覆盖用户旧副本（office/visual/ego 同步链路）。
 
-### 这个技能的内容分层：不足
+### 这个技能的内容分层：已修
 
-- 只有 L1 + L2，没有 L3；20.8KB 正文在激活时一次性进入上下文。
-- `templates/surface`、`desktop/app`、`go test ./desktop/bridge` 都是**仓库路径**，不是
-  技能目录内的相对资源；单独拷走技能目录会失效。
-- 正文里已有 11 个二级章节，适合拆成：
-  `references/panel-api.md`（host API / theme / lifecycle）、
-  `references/tools.md`（tool.call / 审批 / requires_panel）、
-  `references/entries.md`、`references/verification.md`；
-  `scripts/validate-plugin.mjs` 做静态校验，`scripts/install-smoke.sh` 跑安装器。
+- L2 现在 130 行 / 6.8KB，只留导航 + 六步流程 + 硬规则；L3 按需加载。
+- `references/`：panel-api、tools、entries、examples、verification 五个文件，均一层深。
+- `scripts/`：`validate-plugin.mjs`（静态 preflight）+ `install-smoke.sh`（真安装器）。
+- `assets/`：模板三件套（surface.json / panel.js / icon.svg）随技能分发；根
+  `templates/surface` 仍是安装器/e2e 的权威入口，`TestSurfaceSkillLoadable` 逐字节防漂移。
+- 仍保留的仓路径：`install-smoke.sh` 需要 repo 的 `desktop/bridge`；这是开发环境脚本，
+  不是可移植技能的硬依赖（安装器检查仍可由宿主工具完成）。
 
 ### CreateMode 规范盘点
 
 | 材料 | 内容 | 问题 |
 |---|---|---|
 | `01-design.md` §5.1 | D-N：4 常驻工具 + 1 skill + 审批；工具 schema 成本纪律 | 定义清楚，但默认值/工具数量约束与代码有漂移 |
-| `03-code-plan.md` §3.7 | 工具注册骨架、skill frontmatter 骨架、模板/插件页 | 写「默认 true」，实现/测试/SKILL 是 **false** |
+| `03-code-plan.md` §3.7 | 工具注册骨架、skill frontmatter 骨架、模板/插件页 | 2026-11-15 已改为默认 **false** + 设置页开关，与实现/SKILL/测试一致 |
 | `skills/hai-surface-dev/SKILL.md` | 操作规范、D11、host API、entries、tools、自检 | 是当前事实上的规范；但只有 1 个技能，无独立 skill spec |
 | `templates/surface/*` | 可运行示例，真安装器可过 | 模板在技能目录外，不算技能资产 |
 | `surface_skill_content_test.go` | 解析、description 80–300、requires 两向、模板安装、命令白名单 | 守住了静态形状，不守触发/行为/多模型效果 |
 
-**结论**：有「设计说明 + 一个技能 + 一个模板 + 静态守卫」，但还没有一份独立的
+**结论**：有「设计说明 + 一个技能 + 一个模板 + 静态守卫」，但此前没有一份独立的
 「CreateMode Skill 规范」把 frontmatter、触发词、分层、token 预算、安全边界、验收指标
 写成可执行契约。默认值漂移（design true vs code false）就是缺少单一事实源的症状。
+
+> **2026-11-15 落地**：新增 `11-skill-spec.md`（单一规范）；`hai-surface-dev` 已拆成
+> `SKILL.md`（130 行 / 6.8KB）+ 5 个 `references/` + 2 个 `scripts/` + 3 个 `assets/`；
+> 设置页开关已补；默认值四处统一为 false。下面「建议的规范骨架」保留为方法论记录。
 
 ## 建议的规范骨架（下一步）
 
@@ -158,6 +159,48 @@ Anthropic 格式，但不是标准字段，应该在我们的规范里明确标�
    - 正文 <500 行、<5k token；L3 资源一层深、必须相对技能目录；
    - 安装/审批/D11/密钥/网络边界；
    - 触发集与四类 golden task 的验收指标。
-2. 把 `hai-surface-dev` 拆出 `references/` 与 `scripts/`，SKILL.md 只留导航 + 六步流程。
-3. 统一 `features.surfaceTools` 默认值（设计、代码、SKILL、测试四处一致），并提供可视化开关。
+2. ~~把 `hai-surface-dev` 拆出 `references/` 与 `scripts/`，SKILL.md 只留导航 + 六步流程。~~ —— 已完成。
+3. ~~统一 `features.surfaceTools` 默认值并提供可视化开关~~ —— 已完成（默认 false；设置页开关；文档同步）。
 4. 做有/无 skill 的行为 A/B（真实 Provider 或本地端点），至少 Haiku/Sonnet/Opus 各一轮。
+
+## 独立 builder / evaluator 实测（2026-11-15）
+
+方法：一个独立子智能体**只靠技能文档**写一个 PDF 阅读器插件；另一个独立子智能体在不知道
+builder 结论的情况下验收。没有让主会话代写，避免把主会话能力误当成技能效果。
+
+**产物判定：PASS。**
+
+- 真安装器 `TestSurfaceInstallExternal`：`status:"applied"`，1 个入口，sha256 写入 index；
+- 真实浏览器探针 `verify_external_surface.mjs`：T1–T9 绿，真 `panel.js` 字节进注册表，＋ 菜单
+  标题/键盘/非空渲染/pageerror=0；
+- `verify_external_surface_electron.mjs`：**BLOCKED**（不是插件失败）。用仓库自己的
+  `templates/surface` 跑同一命令，也在「等待 ＋ 菜单入口」超时；说明是本机 Electron 构建/环境
+  问题。验证文档已补「先跑 control，control 也红就标 BLOCKED」。
+
+**技能侧判定：documentation FAIL（3 major）**，已在 1.1.1 修：
+
+1. 随包模板 `assets/panel.js` 使用不存在的 `theme.tokens.bg2` / `.muted`，而文档明确只有 8 个
+   token。已改为合法 token；`validate-plugin.mjs` 新增 token 名静态检查，防止模板再漂移。
+2. `surface.json` 字段集缺失：`name` 必须是 `{"zh","en"}` 对象（裸字符串会让安装器报误导性的
+   “不是合法 JSON”）；模板里的 `placement` 是死字段、`api` 未被消费。`references/panel-api.md`
+   新增完整字段表，两个模板都删除 `api` / `placement`。
+3. 自相矛盾：`entries.md` 把声明入口标题写成 `manifest.title`（应为 `entries[].title`）；工具
+   description “≤120” 与 “≤300” 未区分（300 是安装器硬上限，120 是设计预算）；验证文档没说明
+   browser 档自带 Vite/5232、不需要 dev server/5173，也没给 Electron control。均已修正。
+
+**同时修正的 minor**：`apply` 返回值被忽略、`onEvent` 由宿主自动回收的 teardown 语义；
+`reason` 闭集（含 `panel_not_open` / `timeout` / `plugin_unloaded`）；`composer.quote.source`
+的字符串/对象两种形状与 200 字符截断；`composer.quote.text` 按 UTF-8 字节而非字符计 8 KiB；
+provider 的 `order` / `icon` / `dedupeKey`；验证脚本的技能相对路径；`validate-plugin.mjs`
+的边界（只做静态 preflight，不是安装器）以及 name/entries/tools/token 检查。
+
+**仍未做**：有/无 skill 的真实模型行为 A/B（需要 provider，且要固定同一 prompt 与评分）；
+Electron 真机门要等本机构建能显示插件入口后再跑。机制验收已通过，不能把机制绿当成模型效果
+结论——这一点仍按规范第 6 节标注。
+
+**复核（独立子智能体，2026-11-15）**：documentation **PASS**。3 major 逐条按行为复核——模板
+token 0 个非法、两份模板 md5 一致；manifest 字段表 + name 对象 + 模板无 api/placement；验证文档
+自带 Vite/5232、control 语义、exit 1 宿主/插件区分。命令：validate templates/example 0；
+install-smoke 0（`applied`，entries 3）；浏览器 T1–T9 32 ✅ / 0 ❌；`TestSurfaceTemplateContracts`
+等 Go 用例 0。仍只余 minor：示例 fixture 保留 api/placement（只读，警告即可）；Electron 本机
+宿主构建仍 BLOCKED。报告：`/tmp/creator-skill-eval/recheck-report.md`。

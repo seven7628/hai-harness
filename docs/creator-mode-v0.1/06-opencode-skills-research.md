@@ -111,7 +111,7 @@ description: Prepare release notes, version bumps, and GitHub releases
 ### 4.1 取消 `CreatorMode`
 
 - 删除 `agents/mode.go` 里的 `CreatorMode`（PR-14 不再改 mode）；
-- `ui_inspect` / `surface_install` / `surface_list` / `surface_remove` **进入标准工具集**（与 `bash`/`edit_file` 同级），受 `settings.features.surfaceTools` 开关控制（默认开）；
+- `ui_inspect` / `surface_install` / `surface_list` / `surface_remove` **进入标准工具集**（与 `bash`/`edit_file` 同级），受 `settings.features.surfaceTools` 开关控制（默认 **false**；设置页可见开关，打开后 skill 才进入清单）；
 - **审批不变**：`surface_install` / `surface_remove` 仍每次要批准（`RequiresApproval → true`）。
 
 ### 4.2 工具描述的"瘦身"纪律

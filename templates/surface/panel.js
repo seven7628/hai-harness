@@ -60,9 +60,9 @@ export const surface = {
     //
     // 这一页演示三件事，每一件都对应一个「用错了就会出事」的点：
     //   ① agent.run 的**回执只含 run_id/session_id**，内容靠事件流（agent.delta …）；
-    //      所以必须先在 manifest.data 里声明要收的事件，且每个订阅都要 off()。
-    //   ② 事件订阅与组件生命周期同长：卸载时 off()，否则面板关掉之后回调还在跑
-    //      （loader 也会兜底回收，但插件不该指望宿主替它收尾）。
+    //      所以必须先在 manifest.data 里声明要收的事件。
+    //   ② onEvent 订阅由宿主在插件卸载/重载时统一回收；off() 只用于提前退订。组件里的
+    //      useEffect cleanup 适合「只跟这个面板同长」的订阅，工具监听通常放在 apply 作用域。
     //   ③ composer.quote **只插草稿、绝不自动发送**（D7）：发不发由用户按回车决定。
     function Overview() {
       const theme = host.theme()
@@ -140,7 +140,7 @@ export const surface = {
         marginRight: 8,
         borderRadius: 6,
         border: `1px solid ${theme.tokens.border}`,
-        background: theme.tokens.bg2 || 'transparent',
+        background: 'transparent',
         color: theme.tokens.fg,
         cursor: 'pointer',
         font: 'inherit',
@@ -151,7 +151,7 @@ export const surface = {
         h('div', { style: h2Style(theme) }, '成本看板'),
         h(
           'div',
-          { style: { color: theme.tokens.muted || theme.tokens.fg, marginBottom: 8 } },
+          { style: { color: theme.tokens.fg, marginBottom: 8 } },
           '问一句，结果流式回到这里；引用只进草稿，不会自动发送。',
         ),
         h('textarea', {
@@ -169,7 +169,7 @@ export const surface = {
           busy ? h('button', { type: 'button', style: btn, onClick: cancel }, '停止') : null,
         ),
         // 拒绝是一个**值**（ok:false + reason），不是异常 —— 照实显示，别吞掉。
-        status ? h('div', { style: { color: theme.tokens.muted || theme.tokens.fg }, 'data-template-status': '' }, status) : null,
+        status ? h('div', { style: { color: theme.tokens.fg }, 'data-template-status': '' }, status) : null,
         answer
           ? h('pre', { 'data-template-answer': '', style: { whiteSpace: 'pre-wrap', margin: '8px 0 0', font: 'inherit' } }, answer)
           : null,
@@ -201,7 +201,7 @@ export const surface = {
             h(
               'tr',
               { key: 'head' },
-              ['时间', ...SLOTS].map((d) => h('th', { key: d, style: { ...cell, color: theme.tokens.muted || theme.tokens.fg } }, d)),
+              ['时间', ...SLOTS].map((d) => h('th', { key: d, style: { ...cell, color: theme.tokens.fg } }, d)),
             ),
           ),
           h(
@@ -212,7 +212,7 @@ export const surface = {
                 'tr',
                 { key: row[0] },
                 row.map((v, i) =>
-                  h('td', { key: `${row[0]}-${i}`, style: { ...cell, color: i === 0 ? theme.tokens.muted || theme.tokens.fg : theme.tokens.fg } }, v),
+                  h('td', { key: `${row[0]}-${i}`, style: { ...cell, color: theme.tokens.fg, fontWeight: i === 0 ? 600 : 400 } }, v),
                 ),
               ),
             ),
@@ -239,7 +239,7 @@ export const surface = {
           'ul',
           { style: { margin: '8px 0 0', paddingLeft: 18 } },
           RESOURCES.map((r) =>
-            h('li', { key: r.name }, h('span', { style: { color: theme.tokens.muted || theme.tokens.fg } }, `${r.kind} · `), r.name),
+            h('li', { key: r.name }, h('span', { style: { color: theme.tokens.fg } }, `${r.kind} · `), r.name),
           ),
         ),
       )

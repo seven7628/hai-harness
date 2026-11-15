@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- 标签条按 12×12 渲染它（provider.icon），所以线宽在 24 的画布上给 1.8 才不会糊 -->
+  <path d="M3 20h18" />
+  <rect x="5" y="11" width="3.5" height="6" rx="0.6" />
+  <rect x="10.3" y="7" width="3.5" height="10" rx="0.6" />
+  <rect x="15.6" y="13" width="3.5" height="4" rx="0.6" />
+  <path d="M4.5 7.5 9 4l4 2.2L19.5 3" />
+</svg>

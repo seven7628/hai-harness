@@ -424,7 +424,7 @@ PluginsPage 拆到 R14b。逐条记下与 01/03 的差，下一轮别按老写�
 | 索引条目 | `{id,version,hash,enabled,kind,commands,icon?}` | 多 `data`（声明订阅的 op）、`entry`（PR-13 允许 `dist/panel.js`）、`error`（坏 manifest） | 少了 `entry` 就会对「改了入口名的合法插件」404；少了 `data` 就没法在 `host.events.on` 上做闸门；`error` 让「装坏了」在 `ui_inspect` 里与「没装」可分 |
 | 加载失败 | 「墓碑 + disabledReason」 | 进 `ui_inspect` 的 `surfaces[]`（`disabled:true` + `error`）+ `surface_status` 上报 + console.warn | 失败插件**没有 provider**，health 的三连计数挂在「挂载后崩溃」上，接不住「根本没装上」这一类 |
 | host 只读白名单 | 「git_snapshot / workspace_list / session_list / ui_inspect 对应的内部调用」 | 恰好这四条（`TestSurfaceHostCommandWhitelistIsClosed` 钉住） | 写类、provider/网络、审批/中断一律不开；加一条之前先回答「恶意插件连调 1000 次用户损失什么」 |
-| `settings.features.surfaceTools` 默认 | true（03 §3.7） | **false** | 三个工具是常驻 schema，每个轮次都付 token；V0.1 的插件能力是「先读 skill 再打开」 |
+| `settings.features.surfaceTools` 默认 | true（03 §3.7） | **false**；设置页有可见开关 | 四个工具是常驻 schema，每个轮次都付 token；V0.1 的插件能力是「先读 skill 再打开」；没有开关会让 skill 自锁 |
 | 迁移面 | `surface_disable` | 本轮未做 | 禁用走 `writeIndex` 的 enabled 位（R14b 的插件页接） |
 
 **证据**：`surfaces_command_test.go`（10 条：声明+允许 / 未声明 / 未知 id / 禁用 / 非法 id /

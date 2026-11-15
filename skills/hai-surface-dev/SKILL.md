@@ -1,7 +1,7 @@
 ---
 name: hai-surface-dev
-version: 1.0.0
-description: 'Build or debug a panel in the desktop right sidebar - a dashboard, a tool page, or a UI the user wants added. Installs a local ESM plugin and verifies it. Triggers: 插件, 面板, 看板, 右栏, right panel, surface, dashboard, add a tab, 装个面板.'
+version: 1.1.1
+description: 'Builds or debugs a panel in the desktop right sidebar — dashboard, tool page, PDF/document viewer, or any UI the user wants added. Installs a local ESM plugin and verifies it. Use for 插件/面板/看板/右栏/PDF 阅读器/文档面板/right panel/plugin/surface.'
 requires:
   tools: [ui_inspect, surface_install]
 ---
@@ -14,6 +14,16 @@ the renderer through `hai-surface://<id>/panel.js` and registered into the same 
 built-in panels (activity / git / file / web) use. Nothing is special-cased: a plugin is a normal
 surface provider.
 
+The contract is split into small references. Read only the ones the task needs:
+
+| When | Read |
+|---|---|
+| Writing `surface.json` / `panel.js`, host API, theme, lifecycle | [`references/panel-api.md`](references/panel-api.md) |
+| The panel exposes model-callable tools (P2, approvals, `requires_panel`) | [`references/tools.md`](references/tools.md) |
+| The plugin declares several pages (`entries`) | [`references/entries.md`](references/entries.md) |
+| Copying a working skeleton or the agent/quote pattern | [`references/examples.md`](references/examples.md) |
+| Before claiming it works | [`references/verification.md`](references/verification.md) |
+
 ## Before you write code
 
 1. `ui_inspect` with `what:"surfaces"` — what is already registered, and is anything `disabled` or
@@ -22,270 +32,60 @@ surface provider.
 2. If the user's goal is ambiguous (a chart? a table? a button that does something?), ask once.
    A panel that reads the wrong thing is worse than one question.
 
+If `ui_inspect` / `surface_install` are **not in your tool list**, do not pretend to call them:
+point at Settings → Surfaces → AI panel creation (or the packaged scripts in “Self-check”) and say
+that live host inspection/install was unavailable in this environment. The scripts are the
+supported fallback when the surface tools are off.
+
 ## Where things go
 
 - New ability → `group: "plugin"`. **Never** replace or re-register a built-in kind
   (`activity` / `git` / `file` / `web`) — those are the app's own panels.
 - `kind` must be exactly `plugin:<id>`, and `<id>` must match `^[a-z][a-z0-9-]{1,40}$`.
   A mismatch is rejected at load time (and the panel never appears).
+- No JSX and no bundler: `panel.js` is loaded directly, so use `createElement` (React arrives as
+  an argument). A bare npm `import` will fail in the browser.
 
 ## The flow
 
-1. Copy `templates/surface/` (in this repo) to the user's workspace, e.g.
-   `cp -R templates/surface ./my-board`, then edit `surface.json` (`id`, `kind`, `version`,
-   `commands`, `data`) and `panel.js`.
+1. Copy the packaged skeleton: `cp -R <this-skill>/assets ./my-board` (or copy
+   `templates/surface/` from the repo). Edit `surface.json` (`id`, `name`, `version`, `kind`,
+   `commands`, `data`, and `entries`/`tools` if used) and `panel.js`; the field table is in
+   [`references/panel-api.md#surfacejson-fields`](references/panel-api.md#surfacejson-fields).
 2. `surface_install({ target: "<absolute path to that folder>" })`. It returns a receipt:
    `applied` / `already_installed` / `cleaned` / `rejected` / `error` — **only `applied` means the
-   panel is live**. `rejected` carries the reason; fix the folder, install again.
+   panel is live**. `rejected` carries the reason; fix the folder, install again. If the tool is
+   unavailable, `bash <this-skill>/scripts/install-smoke.sh <plugin-dir>` proves the installer
+   accepts it; say clearly that the live in-app install still needs the settings switch.
 3. `ui_inspect` again: the kind must be in `surfaces` with `disabled:false`. If it has `error`,
    that string is your bug report.
 4. `surface_list` to confirm what is installed; `surface_remove({ id })` to take it away
    (the panel's tab becomes a tombstone, nothing else is deleted).
 
-> `surface_install` / `surface_remove` / `surface_list` need `settings.json` to have
-> `"features": { "surfaceTools": true }` (default **false** — the tools are absent otherwise).
-> `ui_inspect` is always available. If the three surface tools are missing, say so and point the
-> user at that setting instead of inventing a workaround.
+> `surface_install` / `surface_remove` / `surface_list` need
+> `settings.json` → `"features": { "surfaceTools": true }` (default **false** — the tools are
+> absent otherwise). The visible switch is **Settings → Surfaces → AI panel creation**.
+> `ui_inspect` is always available. If the surface tools are missing, say so and point the user at
+> that switch instead of inventing a workaround.
+>
+> D11 only forbids declaring `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect`
+> inside a plugin's `surface.json.commands`. `ui_inspect` is still a **host tool** and step 1
+> expects you to call it; the installer rejects it only as a plugin command declaration.
 
-## panel.js rules (the hard ones)
+## Hard rules (details in references)
 
-- **No JSX, no bundler.** `panel.js` is the file the browser imports; there is no compile step.
-  Use `React.createElement` (aliased `h`). Anything you would `import` from npm will fail — React
-  arrives as an argument (`apply({ host, React, surfaces })`).
-- **Export exactly one thing**: `export const surface = { kind, apply({ host, React, surfaces }) }`.
-- Register **your own kind only**, once, inside `apply`:
-  `surfaces.register({ kind: 'plugin:x', group: 'plugin', title: () => '…', render: () => h(Panel) })`.
-- **Two functions, that is the whole API**: `host.command(name, payload)` and
-  `host.onEvent(type, fn)`. There is no `host.agent`, no `host.composer`, no `window.desktop`,
-  no module you can import the host from. (Older examples used `host.events.on`,
-  `host.openTab`, `host.toast` — those are gone.)
-- Read/write the world only through `host.command`, and declare every name in
-  `surface.json.commands`. Everything the host offers a plugin:
+- Export exactly one `surface = { kind, apply({ host, React, surfaces }) }`; register your own
+  kind once **inside** `apply`, never at module top level.
+- The whole host API is `host.command(name, payload)` + `host.onEvent(type, fn)`. Declare every
+  command in `surface.json.commands` and every event in `data`. The host tracks `onEvent`
+  subscriptions and disposes them on unload/reload; `off()` is for early removal. `apply`'s return
+  value is ignored, so clean up your own timers/listeners.
+- Never replace a built-in kind; never touch `document.body` / global CSS / another panel's DOM.
+- Read-only is the default. A write-side tool (`read_only:false`) always needs explicit approval;
+  the plugin cannot approve itself.
+- Do not fabricate data. Render `{ ok:false, reason }` as the user-visible reason.
 
-  | command | payload | reply |
-  |---|---|---|
-  | `agent.session` | `{title?}` | `{ok, session_id}` |
-  | `agent.run` | `{session_id?, input, instructions?}` | `{ok, run_id, session_id}` — the **content** arrives as events |
-  | `agent.cancel` | `{run_id}` | `{ok}` |
-  | `tool.result` | `{call_id, ok, result?, error?}` | `{ok}` — only for plugin tools (P2) |
-  | `composer.quote` | `{text, source?}` | `{ok}` — inserts into the current draft, **never sends** |
-  | `ui.open_tab` | `{kind, params?}` | `{ok}` — `kind` must be your own |
-  | `ui.toast` | `{message}` | `{ok}` |
-
-  Replies are **values, never exceptions**: undeclared name → `{ok:false, reason:"not_declared"}`,
-  refused → `{ok:false, reason:"denied"}`, and a bad quote payload → `invalid_input` / `no_session`.
-  Check `ok` and render the reason.
-- **The four old read-only commands are disabled** (D11): `workspace_list`, `session_list`,
-  `git_snapshot`, `ui_inspect`. They can read real project/session metadata, which a panel must not
-  touch. Declaring them makes **installation `rejected`** (D11); old installed plugins that still
-  declare them answer `denied` at runtime. Copy the current `templates/surface/`, do not copy old
-  examples.
-- Subscribe only to event types declared in `surface.json.data` — `host.onEvent` **throws** for an
-  undeclared type (so a typo fails at `apply` time instead of silently never firing). Always keep
-  the disposer and call it on unmount:
-
-  ```js
-  useEffect(() => {
-    const off = host.onEvent('agent.delta', (ev) => setText((t) => t + ev.data.text))
-    return off
-  }, [])
-  ```
-
-  | event | data | notes |
-  |---|---|---|
-  | `agent.delta` | `{text}` | incremental text (host batches ~50 ms) |
-  | `agent.tool` | `{name, status, ok?}` | tool name + status only |
-  | `agent.usage` | `{input_tokens, output_tokens}` | once, near the end |
-  | `agent.done` | `{text}` | terminal |
-  | `agent.error` | `{reason, message?}` | terminal |
-  | `tool.call` | `{call_id, tool, args, deadline_ms, read_only, requires_panel}` | the model wants **your** tool; reply with `tool.result` |
-  | `surfaces_changed` | `{}` | plugin installed/enabled/removed (also spelled `surfaces.changed`) |
-
-  `surfaces_changed` needs no token and works even when the agent channel is unavailable; every
-  other event only ever carries **your own** runs (the loader filters by plugin id).
-
-- Theme from `host.theme()` (`{ mode, tokens: { bg, fg, border, accent, ok, warn, err, info } }`).
-  Hardcoded colours break one of the two themes.
-- Opening another tab is `host.command('ui.open_tab', { kind: 'plugin:<your-id>', params })` —
-  your own kind only. A one-line message is `host.command('ui.toast', { message })`. Both are
-  conveniences: a panel that only renders is a fine panel.
-- Quote into the draft with `host.command('composer.quote', { text, source })`: the text lands in
-  the user's composer, `source` becomes a deletable chip on it, and **nothing is sent** (the user
-  presses Enter). `text` is capped at 8 KiB; empty/oversized text is `invalid_input`, no active
-  session is `no_session`.
-
-## Exposing tools to the agent (P2)
-
-A plugin can give its own agent session tools (for example a PDF panel exposing `update_note`).
-Declare them in `surface.json`, **and** declare the two channels — the installer rejects tools
-without them:
-
-```json
-{
-  "commands": ["agent.session", "agent.run", "tool.result"],
-  "data": ["agent.delta", "agent.done", "agent.error", "tool.call"],
-  "tools": [
-    {
-      "name": "update_note",
-      "description": "Replace the note shown in this panel",
-      "input": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
-      "read_only": false,
-      "requires_panel": true,
-      "timeout_ms": 10000
-    }
-  ]
-}
-```
-
-Reply from the plugin (no per-tool registration API):
-
-```js
-const off = host.onEvent('tool.call', async (ev) => {
-  const { call_id, tool, args } = ev.data
-  try {
-    const result = await runMyTool(tool, args) // your code
-    await host.command('tool.result', { call_id, ok: true, result })
-  } catch (e) {
-    await host.command('tool.result', { call_id, ok: false, error: String(e && e.message || e) })
-  }
-})
-```
-
-Keep the disposer (`off`) and call it when the panel unloads, like any other event.
-
-- `read_only: true` may run without a card. `read_only: false` **always** asks the user, even in
-  Auto / Full Access — `MandatoryApproval` bypasses the mode approver. A plugin cannot approve it.
-- `requires_panel: true` means the host refuses with `panel_not_open` unless a tab of your kind is
-  open **in the current scope**; the callback is not called. Any entry counts.
-- Cancel a run with `host.command('agent.cancel', { run_id })` (keep the id from the `agent.run`
-  ack). The terminal event is `agent.error{reason:"cancelled"}` — **not** `agent.done`; there is no
-  partial done to reconcile. The approval card shows your plugin name + tool name, not the raw
-  `plugin__<id>__<name>`.
-- The model sees `plugin__<id>__<name>`; keep the full name ≤ 64 bytes (OpenAI function-name hard
-  limit). `name` matches `^[a-z][a-z0-9_]{0,40}$`, no `__`, ≤ 16 tools/plugin, description ≤ 300
-  chars, `input` must be a JSON `object` (≤ 16 KiB, no `$ref`), `timeout_ms` 0 (=10s) or 100ms–60s.
-- Results are capped at 64 KiB JSON (truncated with `truncated:true`). Timeout / unload fail the
-  call (`timeout` / `plugin_unloaded`); the run continues. Unknown or already-settled `call_id` is
-  ignored, so a late `tool.result` is harmless.
-- Tools exist only in **your plugin's own sessions** (D10) — never in a real Project session, never
-  in another plugin. Do not try to register tools globally.
-
-## Multiple entrances (`entries`)
-
-One plugin stays **one kind**. If the user needs several pages (overview / schedule / resources),
-declare them in `surface.json` — the host draws the menu itself, you do not inject UI:
-
-```json
-"entries": [
-  { "id": "overview",  "title": "总览", "order": 10 },
-  { "id": "schedule",  "title": "课表", "icon": "calendar.svg", "order": 20 },
-  { "id": "resources", "title": "资源", "order": 30 }
-]
-```
-
-Rules the installer enforces (any violation = the whole install is `rejected`, nothing is written):
-`entries` ≤ 20, `id` matches `^[a-z][a-z0-9-]{1,40}$` and is unique, `title` non-empty and ≤ 64
-characters, `icon` is a path **inside** the plugin folder (a missing icon file is fine — the host
-falls back to the kind icon). `title` is either a plain string (rendered in every language) or a
-`{ "zh": "课表", "en": "Schedule" }` object — at least one language must be non-empty, each ≤ 64
-characters, and the host picks by the UI language at render time.
-
-How the host renders them (three places, all host-owned):
-
-1. right panel `＋` → group **面板插件**;
-2. the right panel's empty state (what a new user sees first);
-3. settings → 面板插件, one **打开** button per row plus the hint "入口在右栏 ＋ → 面板插件".
-
-Clicking an entrance calls `openTab({ kind: 'plugin:<id>', params: { entry: '<entry id>' } })`:
-each entry is its own tab, and the tab title for a **declared** entry comes from `manifest.title`
-(so the menu and the tab bar always agree). Read it back through `tab.params.entry`:
-
-```js
-function Page({ tab }) {
-  const entry = tab.params && tab.params.entry
-  return entry === 'schedule' ? h(Timetable) : h(Overview)
-}
-surfaces.register({ kind: 'plugin:hello', group: 'plugin', title: (tab) => titleOf(tab), render: ({ tab }) => h(Page, { tab }) })
-```
-
-- **Zero `entries`** is legal and must still be reachable: the host synthesises one default
-  entrance titled from `name` (else the id) and opens it with `params.entry === 'default'`.
-  Never ship a plugin that "loads fine but shows nothing anywhere" — that is the one state the
-  entrance contract forbids.
-- **Routing inside a page** (list → detail → form) is yours; do not open a new entry id per row.
-  If a row genuinely needs **its own tab**, put the distinguishing value in `params` (for example
-  `params: { entry: 'resources', fileId: 42 }`): the host's default tab identity is
-  `entry + the rest of params` (key-order insensitive), so different values = different tabs and the
-  same values = the same tab. Declare `dedupeKey: (tab) => String(tab.params?.courseId)` on your
-  provider when a *coarser* key is right (e.g. one tab per course, ignoring `fileId`); it must be a
-  pure function of `params`.
-- **The tab title of a declared entry is host-owned**: it comes from `entries[].title` so the menu
-  and the tab bar agree. `title()` on the provider is what the host uses for the **default** entry
-  (zero `entries`) and for tabs your plugin opens itself (`ui.open_tab`) — do not fight it for
-  declared entries.
-- Disabling or uninstalling the plugin removes all entrances immediately; tabs already open turn
-  into tombstones (the host does that — do not try to close them from the plugin).
-
-## Host runtime contract (storage / theme / icons / lifecycle)
-
-Four questions every plugin hits while it is being written; the answers are not visible from the
-rest of this file.
-
-**Where your code runs.** `panel.js` is imported into the app's own page — not an iframe, not a
-worker. You share its `window`, its `document.documentElement` and its web storage. Your globals,
-timers and listeners live as long as the panel stays loaded.
-
-**Storage is yours — and disposable.** The host gives plugins no storage API and no file write. Keep
-your own data: `localStorage` is available and is the intended place for small state (progress ticks,
-the last selected tab). Prefix every key with your id (`course-mvp:progress:v1`) — the host uses that
-prefix, it is the same storage the app uses, and namespacing is what keeps two plugins apart.
-
-Three consequences, in increasing order of how much they hurt:
-
-1. The origin differs between dev (`http://localhost:5173`) and production (`file://…/dist/index.html`),
-   so data written in one is not visible in the other.
-2. **Disabling does not delete data.** A disabled plugin keeps everything it wrote; re-enabling
-   resumes where it left off. (The index entry, version and hash stay too.)
-3. **Uninstalling DOES delete every key prefixed `<id>:`.** Treat plugin storage as **disposable**:
-   never store anything that must survive uninstall (user-authored documents, credentials, anything
-   the user would call "my work"). The host has **no write command** — there is no plugin API that
-   saves a file or a workspace, so "keep it somewhere safe" is not something the host can do for you:
-   if a value must outlive the plugin, it does not belong in `localStorage` — let the user export or
-   copy it, and own the saving in your own UI (say so on screen, do not claim the host persists it).
-   There is also a "Clear data" button on the settings page (same effect, without uninstalling), and
-   the host sweeps the prefix on the next start if the plugin vanished while the app was not running.
-
-If `localStorage` throws (quota, disabled storage), fall back to in-memory state and say so in the UI
-instead of crashing the panel.
-
-**Theme is live.** `host.theme()` returns `{ mode, tokens }` for the theme *right now*. It is not a
-constant: call it **inside render**, not once in `apply` and stored — a cached palette keeps the old
-colours after the user switches light/dark. The tokens are exactly `bg, fg, border, accent, ok,
-warn, err, info`; there is no `muted` and no font token. Derive anything else from these (`fg` at
-reduced opacity) or use `currentColor`.
-
-**Icons.** Two different things share the name. `surface.json.icon` is a path inside your folder:
-the host loads it through its own protocol and uses it as the provider's fallback icon (the tab
-strip), unless your provider declares `icon`. `entries[].icon` is also a path, used by the host in
-the menu. `provider.icon` is a function `(tab?) => ReactNode` rendered at ~12 px — return an element
-from it, not a path.
-
-**Lifecycle.** The host calls `apply` once per load. On reload (file changed, plugin re-enabled,
-app restart) it first unregisters your kind, then imports the file again and calls `apply` again. So
-do all `surfaces.register` calls **inside `apply`**, never at module top level (a top-level
-registration runs before the old provider is gone and leaves a stale one), and keep `apply`
-idempotent. Anything you start must be stoppable: return a cleanup from `useEffect`, and do not
-leave a `setInterval` running after your panel unmounts.
-
-## Forbidden (they are not style preferences)
-
-- No iframe / no `mock HTML preview` — the panel renders in the app's own React tree.
-- No touching `document.body`, no replacing the app root, no global CSS, no reading another
-  panel's DOM. Your island is your provider's subtree.
-- No `capabilities: ['write']` — plugins cannot ask for write access (the registry rejects it).
-- Do not fabricate data. If a command returns `{ ok: false }`, render the reason.
-
-## Minimum working example
+## Minimum shape
 
 ```js
 export const surface = {
@@ -302,88 +102,29 @@ export const surface = {
 }
 ```
 
-with `surface.json`: `{"id":"hello","kind":"plugin:hello","version":"1.0.0","entry":"panel.js","commands":[],"data":[]}`.
-
-A panel that talks to the Agent and quotes into the draft (the shape `templates/surface` ships):
+with:
 
 ```json
-{
-  "commands": ["agent.session", "agent.run", "agent.cancel", "composer.quote", "ui.toast"],
-  "data": ["agent.delta", "agent.done", "agent.error", "surfaces_changed"]
-}
+{"id":"hello","name":{"zh":"你好","en":"Hello"},"version":"1.0.0","kind":"plugin:hello","entry":"panel.js","commands":[],"data":[]}
 ```
 
-```js
-apply({ host, React }) {
-  const h = React.createElement
-  let sessionId = ''
-  async function ask(input) {
-    if (!sessionId) {
-      const s = await host.command('agent.session', { title: 'my panel' })
-      if (!s.ok) return s.reason
-      sessionId = s.session_id
-    }
-    const r = await host.command('agent.run', { session_id: sessionId, input })
-    return r.ok ? r.run_id : r.reason
-  }
-  host.onEvent('agent.delta', (ev) => render(ev.data.text)) // plus agent.done / agent.error
-}
-```
+`name` is an **object keyed by language**, not a plain string. The full field table (including
+`entries`, `tools`, and fields that are deliberately absent) is in
+[`references/panel-api.md`](references/panel-api.md#surfacejson-fields).
 
-## Tool descriptions stay short
+See [`references/examples.md`](references/examples.md) for the agent/quote pattern and
+[`references/panel-api.md`](references/panel-api.md) for the full host surface.
 
-Every tool description in this product is a permanent cost (it rides in the schema of every turn).
-Keep a new one **≤ 120 characters**, ≤ 3 parameters, and put the tutorial in this skill — not in
-the schema. Same rule for the receipt strings you show the user: one line, actionable.
+## Self-check (before you say it works)
 
-## Self-check (run before you say it works)
-
-Two commands, both take **the directory you just wrote** (absolute path is safest, because
-`go test` runs with the package as its working directory):
+Run the packaged validator first, then the real installer; both take the directory you wrote:
 
 ```bash
-go test ./desktop/bridge -run TestSurfaceInstallExternal -count=1 -v -args -dir=<plugin-dir>
-
-cd desktop/app && node e2e/verify_external_surface.mjs --dir=<plugin-dir>
-# …or via npm (SURFACE_DIR defaults to the in-repo template):
-cd desktop/app && SURFACE_DIR=<plugin-dir> npm run test:surface-install
-cd desktop/app && SURFACE_DIR=<plugin-dir> npm run e2e:external-surface
+node <this-skill>/scripts/validate-plugin.mjs <plugin-dir>
+bash <this-skill>/scripts/install-smoke.sh <plugin-dir>
 ```
 
-What they prove — and each one is a failure, not a warning:
-
-- **Installer** (`TestSurfaceInstallExternal`): the real installer copies your directory into a
-  throw-away `HOME` and prints the receipt. `status` must be `applied`, the receipt carries
-  `entries: <n>` (how many entrances you declared) and `entryHint` (where the user finds them:
-  right panel ＋ → Panel plugins), `index.json` must have exactly one item whose `hash` is
-  `sha256(<your entry file>)`, and the installed copy keeps `0600` files / `0700` directories.
-  A rejected receipt prints the reason the installer refused (`reason`) — fix the manifest and
-  run it again.
-- **Browser** (`verify_external_surface.mjs`): loads **your real `panel.js` bytes** into the app
-  and clicks what a user would click — every `entries[].id` appears in the ＋ menu with your
-  title, the first one renders non-empty content (a crash card or a tombstone fails), the tab
-  title equals your declared title, `pageerror` stays 0, and the ＋ menu itself is keyboard
-  operable (↑↓ move, Enter opens, Esc closes and returns focus). It also re-checks after a reload.
-
-If you can spare a minute more, one command does the same with **no substitutes** — real
-installer → real Electron (temporary `HAI_DATA_DIR`) → real ＋ menu → real `hai-surface://`
-panel load (it builds `dist/` + `dist-electron/` on first run):
-
-```bash
-cd desktop/app && node e2e/verify_external_surface_electron.mjs --dir=<plugin-dir>
-```
-
-Exit codes: `0` pass, `1` your plugin is wrong, `2` the environment is wrong (port taken, or
-`--dir` has no `surface.json` / no `panel.js`) — `2` never means "your panel is fine".
-
-`entries[].title` accepts either form; `{ zh, en }` is picked by the host's current language, the
-plain string is used for every language:
-
-```json
-{ "entries": [ { "id": "overview", "title": "总览" },
-               { "id": "schedule", "title": { "zh": "课表", "en": "Schedule" } } ] }
-```
-
-Limits of the browser check (do not read a green run as more than it is): it feeds your file as a
-single Blob module, so a panel that `import`s other files will fail there (production serves your
-whole directory over `hai-surface://`); entry icons are not asserted.
+For the browser/Electron checks, exit codes, and what each assertion proves, read
+[`references/verification.md`](references/verification.md) — the browser tier is self-contained
+(port 5232, no dev server/5173), and an Electron red must be compared with the template control
+before you touch the panel.
