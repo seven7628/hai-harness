@@ -9,9 +9,32 @@
 // 副作用都在 applyAppearance() 一处，React 侧只读（useAppearance）。
 
 import { useSyncExternalStore } from 'react'
-import { bridge } from '../lib/bridge'
+import { bridge, type DesktopApi } from '../lib/bridge'
 
 const LS_KEY = 'go-code.appearance'
+
+/**
+ * 宿主 api 的**解析函数**（不是常量）：生产 = `bridge`（preload 一次性交接的那个对象）；
+ * 非生产构建再兜一层 dev-only 的 `window.__haiTestBridge`（bridge.ts 已挂好的探针读取口）。
+ *
+ * 为什么必须是**调用时**解析、不能提到模块顶层：`bridge` 是 bridge.ts 的模块求值常量，
+ * 求值那一刻页面上有什么才算什么。e2e 的原生缩放段要验的正是「宿主在，就走原生缩放」，
+ * 它在页面**加载之后**才注入一个只含 setUiZoom 的 fake —— 这时 bridge 早已定死为 null，
+ * 只有调用时再看一眼才看得见它（提成常量 = 缩放永远走 CSS 分支，探针卡在 waitForFunction）。
+ *
+ * 判据沿用 bridge.ts 的 `!import.meta.env?.PROD`（vite 里 PROD 与 DEV **反相**，别写反；
+ * scripts/ 下 esbuild 打包的单测里 import.meta 是空对象 ⇒ `!undefined === true` ⇒ 桩可用）。
+ * 反过来，生产构建把它静态折成假 ⇒ 下面的 dev 分支与 `__haiTestBridge` 一起被 dead-code
+ * 掉、**进不了 dist**（e2e/verify_host_boundary.mjs A3a 钉的就是这一条）。
+ *
+ * 边界不变：这不给插件任何东西 —— 插件只能经 `apply({ host })` 拿 host.command / host.onEvent，
+ * 页面上的 desktop 全局入口依旧不存在（宿主只经 preload 一次性交接；A2 与探针自检都盯着这条）。
+ */
+function hostApi(): DesktopApi | null {
+  if (bridge) return bridge
+  if (!import.meta.env?.PROD && typeof window !== 'undefined') return window.__haiTestBridge ?? null
+  return null
+}
 
 export interface Appearance {
   codeThemeLight: string // shiki 主题名（亮色）
@@ -292,9 +315,12 @@ export function applyAppearance(pref: Appearance = current): void {
   // 开发中极易出现「preload 已新版（有 setUiZoom）、main 还是旧产物（没注册 ui:set-zoom）」的错配，
   // 此时 invoke 会 reject（`No handler registered for 'ui:set-zoom'`）：既在控制台冒未捕获错误，
   // 缩放也整个失效（用户 2026-09-21 报的就是这个）。退回 CSS 路径至少让设置可用。
-  if (bridge?.setUiZoom) {
+  // 宿主在这里**现解析**（不是模块常量）：非生产构建下探针会在页面加载后才注入 fake，
+  // 见 hostApi() 的注释 —— 提成模块常量就等于永远看不见它。
+  const host = hostApi()
+  if (host?.setUiZoom) {
     root.style.setProperty('--ui-scale', '1') // 原生缩放生效时 CSS 退化路径必须关掉（否则双重缩放）
-    bridge.setUiZoom(pref.scale)
+    host.setUiZoom(pref.scale)
       .then((r) => { if (!r?.ok) root.style.setProperty('--ui-scale', String(pref.scale)) })
       .catch(() => root.style.setProperty('--ui-scale', String(pref.scale)))
   } else {
