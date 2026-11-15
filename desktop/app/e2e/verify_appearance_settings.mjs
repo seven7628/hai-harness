@@ -480,14 +480,27 @@ try {
   assert(legacy === '1.3' && after.legacyInlineZoom === '' && after.rootZoom === '1.1',
     `遗留 inline zoom 被清除（清前 ${legacy} → 清后 "${after.legacyInlineZoom}"，缩放改由 #root 承担 ${after.rootZoom}）`)
 
-  // 有 desktop 桥时（=真实 Electron）必须改走原生缩放，并关掉 CSS 退化，避免双重缩放
+  // 有宿主桥时（=真实 Electron）必须改走原生缩放，并关掉 CSS 退化，避免双重缩放。
+  // L0（D6）之后页面上已经没有 window.desktop：宿主只经 preload 一次性交接，探针能用的
+  // 注入点只剩 dev-only 的 __haiTestBridge（bridge.ts 在非生产构建挂的探针读取口）。
+  // 注意注入发生在**页面加载之后**：src/lib/appearance.ts 的 hostApi() 是调用时解析，
+  // bridge 常量此刻已是 null，只有现解析才看得见这个 fake（提成模块常量 = 永远走 CSS 分支，
+  // 本条就卡在下面的 waitForFunction 上 —— main 上实测过的回归）。
   await page.evaluate(() => {
     window.__zooms = []
-    window.desktop = { setUiZoom: (z) => { window.__zooms.push(z); return Promise.resolve({ ok: true, scale: z }) } }
+    window.__haiTestBridge = { setUiZoom: (z) => { window.__zooms.push(z); return Promise.resolve({ ok: true, scale: z }) } }
   })
+  // 仪器自检：注入的是 dev-only 读取口，产品入口 window.desktop **必须仍然不存在**。
+  // 没有这条，本条断言红了只要「把 window.desktop 放回来」也能绿 —— 那是靠回退 L0 换来的假绿。
+  const desktopEntry = await page.evaluate(() => ({
+    type: typeof window.desktop,
+    own: Object.prototype.hasOwnProperty.call(window, 'desktop'),
+  }))
+  assert(desktopEntry.type === 'undefined' && !desktopEntry.own,
+    `注入 __haiTestBridge 后 window.desktop 仍是 undefined（typeof=${desktopEntry.type}，own=${desktopEntry.own}）`)
   await page.click('.set-row .seg button:text-is("特大")')
   await page.waitForFunction(() => (window.__zooms || []).length > 0, null, { timeout: 5000 })
-  assert(await page.evaluate(() => window.__zooms.at(-1)) === 1.25, '有 desktop 桥 → 走原生缩放 setUiZoom(1.25)')
+  assert(await page.evaluate(() => window.__zooms.at(-1)) === 1.25, '有宿主桥 → 走原生缩放 setUiZoom(1.25)')
   assert(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--ui-scale').trim()) === '1',
     '原生缩放时 CSS 退化被关掉（--ui-scale=1，不双重缩放）')
   await page.click('.set-row .seg button:text-is("大")') // 回到 1.1 供后面的刷新断言
@@ -495,7 +508,7 @@ try {
   // ④b 主进程没注册 ui:set-zoom（旧产物 / 进程未重启）时：不许冒未捕获错误，且必须自动退回 CSS 路径
   //（用户 2026-09-21 报的 "No handler registered for 'ui:set-zoom'" 就是这种错配）
   await page.evaluate(() => {
-    window.desktop = {
+    window.__haiTestBridge = {
       setUiZoom: () => Promise.reject(new Error("Error invoking remote method 'ui:set-zoom': Error: No handler registered for 'ui:set-zoom'")),
     }
   })
@@ -505,7 +518,7 @@ try {
     null, { timeout: 5000 },
   )
   ok('主进程缺 ui:set-zoom → 自动退回 CSS 路径（缩放仍可用）')
-  await page.evaluate(() => { delete window.desktop })
+  await page.evaluate(() => { delete window.__haiTestBridge })
   await page.click('.set-row .seg button:text-is("大")') // 回到 1.1，供后面的刷新断言
   await page.waitForFunction(
     () => getComputedStyle(document.documentElement).getPropertyValue('--ui-scale').trim() === '1.1',
