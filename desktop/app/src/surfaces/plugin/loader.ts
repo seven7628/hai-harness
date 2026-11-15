@@ -85,6 +85,18 @@ export interface PluginHostDeps {
    * （比如 mobile/browser 模式下永远拿不到，那就不该有任何跨重启清理发生）。
    */
   indexAuthoritative?: () => boolean
+  /**
+   * 插件**新建**了自己的会话（`agent.session` / 不带 session_id 的 `agent.run`）→ 请宿主
+   * 重新拉一次左栏的插件分组（`plugin_projects_list`）。
+   *
+   * 为什么必须由这边通知：左栏的虚拟 Project 只在启动那一刻水合一次，而插件建会话是
+   * **运行中**发生的事 —— 不通知的话会话真的建出来了（Go 侧有、jsonl 有），左栏却是空的，
+   * 用户只能重启才看见。缺省 = 不刷新（单测 / 浏览器档没有左栏插件分组）。
+   *
+   * 传进来的实现**自己负责合并/去抖**（生产 = store 的 schedulePluginProjectsRefresh，
+   * 150ms 合并）：loader 一次命令调一次，不去猜调用频率。
+   */
+  refreshPluginProjects?: () => void
 }
 
 export interface PluginFailure {
@@ -230,6 +242,25 @@ export interface SurfaceAgentApi {
 }
 
 /**
+ * 这条 agent.* 命令是不是**刚建了一个插件会话**（见 `PluginHostDeps.refreshPluginProjects`）。
+ *
+ *   · `agent.session` 恒建新会话；
+ *   · `agent.run` 只在 payload **没有** session_id 时才自己建一个（§6.6 D4：给了
+ *     session_id 是往已有会话里发消息，不产生新的左栏条目）。
+ *
+ * 判据只看**原始 payload**，不看回执：回执顶层被归一摊平过 `session_id`（成功时总有一个），
+ * 拿回执判会把每一次「复用已有会话的 run」都当成新建 —— 那是每次提问都重拉一遍左栏。
+ * 「空白算没有」与 Go 对齐（`strings.TrimSpace(str(args,"session_id"))` 为空 = 新建），
+ * 否则渲染层会认为「不刷新」，而 Go 那边真的建了一个新会话。
+ */
+function createsPluginSession(name: string, args: Record<string, unknown>): boolean {
+  if (name === 'agent.session') return true
+  if (name !== 'agent.run') return false
+  const sid = args.session_id
+  return typeof sid !== 'string' || sid.trim() === ''
+}
+
+/**
  * 读 `composer.quote` 的载荷（§5.1：`{text, source?}`）。
  *
  * 只做**形状与上限**校验，不猜业务：空白文本 = invalid_input，超 8 KiB = invalid_input。
@@ -354,6 +385,17 @@ export function createHost(
           const reply = await agentApi.surfaceAgent({ token, name, args })
           const data = reply?.data
           if (reply?.ok === true) {
+            // 新建了会话 → 请宿主重拉左栏插件分组（只在**成功**且确实新建时；失败没有新会话，
+            // 带 session_id 的 run 也没有）。放在归一之前：判据用原始 payload，不用回执。
+            // 通知失败（宿主回调自己抛）必须**吞掉**：会话已经在 Go 侧建好了，把它改成
+            // `error` 回执会让插件以为没建成而重试 —— 结果是左栏多出两条空会话。
+            if (createsPluginSession(name, args)) {
+              try {
+                deps.refreshPluginProjects?.()
+              } catch (e) {
+                console.warn('[surface] 左栏插件分组刷新失败（会话已创建）：', e)
+              }
+            }
             // §5.1 承诺插件看到 `{ok, session_id}`，§6.6 的 wire 把值放在 `data` 里 ——
             // 这里做**一次**归一：摊到回执顶层，同时保留 `data`（想按 wire 形状读也可以）。
             // 归一放在 loader 而不是让每个插件自己 `r.data ?? r`：那会在几十个面板里分叉。

@@ -76,13 +76,14 @@ function ok(label, cond, detail = '') {
 const eq = (label, actual, expected) => ok(label, JSON.stringify(actual) === JSON.stringify(expected), `实得 ${JSON.stringify(actual)}`)
 
 // —— 假宿主（= main 那三条 IPC 的渲染层替身；记录每一次跨进程边界上的调用）——
-function fakeAgent({ token = 'tok-demo', failToken = false, rejectAgent = false, rejectCommand = false } = {}) {
+function fakeAgent({ token = 'tok-demo', failToken = false, rejectAgent = false, rejectCommand = false, agentReplies = {} } = {}) {
   const subs = new Set()
   const calls = { token: [], agent: [], command: [] }
   // 白名单在「main」那一侧：这份假实现只回一份有数据的回执（形状照 §6.6：值都在 data 里）
   const replies = {
     'agent.session': { ok: true, data: { session_id: 's-1' } },
     'agent.run': { ok: true, data: { run_id: 'r-1', session_id: 's-1' } },
+    ...agentReplies,
   }
   return {
     subs,
@@ -359,5 +360,71 @@ console.log('\nT12 ui.open_tab 只能开自己的 kind；ui.toast 走宿主')
   eq('宿主无 openTab 能力 → denied', await bare.command('ui.open_tab', { kind: 'plugin:demo' }), { ok: false, reason: 'denied' })
   eq('宿主无 toast 能力 → denied', await bare.command('ui.toast', { message: 'x' }), { ok: false, reason: 'denied' })
 }
+
+// =====================================================================
+console.log('\nT13 插件**新建**会话 → 通知宿主重拉左栏插件分组（A：会话即时刷新）')
+{
+  // 命令表补上 agent.cancel / tool.result：它们同属 agent 通道，但**不**产生新会话。
+  const item = { ...ITEM, commands: [...ITEM.commands, 'agent.cancel', 'tool.result'] }
+  let refreshed = 0
+  const { deps } = makeDeps({ refreshPluginProjects: () => { refreshed += 1 } })
+  const host = createHost(item, deps, [], fakeAgent())
+
+  eq('agent.session 成功 → +1', (await host.command('agent.session', { title: 'e2e' }), refreshed), 1)
+  // 不带 session_id 的 run = Go 那边 genID 新建会话（D4），左栏要多一条
+  eq('agent.run 无 session_id 成功 → +1', (await host.command('agent.run', { input: '你好' }), refreshed), 2)
+  // 带 session_id = 往已有会话里发消息：左栏没有新条目，重拉只会刷掉用户正在看的东西
+  eq('agent.run 带 session_id → 不刷新',
+    (await host.command('agent.run', { input: '你好', session_id: 's-1' }), refreshed), 2)
+  // 空白算没有（与 Go 的 strings.TrimSpace 对齐）：Go 那边真的建了新会话，这边不刷新就漏一条
+  eq('agent.run 空白 session_id → +1（Go 视为新建）',
+    (await host.command('agent.run', { input: '你好', session_id: '   ' }), refreshed), 3)
+  eq('agent.cancel → 不刷新', (await host.command('agent.cancel', { run_id: 'r-1' }), refreshed), 3)
+  eq('tool.result → 不刷新', (await host.command('tool.result', { run_id: 'r-1', call_id: 'c-1' }), refreshed), 3)
+  eq('composer.quote → 不刷新', (await host.command('composer.quote', { text: 'hi' }), refreshed), 3)
+
+  // 一次调用只通知一次（不是「每条事件都通知」——那会把左栏刷成 60Hz）
+  const before = refreshed
+  await host.command('agent.session', {})
+  eq('单次调用恰好 +1（不重复通知）', refreshed - before, 1)
+}
+
+// =====================================================================
+console.log('\nT14 失败也不刷新（没有新会话可显示）：只认 ok === true')
+{
+  const item = { ...ITEM, commands: [...ITEM.commands, 'agent.cancel'] }
+  const failReplies = {
+    'agent.session': { ok: false, reason: 'denied' },
+    'agent.run': { ok: false, reason: 'quota' },
+  }
+  let refreshed = 0
+  const host = createHost(item, makeDeps({ refreshPluginProjects: () => { refreshed += 1 } }).deps, [],
+    fakeAgent({ agentReplies: failReplies }))
+  eq('agent.session 失败回执', await host.command('agent.session', {}), { ok: false, reason: 'denied' })
+  eq('agent.run（无 session_id）失败回执', await host.command('agent.run', { input: 'x' }), { ok: false, reason: 'quota' })
+  eq('两条失败都没触发刷新', refreshed, 0)
+
+  // token 领不到 / 传输异常更是收敛成 denied/error，同样不该刷新
+  const noToken = createHost(item, makeDeps({ refreshPluginProjects: () => { refreshed += 1 } }).deps, [],
+    fakeAgent({ failToken: true }))
+  await noToken.command('agent.session', {})
+  await noToken.command('agent.run', { input: 'x' })
+  eq('token 失败不刷新', refreshed, 0)
+  const boom = createHost(item, makeDeps({ refreshPluginProjects: () => { refreshed += 1 } }).deps, [],
+    fakeAgent({ rejectAgent: true }))
+  eq('传输异常收敛成 error', await boom.command('agent.session', {}), { ok: false, reason: 'error' })
+  eq('传输异常不刷新', refreshed, 0)
+
+  // 宿主没提供这个能力（单测 / 浏览器档）→ 正常回执，不抛
+  const bare = createHost(item, { hasActiveSession: () => true }, [], fakeAgent())
+  eq('宿主无 refreshPluginProjects 也不炸', (await bare.command('agent.session', {})).ok, true)
+  // 回调自己抛也不能把回执吃掉：会话**已经建出来了**，把成功改成 error 只会让插件重试
+  //（重试 = 左栏多出两条空会话）。刷新是「锦上添花」，失败只进 console。
+  const throwing = createHost(item, makeDeps({ refreshPluginProjects: () => { throw new Error('刷新炸了') } }).deps, [],
+    fakeAgent())
+  eq('刷新回调抛错 → 回执照旧 ok（会话已建，不许回 error 诱发重试）',
+    (await throwing.command('agent.session', {})).ok, true)
+}
+
 
 console.log(`\n${process.exitCode ? '❌ 有失败' : '✅ 全通过'}（${pass} 项断言）`)
