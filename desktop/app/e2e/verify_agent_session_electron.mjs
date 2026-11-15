@@ -162,14 +162,29 @@ let app = null
 let HOME = ''
 let PLUGIN_DIR = ''
 let WS = ''
+let USER_DATA = ''
 const cleanup = () => {
   try { app?.close() } catch { /* 已退出 */ }
-  for (const d of [HOME, PLUGIN_DIR, WS]) {
+  for (const d of [HOME, PLUGIN_DIR, WS, USER_DATA]) {
     if (!d) continue
     try { fs.rmSync(d, { recursive: true, force: true }) } catch { /* 尽力 */ }
   }
 }
 process.on('exit', cleanup)
+
+// Electron 的 userData（electron/main.ts unifyUserData）预建：Chromium 在 ready 之前写
+// `<userData>/DevToolsActivePort`；macOS 首次运行目录不存在时 mkdir 可能慢半拍，DevTools
+// handler 报 ENOENT，Playwright 只能等满 180s。hash 必须与 main.ts 同一算法。
+function electronUserDataDir(dataDir) {
+  const base = process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support')
+    : process.platform === 'win32'
+      ? (process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'))
+      : (process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'))
+  let h = 0
+  for (let i = 0; i < dataDir.length; i++) h = ((h << 5) - h + dataDir.charCodeAt(i)) | 0
+  return path.join(base, `hai-desktop-${Math.abs(h).toString(36)}`)
+}
 
 try {
   console.log('\nT0 前置：dist 产物 + electron')
@@ -226,6 +241,10 @@ try {
 
   // ---- T3：启动真 Electron（真 preload / 真桥 / 真协议）----
   console.log('\nT3 启动真 Electron（HAI_DATA_DIR 多实例模式）')
+  USER_DATA = electronUserDataDir(HOME)
+  fs.mkdirSync(USER_DATA, { recursive: true })
+  check('Electron userData 目录已预建（DevToolsActivePort 的父目录）',
+    fs.existsSync(USER_DATA), USER_DATA)
   app = await _electron.launch({
     executablePath: ELECTRON, args: ['.'], cwd: APP,
     env: { ...process.env, HOME, HAI_DATA_DIR: HOME },

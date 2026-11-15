@@ -265,18 +265,37 @@ let provider = null
 let HOME = ''
 let PLUGIN_DIR = ''
 let WS = ''
+let USER_DATA = ''
 const cleanup = () => {
   try { app?.close() } catch { /* 已退出 */ }
   try {
     provider?.server.closeAllConnections?.()
     provider?.server.close()
   } catch { /* 已关闭 */ }
-  for (const d of [HOME, PLUGIN_DIR, WS]) {
+  for (const d of [HOME, PLUGIN_DIR, WS, USER_DATA]) {
     if (!d) continue
     try { fs.rmSync(d, { recursive: true, force: true }) } catch { /* 尽力 */ }
   }
 }
 process.on('exit', cleanup)
+
+// Electron 的 userData（electron/main.ts unifyUserData）：`<appData>/hai-desktop-<hash>`，
+// hash 必须与那边**同一算法**，否则预建的目录不会被 Chromium 使用。
+//
+// 为什么要预建：Chromium 在 Electron ready 之前就写 `<userData>/DevToolsActivePort`。
+// macOS 首次运行、目录还不存在时，mkdir 偶尔慢半拍，DevTools handler 直接报
+// `No such file or directory`，Playwright 只能等满 180s 启动超时（2026-11-14 全链真踩过，
+// 目录创建时间与超时同一秒）。这是启动抖动，不是链路红；把父目录先建好即可。
+function electronUserDataDir(dataDir) {
+  const base = process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support')
+    : process.platform === 'win32'
+      ? (process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'))
+      : (process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'))
+  let h = 0
+  for (let i = 0; i < dataDir.length; i++) h = ((h << 5) - h + dataDir.charCodeAt(i)) | 0
+  return path.join(base, `hai-desktop-${Math.abs(h).toString(36)}`)
+}
 
 // userTexts 请求体里 role=user 的文本块（字符串 content 或 [{type:'text',text}] 两种线形）。
 // 只判「原文里出现过 ping」不够：系统提示词里随手一个 typing 就能让断言假绿 ——
@@ -369,6 +388,10 @@ try {
 
   // ---- T3：启动真 Electron（真 preload / 真桥 / 真协议）----
   console.log('\nT3 启动真 Electron（HAI_DATA_DIR 多实例模式）')
+  USER_DATA = electronUserDataDir(HOME)
+  fs.mkdirSync(USER_DATA, { recursive: true })
+  check('Electron userData 目录已预建（DevToolsActivePort 的父目录）',
+    fs.existsSync(USER_DATA), USER_DATA)
   try {
     app = await _electron.launch({
       executablePath: ELECTRON, args: ['.'], cwd: APP,
