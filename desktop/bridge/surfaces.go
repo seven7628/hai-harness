@@ -73,6 +73,10 @@ const (
 	// 这句话是审批卡片上唯一的人读说明（§6.4「卡片显示插件名 · 工具名」），
 	// 太长会被权限卡片截断成「看不出在干什么」。
 	maxSurfaceToolDescriptionChars = 300
+	// maxSurfaceToolFullNameChars 模型侧全名 `plugin__<id>__<name>` 的长度上限。
+	// 64 = OpenAI function name 的硬上限（provider 侧超长是 400，不是截断）；id 最长 41、
+	// tool name 最长 41，所以**组合**超限是真实存在的（安装期必须判）。
+	maxSurfaceToolFullNameChars = 64
 	// maxSurfaceToolInputBytes 单个工具 input schema 的上限（§8.3：schema ≤ 16 KiB）。
 	maxSurfaceToolInputBytes = 16 << 10
 	// 工具超时边界（§6.4「默认 10s（manifest ≤60s）」）。
@@ -104,13 +108,6 @@ var surfaceIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
 // 只允许小写字母开头 + 小写字母/数字/下划线：模型侧名是 `plugin__<id>__<name>`，
 // 工具名里再出现大写或连字符，反解（「这条工具属于谁」）就得靠猜。
 var surfaceToolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
-
-// surfaceToolCallEvent 工具调用下发的事件名（§5.2 / §6.6）。
-//
-// tools[] 非空时 manifest.data 必须声明它 —— 不声明，装上去的工具每次调用都只能
-// 等超时（插件收不到调用）。回执那条（tool.result）复用 surface_agent.go 的
-// surfaceAgentToolResult：同一个协议名不该有两个常量各写一遍字面量。
-const surfaceToolCallEvent = "tool.call"
 
 // surfaceEntry index.json 里的一条（字段名即磁盘协议，PR-14 的插件页直接读它）。
 type surfaceEntry struct {
@@ -969,12 +966,6 @@ func validateSurfaceCommands(id string, cmds []string) error {
 	return nil
 }
 
-// resolveSurfaceEntry 把 manifest 的 entry 解析成 target 内的真实文件路径。
-// 三道闸（对齐 01-design §5.5「装插件 = 信任它」的最低防线：至少要挡住「装 A 读 B」）：
-//  1. 不许绝对路径（否则 manifest 就是一次任意文件读取）；
-//  2. 不许 `..`（Clean 之后按分段判断，`a/../../b` 也算逃逸）；
-//  3. EvalSymlinks 之后仍必须在 target 内（软链逃逸）。
-//
 // validateSurfaceTools 校验 manifest.tools[]（D-3：任何一条不过 = 安装 rejected）。
 //
 // 三条取舍，改之前先读：
@@ -1023,6 +1014,14 @@ func validateSurfaceTools(mf surfaceManifest) error {
 		if n := len([]rune(desc)); n > maxSurfaceToolDescriptionChars {
 			return fmt.Errorf("%s: tools[%d] (%s) 的 description 过长（%d 字符，上限 %d）",
 				id, i, name, n, maxSurfaceToolDescriptionChars)
+		}
+		// 模型侧全名 `plugin__<id>__<name>` 是 provider 请求里的 function name（硬上限 64）：
+		// id 与 name 各自合法也可能拼出超长名字，而超长在 provider 侧是**整轮 400**，
+		// 不是截断 —— 只能安装期拦，reason 给出实际长度便于作者改短。
+		full := pluginToolName(id, name)
+		if n := len(full); n > maxSurfaceToolFullNameChars {
+			return fmt.Errorf("%s: tools[%d] 的模型侧全名 %q 有 %d 字节，超过 %d 上线（name 或 id 需改短）",
+				id, i, full, n, maxSurfaceToolFullNameChars)
 		}
 		if err := validateSurfaceToolInput(id, i, name, t.Input); err != nil {
 			return err
@@ -1126,6 +1125,11 @@ func walkSurfaceToolRef(v any, path string) (string, bool) {
 	return "", false
 }
 
+// resolveSurfaceEntry 把 manifest 的 entry 解析成 target 内的真实文件路径。
+// 三道闸（对齐 01-design §5.5「装插件 = 信任它」的最低防线：至少要挡住「装 A 读 B」）：
+//  1. 不许绝对路径（否则 manifest 就是一次任意文件读取）；
+//  2. 不许 `..`（Clean 之后按分段判断，`a/../../b` 也算逃逸）；
+//  3. EvalSymlinks 之后仍必须在 target 内（软链逃逸）。
 func resolveSurfaceEntry(target, entry string) (string, error) {
 	if filepath.IsAbs(entry) {
 		return "", fmt.Errorf("entry %q 不许是绝对路径（必须是 target 内的相对路径）", entry)

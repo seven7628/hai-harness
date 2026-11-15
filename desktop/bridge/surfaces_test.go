@@ -1268,6 +1268,18 @@ func TestSurfaceToolsRejectedBeforeWrite(t *testing.T) {
 			reason: "16 KiB",
 		},
 		{
+			// id 与 name **各自**都合法（id ≤41、name ≤41），拼出来的
+			// plugin__<id>__<name>（3+41+2+41 = 87）却超过 OpenAI 的 64 —— 这类超限
+			// 只能在这里拦：provider 侧超长是整轮 400，不是截断。
+			name: "模型侧全名超 64",
+			opts: []fixtureOpt{
+				// id 41 + name 41 都各自合法，拼起来 3+41+2+41 = 87 > 64。
+				withManifest(func(m map[string]any) { m["id"] = strings.Repeat("i", 41) }),
+				withTools(toolDecl(strings.Repeat("n", 41), "名字很长但各自合法", wantObjSchema())),
+			},
+			reason: "超过 64",
+		},
+		{
 			name:   "17 项（超 16 上限）",
 			opts:   []fixtureOpt{withTools(tooMany...)},
 			reason: "超过 16 项",

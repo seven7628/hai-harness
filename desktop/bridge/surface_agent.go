@@ -56,6 +56,10 @@ const (
 	surfaceAgentEvUsage = "agent.usage"
 	surfaceAgentEvDone  = "agent.done"
 	surfaceAgentEvError = "agent.error"
+	// surfaceToolCallEvent 工具调用下发（§5.2 / §6.6，P2 启用）。
+	// 名字以 surfaceTool* 而非 surfaceAgentEv* 开头是刻意的：它不是「run 的投影」，
+	// 而是一次**双向**调用的上半场（下半场是插件的 tool.result 回执）。
+	surfaceToolCallEvent = "tool.call"
 )
 
 // 拒绝 reason 封闭集合（§6.5 + §6.6 的 agent.error reason 表）。
@@ -71,6 +75,14 @@ const (
 	surfaceReasonNoSession    = "no_session"    // 会话不存在（或建不出来）
 	surfaceReasonCancelled    = "cancelled"     // 取消/超时的终态事件 reason
 	surfaceReasonBridgeError  = "bridge_error"  // 桥内部失败
+	// 以下三个是 P2 工具调用引入的（§6.5 同一张表，之前没有消费者）：
+	surfaceReasonTimeout        = "timeout"         // 插件在 deadline 内没回 tool.result
+	surfaceReasonPluginUnloaded = "plugin_unloaded" // 等待中插件被卸载/停用
+	// surfaceReasonToolError 插件回 ok:false（面板侧错误）。错误文本原样回给模型，
+	// 审计只记这个封闭值 —— 插件给的文本是内容，不是可统计的类别。
+	surfaceReasonToolError = "tool_error"
+	// surfaceToolReasonNoSuchCall tool.result 没有对应的等待者（幂等回执，无副作用）。
+	surfaceToolReasonNoSuchCall = "no_such_call"
 )
 
 // 额度（§8.3，V1 默认值）。测试通过 surfaceAgentHub 的字段注入小值。
@@ -189,7 +201,9 @@ func (m *manager) auditSurfaceAgent(id, action string, ok bool, extra map[string
 func surfaceAgentAction(name string) string {
 	switch name {
 	case surfaceAgentToolResult:
-		return "tool_result" // P2 接真实 waiter 后并入 tool_call
+		// P2 起并入 tool_call：插件回执与模型侧调用是**同一次**工具调用，
+		// 两个 action 名会让「这个插件调过几次工具」统计不出来（§8.5）。
+		return "tool_call"
 	default:
 		return "agent_run"
 	}
@@ -440,21 +454,59 @@ func (m *manager) handleSurfaceAgentCancel(c command, id string, args map[string
 
 // ---- tool.result ----
 
-// handleSurfaceAgentToolResult P1 只做形状：`{call_id, ok, result?, error?}` → `{ok:true}`。
+// handleSurfaceAgentToolResult 插件回工具结果（§5.1 / §6.4，P2 接真实 waiter）。
 //
-// 即使「没有等待中的 call」也回 ok（不报错）：P2 才会接真实 waiter，而 P1 若在这里
-// 报错，插件侧「发出去的结果没人接」会变成一条永远修不掉的噪声错误。审计照写 ——
-// 这正是 P2 联调时判断「插件到底回没回」的唯一材料。
+// 三条分支的处置不同，改之前先读：
+//  1. **没有这个 call_id** → 回 ok（幂等）：插件可能重发、也可能是上一个进程的残余。
+//     把它报成错误会让插件的错误处理分支永远在重试，而审计里留一行 no_such_call
+//     就足以回答「它到底回了没有」（这正是联调时唯一能看的材料）。
+//  2. **call_id 存在但 surface 不匹配** → denied 且**不动**那个 waiter：这是一次
+//     越权探测（A 插件想替 B 插件回结果），拒掉回执即可，B 的正常结果必须还能到。
+//  3. **匹配** → resolve 等待者：摘表 + 投递在 hub 锁内一次完成（见 resolveToolResult），
+//     结果文本超 64 KiB 截断并带明确 marker（不静默）。
 func (m *manager) handleSurfaceAgentToolResult(c command, id string, args map[string]any) {
 	callID := strings.TrimSpace(str(args, "call_id"))
 	if callID == "" {
 		m.denySurfaceAgent(c, id, surfaceAgentToolResult, surfaceReasonInvalidInput, "call_id 为空", nil)
 		return
 	}
-	ok, _ := args["ok"].(bool)
-	m.resp(c, true, "", map[string]any{})
-	m.auditSurfaceAgent(id, "tool_result", ok,
-		map[string]any{"tool": clipText(callID, 120), "bytes": len(str(args, "result"))}, "")
+	ok, hasOK := args["ok"].(bool)
+	if !hasOK {
+		// 形状不合法才是错误：ok 缺失时我们既不能当成功也不能当失败（后者会把
+		// 一条可能正确的插件结果变成错误回执）。
+		m.denySurfaceAgent(c, id, surfaceAgentToolResult, surfaceReasonInvalidInput, "ok 必须是布尔值",
+			map[string]any{"tool": clipText(callID, 120)})
+		return
+	}
+	out := surfaceToolCallOutcome{ok: ok}
+	var text string
+	if ok {
+		text = pluginToolResultText(args["result"])
+		out.text = text
+	} else {
+		out.err = strings.TrimSpace(str(args, "error"))
+		out.reason = surfaceReasonToolError
+	}
+	status, call := m.surfaceAgentHub().resolveToolResult(callID, id, out)
+	bytes := len(text)
+	switch status {
+	case toolResultNoCall:
+		m.resp(c, true, "", map[string]any{})
+		// tool 记 call_id：没有 waiter 就问不出工具名，而「哪条回执没接住」只能靠它。
+		m.auditSurfaceAgent(id, surfaceAgentAction(surfaceAgentToolResult), false,
+			map[string]any{"tool": clipText(callID, 120), "bytes": bytes}, surfaceToolReasonNoSuchCall)
+	case toolResultMismatch:
+		m.denySurfaceAgent(c, id, surfaceAgentToolResult, surfaceReasonDenied, "该工具调用不属于本插件",
+			map[string]any{"tool": clipText(callID, 120)})
+	default:
+		// 匹配成功**不另写审计行**：模型侧那一行（proxy 工具在调用收尾时写）已经带齐
+		// {session, run, tool, bytes, ok}，而且它是「调用结束」的唯一权威时刻。两边都写
+		// 等于每次调用记两条 —— 既让「调过几次工具」翻倍，也让审计文件的 flock 多一次
+		// 无谓争用（写失败只是丢记录，审计是观测面不是事务，见 surfaces.go 文件头）。
+		// 只有**异常**（no_such_call / 跨插件 / 形状不合法）才在这里留痕。
+		_ = call
+		m.resp(c, true, "", map[string]any{})
+	}
 }
 
 // ---- 会话归属 ----
@@ -547,6 +599,8 @@ type surfaceAgentHub struct {
 	runs   map[string]*surfaceAgentRun
 	active map[string]string
 	recent map[string][]time.Time
+	// toolCalls 等待中的插件工具调用（call_id → waiter，P2）。懒建：见 addToolCall。
+	toolCalls map[string]*surfaceToolCall
 	// 以下四个字段供测试注入（零值 = 生产默认）。
 	now      func() time.Time
 	timeout  time.Duration
@@ -560,10 +614,11 @@ func (m *manager) surfaceAgentHub() *surfaceAgentHub {
 	defer m.surfaceAgentMu.Unlock()
 	if m.surfaceAgents == nil {
 		m.surfaceAgents = &surfaceAgentHub{
-			owner:  m,
-			runs:   map[string]*surfaceAgentRun{},
-			active: map[string]string{},
-			recent: map[string][]time.Time{},
+			owner:     m,
+			runs:      map[string]*surfaceAgentRun{},
+			active:    map[string]string{},
+			recent:    map[string][]time.Time{},
+			toolCalls: map[string]*surfaceToolCall{},
 		}
 	}
 	return m.surfaceAgents
@@ -853,6 +908,9 @@ func (r *surfaceAgentRun) finish(ae *events.AgentEnd) {
 	}
 	in, out := r.inTok, r.outTok
 	r.mu.Unlock()
+	// 终态之后不会再有工具结果回来：一次性唤醒这条 run 的等待者，让工具 Call 立刻
+	// 返回（reason=cancelled，语义同「取消即停」）而不是等满 manifest 的 deadline。
+	r.failToolCalls(surfaceReasonCancelled, "run 已结束，工具结果不会再回来")
 	if ae.Usage != nil {
 		in, out = ae.Usage.Input, ae.Usage.Output
 	}
@@ -918,6 +976,35 @@ func (r *surfaceAgentRun) writeEvent(typ string, seq int, data map[string]any) {
 	})
 }
 
+// failToolCalls 让本条 run 的等待者一次性失败（终态清理的唯一入口）。
+func (r *surfaceAgentRun) failToolCalls(reason, message string) int {
+	if r == nil || r.hub == nil {
+		return 0
+	}
+	return r.hub.failToolCalls(
+		func(c *surfaceToolCall) bool { return c.runID == r.id },
+		surfaceToolCallOutcome{err: message, reason: reason})
+}
+
+// failSurfaceAgentToolCalls 让某个插件的全部等待者失败（卸载 / 停用路径）。
+//
+// 与 run 终态失败的区别只在判据（surface 而非 run）：插件没了，它名下所有 run 的
+// 等待调用都不可能再有结果。**不**懒建 hub：没有 hub 就等于没有等待者。
+func (m *manager) failSurfaceAgentToolCalls(surfaceID, reason, message string) int {
+	if m == nil || surfaceID == "" {
+		return 0
+	}
+	m.surfaceAgentMu.Lock()
+	hub := m.surfaceAgents
+	m.surfaceAgentMu.Unlock()
+	if hub == nil {
+		return 0
+	}
+	return hub.failToolCalls(
+		func(c *surfaceToolCall) bool { return c.surfaceID == surfaceID },
+		surfaceToolCallOutcome{err: message, reason: reason})
+}
+
 // abortSurfaceAgentRun 取消/超时的统一收尾：投终态 error（**不发 done**）→ 归还配额 →
 // 中断会话当前 run。
 //
@@ -940,6 +1027,9 @@ func (m *manager) abortSurfaceAgentRun(r *surfaceAgentRun, reason, message strin
 		r.deltaTmr = nil
 	}
 	r.mu.Unlock()
+	// 取消/超时：等待中的工具调用立即失败（§8.4「取消即停」）。放在发终态事件之前 ——
+	// 模型侧的工具 Call 越早返回，run 的收尾越早开始。
+	r.failToolCalls(surfaceReasonCancelled, "run 已取消，工具结果不会再回来")
 	if text != "" {
 		r.sendTerminal(surfaceAgentEvDelta, map[string]any{"text": text})
 	}
