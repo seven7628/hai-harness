@@ -1,4 +1,8 @@
-// surfaces_command.go —— 插件调用宿主能力的**权威闸门**（PR-14 D；01-design §5.2b/§5.5）。
+// surfaces_command.go —— 插件调用宿主只读命令的**权威闸门**（PR-14 D；01-design §5.2b/§5.5）。
+//
+// P1c 起这条通道**恒拒**（09-agent-bridge D11：四条旧命令全部移除，宿主表为空）。
+// 判定顺序、审计与回执形状原样保留 —— 闸门本身还有用（它决定插件撞上的是
+// `denied` 而不是一片静默），只是现在没有一条命令能通过。
 //
 // 为什么闸门在 Go 而不在渲染层：渲染层跑的就是插件自己的进程。那边写的
 // `if (!allow.has(name)) return denied` 只是**省一次 IPC** 的礼貌，不是边界 ——
@@ -7,7 +11,7 @@
 //
 // 两条闸同时成立才放行：
 //  1. **插件声明**：名字在该 id 的 `surface.json.commands` 里（声明是给用户看的契约）；
-//  2. **宿主允许**：名字在下面这张表里（表里只有只读命令，写类一律不开）。
+//  2. **宿主允许**：名字在下面这张表里（D11 之后为空 → 任何名字都过不了第二道闸）。
 //
 // 判定顺序是刻意的：先 id → index(enabled) → manifest → 声明 → 宿主表。每条失败都
 // 单独审计（reason 固定几类），因为「插件调了什么被拒了」是装完插件后唯一的对账材料。
@@ -19,8 +23,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -36,9 +38,9 @@ const (
 
 // surfaceCommandTimeout 单条宿主命令的上限。
 //
-// 5s：表里最强的 io 是 `git status --porcelain` + numstat（大仓库 ~1-2s）。超过这个数
-// 基本是「工作区在别的进程里被锁死」或「挂在网络盘上」，回 timeout 比让面板转圈好。
-// 刻意与 bridge 请求的超时（main.ts 的 10s）错开：这里先超时，插件拿到的是
+// 表空之后这条超时暂时无人命中，保留它是为了让「加回一条命令」时不必重新想上限：
+// 5s 的依据是原来最强的 io（`git status --porcelain` + numstat，大仓库 ~1-2s），
+// 与 bridge 请求的超时（main.ts 的 10s）刻意错开 —— 这里先超时，插件拿到的是
 // `timeout`，而不是主进程先放弃后转成的 `denied`（后者会把「慢」误报成「越权」）。
 const surfaceCommandTimeout = 5 * time.Second
 
@@ -55,69 +57,21 @@ type surfaceHostCommand struct {
 
 // surfaceHostCommands 宿主**允许插件调用**的只读命令表 —— 唯一白名单。
 //
-// 只放四类，理由逐条：
-//   - bootstrap：git_snapshot —— 面板最常见的内容就是「这个工作区现在怎么样」；
-//   - workspace_list / session_list —— 「有哪些工作区/会话」是任何看板类面板的原料，
-//     且两者都只读左侧栏已有的元数据，不碰磁盘上的对话正文；
-//   - ui_inspect —— 观测自己（快照就在内存里），让插件能回答「我现在是不是被禁用了」。
+// **P1c 起这张表是空的（09-agent-bridge D11）**。原来的四条
+// （`git_snapshot` / `workspace_list` / `session_list` / `ui_inspect`）全部移除：
+// 它们看起来只读，读的却是**真实**项目与会话元数据（分支名、变更文件、别人的会话标题、
+// 整个渲染层快照）—— 与「插件不碰 Project」（D1/D2/D10）正面冲突，也和 §7.2 denylist
+// 里同名的四条命令遥相呼应。移除而不是"限制参数"：只要通道还在，任何一个新加的参数
+// 都是新的越权面，而插件真正需要的数据应该由 Agent 在虚拟 Project 里产出
+// （agent.run，见 surface_agent.go）。
 //
-// **没有**写类（file_save / workspace_add / session_delete / git_commit…）、没有
-// provider/网络、没有审批/中断：插件写磁盘必须走自己的面板 UI 所依赖的既有通路，
-// 不在这张表里开洞。加一条之前先问：这条命令被一个恶意插件连续调用 1000 次，用户
-// 会损失什么？答不上来就别加（03-code-plan §5.1 的成本纪律同样适用于权限）。
-var surfaceHostCommands = map[string]surfaceHostCommand{
-	"git_snapshot": {
-		what: "工作区 git 快照（分支/变更文件/± 行数）",
-		read: func(m *manager, ctx context.Context, ws string, _ map[string]any) (any, error) {
-			if ws == "" {
-				return nil, fmt.Errorf("workspace 为空")
-			}
-			snap, err := gitSnapshot(ctx, ws)
-			if err != nil {
-				return nil, err
-			}
-			parseAheadBehind(ctx, ws, &snap)
-			if snap.Files == nil {
-				snap.Files = []gitFile{} // 干净仓库给空数组（与 git_snapshot 命令同一口径）
-			}
-			return snap, nil
-		},
-	},
-	"workspace_list": {
-		what: "工作区清单",
-		read: func(m *manager, _ context.Context, _ string, _ map[string]any) (any, error) {
-			return map[string]any{"workspaces": m.workspaceEntries()}, nil
-		},
-	},
-	"session_list": {
-		what: "某工作区的会话清单（元数据，不含对话正文）",
-		read: func(m *manager, _ context.Context, ws string, args map[string]any) (any, error) {
-			target := ws
-			if v, ok := args["workspace"].(string); ok && strings.TrimSpace(v) != "" {
-				target = strings.TrimSpace(v)
-			}
-			if target == "" {
-				return nil, fmt.Errorf("workspace 为空")
-			}
-			return map[string]any{"sessions": m.listSessions(target)}, nil
-		},
-	},
-	"ui_inspect": {
-		what: "渲染层 UI 快照（≤256 KiB 的内存缓存，可能 stale）",
-		read: func(m *manager, _ context.Context, _ string, _ map[string]any) (any, error) {
-			raw, age, ok := m.ui.Snapshot()
-			if !ok {
-				return map[string]any{"ok": false, "reason": "no_snapshot"}, nil
-			}
-			return map[string]any{
-				"ok":    true,
-				"ageMs": age.Milliseconds(),
-				"stale": age > uiStaleAfter,
-				"data":  json.RawMessage(raw),
-			}, nil
-		},
-	},
-}
+// 为什么保留这张空表与 `surface_command` 通道：老插件仍在调 `surface_command`
+// （P1b2 之前所有面板都这么写）。留一条**恒定拒绝**的通道比让它们撞「未知命令类型」
+// 好排障 —— 插件拿到的是 `denied` + 一行 audit，而不是一片静默。
+//
+// 加回一条之前先回答：这条命令被恶意插件连续调用 1000 次，用户会损失什么？
+// （03-code-plan §5.1 的成本纪律同样适用于权限。）答不上来就别加。
+var surfaceHostCommands = map[string]surfaceHostCommand{}
 
 // surfaceHostCommandNames 宿主允许的命令名（码点排序；测试与文档读它）。
 func surfaceHostCommandNames() []string {

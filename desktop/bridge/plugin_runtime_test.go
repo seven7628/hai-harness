@@ -120,10 +120,11 @@ func runPluginTurn(t *testing.T, m *manager, buf *syncBuf, home, sid, reply stri
 	waitPluginFile(t, filepath.Join(pluginSessionsDir(bs.runtime.pluginID), sid+".jsonl"))
 }
 
-// pluginSurface 一条 surface 声明（测试用）。
+// pluginSurface 一条 surface 声明（测试用）。commands 可空（= manifest 不声明任何命令）。
 type pluginSurface struct {
-	id      string
-	enabled bool
+	id       string
+	enabled  bool
+	commands []string
 }
 
 // writePluginSurfaces 一次性写 surface 目录 + index.json。
@@ -139,9 +140,13 @@ func writePluginSurfaces(t *testing.T, m *manager, items ...pluginSurface) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("建 %s 失败: %v", dir, err)
 		}
+		cmds := it.commands
+		if cmds == nil {
+			cmds = []string{}
+		}
 		mf := map[string]any{
 			"id": it.id, "name": map[string]string{"zh": it.id}, "version": "1.0.0",
-			"api": 1, "entry": "panel.js", "commands": []string{}, "data": []string{},
+			"api": 1, "entry": "panel.js", "commands": cmds, "data": []string{},
 		}
 		raw, err := json.Marshal(mf)
 		if err != nil {

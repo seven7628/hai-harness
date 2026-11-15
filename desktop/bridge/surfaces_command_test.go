@@ -123,40 +123,78 @@ func surfaceCommandPayload(id, name string) map[string]any {
 	return map[string]any{"id": id, "name": name}
 }
 
-// ---- ① 声明 + 宿主允许 → ok:true，且审计也记一行 ----
+// ---- ① D11：四条旧只读命令一律 denied（声明了、启用了也一样）----
 
-func TestSurfaceCommandDeclaredAndAllowed(t *testing.T) {
+// 这一组取代了 PR-14 时代的「声明 + 宿主允许 → ok:true」。09-agent-bridge D11 把
+// git_snapshot / workspace_list / session_list / ui_inspect 整条移除：它们读的是**真实**
+// 项目与会话元数据（分支名、变更文件、别人的会话标题、整个渲染层快照），与「插件不碰
+// Project」正面冲突。
+//
+// 每条用例钉两件事，缺一条就测不到真正的东西：
+//  1. 回执形状逐字：`{ok:false, code:denied, data:{ok:false, reason:denied}}`
+//     （冻结成 code 是有意的：前端按 code 走"去设置里开权限"的分支）；
+//  2. **data 里没有 result** —— 有 result 就说明 handler 被真的执行过。
+//     只断言"回了拒绝"证明不了"没执行"，而 D11 要的正是"不再调用真实 git/UI 快照"。
+//
+// workspace 故意指到一个不存在的目录：万一实现又去调 git，它会先炸成 code=error
+// 而不是悄悄成功，这条断言就会在 code 上翻车（比"没崩"这种弱断言硬）。
+func TestSurfaceCommandLegacyReadOnlyAllDenied(t *testing.T) {
 	m, buf := testManager(t)
-	fakeSurface(t, m, "demo", true, []string{"workspace_list"})
+	legacy := []string{"git_snapshot", "workspace_list", "session_list", "ui_inspect"}
+	fakeSurface(t, m, "demo", true, legacy) // 插件把四条都声明了（典型的老 manifest）
+	// 先推一份 UI 快照：ui_inspect 若还能读，它一定能拿到 data —— 快照在这里是诱饵。
+	dispatchUISnapshot(t, m, uiSnapshotPayload())
 
-	m.dispatch(cmd(1, "surface_command", surfaceCommandPayload("demo", "workspace_list")))
-	line := commandResponse(t, m, buf, 1)
+	for i, name := range legacy {
+		m.dispatch(cmd(i+1, "surface_command", map[string]any{
+			"id": "demo", "name": name,
+			"workspace": "/nonexistent/d11-workspace", // 真去跑 git 就会失败
+			"args":      map[string]any{"workspace": "/nonexistent/d11-workspace"},
+		}))
+		line := commandResponse(t, m, buf, i+1)
+		if line["ok"] != false {
+			t.Fatalf("%s 被放行了（D11 要求一律 denied）：%v", name, line)
+		}
+		if line["code"] != "denied" {
+			t.Fatalf("%s code = %v，want denied", name, line["code"])
+		}
+		data, _ := line["data"].(map[string]any)
+		if data == nil || data["reason"] != "denied" {
+			t.Fatalf("%s data = %v，want {ok:false, reason:denied}", name, data)
+		}
+		if _, has := data["result"]; has {
+			t.Fatalf("%s 回了 result —— 说明 handler 真被调用了（D11 要求连执行都不发生）：%v", name, data)
+		}
+	}
 
-	if line["ok"] != true {
-		t.Fatalf("ok = %v，want true（声明且宿主允许）：%v", line["ok"], line)
-	}
-	data, _ := line["data"].(map[string]any)
-	if data == nil {
-		t.Fatalf("data 缺失：%v", line)
-	}
-	res, ok := data["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("data.result 不是对象：%v", data)
-	}
-	if _, ok := res["workspaces"]; !ok {
-		t.Fatalf("workspace_list 结果里没有 workspaces：%v", res)
-	}
-
+	// 审计：四条各一行、都 ok:false、reason 非空（只有拒绝记录时对不了账，
+	// 这里断言的是"拒绝留下了痕迹"，不是"调用成功"）。
 	lines := auditLines(t, m)
-	if len(lines) != 1 {
-		t.Fatalf("audit 行数 = %d，want 1：%v", len(lines), lines)
+	if len(lines) != len(legacy) {
+		t.Fatalf("audit 行数 = %d，want %d：%v", len(lines), len(legacy), lines)
 	}
-	rec := lines[0]
-	if rec["id"] != "demo" || rec["action"] != "command" || rec["cmd"] != "workspace_list" || rec["ok"] != true {
-		t.Fatalf("audit 行 = %v，want {id:demo, action:command, cmd:workspace_list, ok:true}", rec)
+	for i, rec := range lines {
+		if rec["id"] != "demo" || rec["action"] != "command" || rec["cmd"] != legacy[i] || rec["ok"] != false {
+			t.Fatalf("audit[%d] = %v，want {id:demo, action:command, cmd:%s, ok:false}", i, rec, legacy[i])
+		}
+		if rec["reason"] == nil {
+			t.Fatalf("拒绝的审计行必须带 reason：%v", rec)
+		}
 	}
-	if _, has := rec["reason"]; has {
-		t.Fatalf("允许的调用不该有 reason：%v", rec)
+
+	// 另一个入口不受影响：**项目会话的工具面**上 ui_inspect 仍然在。
+	// D11 收走的是插件的命令通道（surface_command / surface_command 工具），不是宿主的
+	// 观测能力 —— 这两件事在实现里本来就是两张表，这里把它们钉在一起防将来"顺手删掉"。
+	eng := tools.NewToolEngine()
+	m.registerUITools(eng)
+	var hasUI bool
+	for _, tl := range eng.Tools() {
+		if tl.Name() == "ui_inspect" {
+			hasUI = true
+		}
+	}
+	if !hasUI {
+		t.Fatal("项目会话的 ui_inspect 工具被 D11 连坐了 —— 它不属于插件命令通道")
 	}
 }
 
@@ -261,62 +299,70 @@ func TestSurfaceCommandNotInHostWhitelistDenied(t *testing.T) {
 	}
 }
 
-// 宿主的只读白名单**恰好**是这四条：多一条都要在这里显式登记（先想清楚后果）。
+// 宿主的只读白名单**必须为空**（D11）：加回一条要在这里显式改断言（先想清楚后果）。
 func TestSurfaceHostCommandWhitelistIsClosed(t *testing.T) {
 	got := surfaceHostCommandNames()
-	want := []string{"git_snapshot", "session_list", "ui_inspect", "workspace_list"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("宿主白名单 = %v，want %v\n"+
-			"加一条之前先回答：恶意插件连续调用 1000 次，用户会损失什么？", got, want)
+	if len(got) != 0 {
+		t.Fatalf("宿主只读命令表 = %v，want 空（09-agent-bridge D11 把四条旧命令整条移除）\n"+
+			"加一条之前先回答：恶意插件连续调用 1000 次，用户会损失什么？", got)
+	}
+	// 通道本身还在（老插件的 surface_command 不该撞"未知命令"，而该拿到 denied）：
+	// 表为空 + handler 仍在 = 恒定拒绝。
+	if surfaceHostCommands == nil {
+		t.Fatal("surfaceHostCommands 被置 nil 了 —— 通道的查表路径会 panic，应该留一张空表")
 	}
 }
 
-// ---- ⑤ 内部错误不原样回给插件 ----
+// ---- ⑤ 拒绝文案是固定集合：内部细节绝不回给插件 ----
 
-func TestSurfaceCommandHandlerErrorIsOpaque(t *testing.T) {
+// 原用例测的是"handler 报错时不把 git 原文/绝对路径回给插件"。宿主表清空（D11）之后
+// handler 不再可能被调用，但这条纪律仍然要守：拒绝文案必须是固定字符串，不能把
+// 宿主内部结构（表内容、真实路径、栈）借插件的手吐出去 —— 细节只进 audit.jsonl。
+func TestSurfaceCommandDenyTextIsOpaque(t *testing.T) {
 	m, buf := testManager(t)
 	fakeSurface(t, m, "demo", true, []string{"session_list"})
-	// workspace 为空 → handler 报错。给插件看的只能是固定文案 `error`。
-	m.dispatch(cmd(1, "surface_command", map[string]any{"id": "demo", "name": "session_list", "args": map[string]any{}}))
+	const probe = "/nonexistent/secret-path-do-not-leak"
+	m.dispatch(cmd(1, "surface_command", map[string]any{
+		"id": "demo", "name": "session_list",
+		"args": map[string]any{"workspace": probe},
+	}))
 	line := commandResponse(t, m, buf, 1)
-	if line["ok"] != false || line["code"] != "error" {
-		t.Fatalf("handler 失败 = %v，want ok:false code:error", line)
+	if line["ok"] != false || line["code"] != "denied" {
+		t.Fatalf("响应 = %v，want ok:false code:denied", line)
 	}
-	data, _ := line["data"].(map[string]any)
-	if data["reason"] != "error" {
-		t.Fatalf("data.reason = %v，want 固定文案 error（内部 error 只进 audit）", data["reason"])
+	if msg, _ := line["error"].(string); strings.Contains(msg, probe) || strings.Contains(msg, "workspace 为空") {
+		t.Fatalf("拒绝文案泄漏了内部细节：%q", msg)
 	}
-	if msg, _ := line["error"].(string); strings.Contains(msg, "workspace 为空") {
-		t.Fatalf("内部错误原文泄漏给插件了：%q", msg)
+	// 细节留在审计里（本机 0600）：这条行是排障唯一材料。
+	lines := auditLines(t, m)
+	if len(lines) != 1 || lines[0]["reason"] == nil {
+		t.Fatalf("audit = %v，want 一行带 reason 的拒绝", lines)
 	}
 }
 
-// ---- ⑥ ui_inspect：插件能读渲染层快照（缓存为空时是状态，不是失败）----
+// ---- ⑥ ui_inspect：即使快照就在内存里，插件也读不到（D11）----
 
-func TestSurfaceCommandUIInspectReadsSnapshot(t *testing.T) {
+// 原用例断言"插件能读渲染层快照"。D11 把这条命令移除了：快照里有项目路径、会话标题、
+// 面板状态 —— 那是用户的东西，不是插件的。这里**先推一份真快照**再调，证明拒绝不是
+// "没数据所以失败"，而是"根本没开这个口子"。
+func TestSurfaceCommandUIInspectDeniedEvenWithSnapshot(t *testing.T) {
 	m, buf := testManager(t)
 	fakeSurface(t, m, "demo", true, []string{"ui_inspect"})
+	dispatchUISnapshot(t, m, uiSnapshotPayload())
 
-	// 还没有快照 → ok:true + result.ok=false reason=no_snapshot（可编程状态）。
 	m.dispatch(cmd(1, "surface_command", surfaceCommandPayload("demo", "ui_inspect")))
 	line := commandResponse(t, m, buf, 1)
+	if line["ok"] != false || line["code"] != "denied" {
+		t.Fatalf("ui_inspect 响应 = %v，want ok:false code:denied", line)
+	}
 	data, _ := line["data"].(map[string]any)
-	res, _ := data["result"].(map[string]any)
-	if line["ok"] != true || res["ok"] != false || res["reason"] != "no_snapshot" {
-		t.Fatalf("无快照时的响应 = %v，want ok:true + result{ok:false,reason:no_snapshot}", line)
+	if _, has := data["result"]; has {
+		t.Fatalf("ui_inspect 回了 result —— 插件读到了渲染层快照：%v", data)
 	}
-
-	// 推一份快照后再问 → 拿到 data + ageMs。
-	dispatchUISnapshot(t, m, uiSnapshotPayload())
-	m.dispatch(cmd(2, "surface_command", surfaceCommandPayload("demo", "ui_inspect")))
-	line = commandResponse(t, m, buf, 2)
-	data, _ = line["data"].(map[string]any)
-	res, _ = data["result"].(map[string]any)
-	if res["ok"] != true {
-		t.Fatalf("有快照时的响应 = %v，want result.ok=true", res)
-	}
-	if _, has := res["ageMs"]; !has {
-		t.Fatalf("ui_inspect 结果缺 ageMs：%v", res)
+	// 审计里也不能出现快照内容（审计是排查材料，不是数据出口）。
+	raw, _ := os.ReadFile(filepath.Join(m.surfaces.Dir(), "audit.jsonl"))
+	if strings.Contains(string(raw), "panels") {
+		t.Fatalf("audit.jsonl 里出现了快照内容：%s", raw)
 	}
 }
 
