@@ -49,6 +49,19 @@ const REPLY_A = 'local '
 const REPLY_B = 'ok'
 const REPLY = REPLY_A + REPLY_B
 
+// P2b：模型侧工具全名 = plugin__<id>__<name>（Go 侧 §5.3 的拼法，本探针逐字使用）。
+const TOOL = {
+  echo: `plugin__${PLUGIN_ID}__echo`,
+  needs_panel: `plugin__${PLUGIN_ID}__needs_panel`,
+  write_note: `plugin__${PLUGIN_ID}__write_note`,
+}
+// 三个工具场景的 input（= 上游看到的最后一条 user 文本 = 假服务分流键）。
+const SCENE_USE_TOOL = 'use-tool'
+const SCENE_CLOSED_PANEL = 'closed-panel'
+const SCENE_WRITE_TOOL = 'write-tool'
+// closed-panel 的响应延迟：面板必须**先**关掉，宿主门禁才是一次真实的门禁。
+const CLOSED_PANEL_DELAY_MS = 1000
+
 class Precondition extends Error {
   constructor(msg) { super(msg); this.name = 'Precondition'; this.exitCode = 2 }
 }
@@ -81,6 +94,75 @@ async function waitFor(fn, { timeout = 30000, label = '条件' } = {}) {
 // 恰好是 "local ok"。
 const CHAT_PATH = '/v1/chat/completions'
 const chatRequests = []
+
+// SCENES：一个场景 = 一轮工具调用（可选）+ 收尾文本帧。
+//
+// `echo` 回的结果是 {echo:"hello"}（T11 在第二次请求里断言 hello）；
+// `needs_panel` 声明 requires_panel:true（T12 的门禁对象）；`write_note` 是 read_only:false
+//（T13 的审批对象）。
+const SCENES = {
+  [INPUT]: { text: [REPLY_A, REPLY_B] },
+  [SCENE_USE_TOOL]: {
+    toolCall: { id: 'call_1', name: TOOL.echo, args: '{"text":"hello"}' },
+    text: ['tool ok'],
+  },
+  [SCENE_CLOSED_PANEL]: {
+    toolCall: { id: 'call_2', name: TOOL.needs_panel, args: '{}' },
+    text: ['panel blocked'],
+    delayMs: CLOSED_PANEL_DELAY_MS,
+  },
+  [SCENE_WRITE_TOOL]: {
+    toolCall: { id: 'call_3', name: TOOL.write_note, args: '{"text":"note"}' },
+    text: ['write ok'],
+  },
+}
+
+// contentTexts：一条消息的文本块（字符串 content 与 [{type:'text',text}] 两种线形都认）。
+function contentTexts(m) {
+  if (typeof m?.content === 'string') return [m.content]
+  if (Array.isArray(m?.content)) {
+    return m.content.filter((c) => c && typeof c.text === 'string').map((c) => String(c.text))
+  }
+  return []
+}
+
+// sceneOf：最后一条 user 文本 = 本次 run 的 input（插件 agent.run 的原文）。
+function sceneOf(parsed) {
+  const msgs = Array.isArray(parsed?.messages) ? parsed.messages : []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]?.role !== 'user') continue
+    const t = contentTexts(msgs[i])[0]
+    if (t && t.trim()) return t.trim()
+  }
+  return ''
+}
+
+// hasToolMessage：这次请求里，**最后一条 user 之后**是否已有 role:"tool"。
+//
+// 不能判「全历史里有没有 tool」：P2b 的三个场景复用同一个会话（D4），T11 的
+// echo 结果会一直留在 messages 里。若按全历史判，T12/T13 的第一轮就会被误判成
+// 工具轮第二次请求，假上游直接回文本 —— 工具调用根本不会发生（本探针真踩过）。
+function hasToolMessage(parsed) {
+  const msgs = Array.isArray(parsed?.messages) ? parsed.messages : []
+  let lastUser = -1
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]?.role === 'user') { lastUser = i; break }
+  }
+  if (lastUser < 0) return false
+  return msgs.slice(lastUser + 1).some((m) => m?.role === 'tool')
+}
+
+// toolTexts：role:"tool" 消息的文本（T11 断言 hello、T12 断言 panel_not_open 都读它）。
+function toolTexts(body) {
+  let v
+  try { v = JSON.parse(body) } catch { return [] }
+  const out = []
+  for (const m of Array.isArray(v?.messages) ? v.messages : []) {
+    if (m?.role !== 'tool') continue
+    out.push(...contentTexts(m))
+  }
+  return out
+}
 function startFakeProvider() {
   const server = http.createServer((req, res) => {
     const chunks = []
@@ -94,25 +176,58 @@ function startFakeProvider() {
       if (req.method === 'POST' && url === CHAT_PATH) {
         let parsed = null
         try { parsed = JSON.parse(body) } catch { /* 记原文即可 */ }
-        chatRequests.push({ url, body, parsed, at: Date.now() })
+        // 场景按**最后一条 user 文本**分流：它就是插件 host.command('agent.run', {input}) 的原文。
+        // round2 = 请求里已经有 role:"tool" 消息 ⇒ 这是同一个 run 的第二次请求（工具结果回模型）。
+        const scene = sceneOf(parsed)
+        const round2 = hasToolMessage(parsed)
+        const rec = { url, body, parsed, scene, round2, at: Date.now(), respondedAt: 0 }
+        chatRequests.push(rec)
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         })
-        const frame = (obj) => res.write('data: ' + JSON.stringify(obj) + '\n\n')
+        const frame = (obj) => {
+          try { res.write('data: ' + JSON.stringify(obj) + '\n\n') } catch { /* 客户端已断 */ }
+        }
         const head = { id: 'chatcmpl-agent-run-e2e', object: 'chat.completion.chunk', model: MODEL }
-        // ① 两段文本：分两帧，让「delta 合并窗口」有多段可合（合成一段也合法，断言只看拼接结果）。
-        frame({ ...head, choices: [{ index: 0, delta: { role: 'assistant', content: REPLY_A } }] })
-        frame({ ...head, choices: [{ index: 0, delta: { content: REPLY_B } }] })
-        // ② finish + usage 同一帧，然后 [DONE]。
-        frame({
-          ...head,
-          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
-        })
-        res.write('data: [DONE]\n\n')
-        res.end()
+        // 未声明的场景按 ping 回：探针跑歪时也要有终态，不能吊死在一个永远不结束的流上。
+        const spec = SCENES[scene] || SCENES.ping
+        const frames = []
+        if (spec.toolCall && !round2) {
+          // 工具轮：id/name/arguments **一帧给齐**（真实网关的常见形态；拆帧由
+          // provider/toolcall_merge.go 负责，那是它自己的单测面）。
+          frames.push({
+            ...head,
+            choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{
+              index: 0, id: spec.toolCall.id, type: 'function',
+              function: { name: spec.toolCall.name, arguments: spec.toolCall.args },
+            }] } }],
+          })
+          frames.push({
+            ...head,
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+          })
+        } else {
+          for (const text of spec.text) {
+            frames.push({ ...head, choices: [{ index: 0, delta: { role: 'assistant', content: text } }] })
+          }
+          frames.push({
+            ...head,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+          })
+        }
+        const write = () => {
+          if (res.writableEnded || res.destroyed) return
+          rec.respondedAt = Date.now()
+          for (const f of frames) frame(f)
+          try { res.write('data: [DONE]\n\n'); res.end() } catch { /* 已断 */ }
+        }
+        // 只有 closed-panel 的第一轮才延迟：探针要在这一秒里把面板标签关掉。
+        if (spec.delayMs && !round2) setTimeout(write, spec.delayMs)
+        else write()
         return
       }
       if (req.method === 'GET' && url.endsWith('/models')) {
@@ -138,12 +253,67 @@ function startFakeProvider() {
 // 面板做四件事：① 记宿主边界事实；② **先**订阅四个 agent.* 事件；③ **后**发 agent.run
 // （不带 session_id）；④ 把 ack / 事件序列 / 拼出的文本 / 终态演进写进
 // `<pre data-run-json>`。判据读 JSON，不在 DOM 里猜文本。
-const PANEL_JS = `// panel.js —— agent.run 全链路探针（由 verify_agent_run_electron.mjs 生成）
+const PANEL_JS = `// panel.js —— agent.run + 插件工具（tool.call/tool.result）探针（由 verify_agent_run_electron.mjs 生成）
+//
+// 两个作用域，各管一件事，缺一不可：
+//   · **apply 作用域**：tool.call / agent.done 的订阅活到插件卸载（关标签不退订）。
+//     T12 要证明的正是「面板关了，宿主仍然拦得住」—— 所以证据必须挂在标签之外的地方
+//     （globalThis），而不是某个组件的 useState 里（那些会随标签关闭一起消失）。
+//   · Probe 组件：P1e 的 ping 探针（订阅 → agent.run → 拼 delta → 终态）+ 三个按钮。
 export const surface = {
   kind: ${JSON.stringify(PLUGIN_KIND)},
 
   apply({ host, React, surfaces }) {
     const { createElement: h, useEffect, useState } = React
+    const str = (v) => (typeof v === 'string' ? v : '')
+    const num = (v) => (typeof v === 'number' ? v : -1)
+
+    // 证据容器挂 globalThis：面板标签关掉之后它们还在，Node 侧 win.evaluate 直接读。
+    const calls = (globalThis.__agentToolCalls = globalThis.__agentToolCalls || [])
+    const runs = (globalThis.__agentToolRuns = globalThis.__agentToolRuns || [])
+    const terminals = (globalThis.__agentRunTerminals = globalThis.__agentRunTerminals || [])
+    // 复用 ping 建出来的那个会话（D4）：后续三个场景不各建一条会话，左栏也不要长出四行。
+    const shared = (globalThis.__agentSharedSession = globalThis.__agentSharedSession || { sessionId: '' })
+
+    // ① tool.call（apply 作用域）：原样记下 data，再回 tool.result。
+    //    记录里**没有** needs_panel 这一条 = T12 的门禁证据（宿主挡在投递之前，插件没进过回调）。
+    host.onEvent('tool.call', (e) => {
+      const d = (e && e.data) || {}
+      const args = d.args && typeof d.args === 'object' ? d.args : {}
+      const rec = {
+        tool: str(d.tool),
+        call_id: str(d.call_id),
+        read_only: d.read_only === true,
+        requires_panel: d.requires_panel === true,
+        deadline_ms: num(d.deadline_ms),
+        args,
+        run_id: str(e.run_id),
+        session_id: str(e.session_id),
+        seq: num(e.seq),
+        at: Date.now(),
+        replied: false,
+      }
+      calls.push(rec)
+      // echo 回 {echo:text}（T11 在第二次请求里读 hello）；其余回 {ok:true} 带最小结果。
+      let result = { ok: true }
+      if (rec.tool === 'echo') result = { echo: str(args.text) }
+      if (rec.tool === 'write_note') result = { note: str(args.text) }
+      Promise.resolve(host.command('tool.result', { call_id: rec.call_id, ok: true, result }))
+        .then((r) => { rec.replied = !!r && r.ok === true })
+        .catch((err) => { rec.replyError = String((err && err.message) || err) })
+    })
+
+    // ② agent.done（apply 作用域）：终态文本是 T11/T12/T13 的判据 —— 面板关着也必须留下。
+    host.onEvent('agent.done', (e) => {
+      const d = (e && e.data) || {}
+      terminals.push({
+        run_id: str(e.run_id),
+        session_id: str(e.session_id),
+        text: str(d.text),
+        seq: num(e.seq),
+        at: Date.now(),
+      })
+    })
 
     function Probe() {
       const theme = host.theme()
@@ -152,6 +322,12 @@ export const surface = {
       useEffect(() => {
         let alive = true
         const merge = (patch) => { if (alive) setFacts((f) => Object.assign({}, f, patch)) }
+
+        // ping 只跑一次：T13 之前会重新打开标签，Probe 重挂不该再发一轮 agent.run ——
+        // 那会让「第一次上游请求 body」这条 P1e 断言与 chatRequests 的计数漂移。
+        if (globalThis.__agentPingStarted) { merge({ step: 'done', reused: true }); return }
+        globalThis.__agentPingStarted = true
+
         // 事件是本探针的**主证据**：先订阅再发命令，否则第一条 delta 会落在订阅之前
         // （Go 侧回执先行、事件后到 —— 订阅必须在回执之前就位）。
         const seen = []
@@ -191,6 +367,7 @@ export const surface = {
             ack.run_id = typeof r.run_id === 'string' ? r.run_id : ''
             ack.session_id = typeof r.session_id === 'string' ? r.session_id : ''
             ack.reason = typeof r.reason === 'string' ? r.reason : ''
+            if (ack.session_id) shared.sessionId = ack.session_id
           } catch (e) {
             ack.threw = String(e && e.message || e)
           }
@@ -219,6 +396,24 @@ export const surface = {
         return () => { alive = false; for (const off of offs) { try { off() } catch (e) { /* 已卸载 */ } } }
       }, [])
 
+      // 三个工具场景的统一入口：发 agent.run（复用 ping 的会话），回执写进 globalThis。
+      const startRun = async (scene) => {
+        const rec = { scene, at: Date.now(), threw: '', ack: { ok: false, run_id: '', session_id: '', reason: '' } }
+        runs.push(rec)
+        const payload = { input: scene }
+        if (shared.sessionId) payload.session_id = shared.sessionId
+        try {
+          const r = await host.command('agent.run', payload)
+          rec.ack.ok = !!r && r.ok === true
+          rec.ack.run_id = str(r && r.run_id)
+          rec.ack.session_id = str(r && r.session_id)
+          rec.ack.reason = str(r && r.reason)
+          if (rec.ack.session_id) shared.sessionId = rec.ack.session_id
+        } catch (e) {
+          rec.threw = String((e && e.message) || e)
+        }
+      }
+
       return h(
         'div',
         {
@@ -226,6 +421,9 @@ export const surface = {
           style: { padding: 12, font: '12px/1.6 ui-monospace, monospace', color: theme.tokens.fg },
         },
         h('div', { style: { color: theme.tokens.accent, fontWeight: 600, marginBottom: 6 } }, 'agent.run 探针'),
+        h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 } },
+          ['use-tool', 'closed-panel', 'write-tool'].map((s) =>
+            h('button', { key: s, 'data-act': s, onClick: () => { void startRun(s) } }, s))),
         h('pre', { 'data-run-json': ${JSON.stringify(PLUGIN_ID)}, style: { whiteSpace: 'pre-wrap', margin: 0 } },
           JSON.stringify(facts, null, 2)),
       )
@@ -255,7 +453,46 @@ const MANIFEST = {
   commands: ['agent.session', 'agent.run', 'agent.cancel', 'tool.result'],
   // usage 也声明：它是成功 run 的必经终态之一（finish 里紧跟 delta 投出），
   // 订阅到 = 收尾帧的 usage 真的从 provider 走到了插件手里。
-  data: ['agent.delta', 'agent.done', 'agent.error', 'agent.usage'],
+  //
+  // tool.call（P2b）必须在这里声明 —— 安装期会**硬拒**「声明了 tools[] 却没声明
+  // tool.call」的 manifest（否则每次工具调用只能等到超时，见 surfaces.go validateSurfaceTools）。
+  data: ['agent.delta', 'agent.done', 'agent.error', 'agent.usage', 'tool.call'],
+  // P2b：三个工具各自的声明位就是被验证的对象 ——
+  //   echo       read_only:true                                  → 免审批，独立于面板
+  //   needs_panel read_only:true + requires_panel:true            → T12 的宿主门禁对象
+  //   write_note read_only:false                                 → T13 的审批对象
+  // input 一律 object schema（安装期只判这个，语义校验归插件）。
+  tools: [
+    {
+      name: 'echo',
+      description: '回显一段文本（只读，免审批）',
+      input: {
+        type: 'object',
+        properties: { text: { type: 'string', description: '要回显的文本' } },
+        required: ['text'],
+      },
+      read_only: true,
+      requires_panel: false,
+    },
+    {
+      name: 'needs_panel',
+      description: '需要插件面板在场才能执行（requires_panel）',
+      input: { type: 'object', properties: {} },
+      read_only: true,
+      requires_panel: true,
+    },
+    {
+      name: 'write_note',
+      description: '写一条便签（非只读 ⇒ 走宿主审批）',
+      input: {
+        type: 'object',
+        properties: { text: { type: 'string', description: '便签内容' } },
+        required: ['text'],
+      },
+      read_only: false,
+      requires_panel: false,
+    },
+  ],
   entries: [{ id: 'probe', title: '运行探针', order: 10 }],
 }
 
@@ -617,6 +854,125 @@ try {
   }, { timeout: 30000, label: '左栏出现这条会话（标题 = ping 或 AI 标题 local ok）' }).catch((e) => String(e?.message ?? e))
   check('左栏插件分组里出现这条会话（标题 = ping 或 local ok）', [INPUT, REPLY].includes(String(row)), String(row))
   check('全程零 pageerror', errs.length === 0, errs.join(' | '))
+
+  // ---- P2b：工具场景（同一会话复用；左栏计数保持 1）----
+  //
+  // 三条场景共用 ping 建出来的 session_id（globalThis.__agentSharedSession）。这样
+  // T10 的「插件分组 1 条」不会被后续 run 改写成 4 条，工具的 jsonl 也落在同一个
+  // transcript 上 —— 工具轮与最终回答是**一次会话的连续历史**，不是三次孤立调用。
+  const readToolCalls = () => win.evaluate(() => (globalThis.__agentToolCalls || []).slice())
+  const readToolRuns = () => win.evaluate(() => (globalThis.__agentToolRuns || []).slice())
+  const readTerminals = () => win.evaluate(() => (globalThis.__agentRunTerminals || []).slice())
+  const openPluginPanel = async () => {
+    await activityBtn.click({ timeout: 5000 }).catch(() => {})
+    await waitFor(() => win.locator('.rtabs-add').count().then((n) => n > 0), { label: '＋ 按钮（重开）' })
+    await win.locator('.rtabs-add').click()
+    await waitFor(() => win.locator(entrySel).count().then((n) => n > 0), { label: '＋ 菜单里的插件入口（重开）' })
+    await win.locator(entrySel).first().click()
+    await waitFor(() => win.locator('button[data-act="use-tool"]').count().then((n) => n > 0), { label: '工具按钮（重开）' })
+  }
+  const waitRunAck = (scene) => waitFor(async () => {
+    const rs = await readToolRuns()
+    return rs.find((r) => r.scene === scene && r.ack && r.ack.ok === true) || null
+  }, { timeout: 30000, label: `${scene} 的 agent.run 回执` })
+  const waitTerminal = (runID, text) => waitFor(async () => {
+    const ts = await readTerminals()
+    return ts.find((t) => t.run_id === runID && String(t.text).includes(text)) || null
+  }, { timeout: 60000, label: `${runID} 的 done ${text}` })
+  const toolTextOf = (scene) => {
+    const r = chatRequests.find((x) => x.scene === scene && x.round2 === true)
+    return r ? toolTexts(r.body) : []
+  }
+
+  // ---- T11：use-tool → tool.call → 面板 tool.result → 第二轮 → done ----
+  console.log('\nT11 工具轮：tool.call → tool.result → 第二次上游请求')
+  check('T11 前置：插件标签与工具按钮在场',
+    await win.locator('button[data-act="use-tool"]').count() > 0)
+  await win.locator('button[data-act="use-tool"]').first().click()
+  const useRun = await waitRunAck(SCENE_USE_TOOL)
+  await waitTerminal(useRun.ack.run_id, 'tool ok')
+  const echoCall = (await readToolCalls()).find((c) =>
+    c.tool === 'echo' && c.run_id === useRun.ack.run_id) || null
+  console.log(`  echo tool.call：${JSON.stringify(echoCall)}`)
+  check('T11 tool.call 到达面板', !!echoCall)
+  check('T11 call_id 以 tc- 开头', !!echoCall && /^tc-/.test(echoCall.call_id), String(echoCall?.call_id))
+  check('T11 args.text = hello（模型参数原样到面板）',
+    echoCall?.args?.text === 'hello', JSON.stringify(echoCall?.args ?? null))
+  check('T11 deadline_ms > 0', (echoCall?.deadline_ms ?? 0) > 0, String(echoCall?.deadline_ms))
+  check('T11 read_only=true / requires_panel=false',
+    echoCall?.read_only === true && echoCall?.requires_panel === false,
+    JSON.stringify({ read_only: echoCall?.read_only, requires_panel: echoCall?.requires_panel }))
+  await waitFor(async () => (await readToolCalls()).some((c) =>
+    c.tool === 'echo' && c.run_id === useRun.ack.run_id && c.replied === true),
+  { timeout: 10000, label: '面板回 tool.result' })
+  const useToolMsgs = toolTextOf(SCENE_USE_TOOL)
+  console.log(`  第二次请求 role:tool 文本：${JSON.stringify(useToolMsgs)}`)
+  check('T11 第二轮上游请求带工具结果 hello', useToolMsgs.some((t) => t.includes('hello')), JSON.stringify(useToolMsgs))
+  check('T11 该场景恰好两轮上游请求',
+    chatRequests.filter((r) => r.scene === SCENE_USE_TOOL).length === 2,
+    String(chatRequests.filter((r) => r.scene === SCENE_USE_TOOL).length))
+  check('T11 终态 done 文本 = tool ok',
+    (await readTerminals()).some((t) => t.run_id === useRun.ack.run_id && t.text.includes('tool ok')))
+
+  // ---- T12：requires_panel + 关标签 → 宿主门禁，插件回调不得进入 ----
+  console.log('\nT12 requires_panel：关标签后由宿主回 panel_not_open')
+  check('T12 前置：needs_panel 声明 requires_panel=true',
+    MANIFEST.tools?.some((t) => t.name === 'needs_panel' && t.requires_panel === true))
+  await win.locator('button[data-act="closed-panel"]').first().click()
+  const closedRun = await waitRunAck(SCENE_CLOSED_PANEL)
+  // 假服务第一轮延迟 1s：必须在这 1s 内关掉最后一个该 kind 的标签。
+  const pluginTab = win.locator('.rtabs .rtab', { hasText: '运行探针' }).first()
+  if (await pluginTab.count()) {
+    await pluginTab.locator('.rtab-close').click()
+  } else {
+    check('T12 找到插件标签并关闭', false, '未找到「运行探针」标签')
+    throw new VerifyFailure('T12 无法关闭插件标签')
+  }
+  await waitTerminal(closedRun.ack.run_id, 'panel blocked')
+  const closedMsgs = toolTextOf(SCENE_CLOSED_PANEL)
+  console.log(`  第二次请求 role:tool 文本：${JSON.stringify(closedMsgs)}`)
+  check('T12 模型看到 panel_not_open', closedMsgs.some((t) => t.includes('panel_not_open')), JSON.stringify(closedMsgs))
+  const needsCalls = (await readToolCalls()).filter((c) => c.tool === 'needs_panel')
+  check('T12 宿主挡在插件回调之前（needs_panel 从未进入面板）', needsCalls.length === 0, JSON.stringify(needsCalls))
+  check('T12 标签确实关掉了',
+    await win.locator('.rtabs .rtab', { hasText: '运行探针' }).count() === 0)
+
+  // ---- T13：write_note（read_only=false）→ 审批 ----
+  console.log('\nT13 非只读工具：审批后才 tool.call')
+  // 审批卡属于**插件会话**的对话流。不先切到那条会话，run 虽然会跑，卡片却渲染在
+  // 用户当前看的另一个会话里（甚至根本不可见）—— 这不是审批没发生，是探针看错了地方。
+  const pluginGroup = win.locator('.plugin-group').first()
+  const pluginChev = pluginGroup.locator('.ws-chev').first()
+  if (await pluginChev.getAttribute('aria-expanded') !== 'true') await pluginChev.click().catch(() => {})
+  await pluginGroup.locator('.session-title').first().click()
+  await openPluginPanel()
+  await win.locator('button[data-act="write-tool"]').first().click()
+  const writeRun = await waitRunAck(SCENE_WRITE_TOOL)
+  // P2c：read_only:false 的插件工具实现 MandatoryApproval —— 即使会话是「自动执行」，
+  // 也必须出现审批卡；批准前面板不得收到 write_note、上游不得有第二轮。
+  const approve = win.getByRole('button', { name: '批准', exact: true }).first()
+  let approveVisible = true
+  try {
+    await approve.waitFor({ state: 'visible', timeout: 15000 })
+  } catch {
+    approveVisible = false
+  }
+  check('T13 审批卡出现（Auto/Full Access 也不能静默放行）', approveVisible,
+    approveVisible ? '' : '15s 内没有「批准」按钮')
+  if (!approveVisible) throw new VerifyFailure('T13 强制审批卡未出现')
+  check('T13 批准前没有第二轮上游请求',
+    chatRequests.filter((r) => r.scene === SCENE_WRITE_TOOL && r.round2 === true).length === 0)
+  check('T13 批准前面板没有收到 write_note',
+    (await readToolCalls()).filter((c) => c.tool === 'write_note').length === 0)
+  await approve.click()
+  await waitTerminal(writeRun.ack.run_id, 'write ok')
+  const writeCalls = (await readToolCalls()).filter((c) => c.tool === 'write_note')
+  check('T13 批准后 tool.call 到达面板', writeCalls.length === 1, JSON.stringify(writeCalls))
+  const writeMsgs = toolTextOf(SCENE_WRITE_TOOL)
+  check('T13 工具结果 note 回到模型', writeMsgs.some((t) => t.includes('note')), JSON.stringify(writeMsgs))
+  check('T13 终态 done 文本 = write ok',
+    (await readTerminals()).some((t) => t.run_id === writeRun.ack.run_id && t.text.includes('write ok')))
+  check('P2b 全程零 pageerror', errs.length === 0, errs.join(' | '))
 
   await app.close()
   app = null

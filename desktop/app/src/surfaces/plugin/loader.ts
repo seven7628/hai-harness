@@ -97,6 +97,17 @@ export interface PluginHostDeps {
    * 150ms 合并）：loader 一次命令调一次，不去猜调用频率。
    */
   refreshPluginProjects?: () => void
+  /**
+   * 这个插件 kind 的面板此刻**在不在标签栏里**（P2b 的 `requires_panel` 宿主门禁）。
+   *
+   * 判据必须是「标签集里有这个 kind」，不能只看当前激活标签：插件面板很可能开在**别的
+   * 会话作用域**的标签栏里（用户切走了会话），那也算开着；反过来，把「当前面板不是它」
+   * 当成关掉，会把一个明明在场的面板判成不在，模型收到的就是错的 `panel_not_open`。
+   *
+   * 缺省（不给这个函数）= 按「没开」处理，见 `panelBlocked`：门禁的失效方向必须是
+   * 「拒绝执行」（模型看得懂、会换路），不能是「交给一个可能已经不在的面板」。
+   */
+  isSurfaceOpen?: (kind: string) => boolean
 }
 
 export interface PluginFailure {
@@ -258,6 +269,72 @@ function createsPluginSession(name: string, args: Record<string, unknown>): bool
   if (name !== 'agent.run') return false
   const sid = args.session_id
   return typeof sid !== 'string' || sid.trim() === ''
+}
+
+/**
+ * P2b 宿主门禁：这条 `tool.call` 是不是**必须由宿主挡下**（manifest 声明 requires_panel，
+ * 而插件面板此刻不在标签栏里）。
+ *
+ * 为什么门禁在 loader 而不是「插件自己判」：`requires_panel` 是 manifest 的**声明**，
+ * 插件忘判/判错都不该改变结论；而且「面板关掉后事件照样会到」是这条通道的固有形态 ——
+ * 面板把 `onEvent('tool.call')` 注册在 apply 作用域（活到插件卸载），关标签并不会退订。
+ * 挡在 `fn` 之前一步，插件连回调都进不去，模型收到的就是一个明确的 `panel_not_open`。
+ *
+ * 三个保守选择，都是「宁可拒绝」的方向：
+ *   - deps 没给 `isSurfaceOpen`（单测 / 旧宿主）⇒ 视为没开（fail closed）；
+ *   - 判据自己抛错 ⇒ 视为没开（不知道开没开 = 没开）；
+ *   - `requires_panel` 只认**严格 true** ⇒ manifest 里写 `"true"`/1 不算数，
+ *     与 Go 侧 json.Unmarshal 到 bool 的口径一致（那边这类值直接安装期报错）。
+ */
+function panelBlocked(p: SurfaceAgentEventPayload, id: string, deps: PluginHostDeps): boolean {
+  const ev = p.event
+  if (ev.type !== 'tool.call') return false
+  const data = isPlainRecord(ev.data) ? ev.data : {}
+  if (data.requires_panel !== true) return false
+  try {
+    return deps.isSurfaceOpen?.(pluginKindOf(id)) !== true
+  } catch (e) {
+    console.warn('[surface] isSurfaceOpen 判据抛错，按「面板未打开」处理：', e)
+    return true
+  }
+}
+
+/**
+ * 门禁回执：把 `tool.result{ok:false,error:"panel_not_open"}` 直接发给宿主。
+ *
+ * 为什么**不**走 `host.command('tool.result')`：
+ *  1. 这一跳发生在 `createHost` 构建 host 对象的中途（onEvent 是它的一个字段），
+ *     此刻 host 还不存在，闭包里也拿不到自己；
+ *  2. 回执不该经过插件的命令闸门 —— 说「我现在无法执行」不是一次工具动作，
+ *     不声明 `tool.result` 的插件也必须能拒（否则门禁静默失灵，模型等满 deadline）。
+ *
+ * 失败**吞掉**：门禁本身是兜底，回执发不出去（浏览器档 / bridge 已退出 / token 没领到）
+ * 时最多退化成「模型等到超时」，绝不能把异常抛进插件的订阅回调 —— 那会把一次工具调用
+ * 变成一条插件崩溃（PR-10 的崩溃卡就是这么来的）。
+ *
+ * 没有 `call_id` 就不发：那是唯一能对上等待者的键，编一个反而会 resolve 掉别人的调用。
+ */
+function replyPanelBlocked(
+  p: SurfaceAgentEventPayload,
+  tokenPromise: Promise<string | undefined>,
+  agentApi: SurfaceAgentApi | null,
+): void {
+  const data = isPlainRecord(p.event.data) ? p.event.data : {}
+  const callId = typeof data.call_id === 'string' ? data.call_id.trim() : ''
+  if (!callId || !agentApi?.surfaceAgent) return
+  void (async () => {
+    try {
+      const token = await tokenPromise
+      if (!token) return
+      await agentApi.surfaceAgent({
+        token,
+        name: 'tool.result',
+        args: { call_id: callId, ok: false, error: 'panel_not_open' },
+      })
+    } catch (e) {
+      console.warn('[surface] panel_not_open 回执发送失败（模型将等待超时）：', e)
+    }
+  })()
 }
 
 /**
@@ -451,6 +528,12 @@ export function createHost(
       const raw = agentApi.onSurfaceAgentEvent((p) => {
         if (!p || p.surface_id !== id) return // 别的插件的事件：连监听器都不进
         if (!p.event || p.event.type !== type) return
+        // P2b 宿主门禁（`requires_panel`）：面板没开时**不投递**，由宿主直接回
+        // `tool.result{ok:false,error:"panel_not_open"}`。见 panelBlocked / replyPanelBlocked。
+        if (panelBlocked(p, id, deps)) {
+          replyPanelBlocked(p, tokenPromise, agentApi)
+          return
+        }
         fn(p.event)
       })
       return track(typeof raw === 'function' ? raw : () => {})
