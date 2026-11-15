@@ -71,6 +71,9 @@ import { aggregateFileActivity } from '../../src/lib/fileActivity'
 import { withAgentToolBlocks } from '../../src/lib/agentSession'
 import '../../src/index.css'
 import '../../src/narrative-skin.css'
+// index.css 末尾的 @import 在浏览器里晚于普通规则，dev 下会被忽略；探针要量
+// runtime 皮肤就必须像 verify_user_blocks 一样显式 import（生产构建由 Vite 处理）。
+import '../../src/runtime-skin.css'
 
 // —— R07 仪器自检：activity provider 的 render 到底有没有被执行 ——
 // 与 R06c 给 web 做的那层包法一致（e2e/verify_auto_open_visual.mjs 的 __webRenderCalls）：
@@ -587,6 +590,56 @@ async function main() {
   assert(hint.back === 1, '输入框上方有「返回主会话」（注意力在这里，回程要够近）')
   assert(hint.headBack === 1, '头部也保留「返回主会话」')
 
+  // 子会话 Composer 必须复用主会话的同一条工具条（2026-11 用户截图报障）：
+  // 旧实现把模式/模型/Effort/能力/附件整段隐藏，只剩上下文环+停止，且 .row2 的
+  // space-between 在左簇消失后把右组丢到最左边。这里同时钉住「控件在」「只读」
+  // 「右簇贴右」三件事 —— 隐藏控件和左漂都是用户能一眼看出的回归。
+  const scopedControls = await page.locator('.composer').evaluate((root) => {
+    const q = (sel) => root.querySelector(sel)
+    const attrDisabled = (sel) => {
+      const el = q(sel)
+      return el ? el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('disabled') : null
+    }
+    const row2 = q('.row2')?.getBoundingClientRect()
+    const right = q('.row2-right')?.getBoundingClientRect()
+    return {
+      mode: Boolean(q('.mode-chip')),
+      modeDisabled: attrDisabled('.mode-chip'),
+      model: Boolean(q('.row2-right > .model-chip:not(.effort-chip)')),
+      modelDisabled: attrDisabled('.row2-right > .model-chip:not(.effort-chip)'),
+      effort: Boolean(q('.effort-chip')),
+      effortDisabled: attrDisabled('.effort-chip'),
+      ctx: Boolean(q('.ctx')),
+      doc: Boolean(q('.doc-btn')),
+      docDisabled: attrDisabled('.doc-btn'),
+      send: Boolean(q('.send-btn')),
+      rightAligned: Boolean(row2 && right && Math.abs(row2.right - right.right) < 20),
+      row2Right: row2?.right,
+      groupRight: right?.right,
+    }
+  })
+  assert(scopedControls.mode && scopedControls.model && scopedControls.effort,
+    `子会话保留主会话同款工具条（mode=${scopedControls.mode} model=${scopedControls.model} effort=${scopedControls.effort}）`)
+  assert(scopedControls.modeDisabled === true && scopedControls.modelDisabled === true && scopedControls.effortDisabled === true,
+    `子会话的设置是继承只读（mode=${scopedControls.modeDisabled} model=${scopedControls.modelDisabled} effort=${scopedControls.effortDisabled}）`)
+  assert(scopedControls.ctx && scopedControls.doc && scopedControls.send,
+    `子会话保留上下文环/@引用/发送（ctx=${scopedControls.ctx} doc=${scopedControls.doc} send=${scopedControls.send}）`)
+  assert(scopedControls.docDisabled === false, '子会话仍可用「添加文件」写入 @引用（agent_send 收文本）')
+  assert(scopedControls.rightAligned,
+    `右簇必须贴右（row2.right=${scopedControls.row2Right} group.right=${scopedControls.groupRight}）`)
+  const capsCount = await page.locator('.composer .caps-btn').count()
+  if (capsCount) assert(await page.locator('.composer .caps-btn').isDisabled(),
+    '运行时皮肤的「能力」入口在子会话同样保留但禁用（不执行主会话斜杠命令）')
+  // aria-disabled 会让 Playwright 的常规 click 一直等「enabled」；这里要验证的是
+  // 只读守卫本身，所以直接派发 click（等价于用户绕过指针样式强行点）。
+  await page.locator('.composer .mode-chip').evaluate((el) => el.click())
+  await page.locator('.composer .row2-right > .model-chip:not(.effort-chip)').evaluate((el) => el.click())
+  await page.waitForTimeout(50)
+  assert(await page.locator('.composer .mode-chip .popup.open').count() === 0,
+    '点子会话的模式芯片不会打开主会话的切换菜单')
+  assert(await page.locator('.composer .model-pop.open').count() === 0,
+    '点子会话的模型芯片不会打开主会话的切换菜单')
+
   // 草稿也要按作用域隔离：主会话与子会话、不同子会话之间不能互相串。
   await page.locator('.composer textarea.input').fill('子会话草稿')
   await page.evaluate(() => window.__store.getState().focusAgent(undefined))
@@ -704,6 +757,16 @@ async function main() {
   await page.waitForTimeout(300)
   assert(await page.evaluate(() => !window.__store.getState().focusedAgent), '点「返回主会话」→ 退出子会话视图')
   assert(await page.locator('.narrative .as-hd').count() === 0, '子会话头部消失（真的回到主会话）')
+  // 反向守卫：只读态不能泄漏到主会话 —— 回到主会话后同一批控件必须恢复可点。
+  const mainControls = await page.locator('.composer').evaluate((root) => {
+    const dis = (sel) => {
+      const el = root.querySelector(sel)
+      return el ? el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('disabled') : null
+    }
+    return { mode: dis('.mode-chip'), model: dis('.row2-right > .model-chip:not(.effort-chip)'), effort: dis('.effort-chip') }
+  })
+  assert(mainControls.mode === false && mainControls.model === false && mainControls.effort === false,
+    `主会话控件必须恢复可点（mode=${mainControls.mode} model=${mainControls.model} effort=${mainControls.effort}）`)
   // 那句话**只属于子运行的上下文**：主会话叙述区不该出现它（否则等于把子会话的对话
   // 混进主会话历史 —— 正是「TODO 串了」那类 bug 的同构版本）
   const inMain = await page.locator('.narrative .msg.user').allInnerTexts()

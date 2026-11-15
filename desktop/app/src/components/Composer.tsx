@@ -613,6 +613,10 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
     document.addEventListener('click', close)
     return () => document.removeEventListener('click', close)
   }, [menu])
+  // 进入子会话时模型菜单变只读；不主动收掉的话，回主会话会残留一个已打开的弹层。
+  useEffect(() => {
+    if (focused) setMenu(false)
+  }, [focused])
 
   // @ 引用面板：点击外部 / Esc 关闭
   useEffect(() => {
@@ -1699,12 +1703,14 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
         </div>
         <div className="row2">
           {/* 模式恒在最左（P 布局决策）；模型/思考强度/上下文/发送归右组 */}
-          {!mobile && !focused && (
+          {!mobile && (
             <ChipMenu
               className="mode-chip"
               label={<><span className="compact-chip-icon"><AccessIcon size={14} /></span><span className="chip-full-label"><span style={{ color: 'var(--text-3)' }}>{t('composer.mode')}</span> <span className="mono">{modes.find((m) => m.key === mode)?.label ?? mode}</span></span></>}
               items={modes}
               value={mode}
+              disabled={compressing || Boolean(focused)}
+              title={focused ? t('composer.subInherited') : undefined}
               onSelect={compressing ? () => undefined : switchMode}
             />
           )}
@@ -1723,19 +1729,19 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 switch_model/effort/mode 与 compact，点了只会 403 —— 见函数头的 variant 注释。 */}
             {!mobile && (
               <>
-            {!focused && (<>
             <div
               ref={chipRef}
-              className="model-chip"
+              className={`model-chip${focused ? ' is-disabled' : ''}`}
               role="combobox"
-              aria-expanded={menu}
+              aria-expanded={menu && !focused}
               aria-haspopup="listbox"
-              aria-disabled={compressing}
-              title={`${activeProvLabel} · ${model}`} /* label 过长时省略号截断 → hover 可见全名 */
-              onClick={() => { if (!compressing) setMenu((v) => !v) }}
+              aria-disabled={compressing || Boolean(focused)}
+              /* 子会话沿用主会话的模型/档位：保留同款控件与当前值，但不在这里改主会话 */
+              title={focused ? t('composer.subInherited') : `${activeProvLabel} · ${model}`} /* label 过长时省略号截断 → hover 可见全名 */
+              onClick={() => { if (!compressing && !focused) setMenu((v) => !v) }}
             >
               <span className="spark"><Sparkles size={14} /></span><span className="model-chip-label">{activeProvLabel} · {model}</span><ChevronDown size={12} />
-              {menu && (
+              {menu && !focused && (
                 <div className="popup open pop model-pop" role="listbox" onClick={(e) => e.stopPropagation()}>
                   {/* 筛选框：设计 #m-prompt 的 .pop-search（与 / 命令、@ 引用同一套外壳语言） */}
                   <div className="pop-search">
@@ -1826,6 +1832,8 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
               label={<><span className="compact-chip-icon"><EffortIcon size={14} /></span><span className="chip-full-label"><span style={{ color: 'var(--text-3)' }}>Effort</span> <span className="mono">{EFFORTS.find((e) => e.key === effort)?.label ?? effort}</span></span></>}
               items={effortItems}
               value={effort}
+              disabled={compressing || Boolean(focused)}
+              title={focused ? t('composer.subInherited') : undefined}
               onSelect={compressing ? () => undefined : switchEffort}
             />
             {/* 能力入口（设计 index.html:901）：图标 + 「能力」+ 数量 + chevron，落在
@@ -1838,8 +1846,8 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 onClick={() => setCapsOpen((v) => !v)}
                 aria-expanded={capsOpen}
                 aria-haspopup="dialog"
-                disabled={queueFull || compressing}
-                title={t('composer.caps.hint').replace('{n}', String(slashItems.length))}
+                disabled={queueFull || compressing || Boolean(focused)}
+                title={focused ? t('composer.subInherited') : t('composer.caps.hint').replace('{n}', String(slashItems.length))}
                 aria-label={t('composer.caps.aria').replace('{n}', String(slashItems.length))}
               >
                 <LayersIcon size={12} />
@@ -1848,7 +1856,6 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 <ChevronDown size={11} className="chev" />
               </button>
             )}
-            </>)}
             {/* hover / 键盘聚焦都能展开构成面板（focus 走同一条路径：键盘用户也能看到占比）。
                 后台工具任务不是子智能体，没有自己的上下文环 —— 不借主会话的读数。 */}
             {(!focused || focusedIsAgent) && (
@@ -1912,7 +1919,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             )}
             {/* 图片上传 / 添加文件：图片走内联 data URL（当前模型支持 image 才显示按钮）；
                 其他类型一律走 @引用（不复制）——引用与模型输入类型无关，所以「添加文件」恒可见。 */}
-            {!mobile && !focused && canImage && (
+            {!mobile && canImage && (
               <>
                 <input
                   ref={fileInputRef}
@@ -1925,8 +1932,8 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
                 <button
                   className={`attach-btn${attachmentBusy ? ' busy' : ''}`}
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={queueFull || compressing || attachmentBusy}
-                  title={attachmentBusy ? t('composer.attach.compressing') : compressing ? t('composer.compressing.wait') : t('composer.attach.hint')}
+                  disabled={queueFull || compressing || attachmentBusy || Boolean(focused)}
+                  title={focused ? t('composer.agent.textOnly') : attachmentBusy ? t('composer.attach.compressing') : compressing ? t('composer.compressing.wait') : t('composer.attach.hint')}
                   aria-label={t('composer.attach.hint')}
                 >
                   <ImageIcon size={15} />
@@ -1934,7 +1941,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
               </>
             )}
             {/* 添加文件（本地文件引用）：原生多选对话框 → @引用进消息，不复制、不上传 */}
-            {!mobile && !focused && (
+            {!mobile && (
               <button
                 className="attach-btn doc-btn"
                 onClick={() => void pickDocFiles()}

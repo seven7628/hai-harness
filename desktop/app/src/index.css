@@ -4598,9 +4598,23 @@ body.is-electron .left.collapsed .rail .rbtn {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 模式芯片是左簇、右组是右簇；子会话隐藏/只读模式芯片时，space-between
+     只剩一个子项会把整组丢到左边（用户 2026-11 截图：环+停止停在输入框左下角）。
+     margin-left:auto 让右组无论左簇是否存在都恒贴右。 */
+  margin-left: auto;
   white-space: nowrap; /* chip 内文本恒单行 */
   flex-wrap: nowrap; /* 换行会把发送钮留在中间；收缩交给模型 chip 的 label */
   min-width: 0;
+}
+/* 子会话里模型/模式/Effort 是「沿用主会话」的只读值：保留同款控件（不隐藏），
+   但明确不可点，避免看起来像能单独切换这个子智能体。 */
+.composer .row2 .model-chip[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: default;
+}
+.composer .row2 .model-chip[aria-disabled='true']:hover {
+  background: none;
+  color: var(--text-3);
 }
 /* 右组内除模型 chip 外一律不收缩：收缩只发生在模型名上（省略号），
    保证发送钮恒贴右边界、其余控件不被挤扁。 */

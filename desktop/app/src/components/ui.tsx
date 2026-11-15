@@ -101,6 +101,8 @@ export function ChipMenu({
   onSelect,
   dir = 'up',
   className = '',
+  disabled = false,
+  title,
 }: {
   label: ReactNode
   items: { key: string; label: string; desc?: string }[]
@@ -108,6 +110,8 @@ export function ChipMenu({
   onSelect: (key: string) => void
   dir?: 'up' | 'down'
   className?: string
+  disabled?: boolean
+  title?: string
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -119,19 +123,28 @@ export function ChipMenu({
     document.addEventListener('click', close)
     return () => document.removeEventListener('click', close)
   }, [open])
+  // 切到子会话时控件变只读：把已展开的菜单收掉，否则回到主会话会「自己又弹出来」。
+  useEffect(() => {
+    if (disabled) setOpen(false)
+  }, [disabled])
 
   return (
     <div
       ref={ref}
-      className={`model-chip ${className}`}
+      className={`model-chip ${className}${disabled ? ' is-disabled' : ''}`}
       role="combobox"
-      aria-expanded={open}
+      aria-expanded={open && !disabled}
+      aria-disabled={disabled || undefined}
       aria-haspopup="listbox"
-      onClick={() => setOpen((v) => !v)}
+      title={title}
+      onClick={() => {
+        if (disabled) return
+        setOpen((v) => !v)
+      }}
     >
       {label}
       <ChevronDown size={12} />
-      {open && (
+      {open && !disabled && (
         <div className={`popup open ${dir === 'down' ? 'down' : ''}`} role="listbox" onClick={(e) => e.stopPropagation()}>
           {items.map((it) => (
             <div

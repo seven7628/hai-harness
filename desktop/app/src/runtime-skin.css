@@ -955,6 +955,16 @@ html[data-skin='runtime'] .row2 .model-chip[aria-expanded='true'] {
   color: var(--ink);
 }
 
+/* 子会话：同款控件保留，但设置继承自主会话 —— 只读态不浮起、不伪装成可切换 */
+html[data-skin='runtime'] .row2 .model-chip[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: default;
+}
+html[data-skin='runtime'] .row2 .model-chip[aria-disabled='true']:hover {
+  background: none;
+  color: var(--ink-3);
+}
+
 /* 模型名是这一排里唯一该被读到的值：provider 退成 ink-3，名字用强调色 */
 html[data-skin='runtime'] .row2 .model-chip-label {
   font-weight: 500;
