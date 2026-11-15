@@ -1895,6 +1895,10 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
       // §6.5 封闭集合：bridge 给了 code 就用（denied / no_session / quota / …），
       // 没给（超时 / 进程不在）按 error 文案分成 timeout / error —— 与 surface:command 同口径。
       if (response.code) return { ok: false, reason: response.code }
+      // §6.6 的拒绝信封把 reason 也放在 data 里（`{ok:false, code, data:{ok:false,reason}}`）：
+      // code 是首选，data.reason 是同一个封闭集合的第二种携带方式（P1c 只写了一处时也能对上）。
+      const nested = response.data?.reason
+      if (typeof nested === 'string' && nested) return { ok: false, reason: nested }
       const detail = response.error ?? ''
       return { ok: false, reason: /超时|timeout|timed out/i.test(detail) ? 'timeout' : 'error' }
     }
