@@ -27,6 +27,7 @@ package main
 // （plugin__*，P2）、真实 tool.call/waiter（P1 的 tool.result 只回 ok + 审计）。
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,6 +81,10 @@ const (
 	surfaceAgentRunTimeout     = 10 * time.Minute
 	// surfaceAgentDeltaWindow 文本增量的合并窗口（§6.6「Go 侧 50ms 合并」）。
 	surfaceAgentDeltaWindow = 50 * time.Millisecond
+	// surfaceAgentPersistTimeout 新建会话首次落盘（`<storeDir>/<sid>.jsonl`）的上限。
+	// 用独立超时而不是请求 ctx：dispatch 的 ctx 在回执后就结束，拿它写盘会留下半行
+	// state（jsonl 是 append-only，半行 = 坏记录），那比「回执晚 5s」糟得多。
+	surfaceAgentPersistTimeout = 5 * time.Second
 )
 
 // surfaceAgentHostCommands 宿主放行的 name（§5.1）。声明（manifest）∩ 这张表 = 放行。
@@ -198,6 +203,12 @@ func surfaceAgentAction(name string) string {
 // 「插件自己记 session_id 后再 agent.run 复用」（D4），所以它必须造出与用户手动
 // 新建会话**同构**的东西 —— 工具面 denylist、record 键 plugin-<id>、落盘在
 // plugin-sessions/<id>/sessions，一处都不能走旁路。
+//
+// **建完立刻落一条 state**（D4 的边缘路径）：空会话没有消息，Session 只在有输入/轮次
+// 检查点时 persist，于是「建会话但还没发消息」这条路径在磁盘上不产生任何东西 ——
+// 而 listSessions 只从内存 + `<storeDir>/*.jsonl` 取，进程重启后这个 session_id 就
+// 凭空消失了（插件手里那个 id 变成 no_session）。所以这里显式 Persist 一次，
+// 失败就不把 id 交出去（否则插件拿到的是「看起来成功、重启就丢」的 id）。
 func (m *manager) handleSurfaceAgentSession(c command, id string, args map[string]any) {
 	home := pluginHomePath(id)
 	ws, err := m.pluginRuntimeForHome(home)
@@ -206,12 +217,24 @@ func (m *manager) handleSurfaceAgentSession(c command, id string, args map[strin
 		return
 	}
 	sid := m.genID()
-	if _, err := m.createIn(ws, sid, "", sessionOpts{}); err != nil {
+	bs, err := m.createIn(ws, sid, "", sessionOpts{})
+	if err != nil {
 		// 内部 error（磁盘/装配细节）只进审计：回给插件的是固定文案 + 固定 reason。
 		m.respCode(c, false, "plugin session 创建失败", surfaceReasonBridgeError,
 			map[string]any{"ok": false, "reason": surfaceReasonBridgeError})
 		m.auditSurfaceAgent(id, "agent_run", false, map[string]any{"session": sid},
 			surfaceReasonBridgeError+": "+err.Error())
+		return
+	}
+	// D4：空会话也要有磁盘身份，否则回执里的 session_id 活不过重启。
+	if perr := persistSurfaceAgentSession(bs); perr != nil {
+		// 撤回内存会话：留下它就是「内存里看得见、重启就没」的幽灵，
+		// 而插件这次没拿到 id（不会去用），撤掉比留着更诚实。
+		dropSurfaceAgentSession(ws, sid, bs)
+		m.respCode(c, false, "plugin session 落盘失败", surfaceReasonBridgeError,
+			map[string]any{"ok": false, "reason": surfaceReasonBridgeError})
+		m.auditSurfaceAgent(id, "agent_run", false, map[string]any{"session": sid},
+			surfaceReasonBridgeError+" persist: "+perr.Error())
 		return
 	}
 	// title 可选（§6.6）：只写手动标题覆盖（会话列表读同一份），不触发 AI 标题生成 ——
@@ -221,6 +244,43 @@ func (m *manager) handleSurfaceAgentSession(c command, id string, args map[strin
 	}
 	m.resp(c, true, "", map[string]any{"session_id": sid})
 	m.auditSurfaceAgent(id, "agent_run", true, map[string]any{"session": sid}, "")
+}
+
+// persistSurfaceAgentSession 让刚建出来的会话在磁盘上**立刻**有身份：
+// `<storeDir>/<sid>.jsonl` + 一条 state 行（Session.Persist → SaveState，无消息也写）。
+//
+// 不伪造文件：写盘走 Session 自己的路径，恢复端读到的就是 SDK 协议里的那条 state，
+// 与「发过消息的会话」同一种记录形状（空历史）。
+func persistSurfaceAgentSession(bs *bridgeSession) error {
+	if bs == nil || bs.s == nil {
+		return fmt.Errorf("session 未装配")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), surfaceAgentPersistTimeout)
+	defer cancel()
+	return bs.s.Persist(ctx)
+}
+
+// dropSurfaceAgentSession 撤回一个刚建出来、没能落盘的会话。
+//
+// 只在「建完立刻失败」的窗口里调用：此刻会话没有任何输入、没有 run、也没进 Hub mesh
+// 注册表（插件 runtime 不走那条注册），所以摘表 + 停 goroutine 不会影响别人。
+//
+// 收尾走 stopSession（完整关停：Session.Shutdown + checkpoint 协调器 drain + 事件文件），
+// 代价是它会顺带发出 session_persist_error / session_closed 两条会话级事件。这是**要的**：
+// 插件侧会一直等在 host.command 的 Promise 上、看不到会话事件；而桌面端那边这两条
+// 恰恰是「刚才那次落盘失败了」的唯一可观察线索（未知 sid 只会多一个不可见的视图
+// 条目，不会出现在会话列表里 —— 我们这里不发 session 列表事件）。
+func dropSurfaceAgentSession(ws *workspaceRuntime, sid string, bs *bridgeSession) {
+	if ws != nil {
+		ws.mu.Lock()
+		if cur, ok := ws.sessions[sid]; ok && cur == bs {
+			delete(ws.sessions, sid)
+		}
+		ws.mu.Unlock()
+	}
+	if bs != nil {
+		stopSession(bs) // 停 run goroutine，别把半成品留在进程里
+	}
 }
 
 // ---- agent.run ----
@@ -301,6 +361,21 @@ func (m *manager) handleSurfaceAgentRun(c command, id string, args map[string]an
 	}
 	if surfaceAgentAssembleHook != nil {
 		surfaceAgentAssembleHook(bs)
+	}
+	// 不带 session_id 新建的会话：**先落盘再 ack/Ask**（D4）。
+	// 回执里的 session_id 必须是「重启后还在」的那个 id；Ask 之后 run loop 虽然会
+	// 在跑模型前 persist 一次，但那是「ack 之后」的事 —— 这中间进程被杀，插件手里
+	// 就留下一个磁盘上不存在的 id。复用已有会话不重复写：它本来就有 jsonl。
+	if newSession {
+		if perr := persistSurfaceAgentSession(bs); perr != nil {
+			hub.release(run)
+			dropSurfaceAgentSession(ws, sid, bs)
+			m.respCode(c, false, "plugin session 落盘失败", surfaceReasonBridgeError,
+				map[string]any{"ok": false, "reason": surfaceReasonBridgeError})
+			m.auditSurfaceAgent(id, "agent_run", false, map[string]any{"session": sid},
+				surfaceReasonBridgeError+" persist: "+perr.Error())
+			return
+		}
 	}
 	run.bs = bs
 	hub.armTimeout(run)

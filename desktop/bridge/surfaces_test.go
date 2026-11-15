@@ -1035,3 +1035,75 @@ func TestSurfaceInstallAcceptsNestedEntry(t *testing.T) {
 		t.Fatalf("拷贝的入口 = %q，want %q", got, panel)
 	}
 }
+
+// ---- 安装期拒绝 D11 下线的四条旧命令（P1e 加固） ----
+
+// TestSurfaceInstallRejectsRetiredCommands —— 四条旧命令在**安装期**就判死。
+//
+// 为什么不在运行期拒绝就够了：`surfaceHostCommands` 清空之后，装了这种插件的用户
+// 拿到的是一个「面板能打开、每次调用都 denied」的东西，index 里还多一条永远修不好的
+// 记录。安装期拒绝把问题提前到作者手里 —— 回执里直接写「哪条命令、该改用 agent.*」。
+//
+// 每条用例都断言三件事：status=rejected、理由可读（命令名 + D11 + agent.*）、
+// **磁盘一个字节没动**（index 不存在、目录没拷过去、没有暂存残留）。
+// 最后一条是正对照：只用 agent.* 的 manifest 必须照旧装得上（这条闸不许扩权）。
+func TestSurfaceInstallRejectsRetiredCommands(t *testing.T) {
+	retired := []string{"workspace_list", "session_list", "git_snapshot", "ui_inspect"}
+	for _, name := range retired {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			st, root := testSurfaceStore(t)
+			src := surfaceFixture(t, "legacy-panel", "1.0.0", "export default () => null\n",
+				withManifest(func(m map[string]any) {
+					// 混在合法命令里：只要出现一条旧命令就整包拒绝。
+					m["commands"] = []string{surfaceAgentSessionName, name}
+				}))
+
+			rec := st.Install(src, true)
+			if rec.Status != surfaceRejected {
+				t.Fatalf("status = %q，want %q（回执 %+v）", rec.Status, surfaceRejected, rec)
+			}
+			t.Logf("拒绝文案 = %s", rec.Reason)
+			for _, want := range []string{name, "D11 已下线", "agent.*"} {
+				if !strings.Contains(rec.Reason, want) {
+					t.Fatalf("拒绝理由缺 %q（作者读不出该怎么办）：%q", want, rec.Reason)
+				}
+			}
+			// 拒绝 = 不写 index、不拷目录：根目录只可能多出 audit.jsonl。
+			notExist(t, filepath.Join(root, "index.json"))
+			notExist(t, filepath.Join(root, "legacy-panel"))
+			noStagingLeftovers(t, root)
+			// 审计里要有一行 install 失败（装不上的原因必须可对账）。
+			raw := string(readBytes(t, filepath.Join(root, "audit.jsonl")))
+			if !strings.Contains(raw, `"action":"install"`) || !strings.Contains(raw, `"ok":false`) {
+				t.Fatalf("audit.jsonl 没有 install 失败记录：%s", raw)
+			}
+			if !strings.Contains(raw, name) {
+				t.Fatalf("审计没写清是哪条命令被拒：%s", raw)
+			}
+		})
+	}
+
+	t.Run("合法命令不受影响", func(t *testing.T) {
+		st, root := testSurfaceStore(t)
+		src := surfaceFixture(t, "agent-panel", "1.0.0", "export default () => null\n",
+			withManifest(func(m map[string]any) {
+				// agent.* / composer.quote / ui.* 都在这条闸之外（只关 D11 那四条）。
+				m["commands"] = []string{
+					surfaceAgentSessionName, surfaceAgentRunName, surfaceAgentCancelName,
+					"composer.quote", "ui.inspect",
+				}
+			}))
+		rec := st.Install(src, true)
+		if rec.Status != surfaceApplied {
+			t.Fatalf("只用 agent.* 的 manifest 被拒了（这条闸扩权了）：%+v", rec)
+		}
+		_, idx := readIndex(t, root)
+		if len(idx.Items) != 1 || idx.Items[0]["id"] != "agent-panel" {
+			t.Fatalf("index = %v，want 只有 agent-panel", idx.Items)
+		}
+		if _, err := os.Stat(filepath.Join(root, "agent-panel", "panel.js")); err != nil {
+			t.Fatalf("正对照没真的拷贝：%v", err)
+		}
+	})
+}
