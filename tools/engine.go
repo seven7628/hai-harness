@@ -1008,9 +1008,25 @@ type approvalDecision struct {
 func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler events.EventHandler) (map[string]approvalDecision, error) {
 	tc := events.ToolContextFrom(ctx)
 	if tc == nil || tc.Approver == nil {
+		// 没有审批通道：普通工具维持现状（不审批）；MandatoryApproval 工具必须 fail-closed，
+		// 否则「当前会话没注入 approver」就是一条静默绕过强制审批的路径。
+		blocked := map[string]approvalDecision{}
+		for _, c := range calls {
+			tool, err := e.GetTool(ctx, c.Name)
+			if err != nil {
+				continue
+			}
+			if ma, ok := tool.(MandatoryApproval); ok && ma.MandatoryApproval(ctx, c) {
+				blocked[c.Id] = approvalDecision{approved: false}
+			}
+		}
+		if len(blocked) > 0 {
+			return blocked, nil
+		}
 		return nil, nil // 未注入审批（现状：不审批）
 	}
 	var pending []core.ToolCall
+	approvers := make(map[string]events.Approver, len(calls))
 	for _, c := range calls {
 		if tool, err := e.GetTool(ctx, c.Name); err == nil {
 			needs := false
@@ -1033,6 +1049,12 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 			}
 			if needs {
 				pending = append(pending, c)
+				if mandatory {
+					// 强制审批必须绕过 modeApprover（Auto 会同步 true），直接等会话审批器。
+					approvers[c.Id] = unwrapApprover(tc.Approver)
+				} else {
+					approvers[c.Id] = tc.Approver
+				}
 			}
 		}
 	}
@@ -1047,11 +1069,15 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 			wait func(context.Context) (bool, error)
 			err  error
 		)
-		if ca, ok := tc.Approver.(events.ContextualApprover); ok {
+		approver := approvers[c.Id]
+		if approver == nil {
+			approver = tc.Approver
+		}
+		if ca, ok := approver.(events.ContextualApprover); ok {
 			wait, err = ca.BeginApprovalWithContext(ctx, c)
 		} else {
 			// 兼容旧 Approver：保持原有「注册后发事件」调用协议。
-			wait = tc.Approver.BeginApproval(c)
+			wait = approver.BeginApproval(c)
 		}
 		if err != nil {
 			return nil, err
@@ -1086,6 +1112,29 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 		decisions[c.Id] = approvalDecision{approved: ok}
 	}
 	return decisions, nil
+}
+
+// approverUnwrapper 模式/策略包装器可实现的解包协议（agents.modeApprover 实现）。
+// tools 只认结构，不 import agents（避免循环依赖）。
+type approverUnwrapper interface {
+	Unwrap() events.Approver
+}
+
+// unwrapApprover 剥掉所有策略包装，拿到真正等待用户的审批器；
+// 强制审批（MandatoryApproval）必须用它，否则 Auto 模式会当场同步批准。
+func unwrapApprover(a events.Approver) events.Approver {
+	for i := 0; i < 16; i++ {
+		u, ok := a.(approverUnwrapper)
+		if !ok {
+			return a
+		}
+		next := u.Unwrap()
+		if next == nil || next == a {
+			return a
+		}
+		a = next
+	}
+	return a
 }
 
 // timeoutFor 单次调用的时限：工具级 ToolTimeout/ToolTimeoutProvider 声明 → PerCallTimeout
