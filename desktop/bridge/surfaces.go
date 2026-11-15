@@ -66,6 +66,24 @@ const (
 	// 一个 10 字的中文标题是 30 字节，用字节数判会把正常标题判死。
 	maxSurfaceEntryTitleChars = 64
 
+	// maxSurfaceTools manifest.tools[] 的条数上限（09-agent-bridge §5.3 / §7.3）。
+	// 16 = 「一个插件能一眼列完的工具」的量级；再多就不是一面板插件，是一套工具箱。
+	maxSurfaceTools = 16
+	// maxSurfaceToolDescriptionChars 单个工具描述的**字符**（rune）上限，与 title 同口径。
+	// 这句话是审批卡片上唯一的人读说明（§6.4「卡片显示插件名 · 工具名」），
+	// 太长会被权限卡片截断成「看不出在干什么」。
+	maxSurfaceToolDescriptionChars = 300
+	// maxSurfaceToolFullNameChars 模型侧全名 `plugin__<id>__<name>` 的长度上限。
+	// 64 = OpenAI function name 的硬上限（provider 侧超长是 400，不是截断）；id 最长 41、
+	// tool name 最长 41，所以**组合**超限是真实存在的（安装期必须判）。
+	maxSurfaceToolFullNameChars = 64
+	// maxSurfaceToolInputBytes 单个工具 input schema 的上限（§8.3：schema ≤ 16 KiB）。
+	maxSurfaceToolInputBytes = 16 << 10
+	// 工具超时边界（§6.4「默认 10s（manifest ≤60s）」）。
+	surfaceToolDefaultTimeoutMS = 10000
+	surfaceToolMinTimeoutMS     = 100
+	surfaceToolMaxTimeoutMS     = 60000
+
 	surfaceDirMode  = 0o700 // 目录 0700
 	surfaceFileMode = 0o600 // 文件 0600（index / manifest / panel.js / audit 一律）
 )
@@ -84,6 +102,12 @@ const (
 
 // surfaceIDPattern 插件 id 的唯一判据（manifest 校验、目录名、卸载参数共用）。
 var surfaceIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,40}$`)
+
+// surfaceToolNamePattern 工具名判据（§5.3）。
+//
+// 只允许小写字母开头 + 小写字母/数字/下划线：模型侧名是 `plugin__<id>__<name>`，
+// 工具名里再出现大写或连字符，反解（「这条工具属于谁」）就得靠猜。
+var surfaceToolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
 
 // surfaceEntry index.json 里的一条（字段名即磁盘协议，PR-14 的插件页直接读它）。
 type surfaceEntry struct {
@@ -131,6 +155,40 @@ type surfaceManifest struct {
 	//（渲染层用 `params.entry = <id>` 区分页面）。bridge 只校验形状与路径纪律 ——
 	// 入口渲染在渲染层，这一侧不存 index（index.json 的 schema 不动：entries 是 manifest 字段）。
 	Entries []surfaceEntryDecl `json:"entries"`
+	// Tools 插件声明的**模型可见工具**（09-agent-bridge §5.3 / §7.3，P2）。
+	// 声明即注册：模型侧名 `plugin__<id>__<name>`，调用经 tool.call 下发插件。
+	// 与 entries 同一条纪律：形状/重复/超限在**安装期**判死（写盘前），
+	// 运行期只读这份声明（注册点见 plugin_tools.go 的 buildPluginEngine）。
+	Tools []surfaceToolDecl `json:"tools"`
+}
+
+// surfaceToolDecl manifest.tools[] 的一项（§5.3）。
+//
+// 字段名即协议（渲染层安装页、审批卡片、模型侧 schema 都读同一份）：
+//
+//	name/description/input  模型看到的东西
+//	read_only               只读 = 免审批（§6.4「read_only:false 走现有工具审批」）
+//	requires_panel          调用需要插件面板在场（P2 只透传给插件，不做托管）
+//	timeout_ms              本次调用的等待上限（0 = 默认 10s，见 timeout）
+type surfaceToolDecl struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Input 工具参数的 JSON Schema（必须是 object）。原样透传给模型 —— 这一层
+	// 不加任何关键字：安装期只判「能不能被 provider 当参数描述吃掉」。
+	Input         json.RawMessage `json:"input"`
+	ReadOnly      bool            `json:"read_only"`
+	RequiresPanel bool            `json:"requires_panel"`
+	TimeoutMS     int             `json:"timeout_ms"`
+}
+
+// timeout 生效时限：0 = 默认 10s（§6.4）。安装期已把非法的非零值判死，
+// 这里只剩「0 → 默认」一条规则，运行期不再二次判断。
+func (d surfaceToolDecl) timeout() time.Duration {
+	ms := d.TimeoutMS
+	if ms <= 0 {
+		ms = surfaceToolDefaultTimeoutMS
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // surfaceEntryDecl manifest.entries[] 的一项（D-2 的形状：id/title/icon?/order?）。
@@ -835,6 +893,13 @@ func validateSurfaceSource(target string) (surfaceSource, error) {
 	if err := validateSurfaceCommands(mf.ID, mf.Commands); err != nil {
 		return surfaceSource{manifest: mf}, err
 	}
+	// tools[]（§5.3 / §7.3）同样在**写盘前**判死：装上去之后才发现「名字非法 / schema
+	// 不是 object / 没声明 tool.call」只能卸载重装，而那时模型已经看到过一个永远
+	// 调不通的工具。它紧跟 commands 校验：同属「声明即授权」这一层，且都很便宜
+	// （不碰磁盘、不算 hash）。
+	if err := validateSurfaceTools(mf); err != nil {
+		return surfaceSource{manifest: mf}, err
+	}
 
 	entry := strings.TrimSpace(mf.Entry)
 	if entry == "" {
@@ -899,6 +964,165 @@ func validateSurfaceCommands(id string, cmds []string) error {
 		}
 	}
 	return nil
+}
+
+// validateSurfaceTools 校验 manifest.tools[]（D-3：任何一条不过 = 安装 rejected）。
+//
+// 三条取舍，改之前先读：
+//  1. **零条合法**（缺省 / 空数组）：老 manifest 一个 tools 字段都没写，不能因此装不上；
+//  2. **通道声明是硬条件**（§5.2 / §5.1）：有工具却在 data 里没收 tool.call、或在
+//     commands 里没收 tool.result 的插件，装上之后每次调用都只能等超时 —— 那比装不上
+//     更糟（用户看到的是「插件在，工具永远失败」）。reason 点名缺哪一条，作者据此改；
+//  3. **只判形状，不判语义**：required 里的字段是否真在 properties 里、schema 是否有
+//     意义，交给插件自己与模型 —— 这一层多判一次只会把能跑的 schema 判死。
+func validateSurfaceTools(mf surfaceManifest) error {
+	if len(mf.Tools) == 0 {
+		return nil
+	}
+	id := strings.TrimSpace(mf.ID)
+	if len(mf.Tools) > maxSurfaceTools {
+		return fmt.Errorf("%s: tools 有 %d 项，超过 %d 项上限", id, len(mf.Tools), maxSurfaceTools)
+	}
+	if !surfaceDeclares(mf.Data, surfaceToolCallEvent) {
+		return fmt.Errorf("%s: tools 非空但 data 未声明 %q（插件收不到工具调用，每次调用都会超时）", id, surfaceToolCallEvent)
+	}
+	if !surfaceDeclares(mf.Commands, surfaceAgentToolResult) {
+		return fmt.Errorf("%s: tools 非空但 commands 未声明 %q（插件无法回结果，每次调用都会超时）", id, surfaceAgentToolResult)
+	}
+	seen := make(map[string]struct{}, len(mf.Tools))
+	for i, t := range mf.Tools {
+		name := strings.TrimSpace(t.Name)
+		if !surfaceToolNamePattern.MatchString(name) {
+			return fmt.Errorf("%s: tools[%d].name 不合法：%q（需匹配 ^[a-z][a-z0-9_]{0,40}$）", id, i, name)
+		}
+		// `__` 是模型侧名 `plugin__<id>__<name>` 的分隔符：工具名里再出现就分不清
+		// 「这条工具属于哪个插件、叫什么」，跨插件拒绝也就判不干净。
+		if strings.Contains(name, "__") {
+			return fmt.Errorf("%s: tools[%d].name 不许含 %q（%q 是模型侧名 plugin__<id>__<name> 的分隔符）", id, i, "__", name)
+		}
+		if _, dup := seen[name]; dup {
+			// 重复名 = 同一插件里两个工具抢一个模型侧名：后注册的静默覆盖前一个，
+			// 装完再发现只能卸载重装（与 entries 的 id 重复同一条理由）。
+			return fmt.Errorf("%s: tools 的 name 重复：%q（同一插件内工具名必须唯一）", id, name)
+		}
+		seen[name] = struct{}{}
+		// 描述是审批卡片上唯一的人读说明（§6.4）：空描述等于让用户在不知情的情况下授权。
+		desc := strings.TrimSpace(t.Description)
+		if desc == "" {
+			return fmt.Errorf("%s: tools[%d] (%s) 缺 description（审批卡片要显示它）", id, i, name)
+		}
+		if n := len([]rune(desc)); n > maxSurfaceToolDescriptionChars {
+			return fmt.Errorf("%s: tools[%d] (%s) 的 description 过长（%d 字符，上限 %d）",
+				id, i, name, n, maxSurfaceToolDescriptionChars)
+		}
+		// 模型侧全名 `plugin__<id>__<name>` 是 provider 请求里的 function name（硬上限 64）：
+		// id 与 name 各自合法也可能拼出超长名字，而超长在 provider 侧是**整轮 400**，
+		// 不是截断 —— 只能安装期拦，reason 给出实际长度便于作者改短。
+		full := pluginToolName(id, name)
+		if n := len(full); n > maxSurfaceToolFullNameChars {
+			return fmt.Errorf("%s: tools[%d] 的模型侧全名 %q 有 %d 字节，超过 %d 上限（name 或 id 需改短）",
+				id, i, full, n, maxSurfaceToolFullNameChars)
+		}
+		if err := validateSurfaceToolInput(id, i, name, t.Input); err != nil {
+			return err
+		}
+		// 0 = 默认 10s；非零必须在 [100ms, 60s]（§6.4）。负数与 1ms 同样拒绝：
+		// 它们不是「更快」，是「调用必然打不满一次插件往返」。
+		if ms := t.TimeoutMS; ms != 0 && (ms < surfaceToolMinTimeoutMS || ms > surfaceToolMaxTimeoutMS) {
+			return fmt.Errorf("%s: tools[%d] (%s) 的 timeout_ms = %d，必须在 [%d, %d]（0 = 默认 %d ms）",
+				id, i, name, ms, surfaceToolMinTimeoutMS, surfaceToolMaxTimeoutMS, surfaceToolDefaultTimeoutMS)
+		}
+	}
+	return nil
+}
+
+// validateSurfaceToolInput 校验单个工具的参数 schema（§5.3）。
+//
+// 「必须是 JSON object 且 type=object」是硬条件：模型侧 schema 会被 provider 直接
+// 翻成请求参数描述，一个 `{"type":"string"}` 的 input 在那边是非法请求（整轮 400），
+// 而这跟插件作者写的意图无关 —— 只能安装期拦住。
+func validateSurfaceToolInput(id string, index int, name string, raw json.RawMessage) error {
+	where := fmt.Sprintf("%s: tools[%d] (%s) 的 input", id, index, name)
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return fmt.Errorf(`%s 缺失：必须是 JSON object（如 {"type":"object","properties":{}}）`, where)
+	}
+	if trimmed[0] != '{' {
+		return fmt.Errorf("%s 必须是 JSON object（实际以 %q 开头）", where, trimmed[0])
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return fmt.Errorf("%s 不是合法 JSON：%v", where, err)
+	}
+	rawType, ok := obj["type"]
+	if !ok {
+		return fmt.Errorf(`%s 缺 "type"：必须是 "object"`, where)
+	}
+	var typ string
+	if err := json.Unmarshal(rawType, &typ); err != nil || typ != "object" {
+		return fmt.Errorf(`%s 的 "type" 必须是 "object"（实际 %s）`, where, string(bytes.TrimSpace(rawType)))
+	}
+	// required / properties 只判形状：两者是 provider 侧最常被直接消费的两个键，
+	// 形状错了同样是整轮请求失败，而语义（必填是否在 properties 里）不归这一层管。
+	if rawReq, ok := obj["required"]; ok {
+		var req []string
+		if err := json.Unmarshal(rawReq, &req); err != nil {
+			return fmt.Errorf(`%s 的 "required" 必须是字符串数组`, where)
+		}
+	}
+	if rawProps, ok := obj["properties"]; ok {
+		var props map[string]json.RawMessage
+		if err := json.Unmarshal(rawProps, &props); err != nil {
+			return fmt.Errorf(`%s 的 "properties" 必须是对象`, where)
+		}
+	}
+	// $ref：P2 不做引用解析（既没有解析器，也没有「能指向哪」的白名单）。允许了就等于
+	// 让 manifest 声明一个宿主永远不会展开的 schema —— 模型看到的是无法满足的参数。
+	if path, found := findSurfaceToolRef(trimmed); found {
+		return fmt.Errorf(`%s 不许含 "$ref"（%s）：P2 只支持内联定义`, where, path)
+	}
+	// 体积按**紧凑序列化后**的字节数算（与真正发给 provider 的形状同口径）。
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, trimmed); err != nil {
+		return fmt.Errorf("%s 不是合法 JSON：%v", where, err)
+	}
+	if n := compact.Len(); n > maxSurfaceToolInputBytes {
+		return fmt.Errorf("%s 有 %d 字节，超过 16 KiB 上限", where, n)
+	}
+	return nil
+}
+
+// findSurfaceToolRef 在内联 schema 里找 `$ref` 键，返回它的路径（"input.properties.x.$ref"）。
+//
+// 走解码后的 any 而不是正则在原文里搜：`{"description":"别用 $ref"}` 是合法描述，
+// 正则会把作者的解释当成引用拒掉 —— 那是最典型的假红。
+func findSurfaceToolRef(raw []byte) (string, bool) {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", false
+	}
+	return walkSurfaceToolRef(v, "input")
+}
+
+func walkSurfaceToolRef(v any, path string) (string, bool) {
+	switch node := v.(type) {
+	case map[string]any:
+		for k, child := range node {
+			if k == "$ref" {
+				return path + "." + k, true
+			}
+			if p, found := walkSurfaceToolRef(child, path+"."+k); found {
+				return p, true
+			}
+		}
+	case []any:
+		for i, child := range node {
+			if p, found := walkSurfaceToolRef(child, fmt.Sprintf("%s[%d]", path, i)); found {
+				return p, true
+			}
+		}
+	}
+	return "", false
 }
 
 // resolveSurfaceEntry 把 manifest 的 entry 解析成 target 内的真实文件路径。

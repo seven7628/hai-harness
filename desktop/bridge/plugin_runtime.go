@@ -272,6 +272,9 @@ func (m *manager) closePluginRuntime(pluginID string) {
 	if !ok || ws == nil {
 		return
 	}
+	// 插件没了 = 等待中的工具调用再也回不来（§6.4 plugin_unloaded）：立即失败，
+	// 别让模型等满 manifest 的 deadline 才发现插件已经卸载。
+	m.failSurfaceAgentToolCalls(pluginID, surfaceReasonPluginUnloaded, "插件已卸载或停用，工具结果不会再回来")
 	ws.mu.Lock()
 	items := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {

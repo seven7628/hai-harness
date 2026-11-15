@@ -139,6 +139,12 @@ func (m *manager) buildPluginEngine(ws *workspaceRuntime, sid, prov, model, effo
 	applyPluginToolPolicy(eng)
 	// P2 的插件工具（plugin__<id>__<name>）装配点就在这里 —— 只对 ws.pluginID 注册，
 	// 且只在 runtimePlugin 上走到本函数。项目 runtime 没有这条路径（D10）。
+	//
+	// 放在 applyPluginToolPolicy **之后**：代理工具名一定不含 denylist 里的名字，
+	// 先注册也只是让「撤下」这一步多看几眼；但顺序反过来（先注册工具、后装 filter）
+	// 会让运行期新建的代理工具漏过 filter —— 一次装配只发生一次，仍按「策略先就位」
+	// 写，读代码时不用在脑子里排时序。
+	m.registerPluginProxyTools(eng, ws, sid)
 	return eng, effortRef
 }
 

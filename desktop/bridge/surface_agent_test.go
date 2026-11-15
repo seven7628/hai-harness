@@ -233,7 +233,7 @@ func surfaceAuditRows(t *testing.T, m *manager) []map[string]any {
 	var out []map[string]any
 	for _, rec := range auditLines(t, m) {
 		switch rec["action"] {
-		case "agent_run", "tool_result":
+		case "agent_run", "tool_call":
 			out = append(out, rec)
 		}
 	}
@@ -862,24 +862,28 @@ func TestSurfaceAgentCancelCrossSurface(t *testing.T) {
 	close(gate.release)
 }
 
-// ---- ⑤ tool.result：只做形状 + 审计 ----
+// ---- ⑤ tool.result：真实 resolve 的三条分支（P2）----
+//
+// P1 只判形状；P2 接上等待表之后，这里钉的是「没有等待者时**不产生任何副作用**」：
+// 回执照样 ok（幂等），审计留 no_such_call。真正的 resolve 路径见
+// plugin_proxy_tool_test.go 的全链路/跨插件/超时用例（那里有活的 waiter）。
 
 func TestSurfaceAgentToolResultShape(t *testing.T) {
 	m, buf := testManager(t)
 	fakeSurface(t, m, "demo", true, agentCommands)
 
-	// ① 形状合法：即使没有任何等待中的 call 也回 ok（P1 不接 waiter）。
+	// ① 形状合法但没有等待者：回 ok（幂等），不产生任何副作用。
 	resp := pluginResp(t, m, buf, 1, "surface_agent", agentPayload("demo", surfaceAgentToolResult,
 		map[string]any{"call_id": "call-1", "ok": true, "result": map[string]any{"n": 1}}))
 	if resp["ok"] != true {
-		t.Fatalf("tool.result = %v，want ok:true", resp)
+		t.Fatalf("tool.result = %v，want ok:true（没有等待者也是幂等成功）", resp)
 	}
 
-	// ② 失败结果也是合法形状（ok:false + error），回执同样是 ok:true。
+	// ② 失败结果同样是合法形状（ok:false + error），回执 ok:true。
 	resp = pluginResp(t, m, buf, 2, "surface_agent", agentPayload("demo", surfaceAgentToolResult,
 		map[string]any{"call_id": "call-2", "ok": false, "error": "插件内部失败"}))
 	if resp["ok"] != true {
-		t.Fatalf("失败结果被拒 = %v（P1 只校验形状，不判断结果语义）", resp)
+		t.Fatalf("失败结果被拒 = %v（形状合法就该收，语义由真实 waiter 判）", resp)
 	}
 
 	// ③ 缺 call_id → invalid_input（形状不合法才是错误）。
@@ -887,25 +891,33 @@ func TestSurfaceAgentToolResultShape(t *testing.T) {
 		map[string]any{"ok": true}))
 	assertDenied(t, resp, surfaceReasonInvalidInput)
 
-	// ④ 审计：每次 tool.result 一行（**含被拒的那次** —— 拒绝也要留下痕迹，
-	//    否则「插件到底回没回」这件事在审计里少一半），tool=call_id、ok 跟随结果。
+	// ④ ok 不是布尔 → invalid_input：既不能当成功，也不能当失败。
+	resp = pluginResp(t, m, buf, 4, "surface_agent", agentPayload("demo", surfaceAgentToolResult,
+		map[string]any{"call_id": "call-3", "ok": "true"}))
+	assertDenied(t, resp, surfaceReasonInvalidInput)
+
+	// ⑤ 审计：每次 tool.result 一行（**含被拒的那两次** —— 拒绝也要留下痕迹，
+	//    否则「插件到底回没回」这件事在审计里少一半）。action 自 P2 起并入 tool_call。
 	var rows []map[string]any
 	for _, rec := range surfaceAuditRows(t, m) {
-		if rec["action"] == "tool_result" {
+		if rec["action"] == "tool_call" {
 			rows = append(rows, rec)
 		}
 	}
-	if len(rows) != 3 {
-		t.Fatalf("tool_result 审计行数 = %d，want 3（两次回执 + 一次形状拒绝）：%v", len(rows), rows)
+	if len(rows) != 4 {
+		t.Fatalf("tool_call 审计行数 = %d，want 4（两次无 waiter 回执 + 两次形状拒绝）：%v", len(rows), rows)
 	}
-	if rows[0]["tool"] != "call-1" || rows[0]["ok"] != true {
-		t.Fatalf("audit[0] = %v，want {tool:call-1, ok:true}", rows[0])
+	if rows[0]["tool"] != "call-1" || rows[0]["ok"] != false || rows[0]["reason"] != surfaceToolReasonNoSuchCall {
+		t.Fatalf("audit[0] = %v，want {tool:call-1, ok:false, reason:no_such_call}", rows[0])
 	}
-	if rows[1]["tool"] != "call-2" || rows[1]["ok"] != false {
-		t.Fatalf("audit[1] = %v，want {tool:call-2, ok:false}", rows[1])
+	if rows[1]["tool"] != "call-2" || rows[1]["ok"] != false || rows[1]["reason"] != surfaceToolReasonNoSuchCall {
+		t.Fatalf("audit[1] = %v，want {tool:call-2, ok:false, reason:no_such_call}", rows[1])
 	}
 	if rows[2]["ok"] != false || rows[2]["reason"] != surfaceReasonInvalidInput {
 		t.Fatalf("audit[2] = %v，want {ok:false, reason:invalid_input}", rows[2])
+	}
+	if rows[3]["ok"] != false || rows[3]["reason"] != surfaceReasonInvalidInput {
+		t.Fatalf("audit[3] = %v，want {ok:false, reason:invalid_input}", rows[3])
 	}
 }
 

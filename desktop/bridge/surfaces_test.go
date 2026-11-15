@@ -1107,3 +1107,324 @@ func TestSurfaceInstallRejectsRetiredCommands(t *testing.T) {
 		}
 	})
 }
+
+// ---- 工具声明 tools[]（P2a / 09-agent-bridge §5.3 · §6.4 · §7.3）----
+//
+// 与 entries 同一套不变式（见 TestSurfaceEntriesRejectedBeforeWrite 的文件头）：
+// 校验先于写盘 —— 任何一条不过都 `rejected`，index **逐字节**不变、不留半个目录。
+//
+// 为什么单开：tools[] 是**模型可见**的声明（schema 直接进 provider 请求），
+// 比 entries 多两类失败（schema 形状、通道声明），混进既有表格会让「哪一条坏了」
+// 只能靠 reason 猜。
+
+// toolChannels 一份声明了两条工具通道的 manifest 片段（缺通道的用例自己删）。
+func toolChannels() (cmds, data []string) {
+	return []string{surfaceAgentToolResult}, []string{surfaceToolCallEvent}
+}
+
+// toolDecl 造一条工具声明（input 由调用方给，可用 map 或 []any 等任意 JSON 值）。
+func toolDecl(name, desc string, input any) map[string]any {
+	d := map[string]any{"name": name, "description": desc}
+	if input != nil {
+		d["input"] = input
+	}
+	return d
+}
+
+// withChannelTools 把 tools / commands / data 一起写进 manifest（三者必须同进同退）。
+func withChannelTools(cmds, data []string, tools ...any) fixtureOpt {
+	return withManifest(func(m map[string]any) {
+		m["commands"] = cmds
+		m["data"] = data
+		if tools != nil {
+			m["tools"] = tools
+		}
+	})
+}
+
+// withTools 声明两条工具通道都已就位的 tools（绝大多数用例的起点）。
+func withTools(tools ...any) fixtureOpt {
+	cmds, data := toolChannels()
+	return withChannelTools(cmds, data, tools...)
+}
+
+// wantObjSchema 一份最小合法 input。
+func wantObjSchema() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"q": map[string]any{"type": "string"}},
+		"required":   []string{"q"},
+	}
+}
+
+func TestSurfaceToolsRejectedBeforeWrite(t *testing.T) {
+	// 17 项：前 16 项都合法（任一项单独都能过），第 17 项让「超上限」成为唯一失败原因。
+	tooMany := make([]any, 0, 17)
+	for i := 0; i < 17; i++ {
+		tooMany = append(tooMany, toolDecl(fmt.Sprintf("tool_%02d", i), fmt.Sprintf("工具 %d", i), wantObjSchema()))
+	}
+
+	cases := []struct {
+		name   string
+		opts   []fixtureOpt
+		reason string // reason 里必须出现的子串
+	}{
+		{
+			name: "data 未声明 tool.call",
+			opts: []fixtureOpt{withChannelTools([]string{surfaceAgentToolResult}, []string{"agent.delta"},
+				toolDecl("echo", "回显", wantObjSchema()))},
+			reason: surfaceToolCallEvent,
+		},
+		{
+			name: "commands 未声明 tool.result",
+			opts: []fixtureOpt{withChannelTools([]string{surfaceAgentRunName}, []string{surfaceToolCallEvent},
+				toolDecl("echo", "回显", wantObjSchema()))},
+			reason: surfaceAgentToolResult,
+		},
+		{
+			name: "重复 name",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "第一次", wantObjSchema()),
+				toolDecl("echo", "第二次", wantObjSchema()))},
+			reason: "name 重复",
+		},
+		{
+			// `__` 是模型侧名 plugin__<id>__<name> 的分隔符：工具名带头会把归属判成一团。
+			name: "name 含 __",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo__v2", "带分隔符的名字", wantObjSchema()))},
+			reason: "__",
+		},
+		{
+			name: "name 非法（大写 + 连字符）",
+			opts: []fixtureOpt{withTools(
+				toolDecl("Echo-Tool", "大写与连字符", wantObjSchema()))},
+			reason: "name 不合法",
+		},
+		{
+			name: "缺 description",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "   ", wantObjSchema()))},
+			reason: "description",
+		},
+		{
+			name: "description 超 300 字符",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", strings.Repeat("回", 301), wantObjSchema()))},
+			reason: "过长",
+		},
+		{
+			name: "input 缺失",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "回显", nil))},
+			reason: "input 缺失",
+		},
+		{
+			name: "input 不是 object（数组）",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "回显", []any{}))},
+			reason: "JSON object",
+		},
+		{
+			name: "input.type 不是 object（string）",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "回显", map[string]any{"type": "string"}))},
+			reason: `"type" 必须是 "object"`,
+		},
+		{
+			name: "input 含 $ref",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "回显", map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"q": map[string]any{"$ref": "#/definitions/q"}},
+				}))},
+			reason: "$ref",
+		},
+		{
+			name: "input.required 不是字符串数组",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "回显", map[string]any{
+					"type": "object", "properties": map[string]any{}, "required": []any{1, 2},
+				}))},
+			reason: "required",
+		},
+		{
+			name: "input.properties 不是对象",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "回显", map[string]any{
+					"type": "object", "properties": []any{"q"},
+				}))},
+			reason: "properties",
+		},
+		{
+			// 16 KiB 按紧凑序列化后算：17 KiB 的描述性字段让「超体积」成为唯一失败原因。
+			// 其余字段全部合法 —— 否则这条会红在别处，测不到体积闸。
+			name: "input 超 16 KiB",
+			opts: []fixtureOpt{withTools(
+				toolDecl("echo", "回显", map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"q": map[string]any{"type": "string", "description": strings.Repeat("x", 17<<10)}},
+				}))},
+			reason: "16 KiB",
+		},
+		{
+			// id 与 name **各自**都合法（id ≤41、name ≤41），拼出来的
+			// plugin__<id>__<name>（8+41+2+41 = 92）却超过 OpenAI 的 64 —— 这类超限
+			// 只能在这里拦：provider 侧超长是整轮 400，不是截断。
+			name: "模型侧全名超 64",
+			opts: []fixtureOpt{
+				// id 41 + name 41 都各自合法，拼起来 8+41+2+41 = 92 > 64。
+				withManifest(func(m map[string]any) { m["id"] = strings.Repeat("i", 41) }),
+				withTools(toolDecl(strings.Repeat("n", 41), "名字很长但各自合法", wantObjSchema())),
+			},
+			reason: "超过 64",
+		},
+		{
+			name:   "17 项（超 16 上限）",
+			opts:   []fixtureOpt{withTools(tooMany...)},
+			reason: "超过 16 项",
+		},
+		{
+			name: "timeout_ms 太小",
+			opts: []fixtureOpt{withTools(
+				func() map[string]any {
+					d := toolDecl("echo", "回显", wantObjSchema())
+					d["timeout_ms"] = 50
+					return d
+				}())},
+			reason: "timeout_ms",
+		},
+		{
+			name: "timeout_ms 太大",
+			opts: []fixtureOpt{withTools(
+				func() map[string]any {
+					d := toolDecl("echo", "回显", wantObjSchema())
+					d["timeout_ms"] = 60001
+					return d
+				}())},
+			reason: "timeout_ms",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st, root := testSurfaceStore(t)
+			// 先装一个合法的：让「index 一个字节没变」有真内容可比。
+			okSrc := surfaceFixture(t, "baseline", "1.0.0", "export default () => null\n")
+			if r := st.Install(okSrc, true); r.Status != surfaceApplied {
+				t.Fatalf("基线安装失败: %+v", r)
+			}
+			before := readBytes(t, filepath.Join(root, "index.json"))
+			entriesBefore, _ := os.ReadDir(root)
+
+			bad := surfaceFixture(t, "tool-panel", "1.0.0", "export default () => null\n", c.opts...)
+			rec := st.Install(bad, true)
+			if rec.Status != surfaceRejected {
+				t.Fatalf("status = %q，want %q（reason=%q）", rec.Status, surfaceRejected, rec.Reason)
+			}
+			if !strings.Contains(rec.Reason, c.reason) {
+				t.Fatalf("reason = %q，必须包含 %q（可读、指向具体问题）", rec.Reason, c.reason)
+			}
+
+			after := readBytes(t, filepath.Join(root, "index.json"))
+			if string(before) != string(after) {
+				t.Fatalf("校验失败却改了 index：\nbefore=%s\nafter=%s", before, after)
+			}
+			// 没半个目录：根目录条目集合不变（只可能多出 audit.jsonl）。
+			entriesAfter, _ := os.ReadDir(root)
+			for _, e := range entriesAfter {
+				found := false
+				for _, b := range entriesBefore {
+					if b.Name() == e.Name() {
+						found = true
+						break
+					}
+				}
+				if !found && e.Name() != "audit.jsonl" {
+					t.Fatalf("校验失败后多出了 %q（不许留半个目录/暂存目录）", e.Name())
+				}
+			}
+			notExist(t, filepath.Join(root, "tool-panel"))
+			noStagingLeftovers(t, root)
+		})
+	}
+}
+
+// TestSurfaceToolsInstallRoundTrip：合法 tools[] 装得上，且 Manifest() 读回来的是
+// 作者写的那一份（模型侧 schema 与审批声明都来自这次读取，不是安装期缓存）。
+func TestSurfaceToolsInstallRoundTrip(t *testing.T) {
+	st, root := testSurfaceStore(t)
+	src := surfaceFixture(t, "tool-panel", "1.0.0", "export default () => null\n",
+		withTools(
+			func() map[string]any {
+				d := toolDecl("echo", "回显一段文本", wantObjSchema())
+				d["read_only"] = true
+				return d
+			}(),
+			func() map[string]any {
+				d := toolDecl("write_note", "写一条便签", wantObjSchema())
+				d["requires_panel"] = true
+				d["timeout_ms"] = 30000
+				return d
+			}()))
+	rec := st.Install(src, true)
+	if rec.Status != surfaceApplied {
+		t.Fatalf("合法 tools 装不上：%+v", rec)
+	}
+	mf, err := st.Manifest("tool-panel")
+	if err != nil {
+		t.Fatalf("Manifest: %v", err)
+	}
+	if len(mf.Tools) != 2 {
+		t.Fatalf("tools 条数 = %d，want 2：%+v", len(mf.Tools), mf.Tools)
+	}
+	echo, note := mf.Tools[0], mf.Tools[1]
+	if echo.Name != "echo" || echo.Description != "回显一段文本" || !echo.ReadOnly || echo.RequiresPanel {
+		t.Fatalf("echo 读回来变了：%+v", echo)
+	}
+	if echo.TimeoutMS != 0 || echo.timeout() != time.Duration(surfaceToolDefaultTimeoutMS)*time.Millisecond {
+		t.Fatalf("echo timeout = %d/%s，want 0 且生效 10s", echo.TimeoutMS, echo.timeout())
+	}
+	if note.Name != "write_note" || note.ReadOnly || !note.RequiresPanel || note.TimeoutMS != 30000 {
+		t.Fatalf("write_note 读回来变了：%+v", note)
+	}
+	// schema 原样可读（渲染层/模型侧都读这一份：键名与 required 一个不丢）。
+	var schema map[string]any
+	if err := json.Unmarshal(note.Input, &schema); err != nil {
+		t.Fatalf("input 不是合法 JSON：%v", err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("input.type = %v，want object", schema["type"])
+	}
+	if req, _ := schema["required"].([]any); len(req) != 1 || req[0] != "q" {
+		t.Fatalf("input.required = %v，want [q]", schema["required"])
+	}
+	_, idx := readIndex(t, root)
+	if len(idx.Items) != 1 || idx.Items[0]["id"] != "tool-panel" {
+		t.Fatalf("index = %v，want 只有 tool-panel", idx.Items)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tool-panel", "surface.json")); err != nil {
+		t.Fatalf("正对照没真的拷贝：%v", err)
+	}
+}
+
+// TestSurfaceToolsAbsentUnaffected：老 manifest（一个 tools 字段都没有）不受影响 ——
+// 这条闸只关「声明了工具」的插件，不能把既有插件判死。
+func TestSurfaceToolsAbsentUnaffected(t *testing.T) {
+	st, root := testSurfaceStore(t)
+	src := surfaceFixture(t, "legacy-panel", "1.0.0", "export default () => null\n")
+	if rec := st.Install(src, true); rec.Status != surfaceApplied {
+		t.Fatalf("无 tools 的老 manifest 被拒了：%+v", rec)
+	}
+	mf, err := st.Manifest("legacy-panel")
+	if err != nil {
+		t.Fatalf("Manifest: %v", err)
+	}
+	if len(mf.Tools) != 0 {
+		t.Fatalf("没有 tools 的 manifest 读出了 %+v", mf.Tools)
+	}
+	_, idx := readIndex(t, root)
+	if len(idx.Items) != 1 {
+		t.Fatalf("index = %v", idx.Items)
+	}
+}
