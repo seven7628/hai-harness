@@ -2760,11 +2760,32 @@ class MockTransport implements Transport {
           this.respondErr(cmd, 'task_id and text are required')
           break
         }
-        if (taskId === 'task-finished') {
+        // 后端对已结束任务的语义：自动原地续跑，再把这句话作为普通 inbox 消息投递。
+        // mock 用 task-finished 复现这条闭环（task_started → 新 agent_start → user_message）；
+        // task-rejected 保留「后端拒绝 → 前端回滚」的失败路径。
+        if (taskId === 'task-rejected') {
           this.respondErr(cmd, 'task already finished')
           break
         }
-        this.respond(cmd, {})
+        const resumed = taskId === 'task-finished'
+        this.respond(cmd, resumed ? { resumed: true, task_id: taskId } : {})
+        if (resumed) {
+          const runId = `run-resumed-${Date.now()}`
+          this.afterBg(40, () => this.emit({
+            event_type: 'task_started', session_id: sid, task_id: taskId,
+            name: 'resumed', timestamp: Date.now(),
+          }), sid)
+          this.afterBg(80, () => this.emit({
+            event_type: 'agent_start', session_id: sid, run_id: runId,
+            parent_run_id: 'root', depth: 1, task_id: taskId, name: 'resumed',
+            timestamp: Date.now(),
+          }), sid)
+          this.afterBg(120, () => this.emit({
+            event_type: 'agent_user_message', session_id: sid, task_id: taskId,
+            run_id: runId, text, source: 'user', timestamp: Date.now(),
+          }), sid)
+          break
+        }
         this.afterBg(120, () => this.emit({
           event_type: 'agent_user_message', session_id: sid, task_id: taskId,
           text, source: 'user', timestamp: Date.now(),

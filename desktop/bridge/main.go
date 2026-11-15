@@ -400,6 +400,10 @@ type bridgeSession struct {
 	// hubEngine Hub 会话的工具引擎（记忆/人格变更后重建 loop 时复用：
 	// 重建引擎会丢掉正在运行的工具任务与审批等待，没必要）。
 	hubEngine *tools.Engine
+	// resumeTask 用户对**已结束**子 agent 发送消息时的原地续跑入口（nil = 本会话
+	// 没有装配 agent_resume，例如 Work 模式或旧会话）。agent_send 命令在
+	// Registry.Send 返回 ErrTaskFinished 时调用它，而不是让用户先手动恢复。
+	resumeTask func(ctx context.Context, taskID, message string) (string, error)
 	// hubPumpQueue 根 run 结束时推进 Hub 派发队列（nil = 未接线）。
 	hubPumpQueue func(workspace, sessionID string)
 	// hubTaskIDs 本批 UserInputsConsumed 里的 hub_task id（P2-04 相关性）。
@@ -2326,15 +2330,17 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	var effortRef *subagentEffortRef
 	var skillCaps *skills.Capabilities
 	var hubEng *tools.Engine
+	var eng *tools.Engine
 	if opts.hub != nil {
 		// Hub 智能体：工具面 + 提示词都按 Profile 装配（§6.2），与项目会话共用内核。
-		eng, eRef := m.buildHubEngine(ws, id, opts.hub, reg, qw, func() context.Context { return s.Context() })
+		var eRef *subagentEffortRef
+		eng, eRef = m.buildHubEngine(ws, id, opts.hub, reg, qw, func() context.Context { return s.Context() })
 		loop = m.buildHubLoop(ws, id, opts.hub, eng)
 		effortRef = eRef
 		skillCaps = skillCapabilitiesFor(m.provCfg, opts.hub.Agent.Provider, opts.hub.Agent.Model, eng)
 		hubEng = eng
 	} else {
-		loop, effortRef, skillCaps = m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
+		loop, effortRef, skillCaps, eng = m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
 			func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
 	}
 	startupLog("A6.buildLoop", loopStart)
@@ -2406,6 +2412,8 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	bs.hubAlert = func(code, message string) {
 		m.emitHubAlert(hubAlertEvent{Code: code, Message: message})
 	}
+	// 用户对已结束子 agent 说话：agent_send 命令在 ErrTaskFinished 时走这里自动续跑。
+	wireAgentResume(bs, eng)
 	if opts.hub != nil {
 		// Hub 会话的 provider/model 来自 Profile（不是全局 active），persona 标记为 hub：
 		// rebuildLoop 据此走 buildHubLoop，而不会被当成项目会话的 code persona 重建。
@@ -2544,7 +2552,7 @@ func (m *manager) resp(c command, ok bool, errMsg string, data map[string]any) {
 // 认证失败/配置错误/超时/限流/永久错误，而非解析 error 字符串。code 为空 = 兼容旧行为。
 // 高频语义错误（认证/超时/配置/限流/not_found）在调用点显式传 code。
 // sendErrCode 把 Registry.Send 的三种失败翻成可区分的错误码：
-// 前端据此给不同的说法（「已结束 → 需要恢复」/「队列满 → 稍后再发」/「找不到任务」）。
+// 前端据此给不同的说法（「已结束且无法自动续跑」/「队列满 → 稍后再发」/「找不到任务」）。
 // 都回同一个 "failed" 的话，用户只会看到「发送失败」，无从判断该做什么。
 func sendErrCode(err error) string {
 	switch {
@@ -3399,8 +3407,9 @@ func (m *manager) dispatch(c command) {
 		//
 		// 与模型的 agent_send 工具同一条通道（Registry.Send → Task.inbox）：子智能体是
 		// 独立上下文，用户「让它改一下」和模型再派它一次不是同一件事。
-		// 只投运行中的任务：已结束的要 agent_resume（重跑），未知 id 直接报错 ——
-		// 三种情况在 UI 上是三句不同的话，不能都回「失败」。
+		// 运行中直接投；已结束则**自动原地续跑**再投（用户不需要先手动恢复）——
+		// 这句话作为普通 inbox 消息在续跑第一次 Poll 前送达，前端照常收到
+		// AgentUserMessage 并出队。未知 id / 无 checkpoint 仍明确报错。
 		bs := m.get(ws, sid)
 		if bs == nil {
 			m.respCode(c, false, "session not found", "session_not_found", nil)
@@ -3418,7 +3427,21 @@ func (m *manager) dispatch(c command) {
 			return
 		}
 		if err := reg.Send(taskID, text); err != nil {
-			// ErrTaskFinished / ErrTaskInboxFull / 未知任务：原样回传，前端据此给不同的说法
+			if errors.Is(err, subagent.ErrTaskFinished) && bs.resumeTask != nil {
+				ctx := bs.ctx
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				resumedID, rerr := bs.resumeTask(ctx, taskID, text)
+				if rerr != nil {
+					m.respCode(c, false, rerr.Error(), "resume_failed", nil)
+					return
+				}
+				m.resp(c, true, "", map[string]any{"resumed": true, "task_id": resumedID})
+				return
+			}
+			// ErrTaskFinished（本会话没有 resume 入口）/ ErrTaskInboxFull / 未知任务：
+			// 原样回传，前端据此给不同的说法。
 			m.respCode(c, false, err.Error(), sendErrCode(err), nil)
 			return
 		}
@@ -6067,6 +6090,30 @@ func toolSpillDir(sid string) string {
 	return filepath.Join(os.TempDir(), "hai-harness-toolspill", safe)
 }
 
+// wireAgentResume 把本会话的 agent_resume 工具接到 bridgeSession.resumeTask。
+// 只在工具确实存在时接线（Work 模式 / 旧会话 / 插件 denylist 可能没有 agent 家族）：
+// agent_send 命令据此决定「已结束 → 自动续跑」还是「回 task_finished」。
+func wireAgentResume(bs *bridgeSession, eng *tools.Engine) {
+	if bs == nil || eng == nil || bs.s == nil {
+		return
+	}
+	t, err := eng.GetTool(context.Background(), "agent_resume")
+	if err != nil {
+		return
+	}
+	rt, ok := t.(interface {
+		ResumeWithMessage(ctx context.Context, taskID, message string) (string, error)
+	})
+	if !ok {
+		return
+	}
+	bs.resumeTask = func(ctx context.Context, taskID, message string) (string, error) {
+		handler := func(_ context.Context, e events.Event) { bs.emit(e) }
+		tctx := events.WithToolContextForRunTask(ctx, "", "", "", 0, handler, nil, bs.s.Hooks())
+		return rt.ResumeWithMessage(tctx, taskID, message)
+	}
+}
+
 // newSessionEngine 项目 / Hub 会话的工具引擎（record/journal 的会话子树根 = wsSessionsDir(workspace)）。
 //
 // 插件虚拟 Project 走 newSessionEngineAt（sessionsRoot 由 runtime 提供，见 09 §4.3 第 3 点）；
@@ -6264,7 +6311,7 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 // buildLoop 用**调用方给的 runtime** 装配 loop（方案 §6.1.2）：技能/插件/MCP/子代理
 // 全部取 ws 上的实例，绝不按路径再查一次 —— m.runtime(ws.path) 在 Hub 智能体的 home
 // 上会造出一个「项目 kind」的运行时，把项目层重新读进来（P0-08 复审的设计要点）。
-func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities) {
+func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities, *tools.Engine) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -6455,7 +6502,7 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 	// 第三项 = 本次装配用的技能能力面：调用方（rebuildLoop / 会话创建）存进
 	// bridgeSession.skillCaps，宿主 UI 的 skills 命令读同一对象 ——
 	// 保证「面板显示可用的」与「loop 实际注入清单的」是同一份判定，不是两次重算。
-	return loop, effortRef, skillCaps
+	return loop, effortRef, skillCaps, eng
 }
 
 // rebuildLoop 按当前 persona/model/effort 重建会话 loop（switch_model/switch_persona/set_provider 共用）。
@@ -6465,6 +6512,7 @@ func (m *manager) rebuildLoop(bs *bridgeSession) {
 	// Hub 会话（persona=hub）不在 profiles 表里：必须走 Hub 装配，否则拿到零值
 	// personaProfile —— L1/L2 丢失、工具面按项目重装（P1-05 复审实测）。
 	if bs.persona == "hub" && bs.hubEngine != nil && m.rebuildHubLoop(bs) {
+		wireAgentResume(bs, bs.hubEngine)
 		return
 	}
 	profile := profiles[bs.persona]
@@ -6479,12 +6527,13 @@ func (m *manager) rebuildLoop(bs *bridgeSession) {
 		return
 	}
 	prov, model, effort := bs.modelCfg()
-	loop, effortRef, caps := m.buildLoop(ws, bs.id, prov, model, effort,
+	loop, effortRef, caps, eng := m.buildLoop(ws, bs.id, prov, model, effort,
 		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, ws.skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
 	bs.s.SetLoop(loop)
 	bs.loop = loop
 	bs.subagentEffort = effortRef // 子 agent 档位持有者随新引擎换代（旧引擎的 loop 已废弃）
 	bs.skillCaps = caps           // 与本次 loop 注入清单的**同一对象**（skills 命令读它）
+	wireAgentResume(bs, eng)
 }
 
 // setGoalAlignmentReminderRounds 把运行中的提醒阈值同步到所有已创建会话。

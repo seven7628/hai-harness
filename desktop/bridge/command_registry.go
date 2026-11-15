@@ -29,7 +29,7 @@ const (
 	//
 	// 与模型调用的 agent_send 工具**同一条通道**（Registry.Send → Task.inbox）：
 	// 子智能体是独立上下文，「我想让它改一下」和模型再派它一次不是一件事。
-	// 语义与工具一致：仅运行中的任务可投；已结束要 agent_resume，未知任务报错。
+	// 运行中直接投；已结束则自动原地续跑（agent_resume 同链路）再投，未知任务报错。
 	CmdAgentSend Command = "agent_send"
 	// CmdBlocksPage 主对话历史分页（「加载更早」）。
 	//

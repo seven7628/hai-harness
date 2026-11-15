@@ -287,19 +287,19 @@ type finishedTask struct {
 // 它的作用只是承载状态字段（parentTaskID/status/usage 等）。
 func (f finishedTask) task(id string) *Task {
 	return &Task{
-		ID:               id,
-		Name:             f.name,
-		ToolName:         f.toolName,
-		Status:           f.status,
-		Result:           f.result,
-		Usage:            f.usage,
-		Err:              f.err,
-		outputFile:       f.outputFile,
-		parentTaskID:     f.parentTaskID,
-		resumedFrom:      f.resumedFrom,
+		ID:                id,
+		Name:              f.name,
+		ToolName:          f.toolName,
+		Status:            f.status,
+		Result:            f.result,
+		Usage:             f.usage,
+		Err:               f.err,
+		outputFile:        f.outputFile,
+		parentTaskID:      f.parentTaskID,
+		resumedFrom:       f.resumedFrom,
 		acceptingDelivery: false,
-		done:             make(chan struct{}),
-		inbox:            make(chan core.Message, 1),
+		done:              make(chan struct{}),
+		inbox:             make(chan core.Message, 1),
 	}
 }
 
@@ -337,7 +337,7 @@ func (r *Registry) reclaimTask(t *Task) {
 	ft := finishedTask{
 		name:         t.Name,
 		toolName:     t.ToolName,
-		status:      t.Status,
+		status:       t.Status,
 		parentTaskID: t.parentTaskID,
 		resumedFrom:  t.resumedFrom,
 		usage:        t.Usage,
@@ -388,8 +388,8 @@ func (r *Registry) evictFinishedLocked() {
 const defaultAsyncTaskTimeout = 12 * time.Hour
 
 type Registry struct {
-	mu           sync.Mutex
-	tasks        map[string]*Task
+	mu    sync.Mutex
+	tasks map[string]*Task
 	// finished 是已结束任务的**紧凑终态摘要**（task id → 摘要）。
 	//
 	// 为什么不是把 Task 对象一直留着（2026-11-09 实测事故）：Task 带 channel/mutex/
@@ -409,7 +409,7 @@ type Registry struct {
 	accumulatedUsage core.Usage
 	// rehydrate 是宿主注入的「按 task id 从 journal 还原已结束任务」的回落器
 	// （nil = 不注入 → 已结束任务只能靠 finished 摘要）。
-	rehydrate func(taskID string) (*Task, bool)
+	rehydrate    func(taskID string) (*Task, bool)
 	sessionCtx   context.Context                                                                   // 批超时豁免的等待 ctx（Session 注入；nil = Background）
 	onTaskDone   func(taskID, name, result string, status TaskStatus, usage core.Usage, err error) // 任务完成回调（宿主接线：自动回传主 Runtime）
 	slots        *SlotPool                                                                         // 主池：写型子 agent（agent_spawn 等）
@@ -589,6 +589,10 @@ type StartOptions struct {
 	//   - journal 是 append-only：续跑在同一份 `<taskId>.jsonl` 追加新的 start 记录，
 	//     跨进程时「最后一条 start + 它的 turn/result」即最后一个生命周期。
 	ReuseTaskID string
+	// InitialInbox 在任务登记后、goroutine 启动前预置的 inbox 消息。用于「用户对已结束
+	// 子 agent 说话」：先原地续跑，再把这句话交给第一次 Poll —— 与运行中 agent_send
+	// 走同一条 AgentUserMessage/转录链路，不会因为「恢复指令」而绕过事件。
+	InitialInbox []core.Message
 }
 
 // Start 启动后台任务：并发槽阻塞获取（ctx 感知——调用方传 Session 级 ctx，
@@ -665,6 +669,15 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 	r.tasks[id] = t
 	r.mu.Unlock()
 
+	// 预置 inbox 必须在 goroutine 启动前完成：子运行第一次 Poll 一定看得到。
+	if err := pushInitialInbox(t, o.InitialInbox); err != nil {
+		r.mu.Lock()
+		delete(r.tasks, id)
+		r.mu.Unlock()
+		release()
+		return nil, err
+	}
+
 	// 先于 goroutine 启动回调：TaskStarted（占位）必然先于子运行事件（agent_start 等）到达宿主
 	if o.OnStarted != nil {
 		o.OnStarted(id)
@@ -680,6 +693,19 @@ func (r *Registry) start(parent context.Context, o StartOptions, run func(contex
 		r.runAndFinalize(t, run)
 	}()
 	return t, nil
+}
+
+// pushInitialInbox 把预置消息非阻塞写入任务 inbox。容量不足时返回 ErrTaskInboxFull
+// （调用方必须回滚任务状态，不能留下「running 但消息没进去」的半启动任务）。
+func pushInitialInbox(t *Task, msgs []core.Message) error {
+	for _, m := range msgs {
+		select {
+		case t.inbox <- m:
+		default:
+			return ErrTaskInboxFull
+		}
+	}
+	return nil
 }
 
 // restart 原地续跑：把**已结束的同一个任务**重新驱动（agent_resume 的会话级恢复路径）。
@@ -737,6 +763,18 @@ func (r *Registry) restart(parent context.Context, o StartOptions, run func(cont
 		t.Err = err
 		t.mu.Unlock()
 		close(t.done)
+		return nil, err
+	}
+
+	// 预置 inbox 必须在 goroutine 启动前完成；失败时把已置 running 的任务如实回退，
+	// 否则 TaskList 会显示一个永远等不到结果的「在跑」任务。
+	if err := pushInitialInbox(t, o.InitialInbox); err != nil {
+		t.mu.Lock()
+		t.Status = TaskFailed
+		t.Err = err
+		t.mu.Unlock()
+		close(t.done)
+		release()
 		return nil, err
 	}
 

@@ -174,6 +174,73 @@ func (t *agentResumeTool) Call(ctx context.Context, _, arguments string) (string
 	return t.spawn.runBackgroundFrom(ctx, tc, childDepth, brief, name, taskID)
 }
 
+// ResumeWithMessage 用户直接对已结束子 agent 说话：原地续跑，并把 message 作为
+// 普通 agent_send 消息投进 inbox（第一次 Poll 前），而不是作为恢复指令塞进初始上下文。
+//
+// 与 Call 的差别只有两点：
+//   - 没有 journal 交接简报回落 —— 用户是在跟**这个子 agent**说话，换一个新 task id
+//     会让前端的队列/卡片/转录全部对不上，宁可明确报「没有可续跑的 checkpoint」；
+//   - 必须带消息，且消息走 InitialInbox（见 runBackgroundResumeWithMessage 的注释）。
+//
+// 导出方法供 bridge 的 agent_send 命令复用；工具类型本身不导出，调用方按接口断言即可。
+func (t *agentResumeTool) ResumeWithMessage(ctx context.Context, taskID, message string) (string, error) {
+	taskID = strings.TrimSpace(taskID)
+	message = strings.TrimSpace(message)
+	if !ValidTaskID(taskID) {
+		return "", fmt.Errorf("agent_resume: valid task_id required")
+	}
+	if message == "" {
+		return "", fmt.Errorf("agent_resume: message required")
+	}
+
+	tc := events.ToolContextFrom(ctx)
+	childDepth := 0
+	if tc != nil {
+		childDepth = tc.Depth + 1
+	}
+	if t.spawn.spec.MaxDepth > 0 && childDepth > t.spawn.spec.MaxDepth {
+		return "", fmt.Errorf("agent_resume: max depth %d exceeded", t.spawn.spec.MaxDepth)
+	}
+
+	src, err := t.resolveSource(taskID)
+	if err != nil {
+		return "", fmt.Errorf("agent_resume: %w", err)
+	}
+	if src.Status == TaskRunning || src.Status == TaskInterrupting {
+		return "", fmt.Errorf("agent_resume: task %s is still %s — use agent_send to steer it", taskID, src.Status)
+	}
+
+	name := strings.TrimSpace(src.Name)
+	if name == "" {
+		name = strings.TrimSpace(src.ToolName)
+	}
+	if name == "" {
+		name = "resumed task"
+	}
+
+	store := t.spawn.spec.Store.nilSafe()
+	st, lerr := store.Load(ctx, taskID)
+	if lerr != nil || st == nil || len(st.Messages) == 0 {
+		return "", fmt.Errorf("agent_resume: task %s has no checkpoint on disk — cannot resume in place", taskID)
+	}
+	if !t.reg.hasTask(taskID) {
+		if rerr := t.reg.adopt(taskID, src.Name, src.ToolName, src.OutputFile); rerr != nil {
+			return "", fmt.Errorf("agent_resume: %w", rerr)
+		}
+	}
+	out, err := t.spawn.runBackgroundResumeWithMessage(ctx, tc, childDepth, taskID, name, message, st)
+	if err != nil {
+		return "", err
+	}
+	var res struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res.TaskID == "" {
+		return "", fmt.Errorf("agent_resume: malformed resume response")
+	}
+	return res.TaskID, nil
+}
+
 // resolveSource 定位恢复来源。两条路径，按优先级：
 //
 //  1. 注册表命中（同一进程内的常见情形）：权限最高的是进程内权威状态 —— 运行中直接拒绝

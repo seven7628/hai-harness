@@ -16,9 +16,9 @@ import (
 // 而不是一律发主会话。落地上它是 bridge 命令 agent_send → subagent.Registry.Send，
 // 与模型调用 agent_send 工具**同一条通道**（同一份 Task.inbox、同一套运行中判定）。
 //
-// 这个命令的关键不是「能发」，而是**三种失败要能分开**：
+// 这个命令的关键不是「能发」，而是**三种情况要能分开**：
 //
-//	· 任务已结束 → 用户该做的是恢复它（agent_resume），不是重发
+//	· 任务已结束 → 自动原地续跑（agent_resume 同链路）后再投，不是让用户先手动恢复
 //	· 队列满     → 稍后再发（消息没有丢，是被拒绝）
 //	· 找不到任务 → 这个 id 根本不存在（视图可能指向了已清理的任务）
 //
@@ -86,7 +86,15 @@ func TestAgentSendCommand(t *testing.T) {
 		t.Fatalf("会话不存在应当回 session_not_found: %+v", r)
 	}
 
-	// ⑤ 任务结束后 → task_finished（前端据此提示「需要恢复」而不是「重发」）
+	// ⑤ 任务结束后 → 自动原地续跑再投（不再让前端先拦「已结束」）
+	if bs.resumeTask == nil {
+		t.Fatal("agent 工具已装配，但 bridgeSession.resumeTask 未接线")
+	}
+	var resumedTask, resumedText string
+	bs.resumeTask = func(_ context.Context, taskID, message string) (string, error) {
+		resumedTask, resumedText = taskID, message
+		return taskID, nil
+	}
 	close(release)
 	stopped = true // defer 不再重复 close（会 panic）
 	if _, err := bs.s.Registry().Wait(task.ID); err != nil {
@@ -94,8 +102,24 @@ func TestAgentSendCommand(t *testing.T) {
 	}
 	buf.Reset()
 	m.dispatch(cmd(5, "agent_send", map[string]any{"workspace": ws, "session_id": sid, "task_id": task.ID, "text": "还在吗"}))
-	if r := respOf(5); r == nil || r["ok"] != false || str(r, "code") != "task_finished" {
-		t.Fatalf("任务已结束应当回 task_finished: %+v", r)
+	r5 := respOf(5)
+	if r5 == nil || r5["ok"] != true {
+		t.Fatalf("任务已结束应自动续跑并成功: %+v", r5)
+	}
+	data5, _ := r5["data"].(map[string]any)
+	if !boolVal(data5["resumed"]) {
+		t.Fatalf("响应应标记 resumed=true: %+v", r5)
+	}
+	if resumedTask != task.ID || resumedText != "还在吗" {
+		t.Fatalf("续跑入口应收到原 task 与原消息，got task=%q text=%q", resumedTask, resumedText)
+	}
+
+	// ⑥ 没有 resume 入口（Work/旧会话）→ 仍明确回 task_finished，不静默丢弃
+	bs.resumeTask = nil
+	buf.Reset()
+	m.dispatch(cmd(6, "agent_send", map[string]any{"workspace": ws, "session_id": sid, "task_id": task.ID, "text": "还在吗"}))
+	if r := respOf(6); r == nil || r["ok"] != false || str(r, "code") != "task_finished" {
+		t.Fatalf("无续跑入口时应回 task_finished: %+v", r)
 	}
 }
 

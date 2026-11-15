@@ -131,6 +131,67 @@ func TestResumeInPlaceSameTaskID(t *testing.T) {
 	}
 }
 
+// TestResumeWithMessageDeliversInbox 用户对已结束子 agent 说话：原地续跑 + 这句话
+// 作为普通 inbox 消息在第一次 Poll 前送达（AgentUserMessage 照常发出，前端队列出队）。
+// 与 agent_resume 的 message 参数不同：那条是恢复指令，只进初始上下文、不经 Poll。
+func TestResumeWithMessageDeliversInbox(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := recordingStore()
+	spawn, reg := rzJournalSpawnTool(t, dir, rzTwoRoundLoop(nil))
+	spawn.spec.Store = store
+	resume := &agentResumeTool{spawn: spawn, reg: reg}
+
+	const origTask = "先读 auth.go，再列出 401 分支"
+	out, err := spawn.Call(events.WithToolContext(context.Background(), "p", 0, nil, nil, nil), "",
+		`{"name":"auth review","task":`+jsonString(origTask)+`}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := rzParseSpawn(t, out)
+	rzWaitSnapshot(t, reg, old.TaskID, TaskCompleted)
+
+	var mu sync.Mutex
+	var userMsgs []string
+	handler := func(_ context.Context, e events.Event) {
+		if u, ok := e.(*events.AgentUserMessage); ok {
+			mu.Lock()
+			userMsgs = append(userMsgs, u.Text)
+			mu.Unlock()
+		}
+	}
+	ctx := events.WithToolContext(context.Background(), "p", 0, handler, nil, nil)
+	got, err := resume.ResumeWithMessage(ctx, old.TaskID, "把 401 分支也补上")
+	if err != nil {
+		t.Fatalf("ResumeWithMessage: %v", err)
+	}
+	if got != old.TaskID {
+		t.Fatalf("必须原地续跑同一 task id：old=%s got=%s", old.TaskID, got)
+	}
+	rzWaitSnapshot(t, reg, old.TaskID, TaskCompleted)
+
+	st, lerr := store.Load(context.Background(), old.TaskID)
+	if lerr != nil || st == nil {
+		t.Fatalf("续跑后应能读回状态: %v", lerr)
+	}
+	if !messagesContain(st.Messages, "把 401 分支也补上") {
+		t.Fatalf("续跑上下文应含用户新消息: %+v", st.Messages)
+	}
+	if !messagesContain(st.Messages, origTask) {
+		t.Fatalf("续跑上下文应保留原任务原文: %+v", st.Messages)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, text := range userMsgs {
+		if text == "把 401 分支也补上" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("续跑应发出 AgentUserMessage（前端队列靠它出队），got %+v", userMsgs)
+	}
+}
+
 // messagesContain 任一消息的文本块含子串。
 func messagesContain(msgs []core.Message, sub string) bool {
 	for _, m := range msgs {

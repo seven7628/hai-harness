@@ -304,6 +304,10 @@ type runSpec struct {
 	resumedFrom string         // 恢复链标记（展示用；原地续跑时 = 自身 id）
 	reuseTaskID string         // 非空 = 复用同一 task id 原地续跑（不新建任务对象）
 	seed        []core.Message // 非空 = 以此为初始上下文（恢复时 = 落盘的有效上下文）
+	// initialInbox 任务登记后、子运行第一次 Poll 前投进 inbox 的消息。
+	// 用于「用户对已结束子 agent 说话」：先原地续跑，再把这句话作为普通
+	// agent_send 消息交给 Poll —— 与运行中投递走同一条事件/转录链路。
+	initialInbox []core.Message
 }
 
 func (t *Tool) runBackgroundFrom(ctx context.Context, tc *events.ToolContext, childDepth int, task, name, resumedFrom string) (string, error) {
@@ -321,6 +325,25 @@ func (t *Tool) runBackgroundResume(ctx context.Context, tc *events.ToolContext, 
 	return t.runBackgroundInternal(ctx, tc, childDepth, runSpec{
 		instruct: instruct, name: name,
 		resumedFrom: taskID, reuseTaskID: taskID, seed: seed,
+	})
+}
+
+// runBackgroundResumeWithMessage 用户直接对已结束子 agent 说话：原地续跑，并把这句话
+// 作为**普通 inbox 消息**在第一次 Poll 前投递。为什么不是塞进 instruct：
+// instruct 只进初始上下文、不经过 Poll，宿主就收不到 AgentUserMessage —— 前端队列
+// 会一直停在「已推送」，转录里也看不到这句话。走 inbox 与运行中 agent_send 完全同源。
+func (t *Tool) runBackgroundResumeWithMessage(ctx context.Context, tc *events.ToolContext, childDepth int, taskID, name, message string, st *RunState) (string, error) {
+	var seed []core.Message
+	if st != nil {
+		seed = st.Messages
+	}
+	return t.runBackgroundInternal(ctx, tc, childDepth, runSpec{
+		name: name,
+		// 空 instruct：这句话不是「恢复指令」，而是一条新的用户消息（见 initialInbox）。
+		resumedFrom: taskID, reuseTaskID: taskID, seed: seed,
+		initialInbox: []core.Message{
+			core.NewUserMessage(core.Content{Type: core.ContentTypeText, Content: message}),
+		},
 	})
 }
 
@@ -379,6 +402,7 @@ func (t *Tool) runBackgroundInternal(ctx context.Context, tc *events.ToolContext
 		JournalPath:  t.spec.JournalPath,
 		ResumedFrom:  rs.resumedFrom,
 		ReuseTaskID:  rs.reuseTaskID, // 非空 = 原地续跑（复用同一 task 对象）
+		InitialInbox: rs.initialInbox,
 	}, func(bg context.Context, tk *Task) (string, core.Usage, error) {
 		// 任务 id 注入运行选项：AgentStart/AgentEnd 事件携带 task_id（前端关联锚；不依赖事件顺序）
 		opts.TaskId = tk.ID

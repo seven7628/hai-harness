@@ -14,8 +14,6 @@ import type { TraceSpan, TraceSummary, TraceDetail } from './trace'
 import { toolNodeLabel } from '../lib/toolSummary'
 import { parseQuestionOptions, type QuestionOption } from '../lib/questionOptions'
 import { looksSubRun } from '../lib/sessionScope'
-import { agentRunStateFromView } from '../lib/agentTree'
-import type { ViewAgentBlock, ViewRunNode } from '../lib/agentTree'
 import { visualKindOf, isVisualPath, BROWSER_EXTS, extOf } from '../lib/visualFile'
 import { dataUrlBytes, fmtBytes, MAX_MESSAGE_IMAGE_BYTES } from '../lib/imageAttach'
 import { parseHostOps, parseNestedCalls, spillPathFrom, type HostOpsView, type NestedCallView } from '../lib/codemodeNested'
@@ -10977,23 +10975,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const s0 = get()
     const sid = s0.activeSessionId
     if (!sid || !taskId) return
-    const view = s0.views[sid]
-    if (!view) return
     const key = agentQueueKey(sid, taskId)
-    const run = agentRunStateFromView(
-      [...view.blocks, ...(view.agentDetached ?? [])].filter((b) => b.kind === 'agent') as ViewAgentBlock[],
-      view.runNodes as ViewRunNode[],
-      { nodeId: taskId, runId: taskId, taskId },
-    )
-    if (!run.running) {
-      const err = i18nT('composer.agent.ended')
-      set((s) => ({
-        agentSendError: err,
-        agentQueueErrors: { ...s.agentQueueErrors, [key]: err },
-      }))
-      return
-    }
-    // 能投递了：清掉上一轮「任务已结束」的错误，避免队列已发出去但红字还挂着。
+    // 不在这里按 run.running 预拦截：子 agent 已结束时，bridge 的 agent_send 会
+    // **自动原地续跑**再投递（与模型 agent_resume 同一链路）。前端若先拒绝，
+    // 命令根本不会发出，用户只会看到「已结束」而不知道它其实可以继续。
     set((s) => ({
       agentSendError: undefined,
       agentQueueErrors: { ...s.agentQueueErrors, [key]: '' },

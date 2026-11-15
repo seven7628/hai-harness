@@ -3,7 +3,7 @@
 // 覆盖用户 2026-11 报障的四条链路：
 //   1. 子会话输入：sendToAgent → 子会话自己的队列（不是主会话 pendingQueue）→
 //      agent_user_message 到达后出队，转录里出现 user 气泡；
-//   2. 队列失败：task 已结束 → 回滚为未推送并给出错误，不静默消失；
+//   2. 已结束任务仍可发送：前端不再按 run.running 预拦截，agent_send 交给后端自动续跑；
 //   3. 续跑：同一 task 新 run 到达时 focusedAgent.runId 跟到新 run；
 //   4. 子会话的审批/压缩作用域读当前 run，不读上一轮。
 //
@@ -98,18 +98,46 @@ assert.ok(card.items.some((it) => it.kind === 'user' && it.text === '把 401 分
   '子会话转录里必须出现用户消息（用户报障的「无当前用户信息」）')
 console.log('PASS 1：子会话队列隔离 + 用户消息可见 + 服务端确认后出队')
 
-// ===== 2. 已结束任务：队列保留、回滚为未推送、错误可见 =====
+// ===== 2. 已结束任务：前端不再预拦截，仍发 agent_send（后端自动续跑）=====
 setup()
 startSub('run-1', 'task-finished')
 useAppStore.getState().focusAgent({ nodeId: 'task-finished', runId: 'run-1', taskId: 'task-finished' })
+EV('agent_end', { run_id: 'run-1', parent_run_id: 'root', task_id: 'task-finished', finish_reason: 'stop', timestamp: 1200 })
 st().sendToAgent('task-finished', '还在吗')
-await wait(40)
 q = st().agentQueues[agentQueueKey('s1', 'task-finished')] ?? []
+assert.equal(q.length, 1, '结束后发送：消息先入子会话队列')
+assert.equal(q[0].pushed, true, '已结束不能在前端被拦下：必须真的发 agent_send')
+assert.equal(st().agentSendError, undefined, '前端预拦截的「已结束」错误不应再出现')
+assert.equal(st().pendingQueue.length, 0, '不能落到主会话队列')
+// mock 的 afterBg 事件不会自动进 store（本脚本没有常驻 transport 订阅），
+// 这里按真实 bridge 的自动续跑时序手动注入同一组事件。
+EV('task_started', { task_id: 'task-finished', name: 'resumed', timestamp: 1300 })
+EV('agent_start', {
+  run_id: 'run-resumed-1', parent_run_id: 'root', depth: 1,
+  task_id: 'task-finished', name: 'resumed', timestamp: 1400,
+})
+EV('agent_user_message', {
+  task_id: 'task-finished', run_id: 'run-resumed-1', text: '还在吗', source: 'user', timestamp: 1500,
+})
+q = st().agentQueues[agentQueueKey('s1', 'task-finished')] ?? []
+assert.equal(q.length, 0, '自动续跑的 agent_user_message 到达后，队列出队')
+const resumedCard = view().blocks.find((b) => b.kind === 'agent' && b.taskId === 'task-finished' && String(b.runId).startsWith('run-resumed-'))
+assert.ok(resumedCard && resumedCard.kind === 'agent', '自动续跑应产生新的子运行卡片')
+assert.ok(resumedCard.items.some((it) => it.kind === 'user' && it.text === '还在吗'), '用户消息落在续跑卡片里')
+console.log('PASS 2：已结束子智能体仍会发出 agent_send，自动续跑后消息可见')
+
+// ===== 2b. 后端明确拒绝：仍回滚为未推送并给出错误 =====
+setup()
+startSub('run-1', 'task-rejected')
+useAppStore.getState().focusAgent({ nodeId: 'task-rejected', runId: 'run-1', taskId: 'task-rejected' })
+st().sendToAgent('task-rejected', '还在吗')
+await wait(40)
+q = st().agentQueues[agentQueueKey('s1', 'task-rejected')] ?? []
 assert.equal(q.length, 1, '失败时不能把消息丢掉')
 assert.equal(q[0].pushed, false, '失败必须回滚 pushed，允许编辑/重试')
 assert.ok(String(st().agentSendError || '').includes('finished'), '失败原因必须可见')
 assert.equal(st().pendingQueue.length, 0, '失败也不能落到主会话队列')
-console.log('PASS 2：子会话发送失败保留在子队列并回滚，不静默、不串主会话')
+console.log('PASS 2b：后端拒绝时子会话消息保留并回滚，不静默、不串主会话')
 
 // ===== 3. agent_resume：焦点 runId 跟到新 run =====
 setup()
@@ -142,16 +170,19 @@ assert.ok(c1 && c1.kind === 'agent' && !c1.items.some((it) => it.kind === 'compr
   '上一轮的压缩不能借给新 run')
 console.log('PASS 4：压缩按 run 隔离（续跑不会复用上一轮的压缩态）')
 
-// ===== 5. 任务结束后暂存的消息：续跑 agent_start 自动补发 =====
+// ===== 5. 未推送的暂存消息：续跑 agent_start 自动补发 =====
 setup()
 startSub('run-1', 'task-1', 1000)
 useAppStore.getState().focusAgent({ nodeId: 'task-1', runId: 'run-1', taskId: 'task-1' })
 EV('agent_end', { run_id: 'run-1', parent_run_id: 'root', task_id: 'task-1', finish_reason: 'stop', duration_ms: 9000, timestamp: 1200 })
-st().sendToAgent('task-1', '恢复后继续')
-await wait(30)
-q = st().agentQueues[agentQueueKey('s1', 'task-1')] ?? []
-assert.equal(q.length, 1, '结束后发送：消息留在队列')
-assert.equal(q[0].pushed, false, '结束后发送：不假装已推送')
+// 模拟一次「发送被后端拒绝/未送达」后留在本地队列的项；续跑 agent_start 是补发信号。
+useAppStore.setState({
+  agentQueues: {
+    [agentQueueKey('s1', 'task-1')]: [{
+      id: 9001, contents: [{ type: 'text', content: '恢复后继续' }], pushed: false,
+    }],
+  },
+})
 startSub('run-2', 'task-1', 2000)
 await wait(60)
 q = st().agentQueues[agentQueueKey('s1', 'task-1')] ?? []
@@ -163,7 +194,7 @@ assert.equal(q.length, 0, '补发确认后出队')
 const run2 = view().blocks.find((b) => b.kind === 'agent' && b.runId === 'run-2')
 assert.ok(run2 && run2.kind === 'agent' && run2.items.some((it) => it.kind === 'user' && it.text === '恢复后继续'),
   '补发的消息落在当前 run 的转录里')
-console.log('PASS 5：结束后暂存的消息在续跑时自动补发，并落到新 run')
+console.log('PASS 5：未推送的暂存消息在续跑时自动补发，并落到新 run')
 
 // ===== 6. 消息已推送但 run 先结束：队列回滚为未推送，不能永远显示已送达 =====
 setup()
