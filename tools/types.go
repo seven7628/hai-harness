@@ -29,6 +29,19 @@ type ReadOnlyTool interface {
 	ReadOnly() bool
 }
 
+// MandatoryApproval 可选接口：工具声明本次调用**必须**走人工审批，
+// 模式策略（Auto / Full Access）不得把它覆盖成自动放行。
+//
+// 与 ApprovalRequired 的区别：ApprovalRequired 是「默认需要审批」，仍可被
+// events.ApprovalPolicy（auto/hitl/full-access）覆盖；MandatoryApproval 是
+// 宿主级不可绕过的安全门 —— 目前只给插件工具（read_only:false）用：
+// 插件是用户装进来的第三方代码，写工具不能在「自动执行」模式下静默落盘。
+//
+// 只读/低风险工具不要实现它：一旦实现，连 full-access 也会弹卡。
+type MandatoryApproval interface {
+	MandatoryApproval(ctx context.Context, call core.ToolCall) bool
+}
+
 // ApprovalRequired 可选接口：工具声明哪些调用需要人工确认（HITL）。
 // engine 在工具轮执行前统一收集需要审批的调用并逐个请求确认
 // （Approver 经 events.ToolContext 注入；决策锚 = ToolCall.Id，

@@ -385,6 +385,17 @@ func TestPluginProxyToolApprovalAndReadOnly(t *testing.T) {
 		if got := ap.RequiresApproval(context.Background(), core.ToolCall{}); got != wantApproval {
 			t.Fatalf("%s RequiresApproval = %v，want %v", name, got, wantApproval)
 		}
+		// P2c：非只读工具还必须实现 MandatoryApproval（Auto/Full Access 不能覆盖）；
+		// 只读工具不实现（或返回 false），否则每次回显都弹审批卡。
+		ma, ok := tool.(interface {
+			MandatoryApproval(context.Context, core.ToolCall) bool
+		})
+		if !ok {
+			t.Fatalf("%s 没实现 MandatoryApproval（Auto 模式会静默放行）", name)
+		}
+		if got := ma.MandatoryApproval(context.Background(), core.ToolCall{}); got != wantApproval {
+			t.Fatalf("%s MandatoryApproval = %v，want %v", name, got, wantApproval)
+		}
 		// CanParallel 恒 false：V1 一次一个（结果通道按 run 关联）。
 		if tool.CanParallel() {
 			t.Fatalf("%s CanParallel = true，V1 必须是 false", name)
