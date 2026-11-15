@@ -121,31 +121,50 @@ func TestSurfaceTemplateInstalls(t *testing.T) {
 	// 跑不通，示例调一条注定 denied 的命令比不调更误导）—— 断言从「必须声明」改成
 	// 「声明了就必须能调通」，这条不变式才是模板真正要守的东西。
 	for _, name := range mf.Commands {
-		if !surfaceAgentHostCommands[name] {
-			if _, legacy := surfaceHostCommands[name]; !legacy {
-				t.Fatalf("模板声明了宿主不放行的命令 %q（面板会拿到 denied）—— 放行集合只有 %v",
-					name, surfaceOpenCommandNames())
-			}
+		if !surfaceCommandAllowed(name) {
+			t.Fatalf("模板声明了宿主不放行的命令 %q（面板会拿到 denied）—— 放行集合只有 %v",
+				name, surfaceOpenCommandNames())
 		}
 	}
 	// 面板代码里**实际调用**的名字同样要在放行集合里：manifest 声明得再对，代码里调一条
 	// 别的命令照样是教错（这一条替代了原来"必须有 commands"的存在性断言）。
 	for _, name := range panelCommandCalls(t, surfaceTemplatesDir) {
-		if !surfaceAgentHostCommands[name] {
-			if _, legacy := surfaceHostCommands[name]; !legacy {
-				t.Fatalf("模板 panel.js 调用了宿主不放行的命令 %q（会拿到 denied）", name)
-			}
+		if !surfaceCommandAllowed(name) {
+			t.Fatalf("模板 panel.js 调用了宿主不放行的命令 %q（会拿到 denied）", name)
 		}
 	}
 }
 
-// surfaceOpenCommandNames 当前真正放行的命令名（agent.* ∪ 只读表），只给失败文案用。
+// surfaceLocalCommandNames 渲染层本地命令：由 loader 直接处理，**不经过 bridge**。
+// 它们不在 Go 的 surfaceAgentHostCommands 里，但对插件是合法能力（§5.1）。
+var surfaceLocalCommandNames = map[string]bool{
+	"composer.quote": true,
+	"ui.open_tab":    true,
+	"ui.toast":       true,
+}
+
+// surfaceCommandAllowed 模板可声明/可调用 = agent.* ∪ 旧只读表 ∪ 渲染层本地命令。
+func surfaceCommandAllowed(name string) bool {
+	if surfaceAgentHostCommands[name] {
+		return true
+	}
+	if surfaceLocalCommandNames[name] {
+		return true
+	}
+	_, legacy := surfaceHostCommands[name]
+	return legacy
+}
+
+// surfaceOpenCommandNames 当前真正放行的命令名（agent.* ∪ 只读表 ∪ 本地命令），只给失败文案用。
 func surfaceOpenCommandNames() []string {
-	out := make([]string, 0, len(surfaceAgentHostCommands)+len(surfaceHostCommands))
+	out := make([]string, 0, len(surfaceAgentHostCommands)+len(surfaceHostCommands)+len(surfaceLocalCommandNames))
 	for name := range surfaceAgentHostCommands {
 		out = append(out, name)
 	}
 	for name := range surfaceHostCommands {
+		out = append(out, name)
+	}
+	for name := range surfaceLocalCommandNames {
 		out = append(out, name)
 	}
 	sort.Strings(out)
