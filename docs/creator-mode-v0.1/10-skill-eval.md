@@ -173,9 +173,12 @@ builder 结论的情况下验收。没有让主会话代写，避免把主会话
 - 真安装器 `TestSurfaceInstallExternal`：`status:"applied"`，1 个入口，sha256 写入 index；
 - 真实浏览器探针 `verify_external_surface.mjs`：T1–T9 绿，真 `panel.js` 字节进注册表，＋ 菜单
   标题/键盘/非空渲染/pageerror=0；
-- `verify_external_surface_electron.mjs`：**BLOCKED**（不是插件失败）。用仓库自己的
-  `templates/surface` 跑同一命令，也在「等待 ＋ 菜单入口」超时；说明是本机 Electron 构建/环境
-  问题。验证文档已补「先跑 control，control 也红就标 BLOCKED」。
+- `verify_external_surface_electron.mjs`：首轮 **BLOCKED**（不是插件失败）。用仓库自己的
+  `templates/surface` 跑同一命令也在「等待 ＋ 菜单入口」超时。后续定位到根因：失败运行用的是
+  **另一个 checkout/worktree 的旧 `dist`/`dist-electron`**，`surface:index` 为空；脚本只判产物
+  存在、不判新鲜度，于是空 index 静默表现成 30s 超时。已在 main 修脚本前置（空宿主 index →
+  exit 2 + 明确诊断；源码比产物新则重建；清掉继承的 `VITE_DEV_SERVER_URL`）并复跑 **PASS**
+  （3 个入口、面板非空、pageerror=0）。
 
 **技能侧判定：documentation FAIL（3 major）**，已在 1.1.1 修：
 
@@ -194,13 +197,14 @@ builder 结论的情况下验收。没有让主会话代写，避免把主会话
 provider 的 `order` / `icon` / `dedupeKey`；验证脚本的技能相对路径；`validate-plugin.mjs`
 的边界（只做静态 preflight，不是安装器）以及 name/entries/tools/token 检查。
 
-**仍未做**：有/无 skill 的真实模型行为 A/B（需要 provider，且要固定同一 prompt 与评分）；
-Electron 真机门要等本机构建能显示插件入口后再跑。机制验收已通过，不能把机制绿当成模型效果
-结论——这一点仍按规范第 6 节标注。
+**仍未做**：有/无 skill 的真实模型行为 A/B（需要 provider，且要固定同一 prompt 与评分）。
+Electron 真机门已在 main 产物上复跑通过；首红是旧 checkout 的 dist + 脚本静默，不是宿主构建缺陷。
+机制验收已通过，不能把机制绿当成模型效果结论——这一点仍按规范第 6 节标注。
 
 **复核（独立子智能体，2026-11-15）**：documentation **PASS**。3 major 逐条按行为复核——模板
 token 0 个非法、两份模板 md5 一致；manifest 字段表 + name 对象 + 模板无 api/placement；验证文档
 自带 Vite/5232、control 语义、exit 1 宿主/插件区分。命令：validate templates/example 0；
 install-smoke 0（`applied`，entries 3）；浏览器 T1–T9 32 ✅ / 0 ❌；`TestSurfaceTemplateContracts`
-等 Go 用例 0。仍只余 minor：示例 fixture 保留 api/placement（只读，警告即可）；Electron 本机
-宿主构建仍 BLOCKED。报告：`/tmp/creator-skill-eval/recheck-report.md`。
+等 Go 用例 0。仍只余 minor：示例 fixture 保留 api/placement（只读，警告即可）。Electron 门
+首红已定位并修复为脚本前置（旧 checkout 的 dist），main 上复跑 PASS。报告：
+`/tmp/creator-skill-eval/recheck-report.md`。

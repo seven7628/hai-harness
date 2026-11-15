@@ -78,18 +78,38 @@ try {
   const index = path.join(APP, 'dist', 'index.html')
   const mainJs = path.join(APP, 'dist-electron', 'main.js')
   const bridge = path.join(APP, 'dist', 'hai-bridge')
-  if (!fs.existsSync(mainJs)) {
-    console.log('  构建 dist-electron（npm run build:electron）…')
+  // 只判「文件存在」会静默沿用旧产物：源码改了、dist 没重建，surface:index 可能还是旧逻辑
+  // （2026-11-15 真踩过：另一个 checkout 的 dist 被拿来跑，菜单空却只表现为 30s 超时）。
+  const newestMtime = (root) => {
+    let newest = 0
+    const walk = (dir) => {
+      let ns = []
+      try { ns = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const n of ns) {
+        if (n.name === 'node_modules' || n.name === 'dist' || n.name === 'dist-electron') continue
+        const p = path.join(dir, n.name)
+        if (n.isDirectory()) walk(p)
+        else if (/\.(ts|tsx|js|mjs|json|go)$/.test(n.name)) {
+          try { newest = Math.max(newest, fs.statSync(p).mtimeMs) } catch { /* 忽略竞态文件 */ }
+        }
+      }
+    }
+    walk(root)
+    return newest
+  }
+  const newerThan = (out, src) => fs.existsSync(out) && fs.statSync(out).mtimeMs >= newestMtime(src)
+  if (!newerThan(mainJs, path.join(APP, 'electron'))) {
+    console.log('  构建 dist-electron（源码比产物新或产物缺失）…')
     const b = spawnSync('npm', ['run', 'build:electron'], { cwd: APP, encoding: 'utf8' })
     if (b.status !== 0) fail(`build:electron 失败：\n${b.stdout}\n${b.stderr}`)
   }
-  if (!fs.existsSync(index)) {
-    console.log('  构建渲染层（npx vite build）…')
+  if (!newerThan(index, path.join(APP, 'src'))) {
+    console.log('  构建渲染层（源码比产物新或产物缺失）…')
     const b = spawnSync('npx', ['vite', 'build'], { cwd: APP, encoding: 'utf8' })
     if (b.status !== 0) fail(`vite build 失败：\n${b.stdout}\n${b.stderr}`)
   }
-  if (!fs.existsSync(bridge)) {
-    console.log('  构建桥（go build ./desktop/bridge）…')
+  if (!fs.existsSync(bridge) || !newerThan(bridge, path.join(REPO, 'desktop/bridge'))) {
+    console.log('  构建桥（Go 源码比产物新或产物缺失）…')
     const b = spawnSync('go', ['build', '-o', 'desktop/app/dist/hai-bridge', './desktop/bridge'], { cwd: REPO, encoding: 'utf8' })
     if (b.status !== 0) fail(`go build 失败：\n${b.stdout}\n${b.stderr}`)
   }
@@ -120,7 +140,9 @@ try {
   console.log('\nT2 启动真 Electron（HAI_DATA_DIR 多实例模式）→ ＋ 菜单')
   app = await _electron.launch({
     executablePath: ELECTRON, args: ['.'], cwd: APP,
-    env: { ...process.env, HOME, HAI_DATA_DIR: HOME },
+    // 不继承父 shell 的 dev-server 变量：那会让生产档加载 5173 的 dev bundle，而不是本 checkout 的
+    // dist；这种「有时好有时坏」比直接失败更难查。
+    env: { ...process.env, HOME, HAI_DATA_DIR: HOME, VITE_DEV_SERVER_URL: '', HAI_MULTI: '', ELECTRON_RUN_AS_NODE: '' },
   })
   const win = await app.firstWindow()
   const errs = []
@@ -156,8 +178,29 @@ try {
   await waitFor(() => activityBtn.count().then((n) => n > 0), { label: '右栏图标条' })
   await activityBtn.click({ timeout: 5000 }).catch(() => {})
   await waitFor(() => win.locator('.rtabs-add').count().then((n) => n > 0), { label: '＋ 按钮' })
+  // 宿主侧前置：菜单有没有入口，先看宿主实际读的 index。空 index 是环境/产物问题，不是插件
+  // 问题；不先判它，症状只会是下面那条菜单超时（2026-11-15 真踩过，另一个 checkout 的 dist）。
+  const host = await app.evaluate(({ app: a }) => ({
+    HOME: process.env.HOME,
+    HAI_DATA_DIR: process.env.HAI_DATA_DIR || '',
+    userData: a.getPath('userData'),
+  }))
+  const cfgDir = host.HAI_DATA_DIR ? path.join(host.HAI_DATA_DIR, '.go-code') : path.join(host.HOME || '', '.go-code')
+  const hostIdxPath = path.join(cfgDir, 'surfaces', 'index.json')
+  const hostIdx = (() => {
+    try { return JSON.parse(fs.readFileSync(hostIdxPath, 'utf8')).items ?? [] } catch { return null }
+  })()
+  console.log(`  宿主 index：${hostIdxPath}（items=${hostIdx ? hostIdx.length : '读不到'}）userData=${host.userData}`)
+  if (!hostIdx || !hostIdx.some((i) => i?.enabled)) {
+    fail(`宿主侧没有 enabled 插件可渲染：${hostIdxPath} 读不到或为空 —— 这不是插件的问题。\n  先确认跑的是本 checkout 的产物（APP=${APP}）；需要时：npm run build:electron && npx vite build`)
+  }
   await win.locator('.rtabs-add').click()
-  await waitFor(() => win.locator('[data-plugin-entry]').count().then((n) => n > 0), { label: '＋ 菜单里的插件入口' })
+  await waitFor(() => win.locator('[data-plugin-entry]').count().then((n) => n > 0), { label: '＋ 菜单里的插件入口', timeout: 10000 })
+    .catch(async (e) => {
+      const menu = await win.evaluate(() => document.querySelector('.rtabs-menu')?.innerText || '').catch(() => '')
+      console.log(`  当时菜单文本：${JSON.stringify(menu.slice(0, 400))}`)
+      throw e
+    })
   const items = await win.locator('[data-plugin-entry]').evaluateAll((ns) => ns.map((n) => ({
     key: n.getAttribute('data-plugin-entry'),
     text: (n.textContent || '').trim(),

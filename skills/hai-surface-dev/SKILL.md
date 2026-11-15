@@ -1,6 +1,6 @@
 ---
 name: hai-surface-dev
-version: 1.1.1
+version: 1.1.2
 description: 'Builds or debugs a panel in the desktop right sidebar — dashboard, tool page, PDF/document viewer, or any UI the user wants added. Installs a local ESM plugin and verifies it. Use for 插件/面板/看板/右栏/PDF 阅读器/文档面板/right panel/plugin/surface.'
 requires:
   tools: [ui_inspect, surface_install]

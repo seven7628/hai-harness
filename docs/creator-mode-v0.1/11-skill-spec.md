@@ -24,7 +24,7 @@
 ```yaml
 ---
 name: hai-surface-dev
-version: 1.1.1
+version: 1.1.2
 description: 'Builds or debugs a panel ... Use for 插件/面板/PDF 阅读器/文档面板.'
 requires:
   tools: [ui_inspect, surface_install]
@@ -109,7 +109,7 @@ requires:
 指标：首次安装通过率、pageerror 为 0 率、修复轮数、工具调用数、耗时、token 成本。
 真实模型至少覆盖 Haiku / Sonnet / Opus 各一轮；没有凭据时只跑机制测试，并在报告里标注
 「行为未验证」，不得用单测代替模型效果结论。2026-11-15 的独立 builder/evaluator 机制实测
-（PDF 示例：真安装器 applied + 真浏览器渲染 PASS；Electron 门因宿主构建 BLOCKED）见
+（PDF 示例：真安装器 applied + 真浏览器渲染 PASS；Electron 门首红后定位为旧 checkout 的 dist，main 复跑 PASS）见
 `10-skill-eval.md` 的「独立 builder / evaluator 实测」。
 
 ## 7. 版本与发布

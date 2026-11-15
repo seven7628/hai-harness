@@ -64,9 +64,15 @@ If the control fails at the same step, the **host build/environment** is broken,
 mark Electron `BLOCKED`, report the control failure, and rely on the browser tier + installer. Do
 not rewrite a panel that already passed browser render to chase a red Electron run.
 
+The script now checks the host's `surface:index` **before** clicking the menu, rebuilds
+`dist`/`dist-electron`/`hai-bridge` when their sources are newer, and clears inherited
+`VITE_DEV_SERVER_URL`. Run it from the checkout that owns the app you are testing: another
+worktree's old `dist` produces an empty index, which used to look like a 30 s menu timeout.
+An empty host index is a **precondition failure (`exit 2`)**, not a plugin failure.
+
 Exit codes: `0` pass, `1` plugin **or host** failure (use the control to tell which), `2` the
-environment is wrong (port taken, or `--dir` has no `surface.json` / no `panel.js`) — `2` never
-means "your panel is fine".
+environment is wrong (port taken, `--dir` has no `surface.json` / no `panel.js`, or the host index
+has no enabled plugin) — `2` never means "your panel is fine".
 
 `entries[].title` accepts either form; `{ zh, en }` is picked by the host's current language, the
 plain string is used for every language:
