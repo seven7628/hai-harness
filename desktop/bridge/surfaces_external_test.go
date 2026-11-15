@@ -44,6 +44,12 @@ var surfaceExternalDir = flag.String("dir", "",
 var surfaceExternalHome = flag.String("home", "",
 	"把插件装到这个 HOME（缺省：临时目录）；配合 HAI_DATA_DIR 启动应用时用")
 
+// surfaceExternalExpect 允许同一条外部安装链验证**拒绝**路径（接受 external 探针用）。
+// 缺省 applied：保持既有「装不上就是失败」的语义；rejected 时断言回执 status/reason、
+// 目录未拷、index 未新增 —— 其余 applied 专属断言（entries/hash/权限）不适用。
+var surfaceExternalExpect = flag.String("expect", "applied",
+	"期望安装结果：applied（缺省）或 rejected（用于 D11 旧命令的安装期拒绝）")
+
 // TestSurfaceInstallExternal 把 `-dir` 指向的目录用真安装器装进临时 HOME。
 //
 // 不指定 -dir 时**跳过**（不失败）：这条命令属于 Creator Mode 的验收链，普通 `go test ./...`
@@ -88,6 +94,37 @@ func TestSurfaceInstallExternal(t *testing.T) {
 	}
 	// 打给人看：**回执就是验收证据**（status / id / hash / entries / entryHint）。
 	t.Logf("安装回执（含 -v 可见）：\n%s", recJSON)
+	want := strings.TrimSpace(*surfaceExternalExpect)
+	if want == "" {
+		want = "applied"
+	}
+	switch want {
+	case "rejected":
+		if rec.Status != surfaceRejected {
+			t.Fatalf("want rejected，实际 status=%q reason=%q\n（目录：%s）", rec.Status, rec.Reason, dir)
+		}
+		if !strings.Contains(rec.Reason, "D11 已下线") {
+			t.Fatalf("拒绝理由没有说清 D11：%q", rec.Reason)
+		}
+		if _, err := os.Stat(filepath.Join(root, rec.ID)); err == nil {
+			t.Fatalf("拒绝了却把目录拷进来了：%s", filepath.Join(root, rec.ID))
+		}
+		if raw, err := os.ReadFile(filepath.Join(root, "index.json")); err == nil {
+			var idx surfaceIndex
+			if err := json.Unmarshal(raw, &idx); err == nil {
+				for _, item := range idx.Items {
+					if item.ID == rec.ID {
+						t.Fatalf("拒绝了却写进了 index：%s", raw)
+					}
+				}
+			}
+		}
+		return
+	case "applied":
+		// 继续走下面的 applied 断言。
+	default:
+		t.Fatalf("-expect=%q 不认识（只支持 applied / rejected）", want)
+	}
 	if rec.Status != surfaceApplied {
 		t.Fatalf("装不上：status=%q reason=%q\n（目录：%s）", rec.Status, rec.Reason, dir)
 	}
