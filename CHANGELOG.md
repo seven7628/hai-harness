@@ -43,6 +43,9 @@ All notable changes to this project are documented here. The format follows
 - `agent.state` is isolated from `agent.run` event sequence/run-id namespaces and
   is only emitted when no plugin-initiated run owns the stream.
 - Browser/Electron probes clean up their temporary processes and data roots.
+- Stopping a group conversation no longer leaves a wake resurrected by an in-flight
+  busy-retry: the delivery ledger and the queue now stay in sync, so the stopped view
+  reports `queue_len: 0` deterministically.
 
 ### Security
 

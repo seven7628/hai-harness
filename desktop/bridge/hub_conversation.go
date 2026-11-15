@@ -626,9 +626,26 @@ func (m *manager) bumpHubConversationGen(gid agenthub.GroupID) {
 }
 
 // emitHubConversation 广播对话视图（begin/turn 变化/停止/耗尽）。
+//
+// 终态事件按「对话 id + 状态」只发一次：停止/耗尽可能同时从 notifyHubConversation、
+// 调度 pass 收尾、超时定时器等多个路径到达，视图本身相同，重复事件会让 UI 闪两下。
+// 系统消息仍由 notifyHubConversation 自己按 hubConvNotified 去重。
 func (m *manager) emitHubConversation(gid agenthub.GroupID, view agenthub.ConversationView) {
 	if m == nil || m.out == nil {
 		return
+	}
+	if view.Terminal() {
+		key := view.ID + "|" + string(view.Status)
+		m.hubConvMu.Lock()
+		if m.hubConvEmitted == nil {
+			m.hubConvEmitted = map[agenthub.GroupID]string{}
+		}
+		if m.hubConvEmitted[gid] == key {
+			m.hubConvMu.Unlock()
+			return
+		}
+		m.hubConvEmitted[gid] = key
+		m.hubConvMu.Unlock()
 	}
 	m.out.writeLine(map[string]any{
 		"event_type": "hub_conversation", "group_id": string(gid), "conversation": view,
@@ -921,6 +938,9 @@ func (m *manager) hubConversationReset(c command) {
 	m.hubConvMu.Lock()
 	if m.hubConvNotified != nil {
 		delete(m.hubConvNotified, g.ID) // 下一次护栏命中要能再报一次
+	}
+	if m.hubConvEmitted != nil {
+		delete(m.hubConvEmitted, g.ID) // 同一对话 id 重置后再停止，事件要能再发一次
 	}
 	m.hubConvMu.Unlock()
 	m.emitHubConversation(g.ID, view)

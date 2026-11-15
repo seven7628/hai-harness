@@ -152,6 +152,22 @@ func (c *ConversationController) RequeueDelivery(w Wake, reason string, readyAt 
 	if d == nil || d.Status.Terminal() {
 		return false
 	}
+	// 终态之后不许复活：stop 先清队列，在飞 run 的「目标忙」退回可能晚一步到，
+	// 若照常回队，视图就会变成 stopped + QueueLen=1（CI 的 HubStop 回归）。
+	// 这里把这条记录就地收口成 skipped，队列一条都不加。
+	if conv.status.Terminal() {
+		c.removeQueuedLocked(conv, w.ID)
+		reason := DeliveryReasonStopped
+		if conv.status == ConversationExhausted {
+			reason = DeliveryReasonExhausted
+		}
+		d.Status = DeliverySkipped
+		d.Reason = reason
+		d.ReadyAt = nil
+		d.UpdatedAt = now
+		conv.updatedAt = now
+		return false
+	}
 	d.Status = DeliveryQueued
 	d.Reason = reason
 	d.UpdatedAt = now
@@ -242,8 +258,12 @@ func (c *ConversationController) SkipQueuedDeliveries(group GroupID, reason stri
 		if d == nil || d.Status != DeliveryQueued {
 			continue
 		}
+		// 队列是「谁在等」的真相：只改账本不出队，View.QueueLen 会永远停在
+		// 旧值（停止窗口里被忙退回队列的 wake 就撞过这个分叉）。
+		c.removeQueuedLocked(conv, d.WakeID)
 		d.Status = DeliverySkipped
 		d.Reason = reason
+		d.ReadyAt = nil
 		d.UpdatedAt = now
 		n++
 	}

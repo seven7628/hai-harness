@@ -1466,13 +1466,14 @@ type manager struct {
 	// hubConv 每群自动对话状态机（懒开）；hubConvLimits 供测试注入限额（生产 nil）。
 	hubConv       *agenthub.ConversationController
 	hubConvLimits *agenthub.ConversationLimits
-	// hubConvMu 保护下面三张表：换代（人类消息作废旧冷却定时器）、定时器、终态通知去重。
+	// hubConvMu 保护下面四张表：换代（人类消息作废旧冷却定时器）、定时器、终态通知去重、终态事件去重。
 	hubConvMu    sync.Mutex
 	hubConvGen   map[agenthub.GroupID]uint64
 	hubConvTimer map[agenthub.GroupID]*time.Timer
 	// hubConvDispatch 按群串行化自动对话的「取 wake → 投递 → 记账」与停止/人类插话（B2）。
 	hubConvDispatch hubConvDispatchGate
 	hubConvNotified map[agenthub.GroupID]string
+	hubConvEmitted  map[agenthub.GroupID]string
 	// hubRunTimerMu/hubRunTimers 是「每 (group, agent) 一个在跑 run 的超时定时器」
 	//（P6-08）：run 收尾/按 agent 停止时撤掉，到点则中断这一轮并继续队列。
 	hubRunTimerMu sync.Mutex

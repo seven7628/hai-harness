@@ -337,3 +337,54 @@ func TestDeliveryFinishRequiresRunning(t *testing.T) {
 		t.Fatalf("running → failed 后 = %+v", d)
 	}
 }
+
+// TestDeliverySkipRemovesQueuedWake：SkipQueuedDeliveries 的账本与队列必须同步清理。
+// 回归：停止窗口里有一条被目标忙退回队列的 wake，账本已记 skipped(stopped)，但
+// 队列仍留着它，View.QueueLen 停在 1（TestMobileP4E2EHubStop 在 CI 上撞到）。
+func TestDeliverySkipRemovesQueuedWake(t *testing.T) {
+	c, _ := newTestController(t, ConversationLimits{Cooldown: -1, PairLimit: 100, MaxDepth: 100})
+	gid := GroupID("g_delivery_skip_queue")
+	c.BeginHuman(gid, 1, time.Time{})
+	c.StartHumanRound(gid, 1, time.Time{})
+	w := mustOffer(t, c, gid, "agent_a", []AgentID{"agent_b"}, 1)[0]
+	if v := c.View(gid); v.QueueLen != 1 {
+		t.Fatalf("入队后 queue = %d, want 1", v.QueueLen)
+	}
+	if n := c.SkipQueuedDeliveries(gid, DeliveryReasonStopped, time.Time{}); n != 1 {
+		t.Fatalf("skipped = %d, want 1", n)
+	}
+	if v := c.View(gid); v.QueueLen != 0 {
+		t.Fatalf("跳过后 queue = %d, want 0（账本与队列不能分叉）", v.QueueLen)
+	}
+	if d := deliveryByID(t, c, gid, w.ID); d.Status != DeliverySkipped || d.Reason != DeliveryReasonStopped {
+		t.Fatalf("跳过后 = %+v, want skipped/stopped", d)
+	}
+}
+
+// TestDeliveryRequeueAfterStopDoesNotResurrect：对话已停止后，在飞 run 的
+// 「目标忙」退回不能把 wake 重新塞回队列。
+//
+// 回归 CI 的 TestMobileP4E2EHubStop：stop 先清队列，随后被打断的 pass 把 B 退回
+// 队列，View 就变成 stopped + QueueLen=1。终态之后 RequeueDelivery 必须拒绝，
+// 并把这条 running 记录收口成 skipped(stopped)。
+func TestDeliveryRequeueAfterStopDoesNotResurrect(t *testing.T) {
+	c, _ := newTestController(t, ConversationLimits{Cooldown: -1, PairLimit: 100, MaxDepth: 100})
+	gid := GroupID("g_delivery_stop_requeue")
+	c.BeginHuman(gid, 1, time.Time{})
+	c.StartHumanRound(gid, 1, time.Time{})
+	w := mustOffer(t, c, gid, "agent_a", []AgentID{"agent_b"}, 1)[0]
+	begun, fresh := c.BeginDelivery(w, time.Time{})
+	if !fresh {
+		t.Fatal("首次投递必须生效")
+	}
+	c.Stop(gid, "人类停止了自动对话，等你继续", time.Time{})
+	if c.RequeueDelivery(begun, DeliveryReasonBusy, time.Time{}, time.Time{}) {
+		t.Fatal("stopped 之后 RequeueDelivery 必须拒绝")
+	}
+	if v := c.View(gid); v.QueueLen != 0 {
+		t.Fatalf("stopped 后 queue = %d, want 0", v.QueueLen)
+	}
+	if d := deliveryByID(t, c, gid, w.ID); d.Status != DeliverySkipped || d.Reason != DeliveryReasonStopped {
+		t.Fatalf("stopped 后退回记录 = %+v, want skipped/stopped", d)
+	}
+}
