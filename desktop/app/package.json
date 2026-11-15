@@ -284,6 +284,10 @@
       {
         "from": "../vendor/visual-skills",
         "to": "visual-skills"
+      },
+      {
+        "from": "../vendor/create-mode-skills",
+        "to": "create-mode-skills"
       }
     ],
     "mac": {

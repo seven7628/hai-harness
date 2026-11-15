@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // verify_external_surface.mjs —— 把「一个外部插件目录」装进来、点开、看有没有渲染（R16b / Creator Mode 验收工具）。
 //
-// 它验的是**别人的插件**，不是我们的：使用者（另一个 agent / 用户）照 skills/hai-surface-dev
+// 它验的是**别人的插件**，不是我们的：使用者（另一个 agent / 用户）照 desktop/vendor/create-mode-skills/create-mode
 // 写出来的目录，交给这一条命令，回答「装进来之后界面上点得开吗」。
 //
 //   node e2e/verify_external_surface.mjs --dir=../../templates/surface

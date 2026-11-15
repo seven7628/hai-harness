@@ -1,6 +1,6 @@
 // surfaces/plugin/storage.ts —— 插件数据的生命周期（R17a）。
 //
-// 契约（skills/hai-surface-dev/SKILL.md 的 Storage 一节是同一句话的用户侧版本）：
+// 契约（desktop/vendor/create-mode-skills/create-mode/SKILL.md 的 Storage 一节是同一句话的用户侧版本）：
 // 宿主**不给**插件 storage API，插件把状态写在 `localStorage` 里，键以 `<id>:` 开头。
 // 用户已拍板：**卸载 = 清掉该 id 前缀下的所有键**（插件存储是可弃的，需要活过卸载的
 // 东西本来就不该放在这里）。**禁用不删**（插件还在、数据还该在，重新启用就接着用）。

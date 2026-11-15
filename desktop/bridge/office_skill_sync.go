@@ -50,6 +50,11 @@ const officeSkillsDirEnv = "GO_CODE_OFFICE_SKILLS_DIR"
 // （模型自己 read_file 看图、自己写产出），不调用任何外部视觉 API。
 const visualSkillsDirEnv = "GO_CODE_VISUAL_SKILLS_DIR"
 
+// createModeSkillsDirEnv bridge 环境变量：内置 **CreateMode 技能**集合目录（Electron main 注入）。
+// 源目录与办公/视觉技能同一套分发机制；目前集合里只有 create-mode 一个技能，
+// 保留“集合目录”形状是为了以后加模板/评审类技能时两侧接线不用改。
+const createModeSkillsDirEnv = "GO_CODE_CREATE_MODE_SKILLS_DIR"
+
 // ensureOfficeSkillsSynced 启动同步内置办公技能到全局技能目录（~/.agents/skills/<name>）：
 //   - env 空（dev 无注入）→ no-op；
 //   - 每个技能目标已存在（symlink 或真实目录）→ 跳过该技能（幂等，尊重用户改过的版本）；
@@ -67,6 +72,12 @@ func ensureOfficeSkillsSynced() error {
 // 换成支持图片的模型，技能必须已经在盘上）。
 func ensureVisualSkillsSynced() error {
 	return syncBundledSkills(os.Getenv(visualSkillsDirEnv), "内置视觉技能")
+}
+
+// ensureCreateModeSkillsSynced 把随包分发的 CreateMode 技能同步到全局技能层。
+// 与办公/视觉技能相同：按 frontmatter version 决定是否覆盖用户副本；失败只打日志。
+func ensureCreateModeSkillsSynced() error {
+	return syncBundledSkills(os.Getenv(createModeSkillsDirEnv), "内置 CreateMode 技能")
 }
 
 // syncBundledSkills 把一个「技能集合目录」下的每个子目录同步到 ~/.agents/skills/<name>。

@@ -2008,6 +2008,12 @@ func (m *manager) runtime(path string) *workspaceRuntime {
 	if err := ensureVisualSkillsSynced(); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ 视觉技能同步失败: %v\n", err)
 	}
+	// CreateMode 技能（2026-11）：同样是随包技能集合，源目录 = GO_CODE_CREATE_MODE_SKILLS_DIR
+	// （dev = desktop/vendor/create-mode-skills，打包 = Resources/create-mode-skills）。
+	// ⚠ 必须早于 buildSkillsRegistry；否则首次启动已落盘却不在清单里。
+	if err := ensureCreateModeSkillsSynced(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ CreateMode 技能同步失败: %v\n", err)
+	}
 	startupLog("A5.officeSkillsSynced", officeSyncStart) // 名字保留：启动日志的既有消费方按它计时
 	// ego-browser skill 随包分发同步（2026-09）：内置 skill（Resources/ego-browser-skill）
 	// → ~/.agents/skills/ego-browser（不存在才复制）。保证未装 ego lite 的机器上

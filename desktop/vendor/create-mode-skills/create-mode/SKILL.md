@@ -1,18 +1,20 @@
 ---
-name: hai-surface-dev
-version: 1.1.3
-description: 'Builds or debugs a panel in the desktop right sidebar — dashboard, tool page, PDF/document viewer, or any UI the user wants added. Installs a local ESM plugin and verifies it. Use for 插件/面板/看板/右栏/PDF 阅读器/文档面板/right panel/plugin/surface.'
+name: create-mode
+version: 1.2.0
+description: 'Build custom HAI CreateMode extensions by combining the exposed panel, agent, and host APIs — dashboards, document panels, tools, and workflows. Use when a developer wants to create, extend, or debug a custom right panel, plugin, surface, PDF viewer, or integration (插件、面板、右栏、看板、文档面板、PDF 阅读器、自定义开发).'
 requires:
   tools: [ui_inspect, surface_install]
 ---
 
-# Surface plugin development
+# CreateMode: build a custom app extension
 
-You are adding a **panel** to the desktop app's right sidebar. It is a plugin: a folder on disk
-with `surface.json` + `panel.js` (+ optional `icon.svg`), installed by `surface_install`, loaded by
-the renderer through `hai-surface://<id>/panel.js` and registered into the same registry the four
-built-in panels (activity / git / file / web) use. Nothing is special-cased: a plugin is a normal
-surface provider.
+CreateMode lets you extend the HAI desktop app by combining the capabilities the host exposes:
+a panel provider, host commands and events, agent sessions, model-callable plugin tools, and
+declarative entries. The smallest extension is a **panel**: a folder on disk with `surface.json` +
+`panel.js` (+ optional `icon.svg`), installed by `surface_install`, loaded by the renderer through
+`hai-surface://<id>/panel.js` and registered into the same registry the four built-in panels
+(activity / git / file / web) use. Nothing is special-cased: an extension is a normal surface
+provider, and it can grow into tools and multi-page workflows without a second runtime.
 
 The contract is split into small references. Read only the ones the task needs:
 

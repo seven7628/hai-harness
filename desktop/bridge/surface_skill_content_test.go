@@ -1,6 +1,7 @@
-// surface_skill_content_test.go —— 随仓的 Surface 技能与模板的内容守卫（PR-14 E）。
+// surface_skill_content_test.go —— 随仓的 CreateMode 技能与模板的内容守卫（PR-14 E/P4）。
 //
-// 三块内容都是「文档即代码」：`skills/hai-surface-dev/SKILL.md` 决定模型怎么写插件，
+// 三块内容都是「文档即代码」：
+// `desktop/vendor/create-mode-skills/create-mode/SKILL.md` 决定模型怎么做自定义开发，
 // `templates/surface/*` 决定用户拿到的第一份插件长什么样。它们写坏了不会有编译错误，
 // 症状是「模型按错的口径写了一版插件，装上才发现面板空白」。所以守四件事：
 //
@@ -28,27 +29,33 @@ import (
 
 const (
 	// 技能的**父目录**：Registry 扫的是「下面每个子目录一份 SKILL.md」的集合目录
-	//（与 desktop/vendor/visual-skills 同一个形状）。仓库根的 skills/ 同时也是 Go 包，
-	// 扫描会跳过没有 SKILL.md 的目录，两者互不影响。
-	surfaceSkillRoot    = "../../skills"
-	surfaceSkillName    = "hai-surface-dev"
+	//（与 desktop/vendor/visual-skills 同一个形状）。
+	createModeSkillRoot = "../vendor/create-mode-skills"
+	createModeSkillName = "create-mode"
 	surfaceTemplatesDir = "../../templates/surface"
 )
 
-func TestSurfaceSkillLoadable(t *testing.T) {
-	reg, err := skills.NewRegistry(surfaceSkillRoot)
+func TestCreateModeSkillLoadable(t *testing.T) {
+	reg, err := skills.NewRegistry(createModeSkillRoot)
 	if err != nil {
-		t.Fatalf("加载 %s 失败: %v", surfaceSkillRoot, err)
+		t.Fatalf("加载 %s 失败: %v", createModeSkillRoot, err)
 	}
-	s, err := reg.Skill(surfaceSkillName)
+	s, err := reg.Skill(createModeSkillName)
 	if err != nil {
-		t.Fatalf("技能 hai-surface-dev 无法加载: %v", err)
+		t.Fatalf("技能 create-mode 无法加载: %v", err)
 	}
 	if strings.TrimSpace(s.Version) == "" {
 		t.Fatal("缺 frontmatter version（随包技能按 version 决定是否覆盖已装用户）")
 	}
 	if n := len([]rune(s.Description)); n < 80 || n > 300 {
 		t.Fatalf("description %d 字，want 80–300（发现阶段只注入这一句）:\n%q", n, s.Description)
+	}
+	// 描述是 L1 的唯一线索：必须让人知道这是「组合宿主能力做自定义开发」，
+	// 而不是旧版「只做一个右栏面板」。这三个词是这条定位的最小锚点。
+	for _, must := range []string{"CreateMode", "custom", "自定义开发"} {
+		if !strings.Contains(s.Description, must) {
+			t.Fatalf("description 缺定位锚点 %q:\n%s", must, s.Description)
+		}
 	}
 	// requires.tools：没有这两个工具的环境不该看到这个技能（它会教模型调不存在的工具）。
 	// 这里是**规范化的能力集**（skills.Capabilities），不是原始字符串比对。
@@ -91,7 +98,7 @@ func TestSurfaceSkillLoadable(t *testing.T) {
 		"scripts/validate-plugin.mjs", "scripts/install-smoke.sh",
 		"assets/surface.json", "assets/panel.js", "assets/icon.svg",
 	} {
-		if _, err := os.Stat(filepath.Join(surfaceSkillRoot, surfaceSkillName, rel)); err != nil {
+		if _, err := os.Stat(filepath.Join(createModeSkillRoot, createModeSkillName, rel)); err != nil {
 			t.Fatalf("技能资源 %q 不存在: %v", rel, err)
 		}
 		// Resources 是绝对/相对混合的完整路径（注册表各层不同根），按后缀匹配；
@@ -114,7 +121,7 @@ func TestSurfaceSkillLoadable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("读根模板 %s 失败: %v", name, err)
 		}
-		got, err := os.ReadFile(filepath.Join(surfaceSkillRoot, surfaceSkillName, "assets", name))
+		got, err := os.ReadFile(filepath.Join(createModeSkillRoot, createModeSkillName, "assets", name))
 		if err != nil {
 			t.Fatalf("读技能模板 %s 失败: %v", name, err)
 		}
@@ -130,7 +137,7 @@ func TestSurfaceSkillLoadable(t *testing.T) {
 //   - manifest 的 name 是语言对象、且不再携带未被消费的 api/placement（避免新插件照抄死字段）。
 func TestSurfaceTemplateContracts(t *testing.T) {
 	allowed := map[string]bool{"bg": true, "fg": true, "border": true, "accent": true, "ok": true, "warn": true, "err": true, "info": true}
-	dirs := []string{surfaceTemplatesDir, filepath.Join(surfaceSkillRoot, surfaceSkillName, "assets")}
+	dirs := []string{surfaceTemplatesDir, filepath.Join(createModeSkillRoot, createModeSkillName, "assets")}
 	tokenRE := regexp.MustCompile(`\btokens\.([A-Za-z_][A-Za-z0-9_]*)`)
 	for _, dir := range dirs {
 		raw, err := os.ReadFile(filepath.Join(dir, "surface.json"))
@@ -332,17 +339,17 @@ func TestSurfaceTemplateManifestKindMatchesID(t *testing.T) {
 	}
 }
 
-// TestSurfaceSkillHiddenWithoutSurfaceTools 锁住「默认关时技能不可见」这条因果链：
+// TestCreateModeSkillHiddenWithoutSurfaceTools 锁住「默认关时技能不可见」这条因果链：
 // `features.surfaceTools` 缺省 false → 引擎没有 surface_install → requires.tools 过滤掉
-// hai-surface-dev。这不是文案问题，改能力面/开关时必须同时看这个用例。
-func TestSurfaceSkillHiddenWithoutSurfaceTools(t *testing.T) {
-	reg, err := skills.NewRegistry(surfaceSkillRoot)
+// create-mode。这不是文案问题，改能力面/开关时必须同时看这个用例。
+func TestCreateModeSkillHiddenWithoutSurfaceTools(t *testing.T) {
+	reg, err := skills.NewRegistry(createModeSkillRoot)
 	if err != nil {
-		t.Fatalf("加载 %s 失败: %v", surfaceSkillRoot, err)
+		t.Fatalf("加载 %s 失败: %v", createModeSkillRoot, err)
 	}
 	hasSkill := func(tools []string) bool {
 		for _, d := range reg.ListFor(skills.NewCapabilities("m", []string{"text"}, tools)) {
-			if d.Name == surfaceSkillName {
+			if d.Name == createModeSkillName {
 				return true
 			}
 		}

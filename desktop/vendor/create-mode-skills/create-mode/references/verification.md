@@ -1,6 +1,6 @@
 # Verify before you say it works
 
-Part of `hai-surface-dev`. Run the packaged scripts first, then the browser check; use Electron only
+Part of `create-mode`. Run the packaged scripts first, then the browser check; use Electron only
 when the browser check is not enough.
 
 Use the skill-relative path (not `../scripts`, which only works if your cwd is `references/`):

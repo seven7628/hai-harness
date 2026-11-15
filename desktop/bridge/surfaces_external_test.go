@@ -1,7 +1,7 @@
 // surfaces_external_test.go —— 「别人的插件目录能不能装进来」的验收工具（R16b / Creator Mode）。
 //
 // 为什么单开一个文件而不是又一条夹具：Creator Mode 的判据**不是**「我们把插件写对了」，
-// 而是「照 skills/hai-surface-dev 写出来的目录，被真安装器装上了、界面上点得开」。
+// 而是「照 desktop/vendor/create-mode-skills/create-mode 写出来的目录，被真安装器装上了、界面上点得开」。
 // 这条链路横跨两侧，所以拆成两个可重复执行的入口（两个都只**读**那个目录，不改它）：
 //
 //	go test ./desktop/bridge -run TestSurfaceInstallExternal -count=1 -v -args -dir=<插件目录>

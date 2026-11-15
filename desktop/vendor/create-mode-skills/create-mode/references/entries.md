@@ -1,6 +1,6 @@
 # Multiple entrances
 
-Part of `hai-surface-dev`. Read this only when the plugin declares several pages.
+Part of `create-mode`. Read this only when the plugin declares several pages.
 
 One plugin stays **one kind**. If the user needs several pages (overview / schedule / resources),
 declare them in `surface.json` — the host draws the menu itself, you do not inject UI:

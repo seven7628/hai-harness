@@ -251,7 +251,7 @@ The bridge binary is built from source by `npm run build`
 (`desktop/bridge` → `desktop/app/dist/hai-bridge`); nothing prebuilt is downloaded.
 
 > **We do not redistribute third-party components.** This tree ships the harness, the bridge, the
-> client code and **our own** built-in skills (`desktop/vendor/office-skills/`). Some client features
+> client code and **our own** built-in skills (`desktop/vendor/office-skills/`, `desktop/vendor/visual-skills/`, `desktop/vendor/create-mode-skills/`). Some client features
 > look for vendored third-party packages that are intentionally absent:
 >
 > - Browser Use's default `mcp` engine expects the upstream **`chrome-devtools-mcp`** package. Drop it
@@ -407,6 +407,7 @@ quotes and ESM for TypeScript.
 | `desktop/bridge/` | Go stdio host: multi-workspace sessions, commands, event flattening, checkpoints, trace projection | `desktop/bridge/main.go` |
 | `desktop/app/` | Electron + React client | `desktop/app/src`, `desktop/app/electron` |
 | `desktop/vendor/office-skills/` | Our own built-in skills (`SKILL.md` for docx / xlsx / pdf / pptx) that the client syncs into your skills directory | — |
+| `desktop/vendor/create-mode-skills/` | Our own CreateMode skill (`create-mode`): builds custom panels/tools by combining the host's exposed APIs. The client syncs it into your skills directory; it is gated by `features.surfaceTools` | — |
 | `desktop/vendor/visual-skills/` | Our own visual/UI skills (`visual-ui`, `screenshot-to-ui`, `visual-review`). No vision API: the **session's selected model** reads the image and writes the output; visibility is gated by the model's input modalities (`requires.input: [image]`) | — |
 | `brand/` | Logo assets (light/dark) | `brand/hai-logo-light.svg` |
 
@@ -436,5 +437,5 @@ Questions, bug reports, or want to collaborate? Email
 [MIT](LICENSE) © 2026 初识. Dependencies keep their own licenses — see the `go.mod` module list
 (Apache-2.0, MIT, BSD-3-Clause and ISC licensed modules) and `desktop/app/package.json` for the
 client's npm dependencies. Third-party assets that we ship in our own builds (the Chrome DevTools MCP
-package, the ego-lite skill) are deliberately **not** redistributed here; the only bundled skill set is
-our own `desktop/vendor/office-skills/`, covered by the MIT license above.
+package, the ego-lite skill) are deliberately **not** redistributed here; the bundled skill sets are
+our own `desktop/vendor/office-skills/`, `desktop/vendor/visual-skills/` and `desktop/vendor/create-mode-skills/`, covered by the MIT license above.

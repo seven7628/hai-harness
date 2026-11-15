@@ -12548,7 +12548,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().fetchCron()
   },
   // 面板插件 AI 工具开关：显式打开后模型才会拿到 ui_inspect/surface_install 等工具，
-  // `hai-surface-dev` 技能也才会进入清单（requires.tools 过滤）。默认关是成本/安全的
+  // `create-mode` 技能也才会进入清单（requires.tools 过滤）。默认关是成本/安全的
   // fail-closed 口径；设置页必须提供这个开关，否则技能会自锁在「工具没开 → 技能不可见
   // → 用户不知道该开」的循环里。
   setSurfaceToolsEnabled: async (on) => {

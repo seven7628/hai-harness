@@ -1,6 +1,6 @@
 # Exposing tools to the agent (P2)
 
-Part of `hai-surface-dev`. Read this only when the panel needs the model to call plugin tools.
+Part of `create-mode`. Read this only when the panel needs the model to call plugin tools.
 
 A plugin can give its own agent session tools (for example a PDF panel exposing `update_note`).
 Declare them in `surface.json`, **and** declare the two channels — the installer rejects tools

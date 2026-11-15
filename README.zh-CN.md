@@ -254,7 +254,7 @@ bridge 二进制由 `npm run build` 从源码编译
 （`desktop/bridge` → `desktop/app/dist/hai-bridge`），不下载任何预编译产物。
 
 > **我们不再分发三方组件。** 本树包含：内核、bridge、客户端代码，以及**我们自己的**内置技能
-> （`desktop/vendor/office-skills/`）。有少数功能会去找三方资产，而那些资产被有意排除：
+> （`desktop/vendor/office-skills/`、`desktop/vendor/visual-skills/`、`desktop/vendor/create-mode-skills/`）。有少数功能会去找三方资产，而那些资产被有意排除：
 >
 > - Browser Use 的默认 `mcp` 引擎需要上游 **`chrome-devtools-mcp`** 包。要启用它，把它放到
 >   `desktop/vendor/chrome-devtools-mcp`（dev）或 `Contents/Resources/chrome-devtools-mcp`（打包态）；
@@ -403,6 +403,7 @@ npm run build                 # 生产打包 + bridge 二进制
 | `desktop/bridge/` | Go stdio 宿主：多工作区会话、命令路由、事件扁平化、检查点、trace 投影 | `desktop/bridge/main.go` |
 | `desktop/app/` | Electron + React 客户端 | `desktop/app/src`、`desktop/app/electron` |
 | `desktop/vendor/office-skills/` | 我们自己的内置技能（docx / xlsx / pdf / pptx 的 `SKILL.md`），客户端启动时同步到你的技能目录 | — |
+| `desktop/vendor/create-mode-skills/` | 我们自己的 CreateMode 技能（`create-mode`）：组合宿主暴露的 API 做自定义面板/工具；客户端启动时同步到技能目录，受 `features.surfaceTools` 开关控制 | — |
 | `desktop/vendor/visual-skills/` | 我们自己的视觉/UI 技能（`visual-ui`、`screenshot-to-ui`、`visual-review`）。**不调任何视觉 API**：由**会话选中的模型**自己看图、自己产出；可见性按该模型的输入模态过滤（`requires.input: [image]`） | — |
 | `brand/` | 品牌 logo（深/亮两版） | `brand/hai-logo-light.svg` |
 
@@ -427,4 +428,4 @@ npm run build                 # 生产打包 + bridge 二进制
 [MIT](LICENSE) © 2026 初识。依赖保留各自许可证 —— 见 `go.mod` 依赖表（Apache-2.0、MIT、BSD-3-Clause、ISC 等）
 与 `desktop/app/package.json` 里的 npm 依赖。我们自己构建时会带上的三方资产（Chrome DevTools MCP 包、
 ego lite 技能）**不在本仓库再分发**；随本仓库分发的技能只有我们自己的
-`desktop/vendor/office-skills/`，适用上面的 MIT 许可证。
+`desktop/vendor/office-skills/`、`desktop/vendor/visual-skills/` 与 `desktop/vendor/create-mode-skills/`，适用上面的 MIT 许可证。

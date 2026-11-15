@@ -1,6 +1,6 @@
 # Examples
 
-Part of `hai-surface-dev`. Minimum shape and the agent/quote pattern.
+Part of `create-mode`. Minimum shape and the agent/quote pattern.
 
 ## Minimum working example
 

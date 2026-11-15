@@ -342,6 +342,18 @@ function bundledVisualSkillsDir(): string {
   return path.resolve(APP_ROOT, '..', 'vendor', 'visual-skills')
 }
 
+// 内置 CreateMode 技能集合目录（2026-11；随包分发）：
+// 打包态 → Contents/Resources/create-mode-skills（electron-builder extraResources）；
+// dev → 仓库 desktop/vendor/create-mode-skills。Go 侧 syncBundledSkills 逐子目录同步到
+// ~/.agents/skills/<name>，按 frontmatter version 决定是否覆盖用户副本。
+// 集合里目前只有 create-mode；保留集合形状，未来加 CreateMode 相关技能不用改接线。
+function bundledCreateModeSkillsDir(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'create-mode-skills')
+  }
+  return path.resolve(APP_ROOT, '..', 'vendor', 'create-mode-skills')
+}
+
 // activateEgoLite 把 ego lite 窗口带到前台（open -a，LaunchServices 路径）。
 // 不用 osascript `tell application to activate`：那需要宿主对目标 app 的 AppleEvent
 // 自动化授权（TCC：系统设置 → 隐私 → 自动化），首启未授权会失败；open -a 拉起/
@@ -411,6 +423,10 @@ function bridgeEnv(): NodeJS.ProcessEnv {
   // 打包 = Resources/visual-skills。Go bridge 逐子目录同步到 ~/.agents/skills/<name>。
   // 与上面办公技能同样的「集合目录」设计：新增一个视觉技能只加子目录，两侧接线都不动。
   env.GO_CODE_VISUAL_SKILLS_DIR = bundledVisualSkillsDir()
+  // 内置 CreateMode 技能集合目录（随包分发）：dev = 仓库 desktop/vendor/create-mode-skills；
+  // 打包 = Resources/create-mode-skills。Go bridge 同步到 ~/.agents/skills/create-mode，
+  // 让打包版用户打开 surface 工具后能直接 load_skill(create-mode)。
+  env.GO_CODE_CREATE_MODE_SKILLS_DIR = bundledCreateModeSkillsDir()
   // GUI（Finder/Dock）启动的 PATH 通常不含用户 shell 配置（Homebrew/nvm 等）：
   // bridge 的 exec.LookPath("node") 找不到 → 误报「未检测到 Node.js」。PATH 上
   // 没有 node 时，把探测到的 node 所在目录前插（已有则不动——用户 PATH 优先）。

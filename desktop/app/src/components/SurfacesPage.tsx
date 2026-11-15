@@ -57,7 +57,7 @@ export default function SurfacesPage() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [confirmId, setConfirmId] = useState<string | null>(null)
   // 功能开关：默认关（成本 + fail-closed）；必须在这里可见，否则技能 requires.tools
-  // 会把 hai-surface-dev 一起过滤掉，用户没有入口知道「怎么让模型装面板」。
+  // 会把 create-mode 一起过滤掉，用户没有入口知道「怎么让模型装面板」。
   const surfaceToolsOn = useAppStore((s) => s.settings.features?.surfaceTools === true)
   const setSurfaceToolsEnabled = useAppStore((s) => s.setSurfaceToolsEnabled)
   const [toolsBusy, setToolsBusy] = useState(false)

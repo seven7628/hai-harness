@@ -1,6 +1,6 @@
 # Panel API / host contract
 
-Part of `hai-surface-dev`. Read `SKILL.md` first; this file is loaded only when you are
+Part of `create-mode`. Read `SKILL.md` first; this file is loaded only when you are
 writing `surface.json` / `panel.js` or debugging rendering/lifecycle.
 
 ## surface.json fields
