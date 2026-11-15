@@ -80,13 +80,21 @@ func testPythonRuntime(t *testing.T) *goruntime.Runtime {
 // testManager：provCfg 默认配置构造 manager（构建 loop 不触发网络；runLoop 只在 ask/wake 后才发 LLM）
 func testManager(t *testing.T) (*manager, *syncBuf) {
 	t.Helper()
+	return testManagerWithDataDir(t, t.TempDir())
+}
+
+// testManagerWithDataDir 与 testManager 同一套隔离（临时 HOME / 办公组件按未装 / 统一收尾），
+// 但 APP 数据目录由调用方给 —— 「重启」类用例要用**同一个** appDataDir 先后起两个 manager，
+// 否则测的就不是重启（磁盘上什么都没留下）。
+func testManagerWithDataDir(t *testing.T, dataDir string) (*manager, *syncBuf) {
+	t.Helper()
 	// 隔离真实用户配置、插件和 Seatbelt 相关宿主状态；bridge 单测不应读取 ~/.go-code。
 	// HOME 之外还要隔离 USERPROFILE：os.UserHomeDir 在 Windows 上读它，只设 HOME 时
 	// p404aWriteUserHooks / 边界测试可能写到真实 %USERPROFILE%\.go-code（破坏性）。
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	appDataDirOverride = t.TempDir()
+	appDataDirOverride = dataDir
 	t.Cleanup(func() { appDataDirOverride = "" })
 	buf := &syncBuf{}
 	m := &manager{

@@ -284,7 +284,8 @@ func TestSurfaceAgentSessionCreatesPluginSession(t *testing.T) {
 		t.Fatalf("plugin-sessions/demo/sessions 没建出来：%v", err)
 	}
 	// ③ 出现在**插件项目**的会话列表里（左栏插件分组读同一份数据）；
-	//    空会话此刻还没有 jsonl（Session 只在有消息后 persist），所以"有记录"以会话表为准。
+	//    空会话也已经有 jsonl 了（agent.session 建完立刻 persist，D4 的重启边缘路径），
+	//    所以这里断言的是「内存 ∪ 磁盘」两条来源都能给出它。
 	var listed bool
 	for _, it := range m.listSessions(home) {
 		if it["id"] == sid {
@@ -293,6 +294,9 @@ func TestSurfaceAgentSessionCreatesPluginSession(t *testing.T) {
 	}
 	if !listed {
 		t.Fatalf("新建的插件会话没出现在 listSessions(plugin home) 里")
+	}
+	if _, err := os.Stat(filepath.Join(pluginSessionsDir("demo"), sid+".jsonl")); err != nil {
+		t.Fatalf("空会话没落盘（重启后这个 id 会丢）：%v", err)
 	}
 	// ④ 绝不造项目 runtime（09 §4.4 红线）。
 	m.mu.Lock()
@@ -1000,4 +1004,250 @@ func TestSurfaceAgentAuditShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(ts), &probe); err == nil {
 		t.Fatalf("ts 被写成了对象：%v", probe)
 	}
+}
+
+// ---- ⑧ D4 重启恢复：会话的磁盘身份（P1e 加固） ----
+
+// stateLinesOf 解出会话 jsonl 里的 state 记录（按出现顺序），别的记录（history/meta/
+// compaction）忽略 —— 恢复端只认 state 行，这里断言的就该是它。
+func stateLinesOf(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	raw := readBytes(t, path)
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("会话 jsonl 有一行不是合法 JSON：%q", line)
+		}
+		if rec["type"] != "state" {
+			continue
+		}
+		st, _ := rec["state"].(map[string]any)
+		if st == nil {
+			t.Fatalf("state 记录缺 state 对象：%q", line)
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// TestSurfaceAgentEmptySessionSurvivesRestart —— 空会话（建完一条消息都没发）必须活过重启。
+//
+// 这是 D4 最容易漏的路径：Session 只在有输入/轮次检查点时 persist，所以「agent.session
+// 建完就停手」此前在磁盘上什么都没留；而 listSessions 只从内存 ∪ `<storeDir>/*.jsonl`
+// 取（agent.run 的归属判定读的也是同一份磁盘证据）—— 进程一重启，插件手里那个
+// session_id 就变成 no_session。
+//
+// 三段断言对应三个事实来源，顺序就是用户实际经历的顺序（建 → 重启 → 恢复）：
+//  1. 建完立刻有 `<storeDir>/<sid>.jsonl` 且含一条 state（空历史，不要求 messages）；
+//  2. 关掉 manager（≈ 进程退出）后，同一 appDataDir 起的新 manager 仍能列出这个 sid；
+//  3. `new_session` 用它恢复不报错（空历史可接受），且恢复出来的就是同一条磁盘记录。
+func TestSurfaceAgentEmptySessionSurvivesRestart(t *testing.T) {
+	dataDir := t.TempDir() // APP 数据目录：两个 manager 共用 = 一次重启
+	storePath := func(sid string) string {
+		return filepath.Join(pluginSessionsDir("demo"), sid+".jsonl")
+	}
+
+	m1, buf1 := testManagerWithDataDir(t, dataDir)
+	// home/storePath 必须在 manager 建好之后算：它们都跟着 appDataDir 走
+	//（testManagerWithDataDir 才把 override 指到 dataDir，提前算就成了真实 ~/.go-code）。
+	home := pluginHomePath("demo")
+	fakeSurface(t, m1, "demo", true, agentCommands)
+	resp := pluginResp(t, m1, buf1, 1, "surface_agent",
+		agentPayload("demo", surfaceAgentSessionName, nil))
+	sid, _ := pluginRespData(t, resp)["session_id"].(string)
+	if sid == "" {
+		t.Fatalf("agent.session 回执没有 session_id：%v", resp)
+	}
+
+	// ① 磁盘身份：不靠 run 触发，建完就得有（且是 SDK 协议里那条 state，不是伪造文件）。
+	states := stateLinesOf(t, storePath(sid))
+	if len(states) == 0 {
+		t.Fatalf("空会话的 jsonl 里没有 state 行（重启后恢复端读不到它）：%s", storePath(sid))
+	}
+	if msgs, _ := states[0]["messages"].([]any); len(msgs) != 0 {
+		t.Fatalf("空会话的第一条 state 带了 %d 条 messages，want 0（这一刻还没有任何输入）", len(msgs))
+	}
+
+	// ② 重启：先把第一个 manager 的插件运行态关掉（会话随之 Shutdown、运行态摘表），
+	//    再用**同一个** appDataDir 起一个新 manager —— 新进程只能靠磁盘认人。
+	m1.closePluginRuntimes()
+	if m1.pluginRuntimeIfExists("demo") != nil {
+		t.Fatal("closePluginRuntimes 之后插件运行态还在（没能模拟重启）")
+	}
+	m2, buf2 := testManagerWithDataDir(t, dataDir)
+	var listed bool
+	for _, it := range m2.listSessions(home) {
+		if it["id"] == sid {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("重启后 listSessions(%s) 里没有 %s（空会话没活过重启）：%v", home, sid, m2.listSessions(home))
+	}
+
+	// ③ 恢复：new_session 能吃这个 sid，且恢复后会话回到插件运行态（不是项目 runtime）。
+	resp2 := pluginResp(t, m2, buf2, 7, "new_session", map[string]any{"workspace": home, "id": sid})
+	if ok, _ := resp2["ok"].(bool); !ok {
+		t.Fatalf("重启后 new_session(%s) 失败：%v", sid, resp2)
+	}
+	data2 := pluginRespData(t, resp2)
+	if got, _ := data2["session_id"].(string); got != sid {
+		t.Fatalf("恢复回执 session_id = %q，want %q（必须复用同一个 id）", got, sid)
+	}
+	if m2.get(home, sid) == nil {
+		t.Fatalf("恢复后 %s 不在插件运行态", sid)
+	}
+	if ws := m2.pluginRuntimeIfExists("demo"); ws == nil || ws.kind != runtimePlugin {
+		t.Fatalf("恢复走错了入口：插件运行态 = %#v，want kind=runtimePlugin", ws)
+	}
+	// 恢复不该把空会话写坏（state 行还在，仍然只有 0 条 messages）。
+	if states := stateLinesOf(t, storePath(sid)); len(states) == 0 {
+		t.Fatalf("恢复之后会话 jsonl 的 state 行没了：%s", storePath(sid))
+	}
+}
+
+// TestSurfaceAgentRunNewSessionPersistsBeforeAck —— agent.run 不带 session_id 时，
+// 回执里的 session_id 必须在 **ack 那一刻**就已经在磁盘上（D4）。
+//
+// 取证点是 out 的行钩子：它在回执那一行写出去的**同一刻**给 store 目录拍照。
+// 不用「dispatch 返回后再看文件」—— 那时 Ask 已经跑过，而 Ask 自己也会 persist 一次
+// （session.go：会话未运行 → persist(pending)），于是旧代码也能"看起来落盘"，
+// 测不出「回执先给 id、落盘在后面」这个窗口。
+func TestSurfaceAgentRunNewSessionPersistsBeforeAck(t *testing.T) {
+	m, buf := testManager(t)
+	fakeSurface(t, m, "demo", true, agentCommands)
+	useAgentLoop(t, &evalProvider{reply: "ok"}, 1) // 真跑一轮要有 provider；这里只关心 ack 那一刻
+
+	dir := pluginSessionsDir("demo")
+	var (
+		probeMu  sync.Mutex
+		probed   bool
+		ackFiles map[string]bool
+	)
+	m.out.setLineTap(func(line []byte) {
+		if !strings.Contains(string(line), `"command_response"`) {
+			return
+		}
+		probeMu.Lock()
+		defer probeMu.Unlock()
+		if probed {
+			return
+		}
+		probed = true
+		ackFiles = map[string]bool{}
+		entries, _ := os.ReadDir(dir) // 回执写出时的磁盘快照
+		for _, e := range entries {
+			ackFiles[e.Name()] = true
+		}
+	})
+
+	resp := pluginResp(t, m, buf, 1, "surface_agent",
+		agentPayload("demo", surfaceAgentRunName, map[string]any{"input": "看看今天的课表"}))
+	probeMu.Lock()
+	snap, taken := ackFiles, probed
+	probeMu.Unlock()
+	if !taken {
+		t.Fatal("没观察到回执写出点（行钩子没被调用）")
+	}
+	sid, _ := pluginRespData(t, resp)["session_id"].(string)
+	if sid == "" {
+		t.Fatalf("agent.run 回执没有 session_id：%v", resp)
+	}
+	if !snap[sid+".jsonl"] {
+		t.Fatalf("回执写出时 %s 还不在磁盘上（Ask 之后才落盘 ⇒ 这中间进程被杀，插件手里的 id 就丢了）：%v",
+			sid+".jsonl", snap)
+	}
+	// 落的是「空会话」那条 state（0 条 messages：回执时还没 Ask），不是伪造的空文件。
+	states := stateLinesOf(t, filepath.Join(dir, sid+".jsonl"))
+	if len(states) == 0 {
+		t.Fatalf("ack 时 %s 还没有 state 行", filepath.Join(dir, sid+".jsonl"))
+	}
+	if msgs, _ := states[0]["messages"].([]any); len(msgs) != 0 {
+		t.Fatalf("ack 时的第一条 state 带了 %d 条 messages，want 0（这一刻还没 Ask）", len(msgs))
+	}
+}
+
+// TestSurfaceAgentRunPersistFailureIsBridgeError —— 落盘失败时**不许**把 id 交出去。
+//
+// 失败注入选「把 <storeDir>/<sid>.jsonl 做成目录」：appendLine 打开它必然失败（EISDIR），
+// 与运行用户是不是 root 无关（chmod 只读在 root 下不生效，那种注入在 CI 上假绿）。
+// 装配钩子在 createIn 之后、落盘之前执行，正好卡在这个窗口上。
+//
+// 断言三件事：回执是 bridge_error 且**没有 session_id**、审计留了一行原因、
+// 内存里也没留下这个会话（撤回了，不是「看着成功」）。
+func TestSurfaceAgentRunPersistFailureIsBridgeError(t *testing.T) {
+	m, buf := testManager(t)
+	fakeSurface(t, m, "demo", true, agentCommands)
+	home := pluginHomePath("demo")
+
+	var sabotagedSID string
+	prev := surfaceAgentAssembleHook
+	surfaceAgentAssembleHook = func(bs *bridgeSession) {
+		sabotagedSID = bs.id
+		if err := os.MkdirAll(filepath.Join(bs.runtime.storeDir, bs.id+".jsonl"), 0o700); err != nil {
+			t.Fatalf("失败注入: %v", err)
+		}
+	}
+	t.Cleanup(func() { surfaceAgentAssembleHook = prev })
+
+	resp := dispatchAndResp(t, m, buf, 1, "surface_agent",
+		agentPayload("demo", surfaceAgentRunName, map[string]any{"input": "hi"}))
+	if ok, _ := resp["ok"].(bool); ok {
+		t.Fatalf("落盘失败却回了成功（插件会拿到一个重启就丢的 id）：%v", resp)
+	}
+	if got, _ := resp["code"].(string); got != surfaceReasonBridgeError {
+		t.Fatalf("code = %q，want %q（%v）", got, surfaceReasonBridgeError, resp)
+	}
+	data := pluginRespData(t, resp)
+	if sid, _ := data["session_id"].(string); sid != "" {
+		t.Fatalf("失败回执里带了 session_id=%q：插件会照着它重试后撞 no_session", sid)
+	}
+	if sabotagedSID == "" {
+		t.Fatal("失败注入没执行（装配钩子没被调用）")
+	}
+	// 会话级线索：落盘失败本身发 session_persist_error，撤回会话再发一条 session_closed
+	//（插件看不到这两条 —— 它们走的是桌面端事件流；这是「到底哪里坏了」的唯一可观察面）。
+	var sawPersistErr, sawClosed bool
+	for _, l := range readAllLines(buf) {
+		switch l["event_type"] {
+		case "session_persist_error":
+			sawPersistErr = true
+		case "session_closed":
+			sawClosed = true
+		}
+	}
+	if !sawPersistErr || !sawClosed {
+		t.Fatalf("事件流里看不到收尾线索：persist_error=%v closed=%v", sawPersistErr, sawClosed)
+	}
+	// 审计留痕：reason 里要能看出是 persist 失败（固定文案之外唯一可对账的材料）。
+	var audited bool
+	for _, row := range auditLines(t, m) {
+		if row["session"] != sabotagedSID || row["ok"] == true {
+			continue
+		}
+		if reason, _ := row["reason"].(string); strings.Contains(reason, "persist") {
+			audited = true
+		}
+	}
+	if !audited {
+		t.Fatalf("审计里没有 persist 失败记录：%v", auditLines(t, m))
+	}
+	// 内存里也不许留：撤回了（否则就是「内存里看得见、重启就没」的幽灵会话）。
+	if bs := m.get(home, sabotagedSID); bs != nil {
+		t.Fatalf("落盘失败的会话仍留在运行态：%s", sabotagedSID)
+	}
+	// 配额也要归还：同一 surface 的下一次 run 不该被判并发超限。
+	// 这一段真跑一轮模型，换成假 provider（别让单测依赖网络）。
+	surfaceAgentAssembleHook = prev
+	useAgentLoop(t, &evalProvider{reply: "ok"}, 1)
+	resp2 := pluginResp(t, m, buf, 2, "surface_agent",
+		agentPayload("demo", surfaceAgentRunName, map[string]any{"input": "hi again"}))
+	if ok, _ := resp2["ok"].(bool); !ok {
+		t.Fatalf("失败之后配额没归还（下一次 run 被拒）：%v", resp2)
+	}
+	waitSurfaceTerminal(t, buf, str(pluginRespData(t, resp2), "run_id"), 30*time.Second)
 }

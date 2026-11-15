@@ -828,6 +828,13 @@ func validateSurfaceSource(target string) (surfaceSource, error) {
 	} else if len([]rune(v)) > 32 {
 		return surfaceSource{manifest: mf}, fmt.Errorf("%s: version 过长（%d 字符，上限 32）", mf.ID, len([]rune(v)))
 	}
+	// commands 声明也在**写盘前**判死（09-agent-bridge D11）。运行期那四条旧命令早已
+	// 恒拒（surfaceHostCommands 是空表），但只拒调用不够：装上去之后用户看到的是一个
+	// 「面板打开、每次调用都 denied」的插件，而且 index 里从此多一条永远修不好的记录。
+	// 安装期直接拒绝，作者拿到的是「哪条命令、该改用哪一组」的可行动理由。
+	if err := validateSurfaceCommands(mf.ID, mf.Commands); err != nil {
+		return surfaceSource{manifest: mf}, err
+	}
 
 	entry := strings.TrimSpace(mf.Entry)
 	if entry == "" {
@@ -865,8 +872,36 @@ func validateSurfaceSource(target string) (surfaceSource, error) {
 	return surfaceSource{manifest: mf, entryPath: entryPath, entryRel: filepath.Clean(entry), hash: hash}, nil
 }
 
-// resolveSurfaceEntry 把 manifest 的 entry 解析成 target 内的真实文件路径。
+// surfaceRetiredCommands P1c/D11 下线、安装期一律拒绝的四条旧宿主命令。
 //
+// 与运行期那张空表（surfaceHostCommands）刻意分开：那张表是**授权**（谁能通过），
+// 这里是**装得上还是装不上**（作者该不该继续写它）。两者唯一的共同点是要一起改 ——
+// 哪天真的加回某条命令，这张表与那张表必须同一次提交里对齐。
+var surfaceRetiredCommands = []string{"workspace_list", "session_list", "git_snapshot", "ui_inspect"}
+
+// validateSurfaceCommands 安装期校验 manifest.commands：四条旧命令出现即拒绝。
+//
+// 只认**名字**：参数形态由各命令自己的 handler 校验（运行期），安装期多解析一层就等于
+// 让 manifest 能通过参数去探测宿主实现。其它命令（agent.* / composer.quote / ui.*）
+// 一律不受影响 —— 这条闸只关 D11 的那四条，不扩权也不收权。
+func validateSurfaceCommands(id string, cmds []string) error {
+	for _, raw := range cmds {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		for _, retired := range surfaceRetiredCommands {
+			if name != retired {
+				continue
+			}
+			return fmt.Errorf("%s: commands 声明了 %q —— D11 已下线，请改用 agent.*（%s / %s / %s）",
+				id, name, surfaceAgentSessionName, surfaceAgentRunName, surfaceAgentCancelName)
+		}
+	}
+	return nil
+}
+
+// resolveSurfaceEntry 把 manifest 的 entry 解析成 target 内的真实文件路径。
 // 三道闸（对齐 01-design §5.5「装插件 = 信任它」的最低防线：至少要挡住「装 A 读 B」）：
 //  1. 不许绝对路径（否则 manifest 就是一次任意文件读取）；
 //  2. 不许 `..`（Clean 之后按分段判断，`a/../../b` 也算逃逸）；
