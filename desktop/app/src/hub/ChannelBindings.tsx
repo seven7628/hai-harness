@@ -257,7 +257,7 @@ export default function ChannelBindings({
                   <span className="hub-channel-meta">
                     {gw?.type ?? r.chat.gateway} · {r.chat.chat_id}
                     {r.chat.thread_id ? `:${r.chat.thread_id}` : ''}
-                    {isGroup && r.agent ? ` · ${r.agent}` : ''}
+                    {isGroup && r.agent ? ` · ${members.find((m) => m.id === r.agent)?.label ?? r.agent}` : ''}
                   </span>
                 </div>
                 <button
