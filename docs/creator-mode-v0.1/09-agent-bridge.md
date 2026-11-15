@@ -467,6 +467,26 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 - 模板/SKILL：移除旧只读命令示例；manifest 校验拒绝已移除的命令名。
 - 测试：会话归属、模型切换、卸载保留、跨插件拒绝、quota。
 
+### P1 落地记录（2026-11-15）
+
+| 块 | merge commit | 验收 |
+|---|---|---|
+| L0 一次性交接 | `34161e9` | host-boundary 29 项；生产 dist 无 `__haiTestBridge` |
+| P1a 虚拟 Project（Go） | `e2cf98b` | 插件 TestPlugin 23 项；Go 全包曾 exit 0 |
+| P1b1 owner path / 左栏（renderer） | `27ffe2d` | owner-path、plugin-projects、store、session-tabs 全绿 |
+| P1b2 host API / quote | `ad61092` | host keys 恰五键；surface-host 86；composer-quote 33；creator-mode 606 |
+| P1c Agent 协议（Go） | `c4f34f2` | SurfaceAgent/SurfaceCommand 19+11 全 PASS；D11 四条 denied |
+| P1d 会话刷新 / 真 Electron | `c5bae12` | 真 Electron `agent.session` 22 项；左栏 0→1；host keys/`window.desktop` 断言 |
+| appearance 探针回归 | `c8b0b17` | 79 项；dist 无 `__haiTestBridge` |
+
+**已验证的端到端**：临时插件 `host.command('agent.session')` → token → preload/main → Go `surface_agent` → `plugin-sessions/<id>/sessions` → 左栏插件分组；`workspace_list` 即使声明也 `denied`（D11）。
+
+**P1 仍欠**：
+1. 空会话不持久化：`agent.session` 建完未发消息时没有 `<sid>.jsonl`，重启后该 id 会丢（D4 边缘路径；下一轮补 session index/空记录）。
+2. 安装期 D11 校验：目前只在运行期 `denied`，安装器尚未对四条旧命令名做“声明即拒绝”。
+3. `agent.run` 的真模型端到端未跑：Go 用 fake provider 覆盖事件/配额/取消；真 Provider 留给联调环境。
+4. 同一 realm 残留（localStorage/全局篡改）仍是 V1 已知边界，V2 iframe/独立 WebContents 解决。
+
 ### P2（2–3 轮）
 - manifest `tools[]` + 代理工具 + `tool.call/result` + 审批 + denylist 断言（工具只在插件自身会话注册，D10）。
 
@@ -500,6 +520,8 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | 旧插件使用已移除的只读命令 | 会 `not_declared` / 安装拒绝 | P1 更新模板与 SKILL；安装回执给出明确 reason |
 | `surface_list` 是否放行 | 禁（D11） | 不开口子；需要清单走宿主 UI |
 | 工具 denylist 随版本漂移 | 集中 denylist + `SetToolFilter`（装配后动态注册）+ `HideTool`（模型不可见、调用即拒）双防线 | MCP/插件工具名是动态的，纯 allowlist 会误伤；P2 若改 allowlist，先解决 `mcp__*` 前缀白名单 |
+| 空插件会话重启丢失 | 已知（P1 记录） | 下轮补 session index/空记录；此前插件应在 `agent.session` 后尽快 `agent.run` |
+| 安装期旧命令未拒绝 | 运行期已 `denied` | P2 前补 install validate：manifest 声明四条旧名 → 安装失败并提示更新 |
 
 ---
 
