@@ -263,7 +263,7 @@ function startFakeProvider() {
 
 // —— 临时插件：surface.json + panel.js（无构建步骤，浏览器直接 import）——
 //
-// 面板做四件事：① 记宿主边界事实；② **先**订阅四个 agent.* 事件；③ **后**发 agent.run
+// 面板做四件事：① 记宿主边界事实；② **先**订阅 agent.* 事件；③ **后**发 agent.run
 // （不带 session_id）；④ 把 ack / 事件序列 / 拼出的文本 / 终态演进写进
 // `<pre data-run-json>`。判据读 JSON，不在 DOM 里猜文本。
 const PANEL_JS = `// panel.js —— agent.run + 插件工具（tool.call/tool.result）探针（由 verify_agent_run_electron.mjs 生成）
@@ -292,6 +292,9 @@ export const surface = {
 
     // P3a：用户从宿主 UI 直接驱动插件会话时，插件也必须看到会话级状态。
     // 放在 apply 作用域（不随面板标签关闭而消失），T15 用它做判据。
+    // T15 还从 Node 侧调一次 snapshot：事件只证明「推得出来」，这条证明
+    // 「拉得到」且经过 loader → main token 注入 → Go 的完整链路。
+    globalThis.__agentSnapshot = (sessionId) => host.command('agent.snapshot', { session_id: sessionId })
     host.onEvent('agent.state', (e) => {
       const d = (e && e.data) || {}
       states.push({
@@ -510,8 +513,8 @@ const MANIFEST = {
   kind: PLUGIN_KIND,
   entry: 'panel.js',
   placement: 'plugin',
-  // 四个 Agent 命令全声明：本探针只调 agent.run，但「声明 ∩ 宿主表」的闸门要看齐全，
-  // 少一个都会让日后加 cancel/tool.result 的探针重新踩 manifest 的坑。
+  // 五个 Agent 命令全声明：本探针调 agent.run / agent.snapshot，但「声明 ∩ 宿主表」的
+  // 闸门要看齐全，少一个都会让日后加 cancel/tool.result 的探针重新踩 manifest 的坑。
   commands: ['agent.session', 'agent.run', 'agent.cancel', 'agent.snapshot', 'tool.result'],
   // usage 也声明：它是成功 run 的必经终态之一（finish 里紧跟 delta 投出），
   // 订阅到 = 收尾帧的 usage 真的从 provider 走到了插件手里。
@@ -1083,6 +1086,10 @@ try {
   check('T15 state 的 session_id = 插件会话', !!(statePair && statePair.running.session_id === sid), JSON.stringify(statePair))
   check('T15 state 不含正文键', !!(statePair && !('text' in statePair.idle) && !('content' in statePair.idle)), JSON.stringify(statePair))
   check('T15 state seq 递增', !!(statePair && statePair.running.seq < statePair.idle.seq), JSON.stringify(statePair))
+  const snap = await win.evaluate((s) => globalThis.__agentSnapshot(s), sid)
+  check('T15 snapshot 回执 ok', !!(snap && snap.ok === true), JSON.stringify(snap))
+  check('T15 snapshot 是自有会话且 idle', !!(snap && snap.session_id === sid && snap.status === 'idle'), JSON.stringify(snap))
+  check('T15 snapshot 无正文', !!(snap && !('messages' in snap) && !('text' in snap) && !('content' in snap)), JSON.stringify(snap))
   check('T15 全程零 pageerror', errs.length === 0, errs.join(' | '))
 
   await app.close()
