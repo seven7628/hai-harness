@@ -478,18 +478,28 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | P1c Agent 协议（Go） | `c4f34f2` | SurfaceAgent/SurfaceCommand 19+11 全 PASS；D11 四条 denied |
 | P1d 会话刷新 / 真 Electron | `c5bae12` | 真 Electron `agent.session` 22 项；左栏 0→1；host keys/`window.desktop` 断言 |
 | appearance 探针回归 | `c8b0b17` | 79 项；dist 无 `__haiTestBridge` |
+| P1e-A/B 空会话 + 安装期 D11 | `c461821`（`ab6f874`） | 空会话重启恢复 3 项；四条旧命令安装期 rejected + index/审计；Go 全包 196s |
+| P1e-C `agent.run` 真机 | `f411edd`（`3c9334d`） | 本地 SSE 全链路；`e2e:agent-run` 接入 creator-mode；启动抖动加固 |
+| P1e 联合门禁修复 | `614cea9` | 真安装器 D11 rejected；空会话 jsonl 必须存在（435B） |
 
 **已验证的端到端**：临时插件 `host.command('agent.session')` → token → preload/main → Go `surface_agent` → `plugin-sessions/<id>/sessions` → 左栏插件分组；`workspace_list` 即使声明也 `denied`（D11）。
 
-**收口验收（2026-11-15）**：完整 `npm test` **exit 0**（含 `e2e:agent-session` 真 Electron 22 项）；`go test ./desktop/bridge -count=1` **ok 180s**；`go test ./session/...` ok；`tsc` 0；eslint 0 error / 57 warning；host-boundary 29；creator-mode 606+。
+**P1e 收口（2026-11-15）**：
+
+- **空会话持久化（P1e-A）**：`agent.session` 在 `createIn` 成功后立刻 `Session.Persist`（独立 5s 超时，不用请求 ctx，避免回执后 ctx 结束写半行）；`agent.run` 不带 `session_id` 时也在回执前落盘。落盘失败回 `bridge_error` + 审计，并撤回内存会话，不把「看起来成功、重启就丢」的 id 交出去。真 Electron：建完会话即有 435B `<sid>.jsonl`；`closePluginRuntimes()` 后同一 `appDataDir` 重起，`listSessions` 仍含该 sid 并可恢复。
+- **安装期 D11（P1e-B）**：`validateSurfaceSource` 在 entry/hash 之前拒绝 `workspace_list` / `session_list` / `git_snapshot` / `ui_inspect`，理由点名命令并指到 `agent.*`；不写 index、不拷目录、无暂存残留，审计有失败记录。`agent.*` / `composer.quote` / `ui.*` 不受影响；运行期 `surfaceHostCommands` 空表保持不变（老已装插件仍走运行期 deny）。
+- **真 Electron `agent.run`（P1e-C）**：本地 `127.0.0.1` 假上游 SSE → Go `agent.run` → `agent.delta/usage/done` → jsonl（history + state）→ 左栏插件分组。断言 run/session 归属、seq 单调、delta 拼接 = done、usage 在 done 前、零 pageerror；`npm run e2e:agent-run` 已接进 `test:creator-mode`。
+- **联合门禁修复（`614cea9`）**：真安装器拒绝旧命令的 e2e 断言（外部安装器 `-expect=rejected`）；空会话 jsonl 从「允许尚未落盘」改成「必须存在且非空」。
+- **启动抖动加固**：两个真 Electron 探针预建 `userData`（防 `DevToolsActivePort` 首启 ENOENT），假上游配置不放明文 `api_key`（防启动期 safeStorage/钥匙串迁移阻塞 180s）。两条都是测试环境真踩过的，不是产品行为变更。
+
+**P1e 联合验收（2026-11-15，main `614cea9`）**：`npm run test:creator-mode` **exit 0 / 0 ❌**（含 T2b 真安装器 rejected、空会话 435B jsonl、`agent.run` 22.1s）；`go test ./desktop/bridge -count=1` **ok 244.9s**；`go test ./session/...` ok；`tsc` 0；eslint 0 error / 57 warning。`go test ./session/remote` 在全包并发跑时红过一次 `target node offline`，单独复跑 13.3s/14.9s 均绿，按既有负载敏感用例记录。
 
 > 注：`link-check:embed-v2` 指向仓库根 `scripts/`（`.gitignore` 忽略的本地脚本），本轮为跑完整链在本地补了适配器新增的 `afterResponse()`，未入库；干净检出需先准备该脚本。
 
-**P1 仍欠**：
-1. 空会话不持久化：`agent.session` 建完未发消息时没有 `<sid>.jsonl`，重启后该 id 会丢（D4 边缘路径；下一轮补 session index/空记录）。
-2. 安装期 D11 校验：目前只在运行期 `denied`，安装器尚未对四条旧命令名做“声明即拒绝”。
-3. `agent.run` 的真模型端到端未跑：Go 用 fake provider 覆盖事件/配额/取消；真 Provider 留给联调环境。
-4. 同一 realm 残留（localStorage/全局篡改）仍是 V1 已知边界，V2 iframe/独立 WebContents 解决。
+**P1e 后仍欠**：
+1. 真 Provider 未跑：P1e-C 用本地 OpenAI 兼容 SSE 假上游，覆盖协议/事件/jsonl/左栏，但不覆盖真实鉴权、真实 usage 字段差异、支持/不支持 `include_usage` 的端点；也仍是单轮文本，无 `tool_calls` 多轮、无 `agent.cancel` 中断、无 `tool.result` waiter。
+2. 落盘失败路径会留下空的 record 子树（`plugin-<id>/`、`<sid>/agents/`；无 record、无 jsonl），且撤回会发 `session_persist_error` / `session_closed`（渲染层会为未知 sid 建不可见视图条目）；清理留给 P2 统一收口。
+3. 同一 realm 残留（localStorage/全局篡改）仍是 V1 已知边界，V2 iframe/独立 WebContents 解决。
 
 ### P2（2–3 轮）
 - manifest `tools[]` + 代理工具 + `tool.call/result` + 审批 + denylist 断言（工具只在插件自身会话注册，D10）。
@@ -524,8 +534,10 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | 旧插件使用已移除的只读命令 | 会 `not_declared` / 安装拒绝 | P1 更新模板与 SKILL；安装回执给出明确 reason |
 | `surface_list` 是否放行 | 禁（D11） | 不开口子；需要清单走宿主 UI |
 | 工具 denylist 随版本漂移 | 集中 denylist + `SetToolFilter`（装配后动态注册）+ `HideTool`（模型不可见、调用即拒）双防线 | MCP/插件工具名是动态的，纯 allowlist 会误伤；P2 若改 allowlist，先解决 `mcp__*` 前缀白名单 |
-| 空插件会话重启丢失 | 已知（P1 记录） | 下轮补 session index/空记录；此前插件应在 `agent.session` 后尽快 `agent.run` |
-| 安装期旧命令未拒绝 | 运行期已 `denied` | P2 前补 install validate：manifest 声明四条旧名 → 安装失败并提示更新 |
+| 空插件会话重启丢失 | **已修（P1e-A）** | 建完即 `Persist`；真 Electron 435B jsonl；重启恢复测试；失败路径空 record 子树待 P2 清理 |
+| 安装期旧命令未拒绝 | **已修（P1e-B）** | `validateSurfaceSource` 声明即 rejected（不写 index/不拷目录）；老已装插件仍走运行期 deny |
+| 真 Electron 首启竞态 | 已加固（测试侧） | 预建 `userData` 防 DevToolsActivePort ENOENT；假上游不放明文 key 防 safeStorage 阻塞 |
+| 真 Provider / 多轮工具未跑 | 已知（P1e 记录） | P1e-C 只覆盖本地单轮文本 SSE；真实鉴权、tool_calls、cancel、tool.result 留给 P2/联调 |
 
 ---
 
