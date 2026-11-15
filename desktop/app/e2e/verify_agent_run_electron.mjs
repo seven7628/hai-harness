@@ -60,7 +60,7 @@ const SCENE_USE_TOOL = 'use-tool'
 const SCENE_CLOSED_PANEL = 'closed-panel'
 const SCENE_WRITE_TOOL = 'write-tool'
 // closed-panel 的响应延迟：面板必须**先**关掉，宿主门禁才是一次真实的门禁。
-const CLOSED_PANEL_DELAY_MS = 1000
+const CLOSED_PANEL_DELAY_MS = 2500
 
 class Precondition extends Error {
   constructor(msg) { super(msg); this.name = 'Precondition'; this.exitCode = 2 }
