@@ -369,7 +369,10 @@ try {
       local: {
         base_url: `http://127.0.0.1:${provider.port}/v1`,
         protocol: 'chat_completions',
-        api_key: 'sk-local',
+        // 不放 api_key：启动时 migrateProviderKeysOnStartup 会把明文 key 搬进 keys.json，
+        // 那一步走 safeStorage（macOS 钥匙串）；钥匙串同步等待+窗口尚未创建时，Playwright
+        // 只看到 180s 启动超时（本探针在全链里真踩过）。假上游不校验 Authorization，
+        // 这条链路不需要 key，也就别在本探针里顺带测钥匙串迁移。
         models: { [MODEL]: 128000 },
         max_tokens: { [MODEL]: 4096 },
       },
