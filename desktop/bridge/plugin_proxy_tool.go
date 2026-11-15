@@ -269,6 +269,12 @@ func (t *pluginProxyTool) RequiresApproval(context.Context, core.ToolCall) bool 
 	return !t.decl.ReadOnly
 }
 
+// MandatoryApproval 插件写工具是第三方代码的不可逆副作用：Auto / Full Access
+// 也不能把它静默放行。只读工具返回 false（不弹卡）。
+func (t *pluginProxyTool) MandatoryApproval(context.Context, core.ToolCall) bool {
+	return !t.decl.ReadOnly
+}
+
 // ToolTimeout 引擎侧兜底：比 waiter 的 deadline 多 2s（见 pluginToolWaiterGrace）。
 func (t *pluginProxyTool) ToolTimeout() time.Duration {
 	return t.decl.timeout() + pluginToolWaiterGrace

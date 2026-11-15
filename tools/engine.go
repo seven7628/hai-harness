@@ -1014,10 +1014,17 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 	for _, c := range calls {
 		if tool, err := e.GetTool(ctx, c.Name); err == nil {
 			needs := false
+			mandatory := false
 			if ar, ok := tool.(ApprovalRequired); ok && ar.RequiresApproval(ctx, c) {
 				needs = true // 工具自声明需审批（如 bash）——现状路径
 			}
-			if tc != nil {
+			// 宿主级强制审批：**先于**模式策略判定，且策略不能把 true 改回 false。
+			// 只给插件写工具这类「第三方代码 + 不可逆副作用」用；只读工具不实现。
+			if ma, ok := tool.(MandatoryApproval); ok && ma.MandatoryApproval(ctx, c) {
+				needs = true
+				mandatory = true
+			}
+			if !mandatory && tc != nil {
 				if ap, ok := tc.Approver.(events.ApprovalPolicy); ok {
 					// 模式策略覆盖：Auto → 不发起审批；Block/Required → 纳入审批通道
 					// （能让 manual 模式强制审批不自声明的 write/edit）
