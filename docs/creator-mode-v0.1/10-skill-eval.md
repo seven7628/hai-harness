@@ -90,3 +90,74 @@ go test ./skills ./agents -run 'Skill' -count=1
 ```
 
 > 本轮没有运行真实 Provider 行为评测：没有凭据。机制结论可以复跑；行为结论待补 A/B。
+
+## Anthropic Agent Skills 对齐（2026-11-15）
+
+依据 Anthropic 官方 Agent Skills overview / best practices：目录 + `SKILL.md`；frontmatter
+必须有 `name`（≤64、lowercase/hyphen、非保留词）与 `description`（≤1024、无 XML）；三层渐进
+披露（metadata → 指令正文 → `scripts/` / `references/` / `assets/`）；正文建议 <500 行；引用
+文件保持一层深；脚本只执行、不把源码读进上下文。
+
+| 要求 | 我们 | 判定 |
+|---|---|---|
+| 目录 + SKILL.md + YAML name/description | `skills/hai-surface-dev/SKILL.md` | 通过 |
+| name ≤64 / lowercase / hyphen / 非保留词 | `hai-surface-dev` 本身合法 | 通过（但解析器不校验长度/字符/保留词） |
+| description ≤1024 / 无 XML | 230 字符、无 XML | 通过 |
+| Level 1：只注入 name + description | `Registry.ListFor` / `Descriptor` | 通过 |
+| Level 2：触发后才加载正文 | `load_skill` → `InstructionsBlock` | 通过 |
+| 正文 <500 行 | 390 行 | 通过 |
+| 正文 token 成本接近官方 <5k 建议 | 20.8KB，约 3.2k words / 多个代码块 | **边界**，可能超过 5k token，建议拆分 |
+| Level 3：references/scripts/assets，一层深 | 框架支持 `Resources` 收集，但本技能一个都没有；模板在仓根 `templates/surface`，不是技能相对资源 | **未做到**（可移植性差） |
+| 脚本执行而非读入上下文 | 框架支持资源清单；本技能没有 bundled script | **未做到**（自检命令是仓库路径，不是技能脚本） |
+| 多模型测试 | 无 Haiku/Sonnet/Opus 结果 | **未验证** |
+
+另外，我们的 `requires`（能力面过滤）、`version`、`manifest` 注入是宿主扩展；它们不破坏
+Anthropic 格式，但不是标准字段，应该在我们的规范里明确标成「go-code extension」。
+
+## 分层与规范盘点
+
+### 框架分层：良好
+
+- 发现层：`~/.agents/skills` / `~/.go-code/skills` / 工作区 `.agents/skills` / `.go-code/skills`
+  四层，同名高层覆盖，symlink 可跟随；`skills/registry.go`。
+- 上下文层：metadata（`ListFor`）→ 正文（`load_skill`）→ `Resources` 清单；
+  `InstructionsBlock` 与 `/skill` 命令共用同一段字节。
+- 能力层：`requires.input` / `requires.tools` + `Capabilities` 过滤，宿主 UI 还能显示「为什么不可用」。
+- 版本层：`version` 用于随包技能覆盖用户旧副本（office/visual/ego 同步链路）。
+
+### 这个技能的内容分层：不足
+
+- 只有 L1 + L2，没有 L3；20.8KB 正文在激活时一次性进入上下文。
+- `templates/surface`、`desktop/app`、`go test ./desktop/bridge` 都是**仓库路径**，不是
+  技能目录内的相对资源；单独拷走技能目录会失效。
+- 正文里已有 11 个二级章节，适合拆成：
+  `references/panel-api.md`（host API / theme / lifecycle）、
+  `references/tools.md`（tool.call / 审批 / requires_panel）、
+  `references/entries.md`、`references/verification.md`；
+  `scripts/validate-plugin.mjs` 做静态校验，`scripts/install-smoke.sh` 跑安装器。
+
+### CreateMode 规范盘点
+
+| 材料 | 内容 | 问题 |
+|---|---|---|
+| `01-design.md` §5.1 | D-N：4 常驻工具 + 1 skill + 审批；工具 schema 成本纪律 | 定义清楚，但默认值/工具数量约束与代码有漂移 |
+| `03-code-plan.md` §3.7 | 工具注册骨架、skill frontmatter 骨架、模板/插件页 | 写「默认 true」，实现/测试/SKILL 是 **false** |
+| `skills/hai-surface-dev/SKILL.md` | 操作规范、D11、host API、entries、tools、自检 | 是当前事实上的规范；但只有 1 个技能，无独立 skill spec |
+| `templates/surface/*` | 可运行示例，真安装器可过 | 模板在技能目录外，不算技能资产 |
+| `surface_skill_content_test.go` | 解析、description 80–300、requires 两向、模板安装、命令白名单 | 守住了静态形状，不守触发/行为/多模型效果 |
+
+**结论**：有「设计说明 + 一个技能 + 一个模板 + 静态守卫」，但还没有一份独立的
+「CreateMode Skill 规范」把 frontmatter、触发词、分层、token 预算、安全边界、验收指标
+写成可执行契约。默认值漂移（design true vs code false）就是缺少单一事实源的症状。
+
+## 建议的规范骨架（下一步）
+
+1. `skills/README.md` 或 `docs/creator-mode-v0.1/11-skill-spec.md`：
+   - 必填/可选 frontmatter；哪些是 Anthropic 标准、哪些是 go-code 扩展；
+   - description 必须写「做什么 + 什么时候用」+ 中英触发词；≤1024；
+   - 正文 <500 行、<5k token；L3 资源一层深、必须相对技能目录；
+   - 安装/审批/D11/密钥/网络边界；
+   - 触发集与四类 golden task 的验收指标。
+2. 把 `hai-surface-dev` 拆出 `references/` 与 `scripts/`，SKILL.md 只留导航 + 六步流程。
+3. 统一 `features.surfaceTools` 默认值（设计、代码、SKILL、测试四处一致），并提供可视化开关。
+4. 做有/无 skill 的行为 A/B（真实 Provider 或本地端点），至少 Haiku/Sonnet/Opus 各一轮。
