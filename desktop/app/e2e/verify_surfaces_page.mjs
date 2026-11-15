@@ -83,7 +83,14 @@ const failNext: Record<string, string> = {}
 
 const log = (fn: string, ...args: unknown[]) => { calls.push({ fn, args }) }
 
+let settings: Record<string, unknown> = { theme: 'dark', lang: 'zh' }
 const stub = {
+  settingsSet: async (patch: Record<string, unknown>) => {
+    log('settingsSet', patch)
+    settings = { ...settings, ...patch }
+    return { ok: true, settings }
+  },
+  command: async (cmd: Record<string, unknown>) => { log('send', cmd); return { ok: true } },
   surfaceIndex: async () => {
     log('surfaceIndex')
     return { version: 1, items: items.map((i) => ({ ...i })) }
@@ -234,6 +241,24 @@ try {
   check('四条只读命令都以 chip 出现',
     JSON.stringify(chips.map((s) => s.trim())) === JSON.stringify(['git_snapshot', 'workspace_list', 'session_list', 'ui_inspect']),
     JSON.stringify(chips))
+
+  // ================= T6b 功能开关（surfaceTools）=================
+  console.log('\nT6b 功能开关：默认关 → 点击写 settings:set，不误发 surface 动作')
+  const toolsBox = page.locator('[data-surface-tools]')
+  check('surfaceTools 默认关（settings.features 缺省）',
+    (await toolsBox.getAttribute('data-surface-tools-on')) === '0')
+  check('默认显示「已关闭」', (await textOf(toolsBox.locator('[data-surface-tools-state]'))) === '已关闭')
+  await reset()
+  await toolsBox.locator('.switch').click()
+  await softWait(() => window.__probe.calls.some((c) => c.fn === 'settingsSet'))
+  const toolsSet = (await callsOf('settingsSet'))[0]
+  check('settings:set 只写 features.surfaceTools=true',
+    JSON.stringify(toolsSet?.args) === JSON.stringify([{ features: { surfaceTools: true } }]),
+    JSON.stringify(toolsSet?.args))
+  check('开关 UI 变为已开启', (await toolsBox.getAttribute('data-surface-tools-on')) === '1')
+  check('功能开关不误发 surfaceSetEnabled', (await callsOf('surfaceSetEnabled')).length === 0)
+  check('功能开关会发 reload_settings（loop 重建）',
+    (await callsOf('send')).some((c) => c.args[0]?.type === 'reload_settings'), JSON.stringify(await callsOf('send')))
 
   // ================= T2 开关（传的是目标值）=================
   console.log('\nT2 开关：点 alpha（开着）→ IPC {id:alpha, enabled:false}，成功后列表刷新')

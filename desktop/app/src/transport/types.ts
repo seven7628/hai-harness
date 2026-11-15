@@ -256,6 +256,10 @@ export interface AppSettings {
   // 内嵌编辑器回滚开关（PR-05b）：false → 文件树/预览工具栏的「编辑」入口**不出现**。
   // 缺省（字段不存在）视为开启 —— 老 settings.json 不该因为少一个键就没了这条能力。
   editor?: boolean
+  // 功能开关（BR：缺省 = 关）。当前只有 surfaceTools：AI 创建/安装面板插件所需的
+  // ui_inspect + surface_install 等工具。开关读不到/写坏一律按 false（fail-closed），
+  // 与 desktop/bridge/surface_settings.go 同口径；设置页 →「面板插件」有可见开关。
+  features?: { surfaceTools?: boolean }
 }
 
 // 一条定时任务（cron_list 返回；CronPage 数据源）

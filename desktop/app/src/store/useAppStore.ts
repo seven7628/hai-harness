@@ -3612,6 +3612,7 @@ export interface AppState {
   deleteCron(id: string): void // 删除任务（cron_delete；cron_changed 后自动刷新）
   updateCron(id: string, patch: { prompt?: string; cron?: string; recurring?: boolean; paused?: boolean }): void // 编辑任务（cron_update；paused=true 暂停 / false 恢复）
   setCodemodeEnabled(on: boolean): void // codemode 开关（乐观 + 持久化 + bridge 重建：注册/移除 codemode 工具）
+  setSurfaceToolsEnabled(on: boolean): Promise<boolean> // 面板插件 AI 工具开关（乐观 + 持久化 + bridge 重建；false = 写盘失败已回滚）
   setCronEnabled(on: boolean): void // 定时任务开关（乐观 + 持久化 + bridge 重建：加载/卸载 cron 工具）
   setCronAutoClean(on: boolean): void // 自动清理开关（乐观 + 持久化）
   setHubConversation(patch: HubConversationSettings): void // 群聊对话引擎全局护栏（P6-04/D8：合并写盘 + bridge 热重载）
@@ -12545,6 +12546,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateCron: (id, patch) => {
     send({ type: 'cron_update', payload: { id, ...patch } })
     get().fetchCron()
+  },
+  // 面板插件 AI 工具开关：显式打开后模型才会拿到 ui_inspect/surface_install 等工具，
+  // `hai-surface-dev` 技能也才会进入清单（requires.tools 过滤）。默认关是成本/安全的
+  // fail-closed 口径；设置页必须提供这个开关，否则技能会自锁在「工具没开 → 技能不可见
+  // → 用户不知道该开」的循环里。
+  setSurfaceToolsEnabled: async (on) => {
+    const before = get().settings.features ?? {}
+    const next = { ...before, surfaceTools: on }
+    set((s) => ({ settings: { ...s.settings, features: next } }))
+    const r = await transport.settingsSet({ features: next })
+    if (!r.ok) {
+      // 写盘失败：回滚乐观值，也不通知 bridge（避免"未持久化却热生效"的假成功）。
+      set((s) => ({ settings: { ...s.settings, features: before } }))
+      return false
+    }
+    // 工具注册发生在 loop 重建时；rebuildAll 后新会话/下一轮才有 UI 工具与技能。
+    send({ type: 'reload_settings', payload: {} })
+    return true
   },
   // codemode（脚本编排工具，Wave 3）：乐观更新 + 落盘 + bridge 重载。
   // 为什么必须 reload_settings：工具注册发生在 newSessionEngine（loop 重建），

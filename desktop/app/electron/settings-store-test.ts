@@ -327,6 +327,25 @@ test('settings:set 未知键（顶层/嵌套/provider 字段）一律拒绝，�
   }
 })
 
+test('settings:set 放行 features.surfaceTools（默认不写；开关只写用户显式的值）', () => {
+  const raw = v2()
+  const r = applySettingsPatch(raw, { features: { surfaceTools: true } })
+  assert.ok(r.ok)
+  if (r.ok) {
+    assert.deepEqual(r.raw.features, { surfaceTools: true })
+    assert.deepEqual(rawDiff(raw, r.raw).map((x) => x.path).sort(), ['explicit', 'features'])
+  }
+  const off = applySettingsPatch(v2(), { features: { surfaceTools: false } })
+  assert.ok(off.ok)
+  if (off.ok) assert.deepEqual(off.raw.features, { surfaceTools: false })
+  const bad = applySettingsPatch(v2(), { features: { surfaceTools: 'yes' } })
+  assert.equal(bad.ok, false)
+  if (!bad.ok) assert.match(bad.error, /invalid settings value features\.surfaceTools/)
+  const unknown = applySettingsPatch(v2(), { features: { other: true } })
+  assert.equal(unknown.ok, false)
+  if (!unknown.ok) assert.match(unknown.error, /unknown settings key features\.other/)
+})
+
 test('一次 theme patch 的 diff 只有 theme + explicit（已迁移 v2）；未迁移 v1 由写路径先迁移', () => {
   // v2 已迁移文件：schema_version 已在 → diff = theme + explicit
   const v2Before = v2()

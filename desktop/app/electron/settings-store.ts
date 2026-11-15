@@ -351,6 +351,14 @@ export const SETTINGS_SCHEMA: Record<string, FieldKind> = {
       background_compact: { t: 'boolOrNull' },
     },
   },
+  // 功能开关（缺省 = 关；读不到/写坏按 false，与 bridge surface_settings.go 同口径）。
+  // 这里只放行 shape，不写默认值：缺字段 = 用户没开过，任何无关保存都不该把它固化。
+  features: {
+    t: 'object',
+    fields: {
+      surfaceTools: { t: 'bool' },
+    },
+  },
   stt: {
     t: 'object',
     fields: {

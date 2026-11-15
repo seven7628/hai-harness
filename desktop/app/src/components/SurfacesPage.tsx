@@ -56,6 +56,12 @@ export default function SurfacesPage() {
   // 每行一条错误（键 = 插件 id；页级错误用空串键）：贴在那一行下面，不弹窗。
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  // 功能开关：默认关（成本 + fail-closed）；必须在这里可见，否则技能 requires.tools
+  // 会把 hai-surface-dev 一起过滤掉，用户没有入口知道「怎么让模型装面板」。
+  const surfaceToolsOn = useAppStore((s) => s.settings.features?.surfaceTools === true)
+  const setSurfaceToolsEnabled = useAppStore((s) => s.setSurfaceToolsEnabled)
+  const [toolsBusy, setToolsBusy] = useState(false)
+  const [toolsError, setToolsError] = useState(false)
   // R17a：清除数据的二次确认走**另一个**状态，而不是复用 confirmId —— 卸载与清数据是
   // 两个不同的破坏性动作（前者连目录一起走，后者只动 localStorage），共用一个 id 状态
   // 会让「点卸载弹出来的是清数据」这种错配成为可能。
@@ -207,6 +213,14 @@ export default function SurfacesPage() {
     [refresh, reportCleared, setRowError],
   )
 
+  const onToggleSurfaceTools = async (next: boolean) => {
+    setToolsBusy(true)
+    setToolsError(false)
+    const ok = await setSurfaceToolsEnabled(next)
+    if (!ok) setToolsError(true)
+    setToolsBusy(false)
+  }
+
   const onRefreshAudit = useCallback(async () => {
     setAuditLoading(true)
     try {
@@ -242,6 +256,25 @@ export default function SurfacesPage() {
     <div className="surfaces-page">
       <div className="settings-sec-title">{t('settings.surfaces')}</div>
       <p className="set-desc" style={{ marginBottom: 8 }}>{t('surfaces.hint')}</p>
+      {/* 功能开关：模型要装面板，必须先有 surface 工具；技能的能力面过滤（requires.tools）
+          又要求这些工具在场。开关放这里，用户看到「没有插件」时就能发现入口。 */}
+      <div className="mcp-server" data-surface-tools data-surface-tools-on={surfaceToolsOn ? '1' : '0'}>
+        <div className="mcp-s-h">
+          <span className={`mcp-state ${surfaceToolsOn ? 'connected' : ''}`} data-surface-tools-state>
+            {surfaceToolsOn ? t('surfaces.tools.on') : t('surfaces.tools.off')}
+          </span>
+          <span className="mcp-name">{t('surfaces.tools.title')}</span>
+          <span style={{ flex: 1 }} />
+          <Switch
+            on={surfaceToolsOn}
+            disabled={toolsBusy}
+            label={surfaceToolsOn ? t('surfaces.tools.off') : t('surfaces.tools.on')}
+            onChange={(next) => void onToggleSurfaceTools(next)}
+          />
+        </div>
+        <p className="set-desc" style={{ marginTop: 6 }}>{t('surfaces.tools.desc')}</p>
+        {toolsError && <p className="mcp-s-err">{t('surfaces.tools.failed')}</p>}
+      </div>
       {/* 白名单四条：这是「装插件 = 信任它」这句话的具体边界 —— 面板能读到的宿主数据
           只有这四条只读命令，写类一条都没开（表在 bridge，页面上只是照抄）。 */}
       <div className="hook-note" style={{ marginBottom: 12 }}>
