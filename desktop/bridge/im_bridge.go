@@ -433,6 +433,10 @@ func (m *manager) hubSendExternal(agentID, text string, images []core.Content, s
 	if m == nil || strings.TrimSpace(agentID) == "" {
 		return
 	}
+	if _, _, err := m.hubLoadAgent(agentID); err != nil {
+		fmt.Fprintf(os.Stderr, "✗ im hub dm target %s: %v\n", agentID, err)
+		return
+	}
 	m.hubSend(command{
 		Type: CmdHubSend,
 		Payload: map[string]any{
@@ -451,6 +455,15 @@ func (m *manager) hubSendExternal(agentID, text string, images []core.Content, s
 // （落群日志 → @ 路由 → 回执/接龙 → hub_message/hub_round）。
 func (m *manager) hubGroupSendExternal(groupID, executorID, text string, images []core.Content, senderName, ws string) {
 	if m == nil || strings.TrimSpace(groupID) == "" {
+		return
+	}
+	st, err := m.hubStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "✗ im hub group store %s: %v\n", groupID, err)
+		return
+	}
+	if g, err := st.LoadGroup(context.Background(), agenthub.GroupID(groupID)); err != nil || g == nil || g.Deleted {
+		fmt.Fprintf(os.Stderr, "✗ im hub group target %s: %v\n", groupID, err)
 		return
 	}
 	payload := map[string]any{
