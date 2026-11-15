@@ -498,9 +498,9 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 
 > 注：`link-check:embed-v2` 指向仓库根 `scripts/`（`.gitignore` 忽略的本地脚本），本轮为跑完整链在本地补了适配器新增的 `afterResponse()`，未入库；干净检出需先准备该脚本。
 
-**P1e 后仍欠**：
-1. 真 Provider 未跑：P1e-C 用本地 OpenAI 兼容 SSE 假上游，覆盖协议/事件/jsonl/左栏；P2b 已把 `tool_calls` 多轮、`tool.call/result`、审批卡、`requires_panel` 门禁接到同一条真 Electron 链上，但仍不覆盖真实鉴权、真实 usage 字段差异、支持/不支持 `include_usage` 的端点；`agent.cancel` 中断仍无真机 e2e。
-2. 落盘失败路径会留下空的 record 子树（`plugin-<id>/`、`<sid>/agents/`；无 record、无 jsonl），且撤回会发 `session_persist_error` / `session_closed`（渲染层会为未知 sid 建不可见视图条目）；磁盘清理仍未做（P2 只收了运行时等待表）。
+**P1e 遗留项（含 hardening 处置）**：
+1. 真 Provider 未跑：P1e-C 用本地 OpenAI 兼容 SSE 假上游，覆盖协议/事件/jsonl/左栏；P2b 已把 `tool_calls` 多轮、`tool.call/result`、审批卡、`requires_panel` 门禁接到同一条真 Electron 链上。P2 hardening 补了 `TestSurfaceAgentRealProviderSmoke`（`HAI_E2E_SURFACE_REAL=1` 门控，走真实鉴权/HTTP/SSE），但默认环境没有凭据，未实际执行；真实 Electron UI + 真 Provider 仍待有 key 的联调。`agent.cancel` 已由 T14（真 Electron + 假上游延迟响应）覆盖。
+2. 落盘失败路径的空壳已清：`dropSurfaceAgentSession` 删会话 jsonl、`<sid>/` 子树、空 record 目录；`DeleteSessionRecord` 同时收走 `.blocks.idx` 孤儿。撤回仍会发 `session_persist_error` / `session_closed`（渲染层会为未知 sid 建不可见视图条目）——这是可观察线索，保留。
 3. 同一 realm 残留（localStorage/全局篡改）仍是 V1 已知边界，V2 iframe/独立 WebContents 解决。
 
 ### P2 落地记录（2026-11-15）
@@ -511,19 +511,48 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | P2c 强制审批（Go） | `38d1d59`（`9d64209`/`7969144`） | `read_only:false` 实现 `MandatoryApproval`；Auto/Full Access 不能静默放行；无审批器 fail-closed；`./tools` 全绿 |
 | P2b 门禁 + 真 Electron e2e（renderer） | `2c72b96` + `ac688cd`（`3d435bb`） | `requires_panel` 当前-scope 判据；T11/T12/T13 真机绿；`test:creator-mode` exit 0 / 0 ❌ |
 
-**已验证的端到端**（`e2e:agent-run`，12.1s）：
+**已验证的端到端**（`e2e:agent-run`，约 11s）：
 
 - **T11**：模型发 `tool_calls` → Go `plugin__*` → `tool.call` 到面板 → 面板 `tool.result` → 第二次上游请求带 tool 消息 → 终态 `done`。断言 call_id `tc-*`、args 原样、deadline/read_only/requires_panel 字段、恰好两轮请求。
 - **T12**：关闭插件标签后，`requires_panel:true` 的工具调用由宿主直接回 `panel_not_open`，模型看到该错误、面板回调从未收到 `tool.call`。修复点：`tabsByScope` 跨 scope 会同步隐藏副本，判据必须是当前 scope 的标签集。
-- **T13**：`read_only:false` 工具在 Auto 模式下也必须弹审批卡；批准前无第二轮请求、面板无回调；批准后才投递并回结果。
-- **真机耗时**：T11/T12/T13 合计约 5s；整条 creator-mode 链 exit 0。
+- **T13**：`read_only:false` 工具在 Auto 模式下也必须弹审批卡；批准前无第二轮请求、面板无回调；批准后才投递并回结果。审批卡标题显示「运行探针 · write_note」，不是 `plugin__...`。
+- **T14**：假上游把响应按住 4s，插件 `agent.cancel` 回执 ok 后，终态是 `agent.error{cancelled}` 且**没有** `agent.done`，取消在延迟响应到点前生效。
+- **真机耗时**：T11–T14 合计约 10s；整条 creator-mode 链 exit 0。
 
 **P2 仍欠**：
 1. `agent.run` 的 `schema` / `tools` 参数仍未实现（P1/P2 都只支持 manifest 静态工具）；模型输出 JSON Schema 校验仍无。
 2. 工具 `input` 只做安装期形状校验（object / 上限 / 无 `$ref`），不做完整 JSON Schema 语义校验（required/type/enum）；参数不合 schema 时由插件自己回 `invalid_input`，宿主不拦。
 3. `requires_panel` 粒度为「当前 scope 有该 kind 标签」，不区分 entry；多入口插件只要还有一个入口开着的标签就算在场。
-4. 审批卡标题是模型侧名 `plugin__<id>__<name>`（描述里带插件 id），尚无「插件名 · 工具名」的友好映射。
-5. 真 Provider / 真实鉴权 / `agent.cancel` 中断仍无真机 e2e；插件工具进子 agent 的继承尚未上真机覆盖。
+4. 真 Provider 的 Electron UI 联调仍未跑（Go 门控 smoke 已有，但默认无凭据）；插件工具进子 agent 的继承尚未上真机覆盖。
+5. `agent.cancel` 已覆盖「请求在跑」的取消；真实 Provider 的流式取消/服务端计费截断仍待联调。
+
+### P2 hardening（2026-11-15，`a28cff8`）
+
+| 项 | 实现 | 验收 |
+|---|---|---|
+| `agent.cancel` 真机 | Electron T14：假上游延迟 4s，面板取消按钮 → `agent.error{cancelled}` | 与 `agent.done` 互斥；取消早于延迟响应到点；回执 ok |
+| 空壳清理 | `dropSurfaceAgentSession` 删 jsonl、`<sid>/agents`、空 record 目录；`removeBlockStore` 连带 `.blocks.idx` | `TestSurfaceAgentRunPersistFailureIsBridgeError` 断言磁盘无残留；`TestSidecarRemovedWithRecord` 断言索引删除 |
+| 审批卡展示 | `pluginToolLabel`：`plugin__<id>__<name>` → `<插件名> · <工具名>`；协议 Name 不变 | T13 真实审批卡文本包含「运行探针 · write_note」 |
+| 真 Provider | `TestSurfaceAgentRealProviderSmoke` 走 `agent.session` → 真实 HTTP/SSE → done/usage/jsonl | 默认 skip；`HAI_E2E_SURFACE_REAL=1` + provider/model/key 时执行 |
+
+**真 Provider 运行方式**：
+
+```bash
+# 不要把 key 写进命令行、文档、commit 或 shell history。
+# 先在当前终端用静默输入放进环境变量（read -s 不回显，也不会进 history）：
+printf 'Provider API key: '; read -rs HAI_E2E_SURFACE_API_KEY; printf '\n'
+export HAI_E2E_SURFACE_API_KEY
+
+export HAI_E2E_SURFACE_REAL=1
+export HAI_E2E_SURFACE_PROVIDER=opencode2
+export HAI_E2E_SURFACE_MODEL=deepseek-v4.1-flash
+go test ./desktop/bridge -run TestSurfaceAgentRealProviderSmoke -count=1 -v
+unset HAI_E2E_SURFACE_API_KEY
+```
+
+> 文档只写变量名，**不写真实 key**；测试、审计、日志也不打印 key。真实 key 只应从密码管理器或上面的静默输入进入当前 shell；不要提交到仓库，不要写进 `settings.json` 或命令历史。key 只在测试进程内存里（临时 HOME 不写明文）；没有凭据时默认 skip，不让日常 `go test` 变慢或红。
+
+**Hardening 联合验收（2026-11-15，`a28cff8`）**：`go test ./desktop/bridge` ok 172.8s；`go test ./session` ok 12.6s；`npm run test:creator-mode` exit 0 / 0 ❌；`e2e:agent-run` 连跑两次 10.7s / 10.6s；`tsc --noEmit` 0。真 Provider smoke 默认 skip（本机无凭据），需按上面的环境变量单独执行。
 
 ### P3（可选，2 轮）
 - 当前会话只读订阅；通用 channel；iframe 隔离预研。
@@ -560,9 +589,11 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | 空插件会话重启丢失 | **已修（P1e-A）** | 建完即 `Persist`；真 Electron 435B jsonl；重启恢复测试；失败路径空 record 子树的磁盘清理仍未做 |
 | 安装期旧命令未拒绝 | **已修（P1e-B）** | `validateSurfaceSource` 声明即 rejected（不写 index/不拷目录）；老已装插件仍走运行期 deny |
 | 真 Electron 首启竞态 | 已加固（测试侧） | 预建 `userData` 防 DevToolsActivePort ENOENT；假上游不放明文 key 防 safeStorage 阻塞 |
-| 真 Provider 未跑 | 多轮工具已覆盖（P2b） | P1e-C/P2b 用本地 OpenAI 兼容 SSE 覆盖 tool_calls/审批/门禁；真实鉴权、真实 usage、`agent.cancel` 仍待联调 |
+| 真 Provider 未跑 | 门控 Go smoke 已有，Electron UI 未跑 | `HAI_E2E_SURFACE_REAL=1` 时走真实鉴权/HTTP/SSE；默认无凭据 skip，真实 Electron + Provider 仍待联调 |
 | 工具参数 schema 只判形状 | 已知（V1） | 安装期只保证 provider 不 400；required/type/enum 由插件自检并回 `invalid_input`，P3 再评估完整校验 |
 | `requires_panel` 粒度为 kind | 已知（多入口） | 当前 scope 有任一该 kind 标签即算开；需要按 entry 判定时再加 `requires_entry`，V1 不扩 |
+| 落盘失败空壳 | **已修（hardening）** | jsonl/`<sid>/agents`/空 record 目录一并清；sidecar 索引随 record 删除 |
+| 审批卡插件工具名 | **已修（hardening）** | `plugin__*` 显示「插件名 · 工具名」；协议字段不变 |
 
 ---
 

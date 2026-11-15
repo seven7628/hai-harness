@@ -157,6 +157,10 @@ Keep the disposer (`off`) and call it when the panel unloads, like any other eve
   Auto / Full Access — `MandatoryApproval` bypasses the mode approver. A plugin cannot approve it.
 - `requires_panel: true` means the host refuses with `panel_not_open` unless a tab of your kind is
   open **in the current scope**; the callback is not called. Any entry counts.
+- Cancel a run with `host.command('agent.cancel', { run_id })` (keep the id from the `agent.run`
+  ack). The terminal event is `agent.error{reason:"cancelled"}` — **not** `agent.done`; there is no
+  partial done to reconcile. The approval card shows your plugin name + tool name, not the raw
+  `plugin__<id>__<name>`.
 - The model sees `plugin__<id>__<name>`; keep the full name ≤ 64 bytes (OpenAI function-name hard
   limit). `name` matches `^[a-z][a-z0-9_]{0,40}$`, no `__`, ≤ 16 tools/plugin, description ≤ 300
   chars, `input` must be a JSON `object` (≤ 16 KiB, no `$ref`), `timeout_ms` 0 (=10s) or 100ms–60s.
