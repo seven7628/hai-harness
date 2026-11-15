@@ -55,21 +55,21 @@ func (l *LLMEnd) Type() EventType {
 // canceled 与 aborted 都是 context.Canceled 且都不重试，区别只在**谁取消的**（见
 // provider.ErrorKindAborted 注释）：文案必须不同，否则一次都没重试却显示「重试已耗尽」。
 type LLMError struct {
-	RunId        string `json:"run_id"`          // 所属运行（事件自包含）
-	Model        string `json:"model,omitempty"` // 失败的那次调用用的模型（metrics 归因/展示用）
+	RunId string `json:"run_id"`          // 所属运行（事件自包含）
+	Model string `json:"model,omitempty"` // 失败的那次调用用的模型（metrics 归因/展示用）
 	// RequestId 失败 attempt 的请求 id —— provider 在 LLMStart 里给的那个（首字节之前
 	// 就失败/取消时为空，如连接失败、首字超时）。用途：把这次失败**精确归到那一轮**。
 	//
 	// 为什么必须有：同一个 run 内 LLM 调用严格串行，但重试会开新的 request id。没有它时
 	// 下游只能靠「同 run 里唯一活着的那格」去猜（view_reducer 的 reqState 回收就是这么写
 	// 的），迟到事件按 request_id 命中错误的结算锚。有它之后 reqState 可以精确删除。
-	RequestId    string     `json:"request_id,omitempty"`
-	Message      string     `json:"message"`
-	Attempt      int        `json:"attempt"`                  // 第几次尝试（1-based）
-	MaxAttempts  int        `json:"max_attempts,omitempty"`   // 本次运行的总尝试次数上限（含首次）。UI 据此显示「第 N/M 次」
-	WillRetry    bool       `json:"will_retry"`               // 是否还有重试机会
-	RetryDelayMs int64      `json:"retry_delay_ms,omitempty"` // 本次失败后的退避等待（ms）
-	ErrorKind    string     `json:"error_kind,omitempty"`     // 错误分类标签（context_exceeded 等）
+	RequestId    string `json:"request_id,omitempty"`
+	Message      string `json:"message"`
+	Attempt      int    `json:"attempt"`                  // 第几次尝试（1-based）
+	MaxAttempts  int    `json:"max_attempts,omitempty"`   // 本次运行的总尝试次数上限（含首次）。UI 据此显示「第 N/M 次」
+	WillRetry    bool   `json:"will_retry"`               // 是否还有重试机会
+	RetryDelayMs int64  `json:"retry_delay_ms,omitempty"` // 本次失败后的退避等待（ms）
+	ErrorKind    string `json:"error_kind,omitempty"`     // 错误分类标签（context_exceeded 等）
 
 	// Usage 本次失败尝试**已经产生**的用量（含成本 µUSD；nil = 上游未回 usage 或失败在
 	// 首字节之前）。语义（2026-09-23 决策「失败尝试也要记账」）：**每次尝试各自记账一次**

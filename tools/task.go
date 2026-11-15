@@ -46,7 +46,7 @@ func (t *toolTask) stopTimeout() {
 // （core/reparentable.go:39），它只在「父取消 / Cancel() / Detach()」三者之一
 // 发生时才退出。工具**正常跑完**时没有任何人调 Cancel/Detach（Detach 只在
 // promote 路径被调，Cancel 无人调）→ watcher 就永久停泊在 select 上
-//（父 ctx 在整个会话存活期内都不取消）→ **每次工具调用漏一个 goroutine**。
+// （父 ctx 在整个会话存活期内都不取消）→ **每次工具调用漏一个 goroutine**。
 //
 // 2026-11-09 实测：bridge 连续跑 18h 后 goroutine 创建计数到 65 万，dump 里
 // 大量 [select] 的停泊 watcher；goroutine 堆积同时把 registry 的 r.mu 拖成长

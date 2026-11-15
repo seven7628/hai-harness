@@ -140,7 +140,7 @@ func TestDeleteAgentPurgesDirectory(t *testing.T) {
 }
 
 // CloneAgentProfile 必须隔离切片：调用方随后改自己的切片，快照不能跟着变
-//（P1-03 复核：浅拷贝让「回滚」的旧版本被 patch 污染）。
+// （P1-03 复核：浅拷贝让「回滚」的旧版本被 patch 污染）。
 func TestCloneAgentProfileIsolatesSlices(t *testing.T) {
 	src := &AgentProfile{
 		ID: "ag_clone", Name: "Clone", Provider: "deepseek", Model: "m",

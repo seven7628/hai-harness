@@ -19,8 +19,10 @@ import (
 // ParentTaskIDOf（宿主给终态事件标注归属的必经路径）走的正是 Registry.get。
 //
 // 本测试复刻那个场景：人为占住某个任务的 t.mu，然后确认
-//   ① List() 会阻塞在那个任务上（这是预期的：它要读该任务的状态），但
-//   ② **r.mu 必须是放开的** —— 另一个 goroutine 调 Registry.get 必须立刻返回。
+//
+//	① List() 会阻塞在那个任务上（这是预期的：它要读该任务的状态），但
+//	② **r.mu 必须是放开的** —— 另一个 goroutine 调 Registry.get 必须立刻返回。
+//
 // 旧实现下 ② 会超时（本测试失败）；新实现下 ② 立即成功。
 func TestListDoesNotHoldRegistryLockWhileWaitingOnTask(t *testing.T) {
 	r := NewRegistry()

@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-15
 
 ### Added
 
@@ -64,5 +64,5 @@ All notable changes to this project are documented here. The format follows
 
 Earlier releases are available on the [GitHub releases page](https://github.com/seven7628/hai-harness/releases).
 
-[Unreleased]: https://github.com/seven7628/hai-harness/compare/v0.1.5...HEAD
+[0.2.0]: https://github.com/seven7628/hai-harness/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/seven7628/hai-harness/releases/tag/v0.1.5

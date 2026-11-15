@@ -22,7 +22,7 @@ func TestBuildTurnContextMultiAgentWindow(t *testing.T) {
 		ctxMsg(2, Sender{Kind: SenderAgent, AgentID: c}, "C 的背景", KindText, VisibilityGroup),
 		ctxMsg(3, Sender{Kind: SenderAgent, AgentID: a}, "@B 复核", KindText, VisibilityGroup),
 		ctxMsg(4, Sender{Kind: SenderAgent, AgentID: b}, "B 自己之前的话", KindText, VisibilityGroup),
-		ctxMsg(5, human, "targets=ag_a", KindRouting, VisibilityGroup),          // UI-only
+		ctxMsg(5, human, "targets=ag_a", KindRouting, VisibilityGroup),                            // UI-only
 		ctxMsg(6, Sender{Kind: SenderAgent, AgentID: a}, "owner-only", KindText, VisibilityOwner), // 不可见
 		ctxMsg(7, Sender{Kind: SenderAgent, AgentID: c}, "   ", KindText, VisibilityGroup),        // 空正文
 		ctxMsg(8, Sender{Kind: SenderAgent, AgentID: a}, "窗口外", KindText, VisibilityGroup),

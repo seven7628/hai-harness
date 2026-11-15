@@ -44,6 +44,7 @@ type Member struct {
 //   - max_parallel_runs（P6-02）：并发 = 本轮目标数，没有旋钮可拧；
 //   - max_turns_per_human（P6-13）：用户口径「群策略限制取消」，字段默认值与校验
 //     一起删了 —— 自动接龙由深度/同对/冷却/同内容指纹等护栏约束。
+//
 // 旧群文件/旧客户端仍可能带这两个键：encoding/json 对未知字段是忽略（不是报错），
 // 所以存量数据照常能读，不需要迁移脚本。
 type GroupPolicy struct {
