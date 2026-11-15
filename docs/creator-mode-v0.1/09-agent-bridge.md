@@ -193,7 +193,7 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 | 命令 | 载荷 | 回执 | 说明 |
 |---|---|---|---|
 | `agent.session` | `{ title? }` | `{ok, session_id}` | 建插件会话（随机 id） |
-| `agent.run` | `{ run_id?, session_id?, input, instructions?, schema?, tools }` | `{ok, run_id, session_id}` | 立即回；流式走事件 |
+| `agent.run` | `{ run_id?, session_id?, input, instructions? }` | `{ok, run_id, session_id}` | 立即回；流式走事件（`schema`/`tools` 参数未实现，见下） |
 | `agent.cancel` | `{ run_id }` | `{ok}` | 取消 |
 | `tool.result` | `{ call_id, ok, result?, error? }` | `{ok}` | 回工具调用 |
 | `composer.quote` | `{ text, source? }` | `{ok, reason?}` | 只插草稿 |
@@ -213,7 +213,7 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 | `agent.usage` | `{input_tokens, output_tokens}` | 结束时一次 |
 | `agent.done` | `{text, json?}` | 终态；`json` 仅当 schema 通过 |
 | `agent.error` | `{reason, message?}` | 终态 |
-| `tool.call` | `{call_id, tool, args, deadline_ms}` | Agent 调插件工具；用 `tool.result` 回 |
+| `tool.call` | `{call_id, tool, args, deadline_ms, read_only, requires_panel}` | Agent 调插件工具；用 `tool.result` 回；`requires_panel:true` 且当前 scope 无该 kind 标签时宿主直接回 `panel_not_open`，不投给插件 |
 | `surfaces.changed` | `{}` | 插件装卸/启停（安全的全量生命周期） |
 
 信封：`{type, seq, run_id?, session_id?, data}`；`seq` 单调递增，终态后停投。
@@ -238,7 +238,8 @@ host.onEvent(type: string, fn: (ev: SurfaceEvent) => void): () => void
 
 - 安装页自然语言展示：**可发起 AI 请求（消耗额度）/ 可插草稿 / 可提供 N 个工具 / 可接收 N 类事件**。
 - 设置页可撤销；撤销后命令 `denied`、事件停投、工具 Hide。
-- 工具模型侧名：`plugin__<id>__<name>`；与内置/MCP/subagent 重名 → 安装拒绝。
+- 工具模型侧名：`plugin__<id>__<name>`；同一插件内 `name` 重名 → 安装拒绝；跨插件/内置/MCP 因前缀天然隔离（安装期不扫描全局工具表）。
+- 安装期硬校验：最多 16 条；`name` 匹配 `^[a-z][a-z0-9_]{0,40}$` 且不许含 `__`（模型侧名分隔符）；描述非空 ≤300 字符；`input` 必须是 `type:"object"` 的 JSON object（≤16 KiB，不收 `$ref`）；`timeout_ms` 缺省 10s、非零限 `[100ms, 60s]`；整名 `plugin__<id>__<name>` ≤64 字节（OpenAI function name 硬上限，超长是整轮 400，只能安装期拦）。有工具却没收 `tool.call` / 没声明 `tool.result` 也直接 reject（否则装上后每次调用都只能等超时）。
 
 ---
 
@@ -304,8 +305,8 @@ host.onEvent('tool.call', async (ev) => {
 - 默认超时 10s（manifest ≤60s）；超时 → `{ok:false, reason:'timeout'}`，不中断 run。
 - 插件卸载/崩溃 → 等待中的 call 立即失败 `plugin_unloaded`。
 - 结果 ≤64 KiB JSON，超出截断并标记 `truncated`。
-- `requires_panel:true` 且面板未开 → `panel_not_open`（不偷偷挂隐藏实例）。
-- 审批：`read_only:false` 走现有工具审批；卡片显示「插件名 · 工具名」，插件不能代点。
+- `requires_panel:true` 且面板未开 → `panel_not_open`（不偷偷挂隐藏实例）。判据是**当前作用域**（`tabScopeKey`）的标签集里有该 kind，任意入口都算开；别的会话/工作区里同步的隐藏副本不算。门禁在 renderer 的 loader，插件回调不会被调用。
+- 审批：`read_only:false` 实现 `MandatoryApproval`，先于 `events.ApprovalPolicy` 判定并剥掉 `modeApprover` 直等原始审批器——Auto/Full Access 不能同步放行；没有审批器时 fail-closed。卡片以模型侧名 `plugin__<id>__<name>` + 描述展示（名字已带插件 id；友好名映射留 P3），插件不能代点。
 
 ### 6.5 错误码
 
@@ -347,11 +348,11 @@ onSurfaceAgentEvent(cb: (p: { surface_id: string; event: SurfaceAgentEvent }) =>
 | `agent.session` | `{title?}` | `{session_id}` |
 | `agent.run` | `{session_id?, input, instructions?}` | `{run_id, session_id}` |
 | `agent.cancel` | `{run_id}` | `{}` |
-| `tool.result` | `{call_id, ok, result?, error?}` | `{}`（P2） |
+| `tool.result` | `{call_id, ok, result?, error?}` | `{}`（P2；未知/已超时 call_id 幂等忽略并审计） |
 
 - `agent.run` 不带 `session_id` = 新建插件会话（D4）；带 = 必须属于同一 `surface_id`，否则 `denied`。
 - `agent.run` 先回 `command_response`，再流事件；事件失败不改变已发出的 ack。
-- P1 不实现 `schema` / `tools` 参数；manifest 里出现也只忽略（P2 再启用），避免半套 JSON 校验。
+- P1/P2 都不实现 `agent.run` 的 `schema` / `tools` 参数；manifest 里出现也只忽略，避免半套 JSON 校验。P2 启用的是 manifest `tools[]`（见 §5.3/§7.3），不是单次 run 的临时工具。
 
 **事件 data**
 
@@ -394,8 +395,9 @@ onSurfaceAgentEvent(cb: (p: { surface_id: string; event: SurfaceAgentEvent }) =>
 ### 7.3 插件工具
 
 - manifest `tools[]` 声明即注册；模型侧名 `plugin__<id>__<name>`。
-- 冲突（与任何已有工具同名）→ 安装即拒绝。
-- 调用走 `tool.call` / `tool.result`；插件侧无 register API。
+- 同一插件内 `name` 重名 → 安装即拒绝；模型侧全名带插件 id，跨插件/内置/MCP 不会撞名。
+- 调用走 `tool.call` / `tool.result`；插件侧无 register API。call_id 是宿主生成的 `tc-*`，同一 run 内单调；工具结果 ≤64 KiB JSON，超出截断并标 `truncated`。
+- 工具只在**启用且已加载**的插件上注册；卸载/禁用/`closePluginRuntime` 会让等待中的 call 立即失败 `plugin_unloaded`，不把 run 挂到超时。
 - 子 agent 继承主引擎 → 插件工具对同一插件会话内的子 agent 可用；子 agent 若被派到别的会话，不继承。
 - **只在插件自己的虚拟 Project/会话内注册**（D10）：不进入任何真实 Project 会话，不跨插件；没有"授权到项目会话"这个开关。
 - 插件工具不能修改工具集、注册 MCP、定义 subagent、读别的工具的 schema/结果。
@@ -497,12 +499,31 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 > 注：`link-check:embed-v2` 指向仓库根 `scripts/`（`.gitignore` 忽略的本地脚本），本轮为跑完整链在本地补了适配器新增的 `afterResponse()`，未入库；干净检出需先准备该脚本。
 
 **P1e 后仍欠**：
-1. 真 Provider 未跑：P1e-C 用本地 OpenAI 兼容 SSE 假上游，覆盖协议/事件/jsonl/左栏，但不覆盖真实鉴权、真实 usage 字段差异、支持/不支持 `include_usage` 的端点；也仍是单轮文本，无 `tool_calls` 多轮、无 `agent.cancel` 中断、无 `tool.result` waiter。
-2. 落盘失败路径会留下空的 record 子树（`plugin-<id>/`、`<sid>/agents/`；无 record、无 jsonl），且撤回会发 `session_persist_error` / `session_closed`（渲染层会为未知 sid 建不可见视图条目）；清理留给 P2 统一收口。
+1. 真 Provider 未跑：P1e-C 用本地 OpenAI 兼容 SSE 假上游，覆盖协议/事件/jsonl/左栏；P2b 已把 `tool_calls` 多轮、`tool.call/result`、审批卡、`requires_panel` 门禁接到同一条真 Electron 链上，但仍不覆盖真实鉴权、真实 usage 字段差异、支持/不支持 `include_usage` 的端点；`agent.cancel` 中断仍无真机 e2e。
+2. 落盘失败路径会留下空的 record 子树（`plugin-<id>/`、`<sid>/agents/`；无 record、无 jsonl），且撤回会发 `session_persist_error` / `session_closed`（渲染层会为未知 sid 建不可见视图条目）；磁盘清理仍未做（P2 只收了运行时等待表）。
 3. 同一 realm 残留（localStorage/全局篡改）仍是 V1 已知边界，V2 iframe/独立 WebContents 解决。
 
-### P2（2–3 轮）
-- manifest `tools[]` + 代理工具 + `tool.call/result` + 审批 + denylist 断言（工具只在插件自身会话注册，D10）。
+### P2 落地记录（2026-11-15）
+
+| 块 | merge commit | 验收 |
+|---|---|---|
+| P2a manifest `tools[]` + 代理工具（Go） | `4a8f36e`（`6e4c531`/`bcd2bd0`/`6c13c4a`） | 安装期校验 17 子用例；`plugin__*` 注册矩阵 / 回环 / 超时 / 跨插件 / 取消；bridge 全包 180s 绿 |
+| P2c 强制审批（Go） | `38d1d59`（`9d64209`/`7969144`） | `read_only:false` 实现 `MandatoryApproval`；Auto/Full Access 不能静默放行；无审批器 fail-closed；`./tools` 全绿 |
+| P2b 门禁 + 真 Electron e2e（renderer） | `2c72b96` + `ac688cd`（`3d435bb`） | `requires_panel` 当前-scope 判据；T11/T12/T13 真机绿；`test:creator-mode` exit 0 / 0 ❌ |
+
+**已验证的端到端**（`e2e:agent-run`，12.1s）：
+
+- **T11**：模型发 `tool_calls` → Go `plugin__*` → `tool.call` 到面板 → 面板 `tool.result` → 第二次上游请求带 tool 消息 → 终态 `done`。断言 call_id `tc-*`、args 原样、deadline/read_only/requires_panel 字段、恰好两轮请求。
+- **T12**：关闭插件标签后，`requires_panel:true` 的工具调用由宿主直接回 `panel_not_open`，模型看到该错误、面板回调从未收到 `tool.call`。修复点：`tabsByScope` 跨 scope 会同步隐藏副本，判据必须是当前 scope 的标签集。
+- **T13**：`read_only:false` 工具在 Auto 模式下也必须弹审批卡；批准前无第二轮请求、面板无回调；批准后才投递并回结果。
+- **真机耗时**：T11/T12/T13 合计约 5s；整条 creator-mode 链 exit 0。
+
+**P2 仍欠**：
+1. `agent.run` 的 `schema` / `tools` 参数仍未实现（P1/P2 都只支持 manifest 静态工具）；模型输出 JSON Schema 校验仍无。
+2. 工具 `input` 只做安装期形状校验（object / 上限 / 无 `$ref`），不做完整 JSON Schema 语义校验（required/type/enum）；参数不合 schema 时由插件自己回 `invalid_input`，宿主不拦。
+3. `requires_panel` 粒度为「当前 scope 有该 kind 标签」，不区分 entry；多入口插件只要还有一个入口开着的标签就算在场。
+4. 审批卡标题是模型侧名 `plugin__<id>__<name>`（描述里带插件 id），尚无「插件名 · 工具名」的友好映射。
+5. 真 Provider / 真实鉴权 / `agent.cancel` 中断仍无真机 e2e；插件工具进子 agent 的继承尚未上真机覆盖。
 
 ### P3（可选，2 轮）
 - 当前会话只读订阅；通用 channel；iframe 隔离预研。
@@ -522,6 +543,8 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 6. 错误码 + 额度 + denylist（明确插件拿不到哪些工具）。
 7. 反例：不要试图读 `window.desktop`、不要假装宿主会持久化、不要改全局工具集。
 
+> **P2 已同步**：SKILL 新增 “Exposing tools to the agent” 一节（manifest/tool.result 对齐、`read_only`、`requires_panel`、超时/截断、D10）；`templates/surface/surface.json` 带一个只读 `template_echo` 样本与 `tool.call` 处理，`e2e:plugin-loader` 仍全绿。
+
 ---
 
 ## 12. 风险与后续
@@ -534,10 +557,12 @@ L0 之后：插件拿不到 `window.desktop`、拿不到 token、拿不到其它
 | 旧插件使用已移除的只读命令 | 会 `not_declared` / 安装拒绝 | P1 更新模板与 SKILL；安装回执给出明确 reason |
 | `surface_list` 是否放行 | 禁（D11） | 不开口子；需要清单走宿主 UI |
 | 工具 denylist 随版本漂移 | 集中 denylist + `SetToolFilter`（装配后动态注册）+ `HideTool`（模型不可见、调用即拒）双防线 | MCP/插件工具名是动态的，纯 allowlist 会误伤；P2 若改 allowlist，先解决 `mcp__*` 前缀白名单 |
-| 空插件会话重启丢失 | **已修（P1e-A）** | 建完即 `Persist`；真 Electron 435B jsonl；重启恢复测试；失败路径空 record 子树待 P2 清理 |
+| 空插件会话重启丢失 | **已修（P1e-A）** | 建完即 `Persist`；真 Electron 435B jsonl；重启恢复测试；失败路径空 record 子树的磁盘清理仍未做 |
 | 安装期旧命令未拒绝 | **已修（P1e-B）** | `validateSurfaceSource` 声明即 rejected（不写 index/不拷目录）；老已装插件仍走运行期 deny |
 | 真 Electron 首启竞态 | 已加固（测试侧） | 预建 `userData` 防 DevToolsActivePort ENOENT；假上游不放明文 key 防 safeStorage 阻塞 |
-| 真 Provider / 多轮工具未跑 | 已知（P1e 记录） | P1e-C 只覆盖本地单轮文本 SSE；真实鉴权、tool_calls、cancel、tool.result 留给 P2/联调 |
+| 真 Provider 未跑 | 多轮工具已覆盖（P2b） | P1e-C/P2b 用本地 OpenAI 兼容 SSE 覆盖 tool_calls/审批/门禁；真实鉴权、真实 usage、`agent.cancel` 仍待联调 |
+| 工具参数 schema 只判形状 | 已知（V1） | 安装期只保证 provider 不 400；required/type/enum 由插件自检并回 `invalid_input`，P3 再评估完整校验 |
+| `requires_panel` 粒度为 kind | 已知（多入口） | 当前 scope 有任一该 kind 标签即算开；需要按 entry 判定时再加 `requires_entry`，V1 不扩 |
 
 ---
 

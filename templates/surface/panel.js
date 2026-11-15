@@ -33,6 +33,16 @@ export const surface = {
     // 也不要空白 —— 空白会被当成「插件坏了」）。
     const TITLES = { overview: '总览', schedule: '课表', resources: '资源' }
 
+    // P2：manifest.tools[] 声明的工具由模型发起，插件在 tool.call 里执行并回 tool.result。
+    // 这个样本是只读回显（read_only:true，不弹审批）；写工具必须 read_only:false，宿主会强制
+    // 审批（Auto/Full Access 也一样），插件不能代点。requires_panel:true 时宿主在面板没开时
+    // 直接回 panel_not_open，本回调不会被调用。
+    host.onEvent('tool.call', (ev) => {
+      const d = ev.data || {}
+      const text = d.args && typeof d.args.text === 'string' ? d.args.text : ''
+      host.command('tool.result', { call_id: d.call_id, ok: true, result: { echo: text } })
+    })
+
     // 没有 params（老标签 / 宿主直接按 kind 打开）也落回总览：默认入口的语义由插件自己兜。
     const entryOf = (tab) => {
       const id = tab && tab.params ? tab.params.entry : undefined

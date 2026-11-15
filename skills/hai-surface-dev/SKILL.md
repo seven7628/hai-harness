@@ -77,8 +77,9 @@ surface provider.
   Check `ok` and render the reason.
 - **The four old read-only commands are disabled** (D11): `workspace_list`, `session_list`,
   `git_snapshot`, `ui_inspect`. They can read real project/session metadata, which a panel must not
-  touch. Declaring them in `commands` does nothing — they answer `denied`. Copy the current
-  `templates/surface/`, do not copy old examples.
+  touch. Declaring them makes **installation `rejected`** (D11); old installed plugins that still
+  declare them answer `denied` at runtime. Copy the current `templates/surface/`, do not copy old
+  examples.
 - Subscribe only to event types declared in `surface.json.data` — `host.onEvent` **throws** for an
   undeclared type (so a typo fails at `apply` time instead of silently never firing). Always keep
   the disposer and call it on unmount:
@@ -97,10 +98,12 @@ surface provider.
   | `agent.usage` | `{input_tokens, output_tokens}` | once, near the end |
   | `agent.done` | `{text}` | terminal |
   | `agent.error` | `{reason, message?}` | terminal |
+  | `tool.call` | `{call_id, tool, args, deadline_ms, read_only, requires_panel}` | the model wants **your** tool; reply with `tool.result` |
   | `surfaces_changed` | `{}` | plugin installed/enabled/removed (also spelled `surfaces.changed`) |
 
   `surfaces_changed` needs no token and works even when the agent channel is unavailable; every
   other event only ever carries **your own** runs (the loader filters by plugin id).
+
 - Theme from `host.theme()` (`{ mode, tokens: { bg, fg, border, accent, ok, warn, err, info } }`).
   Hardcoded colours break one of the two themes.
 - Opening another tab is `host.command('ui.open_tab', { kind: 'plugin:<your-id>', params })` —
@@ -110,6 +113,58 @@ surface provider.
   the user's composer, `source` becomes a deletable chip on it, and **nothing is sent** (the user
   presses Enter). `text` is capped at 8 KiB; empty/oversized text is `invalid_input`, no active
   session is `no_session`.
+
+## Exposing tools to the agent (P2)
+
+A plugin can give its own agent session tools (for example a PDF panel exposing `update_note`).
+Declare them in `surface.json`, **and** declare the two channels — the installer rejects tools
+without them:
+
+```json
+{
+  "commands": ["agent.session", "agent.run", "tool.result"],
+  "data": ["agent.delta", "agent.done", "agent.error", "tool.call"],
+  "tools": [
+    {
+      "name": "update_note",
+      "description": "Replace the note shown in this panel",
+      "input": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+      "read_only": false,
+      "requires_panel": true,
+      "timeout_ms": 10000
+    }
+  ]
+}
+```
+
+Reply from the plugin (no per-tool registration API):
+
+```js
+const off = host.onEvent('tool.call', async (ev) => {
+  const { call_id, tool, args } = ev.data
+  try {
+    const result = await runMyTool(tool, args) // your code
+    await host.command('tool.result', { call_id, ok: true, result })
+  } catch (e) {
+    await host.command('tool.result', { call_id, ok: false, error: String(e && e.message || e) })
+  }
+})
+```
+
+Keep the disposer (`off`) and call it when the panel unloads, like any other event.
+
+- `read_only: true` may run without a card. `read_only: false` **always** asks the user, even in
+  Auto / Full Access — `MandatoryApproval` bypasses the mode approver. A plugin cannot approve it.
+- `requires_panel: true` means the host refuses with `panel_not_open` unless a tab of your kind is
+  open **in the current scope**; the callback is not called. Any entry counts.
+- The model sees `plugin__<id>__<name>`; keep the full name ≤ 64 bytes (OpenAI function-name hard
+  limit). `name` matches `^[a-z][a-z0-9_]{0,40}$`, no `__`, ≤ 16 tools/plugin, description ≤ 300
+  chars, `input` must be a JSON `object` (≤ 16 KiB, no `$ref`), `timeout_ms` 0 (=10s) or 100ms–60s.
+- Results are capped at 64 KiB JSON (truncated with `truncated:true`). Timeout / unload fail the
+  call (`timeout` / `plugin_unloaded`); the run continues. Unknown or already-settled `call_id` is
+  ignored, so a late `tool.result` is harmless.
+- Tools exist only in **your plugin's own sessions** (D10) — never in a real Project session, never
+  in another plugin. Do not try to register tools globally.
 
 ## Multiple entrances (`entries`)
 

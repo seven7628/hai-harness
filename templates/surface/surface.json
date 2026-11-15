@@ -10,11 +10,20 @@
   "entry": "panel.js",
   "icon": "icon.svg",
   "placement": "plugin",
-  "commands": ["agent.session", "agent.run", "agent.cancel", "composer.quote", "ui.toast"],
-  "data": ["agent.delta", "agent.done", "agent.error", "surfaces_changed"],
+  "commands": ["agent.session", "agent.run", "agent.cancel", "tool.result", "composer.quote", "ui.toast"],
+  "data": ["agent.delta", "agent.done", "agent.error", "tool.call", "surfaces_changed"],
   "entries": [
     { "id": "overview", "title": "总览", "order": 10 },
     { "id": "schedule", "title": "课表", "order": 20 },
     { "id": "resources", "title": "资源", "order": 30 }
+  ],
+  "tools": [
+    {
+      "name": "template_echo",
+      "description": "回显一段文本。样本工具：演示 manifest.tools[] + tool.call/tool.result，不产生副作用。",
+      "input": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] },
+      "read_only": true,
+      "requires_panel": false
+    }
   ]
 }
