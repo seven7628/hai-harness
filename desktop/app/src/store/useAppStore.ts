@@ -3731,19 +3731,40 @@ function responseWorkspaceMatches(respWs: string, meta: PendingCommand | undefin
   const ws = String(meta?.workspace ?? '') || respWs
   return !!ws && !!current && ws === current
 }
+// bridge 不可用类错误（进程退出/未运行/写 stdin 失败/响应超时）。
+// 与「业务错误」（session not found 等）分开：前者是**基础设施**问题，后者是正常失败。
+function isBridgeDownErr(err: string | undefined): boolean {
+  return /bridge\s*(未运行|退出|进程错误|响应超时)|not running|exited|EPIPE|stdin/i.test(err || '')
+}
+
+// bridge 还没就绪（'idle' 从未启动过 / 'starting' 正在 spawn）。
+// 这个窗口里的「bridge 未运行」**不是故障**，是命令还没被服务：
+// 主进程已把这类命令排队（electron/main.ts 的 bridge 生命周期闸门），
+// 旧版主进程则直接回错——两种情况都不该写进 bridgeError、不该弹 toast、不该标红。
+function bridgeNotReadyYet(): boolean {
+  const st = useAppStore.getState().bridgeStatus
+  return st === 'starting' || st === 'idle'
+}
+
 // bridge 不可用（进程退出/未启动/写 stdin 失败）→ UI 需要升级为「需要重启 bridge」，
 // 而不是普通命令失败。普通业务错误（session not found 等）不应把整个 bridge 标红。
 function looksBridgeDown(err: string | undefined): boolean {
-  if (!/bridge\s*(未运行|退出|进程错误|响应超时)|not running|exited|EPIPE|stdin/i.test(err || '')) return false
+  if (!isBridgeDownErr(err)) return false
   // **启动中**的「bridge 未运行」是**瞬时**的（主进程正在 go build / spawn bridge，
   // 那几秒里 bridge 变量还是 null）⇒ 不能 latch 成永久 error：红横幅「bridge 已退出」
   // 会常驻，用户得手点「重启 bridge」才消。
   //
   // 2026-11-14 实测：重启应用后立刻出现（当时刚好在重建 bridge ⇒ ensureBridgeBin
   // 触发了 go build ⇒ 窗口被拉长到好几秒）。主进程侧已改成**排队**（electron/main.ts
-  // 的 bridgeBooting 闸门），这里再兜一层：即使还有别的路径漏进来，starting 期间
+  // 的 bridge 生命周期闸门），这里再兜一层：即使还有别的路径漏进来，starting 期间
   // 也不标红。
-  if (useAppStore.getState().bridgeStatus === 'starting') return false
+  //
+  // 2026-11-15：'idle' 也算「还没起」——**首次启动**时开屏页等用户选工作区，
+  // bridge 压根没起；此时任何命令失败都不是「bridge 挂了」，只是「还没到」。
+  // （实测命中：开屏时 SkillsPage 挂载就发 skills/market_list ⇒ 回「bridge 未运行」
+  //   ⇒ 这里 latch 成 error ⇒ 开屏页红字「bridge 未运行」。）
+  // bridge 真死掉不靠这条判据：主进程会推 bridge:exit ⇒ onExit 里直接置 error。
+  if (bridgeNotReadyYet()) return false
   return true
 }
 // interrupt_task 在途请求（命令 id → 目标任务）：失败时按 id 回滚乐观 interrupting 态。
@@ -5272,6 +5293,10 @@ export function dispatchEvent(raw: AnyEvent): void {
         }
         const bridgeDown = looksBridgeDown(err)
         const alreadyDown = getState().bridgeStatus === 'error'
+        // bridge 还没就绪（idle/starting）时的失败：**不是**业务失败，是命令还没被服务
+        // （主进程已排队；旧版主进程直接回错）。不写 bridgeError —— 开屏页把它当红字
+        // 显示（首次启动那两条 skills/market_list 就会走到这里）。
+        if (!bridgeDown && bridgeNotReadyYet() && isBridgeDownErr(err)) return
         setState({
           ...(bridgeDown ? { bridgeStatus: 'error' as const } : {}),
           bridgeError: err,
@@ -5540,6 +5565,9 @@ export function dispatchEvent(raw: AnyEvent): void {
         const err = r.error || 'command failed'
         const bridgeDown = looksBridgeDown(err)
         const alreadyDown = getState().bridgeStatus === 'error'
+        // bridge 还没就绪（idle/starting）时的「bridge 未运行」：命令**没被服务**，
+        // 不是业务失败 ⇒ 不写 bridgeError（开屏页会把它当红字显示）、不弹 toast。
+        if (!bridgeDown && bridgeNotReadyYet() && isBridgeDownErr(err)) return
         setState({
           bridgeError: err,
           // bridge 不可用（进程死了/未启动）升级为全局错误态 + toast；普通业务错误

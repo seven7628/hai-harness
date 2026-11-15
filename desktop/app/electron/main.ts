@@ -80,7 +80,7 @@ const rendererSender = createRendererSender(() => mainWindow)
 const sendToRenderer = rendererSender.send
 let bridge: ChildProcessWithoutNullStreams | null = null
 
-// —— bridge 启动闸门（2026-11-14）——
+// —— bridge 生命周期闸门（2026-11-14 首版，2026-11-15 补 'idle'）——
 //
 // `ensureBridgeBin()` 在产物比源码旧时会**跑 go build**（数秒）。这段时间里
 // `bridge` 还是 null，而渲染层**已经在发命令**了（wire 的快照、hub attach、
@@ -91,8 +91,26 @@ let bridge: ChildProcessWithoutNullStreams | null = null
 //
 // ⇒ 改成：启动期间把命令**排队**，bridge 起来后按序补发（命令 id 原样带上，
 // 回执仍能对上号）。只有「不在启动中」才是真的没跑起来。
-let bridgeBooting = false
+//
+// 2026-11-15 补的洞：首版只在 `bridge:start` 这个 IPC **处理器里**才置闸门，
+// 于是「处理器还没被调用」的那段窗口（**首次启动**：开屏等用户选工作区，
+// bridge 压根没起）不在闸门覆盖内。实测命中：开屏时 SkillsPage 挂载就发
+// `skills` / `market_list` ⇒ 两条都回「bridge 未运行」⇒ 前端 latch 成 error
+// ⇒ 开屏页红字显示「bridge 未运行」（用户视角：还没做任何事就报 bridge 挂了）。
+//
+// ⇒ 改成显式状态机：
+//   'idle'     —— 进程起来了但 bridge 还没起（首次启动 / 开屏等选工作区）
+//   'starting' —— 正在 spawn（可能正在 go build）
+//   'running'  —— 已就绪
+//   'failed'   —— 确实起不来（go build 失败 / spawn 失败 / 进程已退出）
+// 'idle' 与 'starting' 期间的命令一律**排队**（bridge 起来后按序补发）；
+// 只有 'failed' 才回硬错误「bridge 未运行」——那时是真的没有去处了。
+type BridgeState = 'idle' | 'starting' | 'running' | 'failed'
+let bridgeState: BridgeState = 'idle'
 const bridgeBootQueue: string[] = []
+// 队列上限：bridge 一直没起时（比如用户一直停在开屏页）渲染层可能反复发命令，
+// 无限增长会吃内存。超了丢**最旧**的（保最新）。
+const MAX_BRIDGE_BOOT_QUEUE = 512
 // —— 原生脏标记 + 退出拦截（PR-05b）——
 // docDirty 由渲染层镜像（任一编辑标签有未保存改动）；allowQuit 是**防死循环**的放行标志：
 // 拦下 → 问用户 → 用户选丢弃/保存完 → quitAnyway() 置 true → app.quit() 第二次进
@@ -1097,11 +1115,18 @@ function newestMtime(paths: string[]): number {
 // 开发模式下源码比 bridge 新时自动重建，避免 Electron 复用旧二进制导致修复后的
 // llm_error/session_run_error 或 provider 协议能力看似「没有生效」。生产包永远使用随包产物。
 async function ensureBridgeBin(): Promise<{ ok: boolean; bin?: string; error?: string }> {
+  // 闸门在**这里**上，而不是只在 `bridge:start` 的处理器里上：
+  // ensureBridgeBin 可能要跑 go build（数秒），期间渲染层的命令要排队。
+  // 所有调用方（bridge:start / office-kit:status / 各 preview 通路…）都紧接着
+  // spawnBridge（⇒ 'running'），所以在这里置 'starting' 是覆盖最全的位置。
+  bridgeState = 'starting'
   if (app.isPackaged) {
     const packaged = path.join(process.resourcesPath, 'hai-bridge')
-    return fs.existsSync(packaged)
-      ? { ok: true, bin: packaged }
-      : { ok: false, error: `bridge 二进制缺失（预期在 ${packaged}）` }
+    if (!fs.existsSync(packaged)) {
+      bridgeState = 'failed'
+      return { ok: false, error: `bridge 二进制缺失（预期在 ${packaged}）` }
+    }
+    return { ok: true, bin: packaged }
   }
   const repoRoot = path.resolve(APP_ROOT, '../..')
   const override = process.env.GO_CODE_DESKTOP_BIN || ''
@@ -1130,6 +1155,7 @@ async function ensureBridgeBin(): Promise<{ ok: boolean; bin?: string; error?: s
     })
     return { ok: true, bin: BRIDGE_BIN }
   } catch (e) {
+    bridgeState = 'failed'
     return { ok: false, error: `go build 失败: ${(e as Error).message}` }
   }
 }
@@ -1139,25 +1165,25 @@ async function ensureBridgeBin(): Promise<{ ok: boolean; bin?: string; error?: s
 // 批量 IPC（FIX_OPTIMIZATION 问题2②）：stdout 行先入 pending 缓冲，每 ~16ms 或 ≥200 行 flush 一次，
 // 发送 { lines: string[] }；command_response 行先 flush 缓冲再单行直发（保序，renderer 依它作同步点）。
 function spawnBridge(bin: string): boolean {
-  if (bridge) return true // 已在运行：幂等复用，绝不 kill
+  if (bridge) {
+    // 已在运行：幂等复用，绝不 kill。但**队列仍要放行**——
+    // 「bridge 已运行」与「上一轮排队里攒了命令」可以同时成立
+    // （例：'idle' 期间排了 skills/market_list，用户选了工作区后
+    //   先由别的 IPC 把 bridge 拉起来了 ⇒ 这里早退，队列若不放行就永远卡住）。
+    bridgeState = 'running'
+    flushBridgeBootQueue()
+    return true
+  }
   try {
     bridge = spawn(bin, [], { env: bridgeEnv() })
   } catch {
+    bridgeState = 'failed'
     return false
   }
 
   // 放行闸门：把启动期间排队的命令按序补发（id 原样 ⇒ 回执对得上号）。
-  if (bridgeBootQueue.length) {
-    const queued = bridgeBootQueue.splice(0)
-    for (const line of queued) {
-      try {
-        bridge!.stdin.write(line)
-      } catch {
-        /* 忽略：bridge 刚起来，写失败让它自己报错 */
-      }
-    }
-  }
-  bridgeBooting = false
+  flushBridgeBootQueue()
+  bridgeState = 'running'
 
   const pending: string[] = []
   const FLUSH_INTERVAL_MS = 16
@@ -1294,12 +1320,18 @@ function spawnBridge(bin: string): boolean {
     clearFlushTimer()
     flush()
     bridge = null
+    // bridge 真没了 ⇒ 'failed'：这之后的命令回硬错误「bridge 未运行」是对的。
+    // 排队期间攒下的命令送不出去了 ⇒ 结算掉（渲染层的 pending 不能永远悬着）。
+    bridgeState = 'failed'
+    dropBridgeBootQueue('bridge 未运行')
   })
   bridge.on('exit', (code) => {
     settleBridgeRequests(`bridge 退出 (${code})`)
     clearFlushTimer()
     flush() // 退出前送完剩余缓冲行，保证事件先于 bridge:exit 到达
     bridge = null
+    bridgeState = 'failed'
+    dropBridgeBootQueue('bridge 未运行')
     // 退出时窗口常在拆除中（webContents 已销毁）：此前 if (mainWindow) 挡不住 destroyed，
     // send 直接抛在 exit 回调里。统一走判空通道。
     sendToRenderer('bridge:exit', { code, err: err.slice(-4000) })
@@ -1345,15 +1377,71 @@ async function pushProviderKeys(): Promise<void> {
 // key 只进 stdin，**不进日志/错误消息**（这里也不打印 cmd）。
 function sendCommand(cmd: unknown): { ok: boolean; error?: string } {
   if (!bridge || bridge.killed) {
-    // 启动中（可能在 go build）⇒ **排队**，别把前端推进永久错误态。
-    if (bridgeBooting) {
-      bridgeBootQueue.push(JSON.stringify(injectProviderKey(cmd, providerKeyOf)) + '\n')
+    // bridge 还没就绪（'idle' 还没起过 / 'starting' 正在 spawn）⇒ **排队**，
+    // 别把前端推进永久错误态（老实现回「bridge 未运行」⇒ 前端 latch 成
+    // error ⇒ 开屏页红字「bridge 未运行」/ 主界面横幅「bridge 已退出」）。
+    // 只有 'failed'（确实起不来 / 进程已退出）才是真的没有去处 ⇒ 回硬错误。
+    if (bridgeState === 'idle' || bridgeState === 'starting') {
+      enqueueBridgeCommand(JSON.stringify(injectProviderKey(cmd, providerKeyOf)) + '\n')
       return { ok: true }
     }
     return { ok: false, error: 'bridge 未运行' }
   }
   bridge.stdin.write(JSON.stringify(injectProviderKey(cmd, providerKeyOf)) + '\n')
   return { ok: true }
+}
+
+// enqueueBridgeCommand 把一条命令（已含换行的 NDJSON）压进启动队列。
+function enqueueBridgeCommand(line: string): void {
+  if (bridgeBootQueue.length >= MAX_BRIDGE_BOOT_QUEUE) bridgeBootQueue.shift()
+  bridgeBootQueue.push(line)
+}
+
+// flushBridgeBootQueue：bridge 就绪后把排队的命令按序补发（id 原样 ⇒ 回执对得上号）。
+// 幂等：bridge 已经存在时也走这里（见 spawnBridge 的早退分支）——
+// 否则「bridge 已运行，但上一轮排队里攒了命令」时那些命令会永远卡在队列里。
+function flushBridgeBootQueue(): void {
+  if (!bridge || bridgeBootQueue.length === 0) return
+  const queued = bridgeBootQueue.splice(0)
+  for (const line of queued) {
+    try {
+      bridge.stdin.write(line)
+    } catch {
+      /* 忽略：bridge 刚起来，写失败让它自己报错 */
+    }
+  }
+}
+
+// dropBridgeBootQueue：命令送不出去了（bridge 起不来 / 进程已退出）⇒ 把排队的
+// 命令逐条**合成一条失败回执**发给渲染层，否则渲染层的 pending 永远不结算
+// （骨架屏转圈到超时、命令静默丢失 —— 用户视角是「点了没反应」）。
+function dropBridgeBootQueue(reason: string): void {
+  if (bridgeBootQueue.length === 0) return
+  const dropped = bridgeBootQueue.splice(0)
+  const lines: string[] = []
+  for (const raw of dropped) {
+    let id: number | undefined
+    let workspace: string | undefined
+    try {
+      const parsed = JSON.parse(raw) as { id?: number; payload?: { workspace?: unknown } }
+      if (typeof parsed.id === 'number') id = parsed.id
+      const ws = parsed.payload?.workspace
+      if (typeof ws === 'string') workspace = ws
+    } catch {
+      /* 解析不了就当没有 id（渲染层按内容分流，缺 id 不会误结算别的命令） */
+    }
+    if (id === undefined) continue
+    lines.push(
+      JSON.stringify({
+        event_type: 'command_response',
+        id,
+        ok: false,
+        error: reason,
+        ...(workspace ? { workspace } : {}),
+      }),
+    )
+  }
+  if (lines.length > 0) sendToRenderer('bridge:event', { lines })
 }
 
 // —— 预览请求的超时口径（R08d 复评 P2）——
@@ -1644,19 +1732,17 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     return r.canceled || r.filePaths.length === 0 ? null : r.filePaths[0]
   })
   ipcMain.handle('bridge:start', async () => {
-    // 闸门**在 await 之前**就上：ensureBridgeBin 可能要 go build（数秒），
+    // 闸门在 ensureBridgeBin 里上（'starting'）：它可能要 go build（数秒），
     // 这段时间渲染层的命令要排队而不是被判成「bridge 未运行」。
-    bridgeBooting = true
     const res = await ensureBridgeBin()
     if (!res.ok || !res.bin) {
-      bridgeBooting = false
-      bridgeBootQueue.length = 0 // 起不来 ⇒ 排队的命令也送不了，丢掉
+      // 起不来 ⇒ 排队的命令也送不了，结算掉（渲染层的 pending 不能永远悬着）。
+      dropBridgeBootQueue(res.error ?? 'bridge 未运行')
       return res
     }
     const ok = spawnBridge(res.bin)
     if (!ok) {
-      bridgeBooting = false
-      bridgeBootQueue.length = 0
+      dropBridgeBootQueue('bridge 未运行')
       return { ok: false, error: 'bridge 启动失败' }
     }
     return { ok: true }

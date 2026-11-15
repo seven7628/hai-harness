@@ -234,7 +234,8 @@
     "test:agent-user-dedupe": "node scripts/test-agent-user-dedupe.mjs",
     "test:compact-notice": "node lab/verify-compact-notice.mjs",
     "test:turn-runs": "node lab/verify-turn-runs.mjs",
-    "test:session-switch": "node scripts/test-session-switch-hydrated.mjs"
+    "test:session-switch": "node scripts/test-session-switch-hydrated.mjs",
+    "test:bridge-boot-gate": "node scripts/test-bridge-boot-gate.mjs"
   },
   "build": {
     "appId": "ai.hai.desktop",

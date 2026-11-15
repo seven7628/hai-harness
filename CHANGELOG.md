@@ -37,6 +37,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- The desktop client no longer reports **“bridge 未运行”** while the bridge is still
+  starting. The startup gate now covers the whole not-yet-ready window — including a
+  first launch, where the bridge has not been started yet because no workspace has been
+  picked: such commands are queued and replayed once the bridge comes up instead of
+  failing and pinning a red “bridge 未运行” on the boot screen. A bridge that really
+  dies still surfaces the error banner and the restart action.
 - Surface Electron E2E now fails fast when the host plugin index is empty, and
   rebuilds stale `dist` / unsets inherited `VITE_DEV_SERVER_URL` before launch,
   instead of silently timing out.
