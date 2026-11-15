@@ -83,6 +83,11 @@ type modeApprover struct {
 	mode  *Mode
 }
 
+// Unwrap 暴露底层审批器：MandatoryApproval 工具（插件写工具）必须绕过模式包装，
+// 直接等会话的人工审批；否则 Auto 模式会在卡片弹出的同一刻自动批准。
+// tools 包只按结构接口（Unwrap() events.Approver）识别，不反向依赖 agents。
+func (m modeApprover) Unwrap() events.Approver { return m.inner }
+
 func (m modeApprover) BeginApproval(call core.ToolCall) func(ctx context.Context) (bool, error) {
 	switch m.mode.Approve(call) {
 	case ApprovalAuto:

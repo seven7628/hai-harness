@@ -71,3 +71,59 @@ func TestPlainToolStillHonorsAutoPolicy(t *testing.T) {
 		t.Fatalf("普通工具被误拦：%+v", res)
 	}
 }
+
+// autoAllowWrapper 复刻 agents.modeApprover 的 Auto 行为：策略说不需要，
+// BeginApproval 同步 true，但通过 Unwrap 暴露底层人工审批器。
+type autoAllowWrapper struct {
+	inner events.Approver
+	began int
+}
+
+func (w *autoAllowWrapper) NeedsApproval(core.ToolCall) bool { return false }
+func (w *autoAllowWrapper) BeginApproval(core.ToolCall) func(context.Context) (bool, error) {
+	w.began++
+	return func(context.Context) (bool, error) { return true, nil }
+}
+func (w *autoAllowWrapper) Unwrap() events.Approver { return w.inner }
+
+func TestMandatoryApprovalUsesRawApproverBehindMode(t *testing.T) {
+	e := NewToolEngine()
+	e.RegisterTool(context.Background(), &mandatoryTestTool{stubTool{
+		BaseTool: BaseTool{Name_: "plugin_write", Description_: "d", Params_: map[string]any{}},
+		result:   "SHOULD-NOT-RUN",
+	}})
+	raw := &autoDenyPolicy{}
+	wrapper := &autoAllowWrapper{inner: raw}
+	ctx := events.WithToolContext(context.Background(), "r3", 0, nil, wrapper, nil)
+
+	res, err := e.Sequence(ctx, []core.ToolCall{{Id: "c1", Name: "plugin_write", Arguments: "{}"}}, nil)
+	if err != nil {
+		t.Fatalf("Sequence: %v", err)
+	}
+	if wrapper.began != 0 {
+		t.Fatalf("强制审批仍走了 modeApprover：Auto 包装被调用 %d 次", wrapper.began)
+	}
+	if raw.began != 1 {
+		t.Fatalf("没有绕过 modeApprover 等原始审批器：raw BeginApproval=%d，want 1", raw.began)
+	}
+	if len(res) != 1 || !res[0].IsError || res[0].Result == "SHOULD-NOT-RUN" {
+		t.Fatalf("强制审批被 Auto 包装放行：%+v", res)
+	}
+}
+
+func TestMandatoryApprovalWithoutApproverFailsClosed(t *testing.T) {
+	e := NewToolEngine()
+	e.RegisterTool(context.Background(), &mandatoryTestTool{stubTool{
+		BaseTool: BaseTool{Name_: "plugin_write", Description_: "d", Params_: map[string]any{}},
+		result:   "SHOULD-NOT-RUN",
+	}})
+	ctx := events.WithToolContext(context.Background(), "r4", 0, nil, nil, nil)
+
+	res, err := e.Sequence(ctx, []core.ToolCall{{Id: "c1", Name: "plugin_write", Arguments: "{}"}}, nil)
+	if err != nil {
+		t.Fatalf("Sequence: %v", err)
+	}
+	if len(res) != 1 || !res[0].IsError || res[0].Result == "SHOULD-NOT-RUN" {
+		t.Fatalf("没有审批器时强制审批未 fail-closed：%+v", res)
+	}
+}
