@@ -1,6 +1,6 @@
 ---
 name: hai-surface-dev
-version: 1.1.2
+version: 1.1.3
 description: 'Builds or debugs a panel in the desktop right sidebar — dashboard, tool page, PDF/document viewer, or any UI the user wants added. Installs a local ESM plugin and verifies it. Use for 插件/面板/看板/右栏/PDF 阅读器/文档面板/right panel/plugin/surface.'
 requires:
   tools: [ui_inspect, surface_install]
@@ -83,6 +83,9 @@ supported fallback when the surface tools are off.
 - Never replace a built-in kind; never touch `document.body` / global CSS / another panel's DOM.
 - Read-only is the default. A write-side tool (`read_only:false`) always needs explicit approval;
   the plugin cannot approve itself.
+- If the panel shows whether its session is running, use `agent.snapshot` + `agent.state`
+  (session-level, content-free). `agent.run` events do **not** fire when the user drives the
+  plugin session from the left panel; see [`references/panel-api.md`](references/panel-api.md).
 - Do not fabricate data. Render `{ ok:false, reason }` as the user-visible reason.
 
 ## Minimum shape

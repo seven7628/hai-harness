@@ -28,6 +28,7 @@ import (
 
 	"github.com/seven7628/hai-harness/agents"
 	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/provider"
 )
 
@@ -1273,4 +1274,108 @@ func TestSurfaceAgentRunPersistFailureIsBridgeError(t *testing.T) {
 		t.Fatalf("失败之后配额没归还（下一次 run 被拒）：%v", resp2)
 	}
 	waitSurfaceTerminal(t, buf, str(pluginRespData(t, resp2), "run_id"), 30*time.Second)
+}
+
+// ---- P3a：只读快照 + 宿主驱动 run 的会话状态 ----
+
+func TestSurfaceAgentSnapshotReadOnly(t *testing.T) {
+	m, buf := testManager(t)
+	cmds := append(append([]string{}, agentCommands...), surfaceAgentSnapshotName)
+	writePluginSurfaces(t, m,
+		pluginSurface{id: "demo", enabled: true, commands: cmds},
+		pluginSurface{id: "beta", enabled: true, commands: cmds},
+	)
+	resp := pluginResp(t, m, buf, 1, "surface_agent", agentPayload("demo", surfaceAgentSessionName, nil))
+	sid := str(pluginRespData(t, resp), "session_id")
+	if sid == "" {
+		t.Fatalf("agent.session 失败：%v", resp)
+	}
+
+	resp = pluginResp(t, m, buf, 2, "surface_agent",
+		agentPayload("demo", surfaceAgentSnapshotName, map[string]any{"session_id": sid}))
+	if resp["ok"] != true {
+		t.Fatalf("snapshot 失败：%v", resp)
+	}
+	data := pluginRespData(t, resp)
+	if data["status"] != surfaceAgentStateIdle || data["session_id"] != sid {
+		t.Fatalf("snapshot 形状 = %v，want idle + 同一 session", data)
+	}
+	if _, ok := data["last_error"]; ok {
+		t.Fatalf("新会话不应有 last_error：%v", data)
+	}
+	for _, forbidden := range []string{"content", "text", "messages", "transcript"} {
+		if _, ok := data[forbidden]; ok {
+			t.Fatalf("snapshot 泄露正文键 %q：%v", forbidden, data)
+		}
+	}
+	quota, _ := data["quota"].(map[string]any)
+	if quota == nil || quota["concurrent_limit"] != float64(1) || quota["run_timeout_ms"] == nil {
+		t.Fatalf("quota 形状不对：%v", data["quota"])
+	}
+
+	// 跨插件：beta 不能拿 alpha 的 session。
+	resp = pluginResp(t, m, buf, 3, "surface_agent",
+		agentPayload("beta", surfaceAgentSnapshotName, map[string]any{"session_id": sid}))
+	assertDenied(t, resp, surfaceReasonDenied)
+	// 不存在 / 缺参数。
+	resp = pluginResp(t, m, buf, 4, "surface_agent",
+		agentPayload("demo", surfaceAgentSnapshotName, map[string]any{"session_id": "s-nope"}))
+	assertDenied(t, resp, surfaceReasonNoSession)
+	resp = pluginResp(t, m, buf, 5, "surface_agent",
+		agentPayload("demo", surfaceAgentSnapshotName, nil))
+	assertDenied(t, resp, surfaceReasonInvalidInput)
+
+	// 5/s burst：前 5 次通过，第 6 次（同 manager）应 quota。
+	// 上面已经用了 1 次 snapshot；再补 4 次到 5，然后第 6 次。
+	for i := 0; i < 4; i++ {
+		r := pluginResp(t, m, buf, 10+i, "surface_agent",
+			agentPayload("demo", surfaceAgentSnapshotName, map[string]any{"session_id": sid}))
+		if r["ok"] != true {
+			t.Fatalf("burst 第 %d 次被拒（应还有令牌）：%v", i+2, r)
+		}
+	}
+	resp = pluginResp(t, m, buf, 20, "surface_agent",
+		agentPayload("demo", surfaceAgentSnapshotName, map[string]any{"session_id": sid}))
+	assertDenied(t, resp, surfaceReasonQuota)
+}
+
+func TestSurfaceAgentStateForHostDrivenRun(t *testing.T) {
+	m, buf := testManager(t)
+	fakeSurface(t, m, "demo", true, append(append([]string{}, agentCommands...), surfaceAgentSnapshotName))
+	resp := pluginResp(t, m, buf, 1, "surface_agent", agentPayload("demo", surfaceAgentSessionName, nil))
+	sid := str(pluginRespData(t, resp), "session_id")
+	bs := m.get(pluginHomePath("demo"), sid)
+	if bs == nil {
+		t.Fatal("插件会话没建出来")
+	}
+	// 关键：没有 surfaceAgentRun —— 模拟用户从左栏直接驱动插件会话。
+	bs.observeSurfaceAgentEvent(&events.AgentStart{
+		RunId: "host-run-1", Timestamp: time.Now(),
+	})
+	bs.observeSurfaceAgentEvent(&events.AgentEnd{
+		RunId: "host-run-1", FinishReason: core.FinishReasonStop, Content: "secret body",
+	})
+	evs := surfaceEventLines(readAllLines(buf), "")
+	var states []map[string]any
+	for _, item := range evs {
+		if surfaceEventType(item) == surfaceAgentEvState {
+			states = append(states, item)
+		}
+	}
+	if len(states) != 2 {
+		t.Fatalf("agent.state 条数 = %d，want 2（running → idle）：%v", len(states), states)
+	}
+	get := func(i int) map[string]any { return surfaceEventData(states[i]) }
+	if get(0)["status"] != surfaceAgentStateRunning || get(1)["status"] != surfaceAgentStateIdle {
+		t.Fatalf("状态迁移 = %v / %v", get(0), get(1))
+	}
+	if states[0]["surface_id"] != "demo" || get(0)["session_id"] != sid {
+		t.Fatalf("state 归属 = %v，want demo/%s", states[0], sid)
+	}
+	if _, ok := get(1)["text"]; ok {
+		t.Fatalf("agent.state 不应带正文：%v", get(1))
+	}
+	if get(0)["seq"].(float64) >= get(1)["seq"].(float64) {
+		t.Fatalf("state seq 不单调：%v", states)
+	}
 }

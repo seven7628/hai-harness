@@ -427,6 +427,11 @@ type bridgeSession struct {
 	// emit 是唯一的生产侧（dispatchMu 内读写 seq），dispatch 侧的 cancel/超时
 	// 也先拿 dispatchMu 再动它 —— 所以这里用原子指针即可，不需要另加锁。
 	surfaceAgentRun atomic.Pointer[surfaceAgentRun]
+	// P3a：插件会话的只读状态投影（snapshot/agent.state 共用）。
+	// emit 与 dispatch（snapshot）都会读；用独立锁，避免把会话状态塞进 dispatchMu
+	// 或 surfaceAgentRun 的锁里。只存状态/run id/错误文案，不存任何正文。
+	surfaceStateMu sync.Mutex
+	surfaceState   surfaceSessionState
 	// hubTaskRunning 根 AgentStart：dispatched → running（P3b-08 B3；nil = 未接线）。
 	hubTaskRunning func(runID string)
 	// hubBudgetCheck 目标会话 LLMEnd 的预算检查；true = 立即中断本 run。

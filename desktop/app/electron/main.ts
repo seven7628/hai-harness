@@ -199,9 +199,9 @@ function settleBridgeRequests(error: string): void {
 // 反查表按需扫（插件数量是个位数），不维护第二份真相 —— 两张表总有一天会不一致。
 const surfaceAgentTokens = new Map<string, string>()
 const SURFACE_AGENT_EVENT_CHANNEL = 'surface:agent-event'
-// agent.* 的四条（§6.6 命令表）。manifest 声明的其它名字走 surface_command 那条老路，
+// agent.* 的五条（§6.6 命令表；P3a 新增只读 snapshot）。manifest 声明的其它名字走 surface_command 那条老路，
 // 不走这里；不在表里的名字一律 denied（插件 Agent 通道不承载宿主的其它命令）。
-const SURFACE_AGENT_COMMANDS = new Set(['agent.session', 'agent.run', 'agent.cancel', 'tool.result'])
+const SURFACE_AGENT_COMMANDS = new Set(['agent.session', 'agent.run', 'agent.cancel', 'agent.snapshot', 'tool.result'])
 // `agent.run` 的**立即回执**（不是整轮耗时）：Go 建 run 就回，流式输出走事件。
 // 30s 是创建会话 + 取 provider 的宽限；超时只说明 ack 丢了，不代表 run 没起来。
 const SURFACE_AGENT_TIMEOUT_MS = 30_000
@@ -1930,7 +1930,7 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     const token = typeof p?.token === 'string' ? p.token : ''
     const name = typeof p?.name === 'string' ? p.name.trim() : ''
     const sid = token ? surfaceIdForToken(token) : undefined
-    // ② 形状 + 白名单：name 只认 agent.* 的四条（§6.6）。不在这张表里就不是插件 Agent
+    // ② 形状 + 白名单：name 只认 agent.* 的五条（§6.6）。不在这张表里就不是插件 Agent
     // 通道该承载的东西（旧只读命令 D11 已禁用，不该从这里绕回去）。
     if (!sid || !SURFACE_AGENT_COMMANDS.has(name)) return { ok: false, reason: 'denied' }
     const args = p?.args && typeof p.args === 'object' && !Array.isArray(p.args) ? (p.args as Record<string, unknown>) : {}

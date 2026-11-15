@@ -222,7 +222,7 @@ const LOCAL_COMMANDS = new Set(['composer.quote', 'ui.open_tab', 'ui.toast'])
  * 两边都在白名单里单独写一遍是刻意的：loader 这一份省一次 IPC，main 那一份才是边界
  *（渲染层与插件同进程，预检只能算礼貌）。
  */
-const AGENT_COMMANDS = new Set(['agent.session', 'agent.run', 'agent.cancel', 'tool.result'])
+const AGENT_COMMANDS = new Set(['agent.session', 'agent.run', 'agent.cancel', 'agent.snapshot', 'tool.result'])
 
 /**
  * D11：四条旧只读命令**已不可用**（`workspace_list` / `session_list` / `git_snapshot` /
@@ -453,7 +453,7 @@ export function createHost(
         return { ok: true }
       }
 
-      // —— 插件 Agent 通道（§6.6）：agent.session / agent.run / agent.cancel / tool.result ——
+      // —— 插件 Agent 通道（§6.6）：agent.session / agent.run / agent.cancel / agent.snapshot / tool.result ——
       if (AGENT_COMMANDS.has(name)) {
         const token = await tokenPromise
         // 领不到 token = 这个宿主没有 Agent 通道（浏览器档/旧主进程）⇒ denied，不报错。

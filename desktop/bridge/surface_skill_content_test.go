@@ -201,8 +201,8 @@ func TestSurfaceTemplateInstalls(t *testing.T) {
 	}
 	// 声明的每条命令都必须在**宿主真正放行**的集合里：模板教人声明的命令调不通，等于教错。
 	//
-	// D11 之后 surface_command 的宿主表是空的，放行集合只剩 surface_agent 的四个 name
-	// （agent.session / agent.run / agent.cancel / tool.result）。因此「一条都不声明」是
+	// D11 之后 surface_command 的宿主表是空的，放行集合只剩 surface_agent 的五个 name
+	// （agent.session / agent.run / agent.cancel / agent.snapshot / tool.result）。因此「一条都不声明」是
 	// 合法的（模板眼下就是这么走的：P1b2 的 claimed API 落地之前，任何 agent.* 调用都
 	// 跑不通，示例调一条注定 denied 的命令比不调更误导）—— 断言从「必须声明」改成
 	// 「声明了就必须能调通」，这条不变式才是模板真正要守的东西。

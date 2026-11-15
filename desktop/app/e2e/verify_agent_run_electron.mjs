@@ -60,6 +60,8 @@ const SCENE_USE_TOOL = 'use-tool'
 const SCENE_CLOSED_PANEL = 'closed-panel'
 const SCENE_WRITE_TOOL = 'write-tool'
 const SCENE_CANCEL = 'cancel'
+// P3a T15：用户从宿主 UI 驱动插件会话（不是 agent.run）。
+const SCENE_USER_STATE = 'user-state'
 // closed-panel 的响应延迟：面板必须**先**关掉，宿主门禁才是一次真实的门禁。
 const CLOSED_PANEL_DELAY_MS = 2500
 // cancel 的响应延迟：留足一个「请求已到上游、run 仍在跑」的窗口给取消按钮。
@@ -122,6 +124,7 @@ const SCENES = {
   // 没有被取消时它会在 CANCEL_DELAY_MS 后回 done；取消成功则应在此之前收到
   // agent.error{cancelled}，且**没有** done —— 两者是互斥终态。
   [SCENE_CANCEL]: { text: ['cancel should not complete'], delayMs: CANCEL_DELAY_MS },
+  [SCENE_USER_STATE]: { text: ['host state ok'] },
 }
 
 // contentTexts：一条消息的文本块（字符串 content 与 [{type:'text',text}] 两种线形都认）。
@@ -282,9 +285,25 @@ export const surface = {
     const calls = (globalThis.__agentToolCalls = globalThis.__agentToolCalls || [])
     const runs = (globalThis.__agentToolRuns = globalThis.__agentToolRuns || [])
     const terminals = (globalThis.__agentRunTerminals = globalThis.__agentRunTerminals || [])
+    const states = (globalThis.__agentStates = globalThis.__agentStates || [])
     // 复用 ping 建出来的那个会话（D4）：后续场景不各建一条会话，左栏也不要长出多行。
     // lastRunId 给 T14 的 cancel 按钮用：它只取消最近一次 agent.run 的回执 id。
     const shared = (globalThis.__agentSharedSession = globalThis.__agentSharedSession || { sessionId: '', lastRunId: '' })
+
+    // P3a：用户从宿主 UI 直接驱动插件会话时，插件也必须看到会话级状态。
+    // 放在 apply 作用域（不随面板标签关闭而消失），T15 用它做判据。
+    host.onEvent('agent.state', (e) => {
+      const d = (e && e.data) || {}
+      states.push({
+        status: str(d.status),
+        session_id: str(d.session_id),
+        run_id: str(d.run_id),
+        seq: num(d.seq),
+        reason: str(d.reason),
+        message: str(d.message),
+        at: Date.now(),
+      })
+    })
 
     // ① tool.call（apply 作用域）：原样记下 data，再回 tool.result。
     //    记录里**没有** needs_panel 这一条 = T12 的门禁证据（宿主挡在投递之前，插件没进过回调）。
@@ -493,13 +512,13 @@ const MANIFEST = {
   placement: 'plugin',
   // 四个 Agent 命令全声明：本探针只调 agent.run，但「声明 ∩ 宿主表」的闸门要看齐全，
   // 少一个都会让日后加 cancel/tool.result 的探针重新踩 manifest 的坑。
-  commands: ['agent.session', 'agent.run', 'agent.cancel', 'tool.result'],
+  commands: ['agent.session', 'agent.run', 'agent.cancel', 'agent.snapshot', 'tool.result'],
   // usage 也声明：它是成功 run 的必经终态之一（finish 里紧跟 delta 投出），
   // 订阅到 = 收尾帧的 usage 真的从 provider 走到了插件手里。
   //
   // tool.call（P2b）必须在这里声明 —— 安装期会**硬拒**「声明了 tools[] 却没声明
   // tool.call」的 manifest（否则每次工具调用只能等到超时，见 surfaces.go validateSurfaceTools）。
-  data: ['agent.delta', 'agent.done', 'agent.error', 'agent.usage', 'tool.call'],
+  data: ['agent.delta', 'agent.done', 'agent.error', 'agent.usage', 'agent.state', 'tool.call'],
   // P2b：三个工具各自的声明位就是被验证的对象 ——
   //   echo       read_only:true                                  → 免审批，独立于面板
   //   needs_panel read_only:true + requires_panel:true            → T12 的宿主门禁对象
@@ -1040,6 +1059,31 @@ try {
   check('T14 取消在延迟响应到点前生效',
     Date.now() - cancelAt < CANCEL_DELAY_MS - 500, `elapsed=${Date.now() - cancelAt}ms`)
   check('P2b 全程零 pageerror', errs.length === 0, errs.join(' | '))
+
+  // ---- T15（P3a）：用户从宿主 UI 驱动插件会话 → 插件收到 agent.state ----
+  // 关键：这条 run 不是 agent.run 发起的，旧的 surfaceAgentRun 投影会完全看不到；
+  // 插件只靠 apply 作用域里的 agent.state 订阅知道会话在跑。
+  console.log('\nT15 用户驱动插件会话 → agent.state')
+  const statesBefore = await win.evaluate(() => (globalThis.__agentStates || []).length)
+  const sessionTitle = win.locator('.plugin-group .session-title').first()
+  await sessionTitle.click({ timeout: 5000 }).catch(() => {})
+  const userComposer = win.locator('.composer textarea.input, .composer textarea').first()
+  await waitFor(() => userComposer.isVisible(), { timeout: 15000, label: '插件会话输入框' })
+  await userComposer.fill(SCENE_USER_STATE)
+  await userComposer.press('Enter')
+  const statePair = await waitFor(async () => {
+    const evs = await win.evaluate(() => (globalThis.__agentStates || []).slice())
+    const fresh = evs.slice(statesBefore)
+    const running = fresh.find((s) => s.status === 'running' && s.session_id === sid)
+    const idle = fresh.find((s) => s.status === 'idle' && s.session_id === sid)
+    return running && idle ? { running, idle, fresh } : null
+  }, { timeout: 60000, label: 'agent.state running → idle' }).catch(() => null)
+  check('T15 用户驱动 run 出现 agent.state running', !!(statePair && statePair.running), JSON.stringify(statePair))
+  check('T15 用户驱动 run 出现 agent.state idle', !!(statePair && statePair.idle), JSON.stringify(statePair))
+  check('T15 state 的 session_id = 插件会话', !!(statePair && statePair.running.session_id === sid), JSON.stringify(statePair))
+  check('T15 state 不含正文键', !!(statePair && !('text' in statePair.idle) && !('content' in statePair.idle)), JSON.stringify(statePair))
+  check('T15 state seq 递增', !!(statePair && statePair.running.seq < statePair.idle.seq), JSON.stringify(statePair))
+  check('T15 全程零 pageerror', errs.length === 0, errs.join(' | '))
 
   await app.close()
   app = null

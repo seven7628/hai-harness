@@ -47,6 +47,7 @@ If an old plugin still carries them, they are ignored; do not add them to new pl
   | `agent.session` | `{title?}` | `{ok, session_id}` |
   | `agent.run` | `{session_id?, input, instructions?}` | `{ok, run_id, session_id}` — the **content** arrives as events |
   | `agent.cancel` | `{run_id}` | `{ok}` |
+  | `agent.snapshot` | `{session_id}` | `{ok, session_id, status, seq, run_id?, started_at?, last_error?, quota}` — only your own session; never content |
   | `tool.result` | `{call_id, ok, result?, error?}` | `{ok}` — only for plugin tools (P2) |
   | `composer.quote` | `{text, source?}` | `{ok}` — inserts into the current draft, **never sends** |
   | `ui.open_tab` | `{kind, params?}` | `{ok}` — `kind` must be your own |
@@ -60,7 +61,7 @@ If an old plugin still carries them, they are ignored; do not add them to new pl
   | `not_declared` | the name is missing from `surface.json.commands` |
   | `denied` | the host refused (D11, wrong kind, no channel, missing capability) |
   | `invalid_input` | malformed/empty payload, or quote over 8 KiB |
-  | `no_session` | no active composer/session to quote into |
+  | `no_session` | the session id does not exist, or no active composer to quote into |
   | `error` | transport/agent failure; no internal detail is exposed |
   | `panel_not_open` | a `requires_panel` tool fired while no tab of your kind is open |
   | `timeout` / `plugin_unloaded` | tool call missed its deadline, or the plugin went away |
@@ -91,11 +92,36 @@ If an old plugin still carries them, they are ignored; do not add them to new pl
   | `agent.usage` | `{input_tokens, output_tokens}` | once, near the end |
   | `agent.done` | `{text}` | terminal |
   | `agent.error` | `{reason, message?}` | terminal |
+  | `agent.state` | `{session_id, status, seq, run_id?, reason?, message?}` | session-level transition; also fires when the **user** drives your plugin session from the left panel |
   | `tool.call` | `{call_id, tool, args, deadline_ms, read_only, requires_panel}` | the model wants **your** tool; reply with `tool.result` |
   | `surfaces_changed` | `{}` | plugin installed/enabled/removed (also spelled `surfaces.changed`) |
 
   `surfaces_changed` needs no token and works even when the agent channel is unavailable; every
   other event only ever carries **your own** runs (the loader filters by plugin id).
+
+- **Your own session is readable as state, never content.** Declare `agent.snapshot` in
+  `commands` and `agent.state` in `data` when the panel shows whether its session is running:
+
+  ```json
+  {"commands":["agent.session","agent.run","agent.snapshot"],
+   "data":["agent.delta","agent.done","agent.error","agent.state"]}
+  ```
+
+  ```js
+  const r = await host.command('agent.snapshot', { session_id: sessionId })
+  // r = {ok, session_id, status:'idle'|'running'|'not_loaded', seq, run_id?, started_at?,
+  //      last_error?:{reason,message?}, quota:{runs_left_this_hour, concurrent_limit, run_timeout_ms}}
+
+  const offState = host.onEvent('agent.state', (ev) => setStatus(ev.data.status))
+  ```
+
+  `agent.state` also fires when the **user** opens the plugin session from the left panel and
+  types there — that run is not initiated by `agent.run`, so the run-projection events
+  (`agent.delta` / `agent.done`) do not carry it. `seq` here is **session-level**; do not compare
+  it with the per-run `seq` on `agent.delta`. Only the plugin that owns the session can snapshot
+  it: a project/Hub session or another plugin's session is `denied`, an unknown id is
+  `no_session`; there is no implicit “current session” and no content/messages in the reply.
+  The snapshot is capped at 2 KiB; `last_error.message` is clipped by the host.
 
 - Theme from `host.theme()` (`{ mode, tokens: { bg, fg, border, accent, ok, warn, err, info } }`).
   Hardcoded colours break one of the two themes.

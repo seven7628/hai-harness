@@ -2,12 +2,13 @@ package main
 
 // surface_agent.go —— 插件 ↔ Agent 双向互通的宿主侧（09-agent-bridge §5.1 / §6.2–6.6 / §8，P1c）。
 //
-// 一条命令四个 name（插件 host.command('agent.run', …) → main 按 token 注入 id →
+// 一条命令五个 name（插件 host.command('agent.run', …) → main 按 token 注入 id →
 // 桥收到 {type:"surface_agent", payload:{id, name, args}}）：
 //
 //	agent.session  {title?}                            → {session_id}
 //	agent.run      {session_id?, input, instructions?}  → {run_id, session_id}（先回执，再流事件）
 //	agent.cancel   {run_id}                            → {}
+//	agent.snapshot {session_id}                        → {status, seq, quota, …}（只读自有会话）
 //	tool.result    {call_id, ok, result?, error?}      → {}（P1 只做形状）
 //
 // 三条不变式，每条都有测试钉子：
@@ -28,6 +29,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,11 +44,12 @@ import (
 )
 
 const (
-	// 四个宿主放行的 name（§6.6）。不在表里的一律 denied —— 声明不等于授权。
-	surfaceAgentSessionName = "agent.session"
-	surfaceAgentRunName     = "agent.run"
-	surfaceAgentCancelName  = "agent.cancel"
-	surfaceAgentToolResult  = "tool.result"
+	// 五个宿主放行的 name（§6.6）。不在表里的一律 denied —— 声明不等于授权。
+	surfaceAgentSessionName  = "agent.session"
+	surfaceAgentRunName      = "agent.run"
+	surfaceAgentCancelName   = "agent.cancel"
+	surfaceAgentSnapshotName = "agent.snapshot"
+	surfaceAgentToolResult   = "tool.result"
 
 	// surfaceAgentEventType bridge stdout 的信封名（main 原样转发 data 到渲染层）。
 	surfaceAgentEventType = "surface_agent_event"
@@ -57,6 +60,14 @@ const (
 	surfaceAgentEvUsage = "agent.usage"
 	surfaceAgentEvDone  = "agent.done"
 	surfaceAgentEvError = "agent.error"
+	// P3a：插件自有会话的状态迁移（用户从宿主 UI 直接驱动插件会话时也要投递）。
+	surfaceAgentEvState = "agent.state"
+
+	// P3a 快照的封闭状态值：not_loaded 表示进程重启后会话还没装配，
+	// 不读 jsonl、不猜 idle（不知道比编一个状态诚实）。
+	surfaceAgentStateIdle      = "idle"
+	surfaceAgentStateRunning   = "running"
+	surfaceAgentStateNotLoaded = "not_loaded"
 	// surfaceToolCallEvent 工具调用下发（§5.2 / §6.6，P2 启用）。
 	// 名字以 surfaceTool* 而非 surfaceAgentEv* 开头是刻意的：它不是「run 的投影」，
 	// 而是一次**双向**调用的上半场（下半场是插件的 tool.result 回执）。
@@ -92,6 +103,10 @@ const (
 	surfaceAgentMaxInstrBytes  = 8 << 10  // instructions ≤ 8 KiB
 	surfaceAgentMaxRunsPerHour = 20       // 20 run/小时/surface
 	surfaceAgentRunTimeout     = 10 * time.Minute
+	// P3a 快照：只回状态/数值，不回正文；硬上限 2 KiB（报告 §2.2）。
+	surfaceAgentSnapshotMaxBytes = 2 << 10
+	surfaceAgentSnapshotRate     = 5.0 // 5 次/秒，burst 5
+	surfaceAgentStateErrMax      = 200 // last_error.message 的最大字符数
 	// surfaceAgentDeltaWindow 文本增量的合并窗口（§6.6「Go 侧 50ms 合并」）。
 	surfaceAgentDeltaWindow = 50 * time.Millisecond
 	// surfaceAgentPersistTimeout 新建会话首次落盘（`<storeDir>/<sid>.jsonl`）的上限。
@@ -101,11 +116,109 @@ const (
 )
 
 // surfaceAgentHostCommands 宿主放行的 name（§5.1）。声明（manifest）∩ 这张表 = 放行。
+// surfaceSessionState 是插件会话的**非正文**状态投影（P3a）。
+//
+// 它刻意不复用 bridgeSession.running：running 是 UI 的忙闲位，关会话/重启后没有
+// 稳定的迁移语义；这里的 seq 只随「根 run 开始/结束 / 取消」迁移，snapshot 与
+// agent.state 是同一份事实。lastReason/lastMessage 只保留最近一次失败，供面板显示
+// 一行错误；不存 assistant 文本、工具参数或结果。
+type surfaceSessionState struct {
+	seq         int64
+	status      string
+	runID       string
+	startedAt   int64
+	lastReason  string
+	lastMessage string
+}
+
+// transition 更新状态；返回本次是否真的发生了迁移。
+// 调用方在 emit（dispatchMu）或 snapshot（dispatch）侧，锁只保护这份小结构。
+func (bs *bridgeSession) transitionSurfaceState(status, runID, reason, message string, startedAt int64) bool {
+	bs.surfaceStateMu.Lock()
+	defer bs.surfaceStateMu.Unlock()
+	if bs.surfaceState.status == status &&
+		bs.surfaceState.runID == runID &&
+		bs.surfaceState.lastReason == reason &&
+		bs.surfaceState.lastMessage == message &&
+		(status != surfaceAgentStateRunning || bs.surfaceState.startedAt == startedAt) {
+		return false
+	}
+	bs.surfaceState.seq++
+	bs.surfaceState.status = status
+	bs.surfaceState.runID = runID
+	bs.surfaceState.lastReason = reason
+	bs.surfaceState.lastMessage = message
+	if startedAt > 0 {
+		bs.surfaceState.startedAt = startedAt
+	}
+	return true
+}
+
+// recordSurfaceState 更新投影但不写事件。插件自己 agent.run 的状态由 run 事件流表达，
+// 再叠一条 agent.state 会和 run 的 seq/run_id 命名空间打架；snapshot 仍需要这份值。
+func (bs *bridgeSession) recordSurfaceState(status, runID, reason, message string, startedAt int64) {
+	bs.transitionSurfaceState(status, runID, reason, clipText(message, surfaceAgentStateErrMax), startedAt)
+}
+
+// snapshotSurfaceState 读一份一致的投影（snapshot 命令用）。
+func (bs *bridgeSession) snapshotSurfaceState() surfaceSessionState {
+	bs.surfaceStateMu.Lock()
+	defer bs.surfaceStateMu.Unlock()
+	return bs.surfaceState
+}
+
+// emitSurfaceState 写一条 agent.state（只在状态真的变化时写）。
+//
+// 这是 P3a 的关键：它不依赖 bs.surfaceAgentRun。用户从左栏打开插件会话直接提问时，
+// 那次 run 不是 agent.run 发起的，旧的 observeSurfaceAgentEvent 会在 nil run 处直接
+// return，插件永远不知道会话在跑。这里把「会话级状态」与「run 投影」拆开。
+func (bs *bridgeSession) emitSurfaceState(status, runID, reason, message string, startedAt int64) {
+	if bs == nil || bs.runtime == nil || bs.runtime.kind != runtimePlugin || bs.runtime.pluginID == "" {
+		return
+	}
+	message = clipText(message, surfaceAgentStateErrMax)
+	if !bs.transitionSurfaceState(status, runID, reason, message, startedAt) {
+		return
+	}
+	st := bs.snapshotSurfaceState()
+	if bs.out == nil {
+		return
+	}
+	data := map[string]any{
+		"session_id": bs.id,
+		"status":     status,
+		"seq":        st.seq,
+	}
+	if runID != "" {
+		data["run_id"] = runID
+	}
+	if reason != "" {
+		data["reason"] = reason
+	}
+	if message != "" {
+		data["message"] = message
+	}
+	bs.out.writeLine(map[string]any{
+		"event_type": surfaceAgentEventType,
+		"data": map[string]any{
+			"surface_id": bs.runtime.pluginID,
+			"event": map[string]any{
+				"type":       surfaceAgentEvState,
+				"seq":        st.seq,
+				"run_id":     runID,
+				"session_id": bs.id,
+				"data":       data,
+			},
+		},
+	})
+}
+
 var surfaceAgentHostCommands = map[string]bool{
-	surfaceAgentSessionName: true,
-	surfaceAgentRunName:     true,
-	surfaceAgentCancelName:  true,
-	surfaceAgentToolResult:  true,
+	surfaceAgentSessionName:  true,
+	surfaceAgentRunName:      true,
+	surfaceAgentCancelName:   true,
+	surfaceAgentSnapshotName: true,
+	surfaceAgentToolResult:   true,
 }
 
 // surfaceAgentAssembleHook 仅测试用：run 装配完成、Ask 之前的确定性停点，
@@ -154,6 +267,8 @@ func (m *manager) handleSurfaceAgent(c command) {
 		m.handleSurfaceAgentRun(c, id, args)
 	case surfaceAgentCancelName:
 		m.handleSurfaceAgentCancel(c, id, args)
+	case surfaceAgentSnapshotName:
+		m.handleSurfaceAgentSnapshot(c, id, args)
 	default:
 		m.handleSurfaceAgentToolResult(c, id, args)
 	}
@@ -205,6 +320,8 @@ func surfaceAgentAction(name string) string {
 		// P2 起并入 tool_call：插件回执与模型侧调用是**同一次**工具调用，
 		// 两个 action 名会让「这个插件调过几次工具」统计不出来（§8.5）。
 		return "tool_call"
+	case surfaceAgentSnapshotName:
+		return "agent_state"
 	default:
 		return "agent_run"
 	}
@@ -474,6 +591,89 @@ func (m *manager) handleSurfaceAgentRun(c command, id string, args map[string]an
 	bs.wakeRun() // 与 CmdAsk 同一条路径：run loop 消费队列，dispatch 立即返回
 }
 
+// ---- agent.snapshot（P3a） ----
+
+// handleSurfaceAgentSnapshot 只读插件**自有会话**的状态，不读正文、不读当前项目会话。
+//
+// 顺序：session_id 形状 → 归属（不存在 no_session / 项目或别家 denied）→ 限流 →
+// 组装。归属必须在限流之前：一个跨插件探测不应该靠限流掩盖成 quota。
+func (m *manager) handleSurfaceAgentSnapshot(c command, id string, args map[string]any) {
+	sid := strings.TrimSpace(str(args, "session_id"))
+	if sid == "" {
+		m.denySurfaceAgent(c, id, surfaceAgentSnapshotName, surfaceReasonInvalidInput, "session_id 为空", nil)
+		return
+	}
+	owner, found := m.surfaceAgentSessionOwner(sid)
+	if !found {
+		m.denySurfaceAgent(c, id, surfaceAgentSnapshotName, surfaceReasonNoSession, "会话不存在",
+			map[string]any{"session": sid})
+		return
+	}
+	if owner != id {
+		m.denySurfaceAgent(c, id, surfaceAgentSnapshotName, surfaceReasonDenied, "会话不属于该插件",
+			map[string]any{"session": sid})
+		return
+	}
+	hub := m.surfaceAgentHub()
+	if !hub.allowSnapshot(id) {
+		m.denySurfaceAgent(c, id, surfaceAgentSnapshotName, surfaceReasonQuota, "snapshot 请求过频（5/s）",
+			map[string]any{"session": sid})
+		return
+	}
+	left, concurrent, timeoutMS := hub.quotaFor(id)
+	data := map[string]any{
+		"session_id": sid,
+		"status":     surfaceAgentStateNotLoaded,
+		"seq":        int64(0),
+		"quota": map[string]any{
+			"runs_left_this_hour": left,
+			"concurrent_limit":    concurrent,
+			"run_timeout_ms":      timeoutMS,
+		},
+	}
+	if ws := m.pluginRuntimeIfExists(id); ws != nil {
+		ws.mu.Lock()
+		bs := ws.sessions[sid]
+		ws.mu.Unlock()
+		if bs != nil {
+			st := bs.snapshotSurfaceState()
+			status := st.status
+			if status == "" {
+				status = surfaceAgentStateIdle
+			}
+			runID := st.runID
+			if bs.running.Load() {
+				status = surfaceAgentStateRunning
+				if r := bs.surfaceAgentRun.Load(); r != nil {
+					runID = r.id
+				}
+			}
+			data["status"] = status
+			data["seq"] = st.seq
+			if runID != "" {
+				data["run_id"] = runID
+			}
+			if status == surfaceAgentStateRunning && st.startedAt > 0 {
+				data["started_at"] = st.startedAt
+			}
+			if st.lastReason != "" {
+				data["last_error"] = map[string]any{
+					"reason":  st.lastReason,
+					"message": clipText(st.lastMessage, surfaceAgentStateErrMax),
+				}
+			}
+		}
+	}
+	// 2 KiB 是硬上限：快照字段本来很小，超限只可能是 last_error 被异常放大；
+	// 宁可丢诊断字段，也不要让一条“只读状态”撑爆插件的事件循环。
+	if enc, err := json.Marshal(data); err == nil && len(enc) > surfaceAgentSnapshotMaxBytes {
+		delete(data, "last_error")
+		delete(data, "started_at")
+	}
+	m.resp(c, true, "", data)
+	m.auditSurfaceAgent(id, "agent_state", true, map[string]any{"session": sid}, "")
+}
+
 // ---- agent.cancel ----
 
 // handleSurfaceAgentCancel 按 run_id + surface 取消（§6.6）。
@@ -643,6 +843,13 @@ func (m *manager) surfaceAgentSessionOwner(sid string) (pluginID string, found b
 // 至多一条在跑 = 并发 1）、recent（每 surface 最近一小时的开始时间 = 20 run/小时）。
 // 时间窗用「切片 + 懒裁剪」而不是环形桶：每 surface 每小时 ≤20 条，切片足够，
 // 而桶需要额外维护边界。
+// surfaceSnapshotBucket snapshot 的令牌桶（5/s burst 5）。放在 hub 里而不是 manager，
+// 因为「谁有在跑」与「谁被限流」是同一份进程级状态，测试也只替换一个 hub。
+type surfaceSnapshotBucket struct {
+	tokens float64
+	last   time.Time
+}
+
 type surfaceAgentHub struct {
 	owner  *manager // 超时回调要回到 manager 的收尾路径
 	mu     sync.Mutex
@@ -651,6 +858,8 @@ type surfaceAgentHub struct {
 	recent map[string][]time.Time
 	// toolCalls 等待中的插件工具调用（call_id → waiter，P2）。懒建：见 addToolCall。
 	toolCalls map[string]*surfaceToolCall
+	// snapshots 是 P3a 的 per-surface 令牌桶（5/s）。懒建；只在 snapshot 命令里用。
+	snapshots map[string]*surfaceSnapshotBucket
 	// 以下四个字段供测试注入（零值 = 生产默认）。
 	now      func() time.Time
 	timeout  time.Duration
@@ -669,6 +878,7 @@ func (m *manager) surfaceAgentHub() *surfaceAgentHub {
 			active:    map[string]string{},
 			recent:    map[string][]time.Time{},
 			toolCalls: map[string]*surfaceToolCall{},
+			snapshots: map[string]*surfaceSnapshotBucket{},
 		}
 	}
 	return m.surfaceAgents
@@ -700,6 +910,53 @@ func (h *surfaceAgentHub) deltaWindow() time.Duration {
 		return h.deltaWin
 	}
 	return surfaceAgentDeltaWindow
+}
+
+// allowSnapshot 5 次/秒、burst 5 的令牌桶。限流只针对 read-state；不占用 run 配额。
+func (h *surfaceAgentHub) allowSnapshot(surfaceID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.clock()
+	if h.snapshots == nil {
+		h.snapshots = map[string]*surfaceSnapshotBucket{}
+	}
+	b := h.snapshots[surfaceID]
+	if b == nil {
+		b = &surfaceSnapshotBucket{tokens: surfaceAgentSnapshotRate, last: now}
+		h.snapshots[surfaceID] = b
+	}
+	if dt := now.Sub(b.last).Seconds(); dt > 0 {
+		b.tokens += dt * surfaceAgentSnapshotRate
+		if b.tokens > surfaceAgentSnapshotRate {
+			b.tokens = surfaceAgentSnapshotRate
+		}
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// quotaFor 返回 (本小时剩余 run, 并发上限, 单 run 超时毫秒)。
+func (h *surfaceAgentHub) quotaFor(surfaceID string) (int, int, int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.clock()
+	cut := now.Add(-time.Hour)
+	kept := h.recent[surfaceID][:0]
+	for _, t := range h.recent[surfaceID] {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	h.recent[surfaceID] = kept
+	left := h.maxPerHour() - len(kept)
+	if left < 0 {
+		left = 0
+	}
+	return left, 1, h.runTimeout().Milliseconds()
 }
 
 // reserve 占一次 run：并发 1 + 每小时上限，返回 (nil, reason, msg) 表示超限。
@@ -851,6 +1108,14 @@ func (r *surfaceAgentRun) observe(e events.Event) {
 			r.rootRunID = ev.RunId
 		}
 		r.mu.Unlock()
+		if r.bs != nil {
+			// 插件自己 agent.run 的会话状态只供 snapshot 读，不额外发 agent.state。
+			started := ev.Timestamp.UnixMilli()
+			if started <= 0 {
+				started = time.Now().UnixMilli()
+			}
+			r.bs.recordSurfaceState(surfaceAgentStateRunning, r.id, "", "", started)
+		}
 	case *events.ContentChunk:
 		if !r.isRoot(ev.RunId) {
 			return
@@ -973,9 +1238,15 @@ func (r *surfaceAgentRun) finish(ae *events.AgentEnd) {
 			msg = "run failed"
 		}
 		r.sendTerminal(surfaceAgentEvError, map[string]any{"reason": surfaceReasonBridgeError, "message": clipText(msg, 300)})
+		if r.bs != nil {
+			r.bs.recordSurfaceState(surfaceAgentStateIdle, r.id, surfaceReasonBridgeError, msg, 0)
+		}
 	} else {
 		r.sendTerminal(surfaceAgentEvUsage, map[string]any{"input_tokens": in, "output_tokens": out})
 		r.sendTerminal(surfaceAgentEvDone, map[string]any{"text": ae.Content})
+		if r.bs != nil {
+			r.bs.recordSurfaceState(surfaceAgentStateIdle, r.id, "", "", 0)
+		}
 	}
 	r.hub.release(r)
 	r.bs.surfaceAgentRun.CompareAndSwap(r, nil)
@@ -1088,6 +1359,9 @@ func (m *manager) abortSurfaceAgentRun(r *surfaceAgentRun, reason, message strin
 		data["message"] = clipText(message, 300)
 	}
 	r.sendTerminal(surfaceAgentEvError, data)
+	if r.bs != nil {
+		r.bs.recordSurfaceState(surfaceAgentStateIdle, r.id, reason, message, 0)
+	}
 	r.hub.release(r)
 	bs.surfaceAgentRun.CompareAndSwap(r, nil)
 	bs.dispatchMu.Unlock()
@@ -1099,8 +1373,43 @@ func (m *manager) abortSurfaceAgentRun(r *surfaceAgentRun, reason, message strin
 // observeSurfaceAgentEvent emit 的钩子（见 main.go emit 内调用点）。
 func (bs *bridgeSession) observeSurfaceAgentEvent(e events.Event) {
 	run := bs.surfaceAgentRun.Load()
-	if run == nil {
+	if run != nil {
+		run.observe(e)
+		// 插件自己 agent.run 的状态由 run 事件流表达；再发 agent.state 会把
+		// run 的 seq/run_id 命名空间混进同一条通道（现有客户端按 run_id 过滤）。
 		return
 	}
-	run.observe(e)
+	// P3a：用户从宿主 UI 直接驱动插件会话时没有 surfaceAgentRun —— 这正是本钩子
+	// 存在的原因；只投会话级状态，不带正文。
+	bs.observeSurfaceSessionState(e)
+}
+
+// observeSurfaceSessionState 只把**根 run**的起止投影成 agent.state，不改 run 的
+// 事件流；子 agent 的 Start/End 不进入（ParentRunId/Depth 已由调用方过滤）。
+func (bs *bridgeSession) observeSurfaceSessionState(e events.Event) {
+	switch ev := e.(type) {
+	case *events.AgentStart:
+		if ev.ParentRunId != "" || ev.Depth != 0 {
+			return
+		}
+		started := ev.Timestamp.UnixMilli()
+		if started <= 0 {
+			started = time.Now().UnixMilli()
+		}
+		bs.emitSurfaceState(surfaceAgentStateRunning, ev.RunId, "", "", started)
+	case *events.AgentEnd:
+		if ev.ParentRunId != "" || ev.Depth != 0 {
+			return
+		}
+		status, reason, message := surfaceAgentStateIdle, "", ""
+		if ev.FinishReason == core.FinishReasonError || ev.Error != "" {
+			status = surfaceAgentStateIdle
+			reason = surfaceReasonBridgeError
+			message = ev.Error
+			if message == "" {
+				message = "run failed"
+			}
+		}
+		bs.emitSurfaceState(status, ev.RunId, reason, message, 0)
+	}
 }

@@ -271,7 +271,7 @@ const (
 	CmdSurfaceCommand Command = "surface_command"
 	// CmdSurfaceAgent 插件 ↔ Agent 双向互通的唯一命令（09-agent-bridge §6.2 / §6.6，P1c）。
 	// payload = {id, name, args}：id 由 main 按 token 注入（bridge 只信任主进程给的值），
-	// name ∈ {agent.session, agent.run, agent.cancel, tool.result}，args 是该 name 的参数对象。
+	// name ∈ {agent.session, agent.run, agent.cancel, agent.snapshot, tool.result}，args 是该 name 的参数对象。
 	//
 	// 与 `surface_command` 的分工：那条是老只读通道（D11 之后宿主表为空，一律 denied），
 	// 这条只服务 Agent 能力 —— 它能花用户的 token、写会话，所以走独立的
