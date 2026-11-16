@@ -115,16 +115,15 @@ func TestHotListRanksByReadCount(t *testing.T) {
 	}
 
 	hot := BuildHotList(body, usage)
-	lines := strings.Split(hot.Text, "\n")
-	if !strings.HasPrefix(lines[0], "- c.md") {
-		t.Fatalf("第一条应为读数最高的 c.md，得到 %q\n%s", lines[0], hot.Text)
+	var paths []string
+	for _, f := range memoryBlocks(hot.Text) {
+		paths = append(paths, blockField(f, "file_path"))
 	}
-	if !strings.HasPrefix(lines[1], "- d.md") {
-		t.Fatalf("第二条应为 d.md，得到 %q\n%s", lines[1], hot.Text)
-	}
-	// 并列（读数都是 0）时保持索引原序：a 在 b 前。
-	if !strings.HasPrefix(lines[2], "- a.md") || !strings.HasPrefix(lines[3], "- b.md") {
-		t.Fatalf("并列时应保持索引原序，得到 %q / %q", lines[2], lines[3])
+	want := []string{"c.md", "d.md", "a.md", "b.md"}
+	for i := range want {
+		if i >= len(paths) || paths[i] != want[i] {
+			t.Fatalf("排序 = %v，期望 %v（读数高的在前，并列保持索引原序）", paths, want)
+		}
 	}
 }
 
@@ -138,8 +137,8 @@ func TestHotListColdStartKeepsIndexOrder(t *testing.T) {
 	if hot.Ranked {
 		t.Fatal("没有 usage 时不该报 Ranked")
 	}
-	if !strings.HasPrefix(hot.Text, "- a.md") {
-		t.Fatalf("冷启动应保持索引原序，得到：\n%s", hot.Text)
+	if got := blockField(memoryBlocks(hot.Text)[0], "file_path"); got != "a.md" {
+		t.Fatalf("冷启动应保持索引原序，首条 = %q：\n%s", got, hot.Text)
 	}
 }
 
@@ -162,8 +161,8 @@ func TestHotListCapsAtKAndSaysItIsPartial(t *testing.T) {
 		t.Fatalf("Total/Shown/Omitted = %d/%d/%d, want %d/%d/%d",
 			hot.Total, hot.Shown, hot.Omitted, n, HotListSize, n-HotListSize)
 	}
-	if n := strings.Count(hot.Text, "\n- ") + 1; n != HotListSize {
-		t.Fatalf("正文条目数 = %d, want %d\n%s", n, HotListSize, hot.Text)
+	if got := len(memoryBlocks(hot.Text)); got != HotListSize {
+		t.Fatalf("正文条目数 = %d, want %d\n%s", got, HotListSize, hot.Text)
 	}
 	if !strings.Contains(hot.Text, "非完整清单") || !strings.Contains(hot.Text, "共 "+itoa(n)+" 条") {
 		t.Fatalf("被省略时必须说明是子集并给出总数，得到：\n%s", hot.Text)
@@ -181,35 +180,51 @@ func TestHotListNoFooterWhenEverythingFits(t *testing.T) {
 	}
 }
 
-// 长文件名的定位符**绝不截断**：截出半条路径等于给一个打不开的地址。
-func TestHotListNeverTruncatesLocator(t *testing.T) {
+// 描述**不截断**：结构化之后 description 是完整的判断依据，截半句会让模型
+// 以为这条就到这儿了——比少给一条更糟（少给一条它会去读 MEMORY.md）。
+func TestHotListDescriptionNotTruncated(t *testing.T) {
 	long := strings.Repeat("x", 80) + ".md"
-	hot := BuildHotList("- ["+long+"]("+long+") — "+strings.Repeat("说", 200)+"\n", nil)
+	desc := strings.Repeat("说", 200)
+	hot := BuildHotList("- ["+long+"]("+long+") — "+desc+"\n", nil)
 
-	line := strings.Split(hot.Text, "\n")[0]
-	if !strings.HasPrefix(line, "- "+long) {
-		t.Fatalf("定位符被截断了：%q", line)
+	block := memoryBlocks(hot.Text)[0]
+	if got := blockField(block, "description"); got != desc {
+		t.Fatalf("描述被改动了：%d rune，期望 %d", len([]rune(got)), len([]rune(desc)))
 	}
-	if !strings.HasSuffix(line, "…") {
-		t.Fatalf("超长摘要应以 … 结尾：%q", line)
+	if got := blockField(block, "file_path"); got != long {
+		t.Fatalf("file_path 被改动了：%q", got)
 	}
-	if got := len([]rune(line)) - len([]rune("- "+long+" — ")) + 1; got < HotSummaryMinRunes {
-		t.Fatalf("长定位符不该把摘要挤没：摘要 %d rune < %d（%q）", got, HotSummaryMinRunes, line)
-	}
-	if strings.Contains(line, "http") || strings.Contains(line, "](") {
-		t.Fatalf("热点清单应渲染成 `- 路径 — 摘要`，不该再带 markdown 链接：%q", line)
+	if got := blockField(block, "name"); got != long {
+		t.Fatalf("name 应退回文件名：%q", got)
 	}
 }
 
-// 摘要按 rune 截断（不是字节）：中文按 70 个字符算，不是 70 字节。
-func TestHotListTruncatesByRune(t *testing.T) {
-	hot := BuildHotList("- a.md — "+strings.Repeat("中", 100)+"\n", nil)
-	line := strings.Split(hot.Text, "\n")[0]
-	if n := len([]rune(line)); n > HotLineMaxRunes {
-		t.Fatalf("行宽 %d rune 超过上限 %d：%q", n, HotLineMaxRunes, line)
+// 字节预算是硬上限：超了**整条丢弃**，而不是把描述切一半。
+func TestHotListByteBudgetDropsWholeEntries(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 40; i++ {
+		b.WriteString("- f")
+		b.WriteString(itoa(i))
+		b.WriteString(".md — ")
+		b.WriteString(strings.Repeat("长", 300))
+		b.WriteString("\n")
 	}
-	if strings.Count(line, "中") < 10 {
-		t.Fatalf("截得太狠，摘要几乎没保留：%q", line)
+	hot := BuildHotList(b.String(), nil)
+
+	if len(hot.Text) > HotListMaxBytes+200 { // +200 容页脚
+		t.Fatalf("注入 %d 字节，超过预算 %d", len(hot.Text), HotListMaxBytes)
+	}
+	if hot.Shown == 0 || hot.Shown >= 40 {
+		t.Fatalf("预算应砍掉一部分条目：Shown = %d", hot.Shown)
+	}
+	// 每条都得是完整的块：不能出现半条。
+	for _, f := range memoryBlocks(hot.Text) {
+		if !strings.Contains(f, "</memory>") {
+			t.Fatalf("出现了半条记录：%q", f)
+		}
+	}
+	if hot.Omitted != 40-hot.Shown {
+		t.Fatalf("Omitted = %d，应为 %d", hot.Omitted, 40-hot.Shown)
 	}
 }
 

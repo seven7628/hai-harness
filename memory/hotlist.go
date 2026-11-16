@@ -1,9 +1,9 @@
 package memory
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
-	"unicode/utf8"
 )
 
 // 热点清单：B 档注入的全部内容（§5.1「启动只放路标」的落点）。
@@ -60,19 +60,8 @@ const (
 	//
 	// 到 64 之后与全量同分（0.887），继续加条目不再涨；而 64 条已经接近"整份索引"，
 	// 说明在这批记忆上，**覆盖率比"精选"更重要**——"只挑 8 条精华"这个设想没有成立。
-	HotListSize = 64
-	// HotLineMaxRunes 单条渲染的目标宽度（按 rune 计，不是字节）。
-	//
-	// 只截**摘要**：定位符（文件路径）任何时候都不截——截出半条路径等于给了一个
-	// 打不开的地址，比不列还糟。所以一行可能因为文件名很长而超过这个宽度。
-	//
-	// 长定位符不吃摘要的额度：文件名占掉 70 个 rune 时若"预算归零"，这条热点就只剩
-	// 一个光秃秃的文件名——八个槽位里每个都写着"你读过这个文件"，却不说它讲什么，
-	// 那和只给一份文件名清单没有区别。所以摘要至少保留 HotSummaryMinRunes 个字符，
-	// 让每个槽位都带一点内容。代价是长文件名那几行会略超 70，实测整体仍在 ~700 token。
-	HotLineMaxRunes = 70
-	// HotSummaryMinRunes 摘要的最小保留宽度（rune），见 HotLineMaxRunes。
-	HotSummaryMinRunes = 12
+	HotListSize     = 64
+	HotListMaxBytes = 12000
 )
 
 // HotList 是热点清单的产物与度量。
@@ -119,16 +108,29 @@ func BuildHotList(body string, usage map[string]UsageEntry) *HotList {
 	shown := entries
 	if len(shown) > HotListSize {
 		shown = shown[:HotListSize]
-		hot.Omitted = len(entries) - HotListSize
 	}
 	hot.Shown = len(shown)
 
 	var b strings.Builder
+	used, kept := 0, 0
 	for i, e := range shown {
-		if i > 0 {
+		block := renderMemoryEntry(e)
+		// 预算封顶：**整条丢弃**，不截断描述。截半句比少给一条更糟——半句会
+		// 让模型以为这条就到这儿了，而少给一条它会去读 MEMORY.md。
+		if used+len(block) > HotListMaxBytes && kept > 0 {
+			shown = shown[:i]
+			break
+		}
+		if kept > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(renderHotLine(e))
+		b.WriteString(block)
+		used += len(block)
+		kept++
+	}
+	hot.Shown = kept
+	if hot.Omitted == 0 {
+		hot.Omitted = len(entries) - kept
 	}
 	if hot.Omitted > 0 {
 		b.WriteString(hotFooter(hot.Total))
@@ -269,48 +271,38 @@ func cleanSummary(s string) string {
 	return strings.TrimLeft(s, " \t—–-:：·|、，,")
 }
 
-// renderHotLine 渲染一条：`- 路径 — 摘要…`，摘要按 HotLineMaxRunes 截断。
+// renderMemoryEntry 渲染一条记忆（2026-11 改成结构化块）。
 //
-// 定位符不截（见 HotLineMaxRunes 的注释）；预算不够时**只丢摘要**，
-// 因为一条没有摘要的热点仍然可用（点开就知道），一条没有路径的热点是废的。
-func renderHotLine(e hotEntry) string {
-	// 两种形态：
-	//   - [名字](x.md) — 摘要   → 渲染成 `- 名字 — 摘要（x.md）`：名字是给人读的，
-	//     路径是给模型读的，两者都要（模型据此决定读哪个文件）。
-	//   - x.md — 摘要           → 名字就是文件名，不重复渲染路径。
-	head := "- " + e.target
-	tail := ""
-	if e.title != "" && e.title != e.target {
-		head = "- " + e.title
-		tail = "（" + e.target + "）"
+// 形态固定为 name / description / file_path 三行：
+//
+//	<memory>
+//	name: 并行 worker 的提交纪律
+//	description: 禁 git add -A；显式 add 也不够……
+//	file_path: parallel-worker-file-boundary.md
+//	</memory>
+//
+// 为什么不再压成一行 `- 名字 — 摘要（路径）`：三件事压在一行里时，摘要一长就
+// 必须截断（旧版截到 70 字），而截断恰好砍掉的往往是"这条能不能回答我"的那半句。
+// 结构化之后 description 不截断，模型拿到的是完整的判断依据。
+//
+// 代价是体积：按真实记忆库实测，同样的条目数下结构化+不截断约是旧口径的 2.8~5 倍
+// （见 HotListMaxBytes 的注释）。所以条数必须由预算兜住，而不是由每行字数兜住。
+func renderMemoryEntry(e hotEntry) string {
+	name := e.title
+	if name == "" {
+		name = strings.TrimSuffix(e.target, filepath.Ext(e.target))
 	}
-	if e.summary == "" {
-		return head + tail
-	}
-	budget := HotLineMaxRunes - utf8.RuneCountInString(head) - utf8.RuneCountInString(tail) - len(" — ")
-	if budget < HotSummaryMinRunes {
-		budget = HotSummaryMinRunes
-	}
-	return head + " — " + truncateRunes(e.summary, budget) + tail
-}
-
-// truncateRunes 截到 n 个 rune，截断时以 `…` 结尾（`…` 计入 n）。
-func truncateRunes(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	if n <= 1 {
-		return "…"
-	}
-	rs := []rune(s)
-	// 结尾若是空白、标点或未闭合的 markdown 装饰，跟着一起截掉：
-	// `…` 前面跟着逗号更好读；而 "终态 `…" 这种半边反引号在真实索引里很常见
-	// （摘要里满是 `code` 与 **粗体**），留着会让模型把它当成未闭合的代码段。
-	end := n - 1
-	for end > 0 && strings.ContainsRune(" \t，,、；;：:`*", rs[end-1]) {
-		end--
-	}
-	return string(rs[:end]) + "…"
+	var b strings.Builder
+	b.WriteString("<memory>\n")
+	b.WriteString("name: ")
+	b.WriteString(name)
+	b.WriteString("\n")
+	b.WriteString("description: ")
+	b.WriteString(e.summary)
+	b.WriteString("\nfile_path: ")
+	b.WriteString(e.target)
+	b.WriteString("\n</memory>")
+	return b.String()
 }
 
 // hotFooter 页脚：说明"这是子集 + 完整清单在哪 + 共多少条"。

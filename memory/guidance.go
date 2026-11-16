@@ -70,6 +70,9 @@ func guidance(d Dir, tier string, omitted int) string {
 	b.WriteString("`- [name](file.md) — description`. **A line without a filename is not an entry**: ")
 	b.WriteString("it never reaches this prompt, and the archive tool cannot see it.\n")
 
+	b.WriteString("- Each entry under `## Memory` below is a `<memory>` block with `name`, `description` and ")
+	b.WriteString("`file_path`. The description is not truncated; when it is not enough, read the body at `file_path`.\n")
+
 	b.WriteString("- `type` in the file's frontmatter, when present, is one of: ")
 	b.WriteString("`user` (who the user is: role, expertise, working preferences) · ")
 	b.WriteString("`feedback` (corrections the user gave and approaches they confirmed, with the reason) · ")
