@@ -163,7 +163,7 @@ func (c Config) BuildInjection(d Dir) (Injection, error) {
 			inj.Dream = line
 			// 今天还没自动处理过 → 把提示变成可执行的任务（每天最多一次）。
 			if c.AutoDreamBlocker(d) == "" {
-				if task := dreamTask(n, DreamEvalCommand()); task != "" {
+				if task := dreamTask(n); task != "" {
 					inj.Text += "\n" + task
 					inj.DreamTask = task
 				}

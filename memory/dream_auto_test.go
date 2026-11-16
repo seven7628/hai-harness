@@ -29,22 +29,6 @@ func TestAutoDreamDailyCap(t *testing.T) {
 	}
 }
 
-// 没配回归命令 → 不允许自动归档。这条是安全底线：不验证的无人值守归档
-// 等于把"有没有弄坏东西"交给运气。
-func TestAutoDreamRequiresEvalCommand(t *testing.T) {
-	d := memDir(t)
-	cfg := Config{}
-	t.Setenv(EnvDreamEvalCommand, "")
-
-	why := cfg.AutoDreamBlocker(d)
-	if why == "" {
-		t.Fatal("没有回归命令时必须拦住")
-	}
-	if !contains(why, EnvDreamEvalCommand) {
-		t.Fatalf("理由里要说明缺的是哪个配置：%s", why)
-	}
-}
-
 // 记忆关掉时什么都不做。
 func TestAutoDreamRespectsDisabled(t *testing.T) {
 	off := false

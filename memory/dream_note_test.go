@@ -172,8 +172,10 @@ func TestDreamNoteZeroConfigDoesNotPanic(t *testing.T) {
 	}
 }
 
-// "每天最多一次"落地为：今天没归档过 + 配了回归命令 → 提示升级成待办；
-// 否则只报告现状，不催。
+// "每天最多一次"落地为：今天没归档过 → 提示升级成待办；今天处理过就不催。
+//
+// 2026-11 去掉了"必须先配置回归命令"这道门：那是把评测绑进产品。产品的保障是
+// 快照 + 可恢复 + 日志，不要求每次归档都跑一遍评测。
 func TestDreamTaskAppearsOnlyWhenActionable(t *testing.T) {
 	now := time.Unix(1700000000, 0).UTC()
 	d := memDir(t)
@@ -183,20 +185,11 @@ func TestDreamTaskAppearsOnlyWhenActionable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 没配回归命令：只报告，不催归档（因为归档后没法验证）。
-	t.Setenv(EnvDreamEvalCommand, "")
 	inj, _ := cfg.BuildInjection(d)
-	if inj.Dream == "" || inj.DreamTask != "" {
-		t.Fatalf("没配回归命令时不该出现待办：dream=%q task=%q", inj.Dream, inj.DreamTask)
+	if inj.Dream == "" || inj.DreamTask == "" {
+		t.Fatalf("今天没处理过，应给出待办：dream=%q task=%q", inj.Dream, inj.DreamTask)
 	}
-
-	// 配了：出现待办，且指向工具与命令。
-	t.Setenv(EnvDreamEvalCommand, "python3 eval.py")
-	inj, _ = cfg.BuildInjection(d)
-	if inj.DreamTask == "" {
-		t.Fatal("配了回归命令后应出现待办")
-	}
-	for _, want := range []string{"memory_dream", "python3 eval.py", "最多 2 条"} {
+	for _, want := range []string{"memory_dream", "最多 2 条", "快照"} {
 		if !contains(inj.DreamTask, want) {
 			t.Fatalf("待办缺少 %q：%s", want, inj.DreamTask)
 		}
