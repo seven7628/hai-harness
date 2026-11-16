@@ -18,7 +18,6 @@ export default function Statusbar() {
   const streaming = useAppStore((s) => s.streaming)
   const bridgeStatus = useAppStore((s) => s.bridgeStatus)
   const mode = useAppStore((s) => s.mode)
-  const persona = useAppStore((s) => s.persona)
   const model = useAppStore((s) => s.model)
   const settings = useAppStore((s) => s.settings)
   const contextWindow = useAppStore(ctxWindowOf)
@@ -38,7 +37,6 @@ export default function Statusbar() {
     .replace('{hit}', `${fmtTokens(usage.cacheRead)}`)
     .replace('{input}', `${fmtTokens(usage.input)}`)
     .replace('{write}', `${fmtTokens(usage.cacheWrite)}`) + cache1h
-  const personaLabel = persona === 'work' ? 'Work' : 'Code'
   return (
     <footer className="statusbar">
       <span className="sb-run">{streaming ? 'running' : 'idle'} · run0</span>
@@ -60,7 +58,7 @@ export default function Statusbar() {
         onClick={() => { openTab({ kind: 'git' }); setRightExpanded(true) }}
       >⑂ <span className="mono">{git.is_repo ? (git.branch || 'detached') : 'no git'}</span>{git.is_repo && !git.clean && <span className="git-modified"> M {git.modified + git.untracked}</span>}</span>
       <span className="grow" />
-      <span className="sb-bridge" style={{ color: 'var(--text-3)' }}>{bridgeStatus === 'running' ? `${personaLabel} · ${model} · ${t('status.mode.' + mode) ?? mode}` : bridgeStatus}</span>
+      <span className="sb-bridge" style={{ color: 'var(--text-3)' }}>{bridgeStatus === 'running' ? `Code · ${model} · ${t('status.mode.' + mode) ?? mode}` : bridgeStatus}</span>
     </footer>
   )
 }

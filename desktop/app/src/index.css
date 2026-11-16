@@ -584,18 +584,6 @@ body.is-electron .left-brand {
   background: var(--surface);
   color: var(--text);
 }
-/* Persona 分段行：logo 下方、工作区管理之上；占满左栏宽度，两档均分 */
-.persona-row {
-  padding: 4px 10px 8px 14px;
-  -webkit-app-region: no-drag;
-}
-.persona-row .seg {
-  display: flex;
-  width: 100%;
-}
-.persona-row .seg button {
-  flex: 1;
-}
 /* 图标条态常驻 logo（折叠后左上角仍必现产品标志 + 拖拽区） */
 .rail-logo {
   width: 100%;
@@ -7572,9 +7560,6 @@ body.is-electron .left.collapsed .rail .rbtn {
 .empty.code .mark {
   color: var(--accent);
 }
-.empty.work .mark {
-  color: var(--success);
-}
 .empty .big {
   font-size: 14px;
   color: var(--text);
@@ -10912,11 +10897,6 @@ select.prov-input option {
   }
 }
 
-/* —— P1：Persona 分段 + 压缩确认 + 文件预览 —— */
-.persona-seg button {
-  min-width: 50px;
-  text-align: center;
-}
 .ctx:hover,
 .ctx:focus-visible {
   background: var(--surface);
@@ -14927,7 +14907,7 @@ body.is-electron .page-head {
 }
 
 /* —— 14. 分段控件（全仓唯一实现）——
-   设置页 / 用量切换 / 页面 tab / 左栏 persona 共用。选中态 = 朱砂实底白字
+   设置页 / 用量切换 / 页面 tab 共用。选中态 = 朱砂实底白字
    （原 9364 的 .cur 视觉，设置页保持一致）；.on 是历史别名，旧调用方不必改。 */
 .seg {
   display: inline-flex;
@@ -14976,17 +14956,6 @@ body.is-electron .page-head {
   margin-left: 4px;
   opacity: 0.85;
 }
-.persona-row .seg {
-  display: flex;
-  width: 100%;
-}
-.persona-row .seg button {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* —— 15. 按钮补充态：ghost（次级/弱动作）与页头里的次级按钮 —— */
 .btn.ghost {
   border-color: transparent;

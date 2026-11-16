@@ -145,7 +145,6 @@ export default function Narrative({ viewSid, source, header, footer, density: de
      那张卡的子会话页里画（AgentSessionView 用同一个 nestCards），主转录只留本层。
      块本身留在 blocks 里不动：左栏树 / 停止按钮 / run→卡 查找全靠它们。 */
   const blocks = useMemo(() => nestCards(rawBlocks).shown, [rawBlocks])
-  const persona = useAppStore((s) => s.persona)
   const focusAgent = useAppStore((s) => s.focusAgent)
   /* 车道行的「打开」入口：子智能体有自己的一页（同一套渲染，只是换数据源）。
      孙任务只出现在派发它的那一页上（见 lib/nestedCards），所以这个入口得跟着车道走 ——
@@ -1182,7 +1181,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   /* 复用判据里的「全局输入」：本组件读到的每个 store 值与本地状态（storeBlocks 除外 ——
      它每个 chunk 都会变，逐轮比块引用就够了）。 */
   const turnGlobals: readonly unknown[] = [
-    lang, density, runEnded, waiting, persona, workspace, openFile,
+    lang, density, runEnded, waiting, workspace, openFile,
     turnMetrics, openTurns, animOn, runStartedAt, mainStartedAt, mainRunId, mainEnded, transcriptKey,
   ]
   const sameList = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((v, i) => v === b[i])
@@ -1590,7 +1589,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         </div>
       )}
       {header}
-      {blocks.length === 0 && (source ? source.empty ?? null : <EmptyChat persona={persona} />)}
+      {blocks.length === 0 && (source ? source.empty ?? null : <EmptyChat />)}
       {items}
       {footer}
       <div className="narrative-anchor" ref={anchorRef} aria-hidden="true" />
@@ -1618,25 +1617,18 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   )
 }
 
-// EmptyChat 空会话引导：按 Persona 区分提示（Code 工程师 / Work 办公助理）+ 近 90 天 Token 活动热力图。
+// EmptyChat 空会话引导：只保留 Code（编码）一套提示 + 近 90 天 Token 活动热力图。
 // 图表是「这里能干活」的实证（有历史才有数据；无记录时 UsageActivityMini 自行不渲染）。
-function EmptyChat({ persona }: { persona: 'code' | 'work' }) {
+function EmptyChat() {
   const t = useT()
-  const isWork = persona === 'work'
   return (
-    <div className={`empty ${isWork ? 'work' : 'code'}`}>
-      <div className="mark">{isWork ? '◇' : '⌘'}</div>
-      <div className="big">{isWork ? t('narrative.emptyWorkTitle') : t('narrative.emptyCodeTitle')}</div>
-      <div className="hint">
-        {isWork
-          ? t('narrative.emptyWorkDesc')
-          : t('narrative.emptyCodeDesc')}
-      </div>
+    <div className="empty code">
+      <div className="mark">⌘</div>
+      <div className="big">{t('narrative.emptyCodeTitle')}</div>
+      <div className="hint">{t('narrative.emptyCodeDesc')}</div>
       <div className="examples">
-        {(isWork
-          ? [t('narrative.suggestWork1'), t('narrative.suggestWork2'), t('narrative.suggestWork3')]
-          : [t('narrative.suggestCode1'), t('narrative.suggestCode2'), t('narrative.suggestCode3')]
-        ).map((e) => <span key={e}>{e}</span>)}
+        {[t('narrative.suggestCode1'), t('narrative.suggestCode2'), t('narrative.suggestCode3')]
+          .map((e) => <span key={e}>{e}</span>)}
       </div>
       <UsageActivityMini />
     </div>

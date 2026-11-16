@@ -20,11 +20,6 @@ import { accentOfAgent, accentOfGroup } from '../hub/agentAccent'
 // + 名字下限 26 ≈ 179 —— 再留些余量到 240，否则名字只剩两三个字（默认宽度 236 即走窄形态）。
 const ROW_ACTIONS_MIN_W = 240
 
-const PERSONAS = [
-  { key: 'code', label: 'Code' },
-  { key: 'work', label: 'Work' },
-] as const
-
 // 左栏 = 工作区管理：显式「添加工作区」（选择已有 / 新建文件夹），每个工作区目录下挂多个会话。
 // 两种视图（leftView）：任务列表（默认）| 工作区文件浏览（WorkspaceFiles）。
 // 入口 = **每个工作区行**的文件夹按钮（悬停浮出，与 pin/新建/删除同级）：一次点击 = 切到该
@@ -52,8 +47,6 @@ export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
   // 真实项目保持原顺序、原折叠状态；插件组排在它们之后，空则整组隐藏。
   const realList = realProjects(projects)
   const pluginGroups = splitPluginProjects(projects)
-  const persona = useAppStore((s) => s.persona)
-  const switchPersona = useAppStore((s) => s.switchPersona)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const titleOverrides = useAppStore((s) => s.titleOverrides)
   const newSession = useAppStore((s) => s.newSession)
@@ -215,23 +208,6 @@ export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
             <WorkspaceFiles onBack={() => setLeftView('tasks')} />
           ) : (
           <>
-          {/* Persona 分段（Code/Work）：logo 下方，工作区管理之上；切换当前会话下一轮生效（bridge 重建 loop） */}
-          <div className="persona-row">
-            <div className="seg persona-seg" role="tablist" aria-label="Persona">
-              {PERSONAS.map((p) => (
-                <button
-                  key={p.key}
-                  role="tab"
-                  aria-selected={persona === p.key}
-                  className={persona === p.key ? 'on' : ''}
-                  onClick={() => switchPersona(p.key)}
-                  title={t(p.key === 'code' ? 'topbar.codeDesc' : 'topbar.workDesc')}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </div>
           {/* Hub 左侧段：智能体/群组列表 + 全历史搜索，始终位于「工作区」之上；
               限高 38vh 内部滚动，工作区树仍占据下方剩余空间。 */}
           <HubSidebar />

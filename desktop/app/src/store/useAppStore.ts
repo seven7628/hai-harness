@@ -3146,11 +3146,12 @@ export function applySessionPrefs(path: string, sid: string): void {
     : defaultModelFor(targetSettings)
   const mode = rec?.mode ?? globalPrefs.mode ?? st.mode
   const effort = rec?.effort ?? globalPrefs.effort ?? st.effort
-  const persona = rec?.persona ?? globalPrefs.persona ?? st.persona
+  // Work 模式已下线：不再读取会话/全局记录里的 persona，恢复路径一律 Code。
+  const persona = 'code'
   const patch: Partial<AppState> = {}
   if (mode !== st.mode) patch.mode = mode
   if (effort !== st.effort) patch.effort = effort
-  if (persona !== st.persona) patch.persona = persona as 'code' | 'work'
+  if (persona !== st.persona) patch.persona = persona
   if (model !== st.model) patch.model = model
   if (provider !== st.settings.provider.active) patch.settings = targetSettings
   // 即使 UI 值恰好相同，也要重应用到刚由 bridge 创建/恢复的 session；bridge 的初始值是
@@ -3517,7 +3518,6 @@ export interface AppState {
   compact(): void
   switchMode(mode: string): void
   switchEffort(effort: string): void
-  switchPersona(name: 'code' | 'work'): void
   switchModel(model: string, provider?: string): void
   refreshGit(): void
   loadGitSnapshot(): void
@@ -5851,7 +5851,8 @@ export function dispatchEvent(raw: AnyEvent): void {
       if (t === 'switch_mode' || t === 'switch_effort') break
       // switch_persona / switch_model：确认（store 已乐观设置，bridge 回执数据兜底）
       if (t === 'switch_persona') {
-        if (currentConfigResponse && typeof d.persona === 'string') setState({ persona: d.persona as 'code' | 'work' })
+        // Work 模式已下线：后端若回写 work（旧会话配置），前端仍钉在 Code。
+        if (currentConfigResponse) setState({ persona: 'code' })
         break
       }
       if (t === 'switch_model') {
@@ -10318,7 +10319,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // localStorage 全局默认恢复；会话级记录在 new_session 响应时应用（applySessionPrefs）
   mode: persistedPrefs.mode ?? 'auto', // 默认自动执行（bash/write/edit 均不弹审批；工具层静态拦截/沙箱仍生效）
   effort: persistedPrefs.effort ?? 'low',
-  persona: (persistedPrefs.persona ?? 'code') as 'code' | 'work',
+  persona: 'code', // Work 模式已下线：只支持 Code；旧偏好里的 work 不再恢复
   model: persistedPrefs.model ?? DEFAULT_MODEL,
   blocks: [],
   approvals: [],
@@ -11472,14 +11473,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     persistPrefs(get())
   },
 
-  // Persona 切换：乐观设置 + 当前会话下一轮生效（bridge 重建 loop）
-  switchPersona: (persona) => {
-    set({ persona })
-    // Work 布局预设：叙述居中、右栏折叠（办公场景聚焦内容）；Code 保持现状
-    if (persona === 'work') get().setRightExpanded(false)
-    send({ type: 'switch_persona', payload: { session_id: get().activeSessionId, persona } })
-    persistPrefs(get())
-  },
   // 切换模型：provider 给定且 ≠ active → 持久化活跃 Provider 选择 + 乐观更新 UI，
   // 然后切模型（switch_model 校验基于 active provider；两命令同步先后入 bridge stdin，顺序保证）。
   // 关键：这里【不发 set_provider】—— set_provider 会让 bridge rebuildAll 重建
