@@ -10,6 +10,7 @@ import type {
   HooksInfo,
 } from '../store/useAppStore'
 import { useT } from '../i18n'
+import SetHead from './SetHead'
 import { FolderIcon, Gear, HookIcon } from './icons'
 import { DetailHead, FlagRow, SourceCard, Switch } from './SettingsGroups'
 import { ownerValid } from '../lib/owner'
@@ -102,8 +103,7 @@ export function HooksTab() {
 
   return (
     <>
-      <div className="settings-sec-title">{t('settings.hooks')}</div>
-      <p className="set-desc" style={{ marginBottom: 6 }}>{t('hook.hint')}</p>
+      <SetHead title={t('settings.hooks')} titleClassName="settings-sec-title" subtitle={t('hook.hint')} />
 
       {!info ? (
         <p className="set-placeholder">{loading ? t('hook.loading') : t('hook.empty')}</p>

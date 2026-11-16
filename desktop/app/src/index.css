@@ -15148,3 +15148,134 @@ body.is-electron .page-head {
     min-height: 0;
   }
 }
+
+/* —— 16. 设置页：标题层级与说明层级 ——
+   .set-head 是页头；其余 .settings-sec-title 一律降为**区块标题**（12.5/600 + 发丝线），
+   避免「每个 tab 标题大小/间距各写一套」。SetHead 内部仍复用旧 class 的（provider/usage/
+   surfaces/mcp/hooks）由下面的 .set-head-title 复位规则拉回页头口径。 */
+.set-head-title .settings-sec-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  margin: 0;
+  padding: 0;
+  border: none;
+  color: var(--text);
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.settings-body .settings-sec-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text);
+  margin: 20px 0 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.settings-body .settings-sec-title:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.settings-body .settings-sec-title .btn {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+/* 说明文字：技术细节弱色小字（2–3 行可读宽度），与人话正文分开 */
+.set-note-tech {
+  max-width: 560px;
+  margin: 6px 0 14px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+.set-note-warn {
+  max-width: 520px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--warning);
+}
+/* 手机连接空态里的「为什么 / 怎么开 / 能做什么」 */
+.page-empty .pe-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  max-width: 460px;
+}
+.page-empty .pe-list li {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.page-empty .pe-list b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+/* provider 页头沿用旧 class 时不要叠加两套 padding */
+.set-head.pvp-head {
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+}
+/* 面板/插件卡片：与设置页其它卡片同一圆角与发丝线 */
+.settings-body .mcp-server {
+  border-radius: 10px;
+}
+.settings-body .hook-note {
+  border-radius: 8px;
+}
+/* 项目记忆 / Dream：控件列对齐（选择器宽度一致，时间成组） */
+.dream-grid .sel,
+.dream-grid .sel-btn {
+  min-width: 120px;
+}
+/* 设置页控件列：下拉选择器与数字输入同一宽度体系（Provider/模型 220、时间 78 成组） */
+.set-row > .sel.set-select {
+  width: 220px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+.set-row > .set-inline .sel.set-select.time {
+  width: 78px;
+  flex: 0 0 auto;
+}
+.set-row > .set-inline .set-unit {
+  text-align: center;
+}
+.set-note-danger {
+  max-width: 520px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--danger);
+}
+/* IM 路由行：群 → 目标在窄窗换行，不吃成「w…」 */
+.im-route {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.im-route-chat {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.im-route-ws {
+  flex: 1 1 180px;
+  min-width: 120px;
+}
+.im-route .btn {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}

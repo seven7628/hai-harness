@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
+import SetHead from './SetHead'
 import { codeToHtml } from './highlight'
 import { useResolvedTheme } from '../lib/useTheme'
 import {
@@ -92,7 +93,11 @@ export default function AppearanceTab() {
 
   return (
     <>
-      <div className="settings-sec-title">{t('settings.appearance')}</div>
+      <SetHead
+        title={t('settings.appearance')}
+        // i18n: 建议 key settings.appearance.sub
+        subtitle="主题、字号、背景与代码配色；改动即时生效。"
+      />
 
       <div className="set-row">
         <div>
