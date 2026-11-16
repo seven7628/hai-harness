@@ -95,7 +95,6 @@ export default function SkillMarket() {
         <div className="mk-card-hd">
           {/* i18n: 建议 key skill.installFromLink */}
           <span className="mk-card-title">从链接安装</span>
-          <span className="mk-card-sub">{scope === 'global' ? '全局' : '当前工作区'}</span>
         </div>
         <p className="mk-card-desc">
           {t('skill.remoteHint')}

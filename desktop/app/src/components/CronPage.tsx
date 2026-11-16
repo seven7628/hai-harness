@@ -177,7 +177,7 @@ export default function CronPage() {
                             <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)' }}>{j.recurring ? t('cron.recurring') : t('cron.once')}</span>
                           </span>
                         </td>
-                        <td data-label={t('cron.th.status')}>
+                        <td className="cell-status" data-label={t('cron.th.status')}>
                           {j.paused ? (
                             <span className="cron-status paused">{t('cron.paused')}</span>
                           ) : (

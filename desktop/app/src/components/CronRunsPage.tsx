@@ -102,7 +102,7 @@ export default function CronRunsPage() {
                     {pageRuns.map((r) => (
                       <tr key={r.run_id} className="cron-run-row" onClick={() => openRun(r)}>
                         <td className="cell-time" data-label={t('cron.th.runTime')}>{fmtStamp(r.fired_at)}</td>
-                        <td data-label={t('cron.th.status')}><span className={`cron-status ${r.status}`}>{statusText(r.status)}</span></td>
+                        <td className="cell-status" data-label={t('cron.th.status')}><span className={`cron-status ${r.status}`}>{statusText(r.status)}</span></td>
                         <td className="cell-time" data-label={t('cron.th.duration')}>{r.duration_ms ? fmtDuration(r.duration_ms) : '—'}</td>
                         <td className="mono" data-label={t('cron.th.session')}>{r.session_id || '—'}</td>
                         <td className="cron-prompt cell-summary" data-label={t('cron.th.summary')} title={r.error || r.final_result || ''}>{r.error || r.final_result || '—'}</td>

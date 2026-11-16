@@ -14128,7 +14128,7 @@ body.is-electron .page-head {
 @media (max-width: 1279px) {
   .sp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-@media (max-width: 820px) {
+@media (max-width: 700px) {
   .sp-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .skill-card {
@@ -15144,9 +15144,6 @@ body.is-electron .page-head {
   .sp-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-  .skill-card {
-    min-height: 0;
-  }
 }
 
 /* —— 16. 设置页：标题层级与说明层级 ——
@@ -15278,4 +15275,150 @@ body.is-electron .page-head {
   height: 24px;
   padding: 0 8px;
   font-size: 11.5px;
+}
+/* 技能网格：行高按内容（max-content），不允许被容器高度压缩 ——
+   否则 min-height:0 的卡片会被压扁，描述第 3 行与不可用原因整行消失（640 实测）。
+   内容超出时让 .sp-grid 自己滚动，而不是压缩卡片。 */
+.sp-grid {
+  grid-auto-rows: max-content;
+}
+
+/* ============================================================================
+   用户追加验收（技能卡统一尺寸 / 状态徽章不换行 / 640 完整性）
+   ========================================================================== */
+
+/* —— 技能卡：**所有卡片同一尺寸**（不只同一行等高）——
+   固定轨道 184（头 27 + 描述 3 行 56 + 原因 2 行 38 + footer 31 + 上下 padding 25），
+   列数走显式断点：1440→3、1024/800→2、≤700→1。
+   不用 auto-fill 的 280 下限：1440 内容区 1080–1254 时会变成 4 列，卡片被压窄；
+   也不用 1fr：.sp-grid 是 flex:1 的滚动容器，1fr 会把行拉满视口、卡片变成竖条。 */
+.sp-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 184px;
+}
+@media (max-width: 1279px) {
+  .sp-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.skill-card {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+/* 卡片头：固定 20px 行高，名称/状态/开关同基线；没有开关的卡（当前模型不可用）也占同高 */
+.skill-card .sc-h {
+  height: 20px;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+}
+.skill-card .sc-nm {
+  line-height: 20px;
+}
+.skill-card .sc-state,
+.skill-card .sc-remote,
+.skill-card .switch {
+  align-self: center;
+}
+/* footer：贴底 + 固定 28px，来源图标、mono 文本、按钮同一基线 */
+.skill-card .sc-src {
+  margin-top: auto;
+  height: 28px;
+  padding-top: 0;
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+.skill-card .sc-src svg {
+  flex: 0 0 auto;
+  opacity: 0.75;
+}
+.skill-card .sc-src .btn {
+  height: 22px;
+  padding: 0 8px;
+}
+@media (max-width: 700px) {
+  .sp-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: 176px;
+  }
+  /* 单列更窄：原因只留 1 行，把 footer 让出来（不靠加高整行解决） */
+  .skill-card .sc-cap-reason {
+    -webkit-line-clamp: 1;
+  }
+}
+
+/* —— 定时任务：状态徽章 ——
+   不再换行（「已暂停」三字不许竖排），也不允许任何下划线/伪元素装饰；
+   min-width 72 + 居中，状态列给 96px 下限。 */
+.cron-status {
+  min-width: 72px;
+  padding: 2px 10px;
+  line-height: 1.5;
+  text-decoration: none !important;
+  border-bottom: none !important;
+}
+.cron-status::before,
+.cron-status::after {
+  content: none !important;
+}
+.cron-table .cell-status,
+.cron-table td.cell-status {
+  min-width: 96px;
+  white-space: nowrap;
+}
+.cron-table th {
+  white-space: nowrap;
+}
+/* 浅色主题下「已暂停」的琥珀 pill：文字取 ochre→正文的混合，提高对比度（不新增色板） */
+.cron-status.paused {
+  color: color-mix(in srgb, var(--warning) 62%, var(--text));
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 34%, transparent);
+}
+@media (max-width: 900px) {
+  .cron-card .cron-table td.cell-status {
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .cron-card .cron-table td.cron-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
+/* —— 技能市场：ghost 按钮与列表在 640 的收紧 —— */
+.mk-actions .btn.ghost {
+  color: var(--text-2);
+}
+.mk-actions .btn.ghost:hover {
+  color: var(--text);
+}
+@media (max-width: 720px) {
+  .sp-market-row {
+    padding: 8px 10px;
+    gap: 6px 8px;
+  }
+  .sp-market-row .grow {
+    display: none;
+  }
+  .sp-market-row .btn {
+    height: 26px;
+    margin-left: auto;
+  }
+  .sp-market-row .btn + .btn {
+    margin-left: 0;
+  }
+}
+/* 调度列的两行（值 / 循环·一次性）在表格态也必须分行：span 默认 inline，
+   只给容器 display:block 不够（会连成「3 分 · 9 点循环」）。 */
+.cron-table .cell-stack > span {
+  display: block;
+}
+@media (max-width: 900px) {
+  .cron-card .cron-table .cell-stack > span {
+    display: block;
+    text-align: right;
+  }
 }
