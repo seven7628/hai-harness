@@ -1660,8 +1660,20 @@ function DreamSection() {
   const minuteOptions: SelOption[] = Array.from({ length: 60 }, (_, i) => ({ value: pad2(i), label: pad2(i) }))
   const [hh, mm] = (draft.at || '03:00').split(':')
 
+  // commit 以**磁盘上的值**（dream = 最近一次 dream_get / dream_set 回写）为基底，
+  // 而不是本地草稿。
+  //
+  // 真机验收抓到的 bug：草稿初始值是 {enabled:false, at:'03:00'}，而 dream_get 还没回来
+  // （或上一次保存还在飞）时点一下 Provider，commit 会把**整份草稿**写回去 —— 于是
+  // 用户刚设的 enabled 与 04:15 被默认值覆盖（实测 dream.json 从 true/04:15 变成
+  // false/03:00，用户视角是"我只换了个模型，定时巡检自己关了"）。逐项保存的语义是
+  // "只改这一项"，不是"把面板上看到的整份状态提交"。
+  // 下面还有一道闸：dream 没加载出来时控件是禁用的（见 disabled），点了也不发命令。
   const commit = (patch: Partial<DreamSettingsInput>) => {
-    const next: DreamSettingsInput = { ...draft, ...patch }
+    const base: DreamSettingsInput = dream
+      ? { enabled: dream.enabled, provider: dream.provider, model: dream.model, at: dream.at || '03:00' }
+      : draft
+    const next: DreamSettingsInput = { ...base, ...patch }
     setDraft(next)
     saveDream(next)
   }
@@ -1676,7 +1688,9 @@ function DreamSection() {
   const now = new Date()
   const today = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`
   const ranToday = dream?.last_run_date === today
-  const disabled = running || saving
+  // !dream = 还没拿到磁盘上的设置：此时任何一次保存都会把默认值写回去（见 commit），
+  // 所以先禁掉，等 dream_get 回来再让用户动。
+  const disabled = running || saving || !dream
 
   return (
     <>
