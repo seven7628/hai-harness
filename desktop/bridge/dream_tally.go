@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/memory"
 )
 
 type dreamTally struct {
@@ -31,17 +32,27 @@ type dreamTally struct {
 	byID  map[string]*dreamRepoResult
 	// steps 按发生顺序的工具调用（nil 台账安全：非 Dream 会话走不到这里）。
 	steps []dreamStep
+	// facts 库 id → 本轮**真的**落盘的归档事实（按发生顺序）。
+	// 与 byID[id].Archived（条数，给运行记录看）同源但不同用途：这里的每一条
+	// 都带 file + 理由，跨轮状态要用它（见 dream_state.go）。
+	facts map[string][]dreamArchivedFact
 }
 
 func newDreamTally() *dreamTally {
-	return &dreamTally{byID: map[string]*dreamRepoResult{}}
+	return &dreamTally{byID: map[string]*dreamRepoResult{}, facts: map[string][]dreamArchivedFact{}}
+}
+
+// dreamRepoID 统一的库标识：空 = "(未命名库)"（台账、跨轮状态、时间线同一口径）。
+func dreamRepoID(id string) string {
+	if id = strings.TrimSpace(id); id == "" {
+		return dreamUnnamedRepo
+	}
+	return id
 }
 
 // get 取（或建）某库的记录。调用方必须已持锁。
 func (t *dreamTally) get(id string) *dreamRepoResult {
-	if id == "" {
-		id = "(未命名库)"
-	}
+	id = dreamRepoID(id)
 	rec, ok := t.byID[id]
 	if !ok {
 		rec = &dreamRepoResult{ID: id}
@@ -108,7 +119,105 @@ func (t *dreamTally) observe(ev *events.ToolResponse) {
 	case "apply":
 		n := dreamArchivedFromResult(ev.Result)
 		t.get(a.Repo).Archived += n
+		t.addFacts(a.Repo, ev)
 	}
+}
+
+// addFacts 记下这次 apply **真的**归档了哪些条目（file + 模型给的 reason）。
+//
+// 两边都对上才算（规格 §2）：参数里有 decisions（file→reason，模型的判断），
+// 返回里有宿主实际归档的文件列表（护栏之后的结果）。只有交集进状态——被保护清单
+// 或 7 天冷却挡下的条目在返回的归档列表里根本不存在，它们还留在库里，不能让下一轮
+// 以为"这条已经处理过了"。
+//
+// 调用方必须已持锁（与 steps/台账同一瞬间）。
+func (t *dreamTally) addFacts(repo string, ev *events.ToolResponse) {
+	archived := dreamArchivedFilesFromResult(ev.Result)
+	if len(archived) == 0 {
+		return
+	}
+	reasons := dreamDecisionReasons(ev.Arguments)
+	at := ev.Timestamp
+	if at.IsZero() {
+		at = time.Now()
+	}
+	id := dreamRepoID(repo)
+	for _, f := range archived {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		t.facts[id] = append(t.facts[id], dreamArchivedFact{File: f, Reason: reasons[f], At: at})
+	}
+}
+
+// dreamDecisionReasons 从 apply 的**参数**里取 {file: reason}。
+//
+// decisions 在工具 schema 里是**字符串**（模型传一段 JSON 文本），但真机里也见过
+// 直接给对象的——两种都吃，解析统一交给 memory.ParseDecisions（它对文件名做与
+// 归档时**同一套**归一化，所以键和返回里的文件名能对上）。
+func dreamDecisionReasons(arguments string) map[string]string {
+	var a struct {
+		Decisions json.RawMessage `json:"decisions"`
+	}
+	if json.Unmarshal([]byte(arguments), &a) != nil || len(a.Decisions) == 0 {
+		return nil
+	}
+	raw := []byte(a.Decisions)
+	if raw[0] == '"' {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return nil
+		}
+		raw = []byte(s)
+	}
+	decs, err := memory.ParseDecisions(raw)
+	if err != nil || len(decs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(decs))
+	for _, d := range decs {
+		if _, dup := out[d.File]; dup {
+			continue // 同一条说了两遍：留第一句（模型先给的那句更像原始判断）
+		}
+		out[d.File] = strings.TrimSpace(d.Reason)
+	}
+	return out
+}
+
+// dreamArchivedFilesFromResult 从宿主的归档返回里读**真的落盘的文件名**。
+//
+// 返回文本形如「记忆归档：归档 2 条：a.md、b.md；快照 …」（见 memory/dream_tool.go
+// 的 ApplyResult.Summary），被护栏挡下的条目只出现在后面的「跳过原因」里。
+// 所以只读「归档 N 条：」之后到「；」为止那一段——整段扫会把跳过的文件名也算成
+// 已归档（"b.md（被评测保护清单点名）"里的 b.md 一字不差）。
+func dreamArchivedFilesFromResult(s string) []string {
+	const marker = "归档 "
+	i := strings.Index(s, marker)
+	if i < 0 {
+		return nil
+	}
+	rest := s[i+len(marker):]
+	j := strings.Index(rest, " 条")
+	if j < 0 {
+		return nil
+	}
+	rest = rest[j+len(" 条"):]
+	// 没有归档时是「归档 0 条；跳过 2 条」：冒号后面那段才是文件列表。
+	if !strings.HasPrefix(rest, "：") {
+		return nil
+	}
+	rest = rest[len("："):]
+	if k := strings.IndexAny(rest, "；\n"); k >= 0 {
+		rest = rest[:k]
+	}
+	var out []string
+	for _, f := range strings.Split(rest, "、") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // dreamStep 的一条事件翻成时间线条目（参数、成败、一句话备注）。
@@ -291,18 +400,42 @@ func (t *dreamTally) resultsLocked() []dreamRepoResult {
 	return out
 }
 
-// snapshot 一次性取出（步骤, 台账）——收口时用，不能边写边读。
+// dreamTallyCapture 一轮巡检收口时要取走的三份数据（同一个瞬间）。
+type dreamTallyCapture struct {
+	Steps []dreamStep
+	Repos []dreamRepoResult
+	// Facts 库 id → 本轮真的落盘的归档事实（按发生顺序）。
+	Facts map[string][]dreamArchivedFact
+}
+
+// capture 一次性取出（步骤, 台账, 归档事实）——收口时用，不能边写边读。
 //
 // 观察发生在会话 goroutine（每条 ToolRunEnd），收口在主会话 emit 的尾部：
-// 两次 getter 各自加锁会在中间让出一条缝（快照里步骤有 apply、台账还没算上）；
-// 一次加锁 + **拷贝** 两份数据，收口拿到的是同一个瞬间。
-func (t *dreamTally) snapshot() ([]dreamStep, []dreamRepoResult) {
+// 分三次 getter 各自加锁会在中间让出一条缝（快照里步骤有 apply、台账还没算上）；
+// 一次加锁 + **拷贝**三份数据，收口拿到的是同一个瞬间。
+func (t *dreamTally) capture() dreamTallyCapture {
 	if t == nil {
-		return nil, nil
+		return dreamTallyCapture{}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	steps := make([]dreamStep, len(t.steps))
-	copy(steps, t.steps)
-	return steps, t.resultsLocked()
+	out := dreamTallyCapture{Repos: t.resultsLocked()}
+	out.Steps = make([]dreamStep, len(t.steps))
+	copy(out.Steps, t.steps)
+	if len(t.facts) > 0 {
+		out.Facts = make(map[string][]dreamArchivedFact, len(t.facts))
+		for id, fs := range t.facts {
+			cp := make([]dreamArchivedFact, len(fs))
+			copy(cp, fs)
+			out.Facts[id] = cp
+		}
+	}
+	return out
+}
+
+// snapshot 只要（步骤, 台账）的旧入口（运行记录那条路不关心归档事实的具体内容，
+// 只看 byID[id].Archived 的条数）。
+func (t *dreamTally) snapshot() ([]dreamStep, []dreamRepoResult) {
+	c := t.capture()
+	return c.Steps, c.Repos
 }

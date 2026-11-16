@@ -138,13 +138,12 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	}
 
 	bs.isDream = true // 与 cron 派生会话同类：不进会话列表、不被 workspace 级操作误伤
-	// 台账：每次工具结果都记进来（repos + 时间线），收口时一起写进运行记录。
-	// 快照在**收口这一刻**取（不是闭包创建时）：闭包里再调 snapshot，才能看到
+	// 台账：每次工具结果都记进来（repos + 时间线 + 归档事实），收口时一起取走。
+	// 快照在**收口这一刻**取（不是闭包创建时）：闭包里再调 capture，才能看到
 	// 最后几次工具调用——它们与 AgentEnd 只隔几条事件。
 	bs.dreamTally = newDreamTally()
 	bs.dreamSessionDone = func(errMsg, final string) {
-		steps, repos := bs.dreamTally.snapshot()
-		m.finishDreamRun(sid, errMsg, final, repos, steps)
+		m.finishDreamRun(sid, errMsg, final, bs.dreamTally.capture())
 	}
 
 	// 先记"已开始"：巡检跑到一半进程被杀，设置页也应当看得到这一轮（FinishedAt 空）。
@@ -153,7 +152,7 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	})
 
 	if err := bs.s.Ask(context.Background(), core.NewUserMessage(core.Content{
-		Type: core.ContentTypeText, Content: dreamPrompt(),
+		Type: core.ContentTypeText, Content: dreamPrompt(loadDreamState()),
 	})); err != nil {
 		bs.dreamSessionDone = nil
 		m.dreamRelease()
@@ -170,9 +169,13 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 //
 // final 是模型收尾正文的**完整版**：摘要归摘要（列表一行），正文归 Result
 // （详情视图看原文，保留换行）——压成摘要就再也还原不回来了。
-func (m *manager) finishDreamRun(sessionID, errMsg, final string, repos []dreamRepoResult, steps []dreamStep) {
-	summary := dreamSummaryOf(final, repos)
-	completeDreamRun(sessionID, time.Now(), summary, errMsg, repos, dreamRunDetail{Result: final, Steps: steps})
+//
+// 顺序是刻意的：先落运行记录（用户面的账，失败会体现在记录里），再写跨轮状态
+// （只影响下一轮的任务书，写失败仅打 stderr）；状态写不进不该让这一轮看起来失败。
+func (m *manager) finishDreamRun(sessionID, errMsg, final string, cap dreamTallyCapture) {
+	summary := dreamSummaryOf(final, cap.Repos)
+	completeDreamRun(sessionID, time.Now(), summary, errMsg, cap.Repos, dreamRunDetail{Result: final, Steps: cap.Steps})
+	updateDreamState(cap.Repos, cap.Facts, final)
 	m.dreamRelease()
 	m.emitDreamChanged()
 }

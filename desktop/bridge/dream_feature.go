@@ -417,8 +417,19 @@ func readDreamRuns(limit int) []dreamRun {
 //
 // 写清楚三件事：范围（全部记忆库）、工具（memory_dream）、允许的动作边界
 // （归档由宿主执行；改文件可以，但索引必须同步）。
-func dreamPrompt() string {
-	return `你的任务是巡检本地全部记忆库，让它们保持可用。
+//
+// 末尾追加「上一轮判断」（见 dream_state.go）：第一轮没有状态，整段不出现——
+// 冷启动时给模型一个不存在的锚点，比不给更糟。
+func dreamPrompt(st dreamState) string {
+	if prior := dreamPromptPrior(st, time.Now()); prior != "" {
+		return dreamPromptBody + "\n\n" + prior
+	}
+	return dreamPromptBody
+}
+
+// dreamPromptBody 固定任务书。刻意与「上一轮判断」分开：这段是**不变的判断标准**，
+// 那段是**会变的上下文**，混在一起以后想改任一半都得先拆开。
+const dreamPromptBody = `你的任务是巡检本地全部记忆库，让它们保持可用。
 
 范围：应用内的**每一个**记忆库（一个项目一份），不是当前工作目录那一个。
 第一步先调 memory_dream(action=repos) 拿清单：返回里每个 id 就是一个库名，count 是库数。
@@ -438,4 +449,3 @@ func dreamPrompt() string {
 不要为了让结果好看而归档仍然有用的条目；不要用 bash 改记忆文件（用 read_file / edit_file / write_file）。
 
 做完后用一句话汇总：处理了几个库、归档了几条、修正了几处。`
-}

@@ -599,8 +599,10 @@ func TestDreamFireCreatesDerivedSession(t *testing.T) {
 	}
 
 	// 收口：AgentEnd 钩子把同一条记录补成"已完成"（不追加第二条）。
-	m.finishDreamRun(bs.id, "", "已巡检 3 个库，归档 2 条", []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}},
-		[]dreamStep{{Tool: "memory_dream", Arg: "repos", OK: true, Note: "1 个库"}})
+	m.finishDreamRun(bs.id, "", "已巡检 3 个库，归档 2 条", dreamTallyCapture{
+		Repos: []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}},
+		Steps: []dreamStep{{Tool: "memory_dream", Arg: "repos", OK: true, Note: "1 个库"}},
+	})
 	runs = readDreamRuns(0)
 	if len(runs) != 1 {
 		t.Fatalf("收口应改写而非追加，得到 %d 条", len(runs))
@@ -614,6 +616,11 @@ func TestDreamFireCreatesDerivedSession(t *testing.T) {
 	// 收口同时落详情：正文全文（此处就是钩子给的 final）+ 时间线。
 	if runs[0].Result != "已巡检 3 个库，归档 2 条" || len(runs[0].Steps) != 1 {
 		t.Fatalf("result/steps 没进记录: %+v", runs[0])
+	}
+	// 跨轮状态：收口时把本轮台账并进状态（第 2 轮任务书靠它）。
+	if st := loadDreamState(); len(st.Repos) != 1 || st.Repos["repo-a"].Runs != 1 ||
+		st.Repos["repo-a"].Topics != 12 || st.LastNotes != "已巡检 3 个库，归档 2 条" {
+		t.Fatalf("收口应写跨轮状态: %+v / %q", st.Repos, st.LastNotes)
 	}
 	// 闩放开：下一轮可以再触发。
 	if !m.dreamAcquire() {
