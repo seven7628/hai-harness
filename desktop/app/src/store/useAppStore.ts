@@ -355,6 +355,14 @@ export interface DreamSettings {
   last_run_date?: string // 最近一次触发的本地日期（YYYY-MM-DD），由调度器维护
 }
 
+// 一轮巡检里某个记忆库的结果（宿主台账，不是模型自述：见 bridge/dream_tally.go）。
+export interface DreamRepoResult {
+  id: string
+  topics: number
+  archived: number
+  note?: string
+}
+
 // 一次巡检的运行记录（dream_get 的 runs；时间均为 RFC3339）。
 // finished_at 缺失 = 还没跑完（进程中途退出时也会停在这个形态）。
 export interface DreamRun {
@@ -364,6 +372,8 @@ export interface DreamRun {
   model: string
   session_id?: string
   summary?: string // 收尾摘要（模型最后一段正文压成一行）
+  // repos 本轮真的处理过哪些库（来自 memory_dream 的调用记录）。
+  repos?: DreamRepoResult[]
   error?: string
 }
 
@@ -5084,6 +5094,14 @@ function normalizeDreamRuns(raw: unknown): DreamRun[] {
       model: String(o.model ?? ''),
       session_id: typeof o.session_id === 'string' ? o.session_id : undefined,
       summary: typeof o.summary === 'string' && o.summary ? o.summary : undefined,
+      repos: Array.isArray(o.repos)
+        ? (o.repos as Record<string, unknown>[]).map((r) => ({
+            id: String(r?.id ?? ''),
+            topics: Number(r?.topics ?? 0) || 0,
+            archived: Number(r?.archived ?? 0) || 0,
+            note: typeof r?.note === 'string' && r.note ? r.note : undefined,
+          })).filter((r) => r.id)
+        : undefined,
       error: typeof o.error === 'string' && o.error ? o.error : undefined,
     }
   })

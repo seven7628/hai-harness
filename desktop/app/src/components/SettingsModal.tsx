@@ -1830,6 +1830,15 @@ function DreamSection() {
                     : r.finished_at
                       ? (r.summary || t('settings.dream.runs.noSummary'))
                       : t('settings.dream.runs.unfinished')}
+                  {/* 台账那一行：处理了几个库、归档了几条。摘要由模型写，可能漏库；
+                      这一行来自宿主记下的 memory_dream 调用，是"真的碰过谁"的事实。 */}
+                  {r.repos && r.repos.length > 0 && (
+                    <div className="set-desc" style={{ marginTop: 2 }}>
+                      {t('settings.dream.runs.repos')
+                        .replace('{n}', String(r.repos.length))
+                        .replace('{a}', String(r.repos.reduce((a, b) => a + (b.archived || 0), 0)))}
+                    </div>
+                  )}
                 </td>
               </tr>
             ))}
