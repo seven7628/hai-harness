@@ -189,7 +189,7 @@ func TestDreamTaskAppearsOnlyWhenActionable(t *testing.T) {
 	if inj.Dream == "" || inj.DreamTask == "" {
 		t.Fatalf("今天没处理过，应给出待办：dream=%q task=%q", inj.Dream, inj.DreamTask)
 	}
-	for _, want := range []string{"memory_dream", "最多 2 条", "快照"} {
+	for _, want := range []string{"memory_dream", "小库 2 条", "大库最多 5 条", "快照"} {
 		if !contains(inj.DreamTask, want) {
 			t.Fatalf("待办缺少 %q：%s", want, inj.DreamTask)
 		}

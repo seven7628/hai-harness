@@ -220,7 +220,8 @@ func TestApplySkipsProtectedFiles(t *testing.T) {
 	}
 }
 
-// 单次归档的绝对上限是 2：一次挪一小步，坏了能归因。
+// 小库的归档额度是 2 条（比例额度的下限）：一次挪一小步，坏了能归因。
+// 大库按比例放宽、由 dreamMaxArchiveCap=5 封顶，见 TestApplyArchiveCapScalesWithRepoSize。
 func TestApplyCapsAtTwoPerRun(t *testing.T) {
 	d, now := lifeFixture(t)
 	var lines []string
@@ -247,6 +248,42 @@ func TestApplyCapsAtTwoPerRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.Archived) > 2 {
-		t.Fatalf("单次最多 2 条，实际 %d", len(res.Archived))
+		t.Fatalf("小库单次归档额度 2 条，实际 %d", len(res.Archived))
+	}
+}
+
+// 大库的额度按库大小放大，但硬上限是 5 条。
+//
+// 这条断言把「上限不是 2」钉在代码里：工具文案一度写着"单次最多 2 条"，
+// 模型照着自我克制，大库（80+ 条）一天只挪 1-2 条，上限改成 max(2, 比例)≤5
+// 等于没改（2026-11 真机观察）。库里刻意放 400 条：无论比例常数是 2% 还是 20%，
+// 算出来都在封顶之上，所以它测的是"封顶 5 条"这件事本身。
+func TestApplyArchiveCapScalesWithRepoSize(t *testing.T) {
+	d, now := lifeFixture(t)
+	stale := now.Add(-30 * 24 * time.Hour)
+	var lines []string
+	for i := 0; i < 400; i++ {
+		n := "big" + itoa(i) + ".md"
+		writeTopicFile(t, d, n, "---\ntype: project\n---\n\n# t\n\nx\n")
+		if err := os.Chtimes(filepath.Join(d.Path, n), stale, stale); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, "- "+n)
+	}
+	writeIndex(t, d, "# Memory Index\n"+strings.Join(lines, "\n")+"\n")
+	cfg := Config{Now: func() time.Time { return now }, ReadDir: os.ReadDir}
+	var decs []Decision
+	for i := 0; i < 400; i++ {
+		decs = append(decs, Decision{File: "big" + itoa(i) + ".md", Action: ActionArchive})
+	}
+	res, err := cfg.ApplyDecisions(d, decs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Archived) != dreamMaxArchiveCap {
+		t.Fatalf("400 条的大库单次应归档 %d 条（比例额度被硬上限压回），实际 %d", dreamMaxArchiveCap, len(res.Archived))
+	}
+	if dreamMaxArchiveCap <= dreamMaxArchivePerRun {
+		t.Fatalf("硬上限 %d 必须大于小库额度 %d，否则分档没有意义", dreamMaxArchiveCap, dreamMaxArchivePerRun)
 	}
 }

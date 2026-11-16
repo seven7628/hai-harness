@@ -35,6 +35,18 @@ func TestDreamEvidenceIsReadableJSON(t *testing.T) {
 	if !strings.Contains(string(raw), "keep|archive") {
 		t.Fatal("证据里应写清动作取值域")
 	}
+	// 归档额度是**按库大小给的**（max(2, 2%) 且 ≤5，见 lifecycle.go），工具文案里
+	// 不许再写成硬性「最多 2 条」：模型会照着自我克制，大库就永远只挪 1-2 条，
+	// 上限改了等于没改（2026-11 真机观察）。
+	how, _ := m["how_to_decide"].(string)
+	if strings.Contains(how, "最多 2 条") || strings.Contains(how, "最多两条") {
+		t.Fatalf("how_to_decide 把归档上限写死成 2 条（应按库大小给额度）：%s", how)
+	}
+	for _, want := range []string{"额度", "大库最多 5 条", "裁掉"} {
+		if !strings.Contains(how, want) {
+			t.Fatalf("how_to_decide 缺少额度说明 %q：%s", want, how)
+		}
+	}
 }
 
 // 只有 keep 时不碰任何文件——"没决定要动"与"决定不动"在磁盘上是同一件事。

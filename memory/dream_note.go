@@ -176,7 +176,7 @@ func dreamTask(n DreamNote) string {
 	}
 	s := "待处理：今天尚未归档过。用 memory_dream(action=evidence) 取证据，"
 	s += "按其结果提交 decisions；宿主会先过快照与保护清单，"
-	s += "单次最多 2 条、7 天内动过的不动。"
+	s += "单次归档额度按库的大小给（小库 2 条，大库最多 5 条），超出会被裁掉，7 天内动过的不动。"
 	s += "归档会留快照，可恢复。"
 	return s
 }

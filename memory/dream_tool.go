@@ -42,7 +42,9 @@ func (c Config) DreamEvidence(d Dir) ([]byte, error) {
 		"conflicts":   rep.Conflicts,
 		"how_to_decide": "每条给 {file, action: keep|archive, reason}。" +
 			"archive 必须基于证据（锚点失效 / 被后续会话推翻 / 有明确继任者），" +
-			"不确定就 keep。单次最多 2 条，宿主还会按保护清单与 7 天冷却再筛一遍。",
+			"不确定就 keep。单次归档额度由宿主按库的大小给（小库 2 条，大库最多 5 条），" +
+			"超出额度的会被裁掉——所以宁可少提几条，也不要把 keep 凑成 archive。" +
+			"宿主还会按保护清单与 7 天冷却再筛一遍。",
 	}
 	return json.MarshalIndent(payload, "", " ")
 }
