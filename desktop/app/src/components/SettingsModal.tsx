@@ -1610,6 +1610,8 @@ function DreamSection() {
   const saveDream = useAppStore((s) => s.saveDream)
   const runDreamNow = useAppStore((s) => s.runDreamNow)
   const appSettings = useAppStore((s) => s.settings)
+  // 记忆总开关：关着时巡检无事可做（bridge 的 fireDream 也会拒绝）。
+  const memoryOff = useAppStore((s) => s.memorySettings?.enabled) === false
   const presets = useAppStore((s) => s.providerPresets)
   const fetchProviderPresets = useAppStore((s) => s.fetchProviderPresets)
 
@@ -1674,6 +1676,10 @@ function DreamSection() {
         {running && <span className="tag-warn"> {t('settings.dream.running')}</span>}
       </div>
       <p className="set-desc">{t('settings.dream.desc')}</p>
+
+      {/* 记忆关着时巡检没有对象（bridge 侧也会拒绝触发）：提前说清楚，
+          比让用户点了「立即运行」再收到一句错误更有用。 */}
+      {memoryOff && <p className="set-desc" style={{ marginTop: 8, color: 'var(--warn, #d08700)' }}>{t('settings.dream.memoryOff')}</p>}
 
       <div className="set-row">
         <div>
