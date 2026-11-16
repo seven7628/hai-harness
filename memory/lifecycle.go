@@ -52,9 +52,11 @@ const (
 	// 20% 对 73 条是 14 条，一次挪 14 条等于一次不可归因的大改——实测归档 4 条就让
 	// 答案级正确率掉 10 个点，且掉分主要来自"清单变短、路由变差"，与具体哪几条关系不大。
 	// 所以绝对上限压到 2：一次只挪一小步，坏了能一眼看出是哪一步。
-	dreamMaxArchivePerRun = 2
-	dreamMinFileAge       = 7 * 24 * time.Hour // 最近动过的文件不碰
-	dreamArchiveDirName   = "archive"
+	dreamMaxArchivePerRun = 2 // 单次归档下限（小库按条数给）
+	// dreamMaxArchiveCap 单次归档硬上限：再大的库一次也不挪超过 5 条。
+	dreamMaxArchiveCap  = 5
+	dreamMinFileAge     = 7 * 24 * time.Hour // 最近动过的文件不碰
+	dreamArchiveDirName = "archive"
 )
 
 // ApplyResult 是一次应用的结果。
@@ -117,14 +119,20 @@ func (c Config) ApplyDecisions(d Dir, decisions []Decision) (ApplyResult, error)
 		todo = append(todo, dec)
 	}
 	if len(topics) > 0 {
-		// 上限至少为 1：小记忆库（2~4 条）按 20% 取整会得到 0，
-		// 那等于永远不许归档——护栏是为了限制破坏面，不是为了禁用功能。
+		// 上限按"库的大小"给：**max(2, 2%) 且不超过 5**（2026-11 改）。
+		//
+		// 旧版是硬性 2 条。对 9 条的小库够用，对 81 条的大库等于"一天只能挪两条"，
+		// 全库巡检要走一个多月。改成分档之后：小库仍是 2 条（破坏面不变），
+		// 大库最多 5 条（2% of 81 ≈ 1.6 → 2，所以实际由 5 封顶只在几百条的库上生效）。
+		//
+		// 兜底仍是"每次运行都留完整快照"，所以真正的安全边界没有变松：任何一次
+		// 都能整份恢复，而不是靠"挪得少"来保证。
 		capN := int(float64(len(topics)) * dreamMaxArchiveRatio)
-		if capN < 1 {
-			capN = 1
-		}
-		if capN > dreamMaxArchivePerRun {
+		if capN < dreamMaxArchivePerRun {
 			capN = dreamMaxArchivePerRun
+		}
+		if capN > dreamMaxArchiveCap {
+			capN = dreamMaxArchiveCap
 		}
 		if len(todo) > capN {
 			for _, dec := range todo[capN:] {
