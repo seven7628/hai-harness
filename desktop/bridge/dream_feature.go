@@ -33,12 +33,30 @@ type dreamSettings struct {
 	LastRunDate string `json:"last_run_date"`
 }
 
-func dreamSettingsPath() string {
+// dreamDirOverride 测试注入：非空时 Dream 的配置与运行记录都落在这个目录（生产恒为空）。
+//
+// 与 appDataDirOverride 同一套隔离手段：测试里 t.Setenv("HOME") 是进程级副作用，
+// 会和同包内并行跑的其它用例抢 HOME；只改 Dream 自己的落点则互不相关。
+var dreamDirOverride string
+
+// dreamCfgDir Dream 的落盘目录（生产 = ~/.go-code）。
+func dreamCfgDir() string {
+	if dreamDirOverride != "" {
+		return dreamDirOverride
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".go-code", "dream.json")
+	return filepath.Join(home, ".go-code")
+}
+
+func dreamSettingsPath() string {
+	dir := dreamCfgDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "dream.json")
 }
 
 var dreamSettingsMu sync.Mutex
@@ -139,17 +157,26 @@ type dreamRun struct {
 	Provider   string            `json:"provider"`
 	Model      string            `json:"model"`
 	SessionID  string            `json:"session_id,omitempty"`
-	Repos      []dreamRepoResult `json:"repos,omitempty"`
-	Error      string            `json:"error,omitempty"`
+	// Summary 本轮巡检的收尾结论（模型最后一段正文的首行）。人工要看的是
+	// "处理了几个库、归档了几条"，而不是整段对话——正文留在派生会话的事件日志里。
+	Summary string            `json:"summary,omitempty"`
+	Repos   []dreamRepoResult `json:"repos,omitempty"`
+	Error   string            `json:"error,omitempty"`
 }
 
 func dreamRunsPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	dir := dreamCfgDir()
+	if dir == "" {
 		return ""
 	}
-	return filepath.Join(home, ".go-code", "dream_runs.jsonl")
+	return filepath.Join(dir, "dream_runs.jsonl")
 }
+
+// dreamRunsMu 串行化运行记录文件的读改写。
+//
+// 追加（触发时）与收口（AgentEnd 时把同一行从"已开始"补成"已完成"）来自两个
+// goroutine，而收口是**重写整个文件**（原子 rename）：不加锁会丢掉同时在追加的行。
+var dreamRunsMu sync.Mutex
 
 // appendDreamRun 追加一条运行记录（best-effort：失败不打断运行）。
 func appendDreamRun(rec dreamRun) {
@@ -161,12 +188,60 @@ func appendDreamRun(rec dreamRun) {
 	if err != nil {
 		return
 	}
+	dreamRunsMu.Lock()
+	defer dreamRunsMu.Unlock()
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 	_, _ = f.Write(append(raw, '\n'))
+}
+
+// completeDreamRun 把某次运行的记录从"已开始"补成"已完成"。
+//
+// 为什么改写而不是再追加一条：设置页一行 = 一次运行。追加第二条（状态行）会把
+// 同一个 session 拆成两行，用户看到的是"跑了两遍"。文件很小（一次运行一行），
+// 整份重写的代价可以忽略。
+func completeDreamRun(sessionID string, finished time.Time, summary, errMsg string) {
+	if sessionID == "" {
+		return
+	}
+	dreamRunsMu.Lock()
+	defer dreamRunsMu.Unlock()
+	p := dreamRunsPath()
+	if p == "" {
+		return
+	}
+	records := readDreamRuns(0) // 已持锁：readDreamRuns 本身不加锁（见 dreamRunsMu 说明）
+	hit := false
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i].SessionID == sessionID && records[i].FinishedAt.IsZero() {
+			records[i].FinishedAt = finished
+			records[i].Summary = summary
+			records[i].Error = errMsg
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		return
+	}
+	var buf []byte
+	for _, r := range records {
+		raw, err := json.Marshal(r)
+		if err != nil {
+			continue
+		}
+		buf = append(buf, raw...)
+		buf = append(buf, '\n')
+	}
+	tmp := p + ".tmp"
+	// 0600：运行记录里有会话正文摘要，按配置文件对待。
+	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, p)
 }
 
 // readDreamRuns 读最近 limit 条（limit<=0 全部）；损坏行跳过。
@@ -207,14 +282,14 @@ func readDreamRuns(limit int) []dreamRun {
 func dreamPrompt() string {
 	return `你的任务是巡检本地全部记忆库，让它们保持可用。
 
-范围：~/.go-code/memory/repos/ 下的每一个目录都是一个记忆库（一个项目一份），
-逐个处理，全部都要看。
+范围：~/.go-code/memory/repos/ 下的每一个目录都是一个记忆库（一个项目一份）；
+先列一遍这个目录（子目录名就是下面要用的库名），逐个处理，全部都要看。
 
 对每个记忆库：
-1. 调 memory_dream(action=evidence) 取证据：代码锚点是否还存在、最后一次被引用是什么时候、
+1. 用库名调 memory_dream(action=evidence, repo=<库目录名>) 取证据：代码锚点是否还存在、最后一次被引用是什么时候、
    有没有被后续会话推翻、有没有重复或未进索引的条目。
 2. 依据证据判断每一条：仍然成立 → 留着；明显过时/被继任/一次性快照 → 提交 archive；
-   证据不足 → 留着。把判断用 memory_dream(action=apply) 提交，宿主会再做护栏检查
+   证据不足 → 留着。把判断用 memory_dream(action=apply, repo=<库目录名>) 提交，宿主会再做护栏检查
    （保护清单、7 天冷却、单次上限、快照）。
 3. 归档之外可以顺手修正：把与正文不符的索引摘要改对、把没登记的条目补进 MEMORY.md、
    合并明显重复的条目。改文件用标准文件工具，改完必须让 MEMORY.md 与文件一致

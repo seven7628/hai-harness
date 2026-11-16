@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/seven7628/hai-harness/memory"
 	"github.com/seven7628/hai-harness/tools"
 )
 
@@ -32,10 +36,12 @@ func newMemoryDreamTool(h *memoryHost, workspace string) tools.Tool {
 				"{decisions:{decisions:[{file,action:keep|archive,reason}]}} via action=apply. " +
 				"Only archive when the evidence supports it; the host still enforces a protected list, " +
 				"a 7-day cooldown and a per-run cap. Archiving is reversible (snapshot is kept); " +
-				"deletion is not offered.",
+				"deletion is not offered. " +
+				"repo 可指定要处理的记忆库（~/.go-code/memory/repos/<repo>）；不给 = 当前工作区那一个。",
 			Params_: tools.Obj(map[string]any{
 				"action":    tools.Str("evidence = 取证据；apply = 提交裁决并执行"),
 				"decisions": tools.Str(`apply 时必填：{"decisions":[{"file":"x.md","action":"keep|archive","reason":"…"}]}`),
+				"repo":      tools.Str("可选：记忆库目录名（~/.go-code/memory/repos 下的子目录名）；不给 = 当前工作区的记忆库"),
 			}, "action"),
 			ReadOnly_: false,
 		},
@@ -50,13 +56,60 @@ type memoryDreamTool struct {
 	workspace string
 }
 
+// memoryDir 解析本次要处理的记忆库。
+//
+// repo 为空 = 当前工作区那一个（既有行为，会话内手工盘点用它）；非空 = 指定
+// ~/.go-code/memory/repos/<repo>。后者是**全应用巡检**的必要条件：Dream 派生会话
+// 的工作目录是个空目录（见 dreamWorkspaceDir），它自己的记忆库是空的，要遍历
+// 全部记忆库就必须能按名字逐个指。
+func (t *memoryDreamTool) memoryDir(ctx context.Context, repo string) (*memory.Dir, error) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		dir, err := t.host.resolve(ctx, t.workspace)
+		if err != nil || dir == nil {
+			return nil, fmt.Errorf("memory_dream: 取不到记忆目录（%v）", err)
+		}
+		return dir, nil
+	}
+	if !validDreamRepoName(repo) {
+		return nil, fmt.Errorf("memory_dream: repo 只能是记忆库目录名，收到 %q", repo)
+	}
+	root, err := memory.ReposRoot()
+	if err != nil {
+		return nil, fmt.Errorf("memory_dream: 取不到记忆根目录（%v）", err)
+	}
+	p := filepath.Join(root, repo)
+	st, err := os.Stat(p)
+	if err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("memory_dream: 记忆库 %q 不存在（%s）", repo, p)
+	}
+	return &memory.Dir{ID: repo, Path: p}, nil
+}
+
+// validDreamRepoName 记忆库名必须是单段目录名（无分隔符、非 . / ..）。
+func validDreamRepoName(repo string) bool {
+	if repo == "" || repo == "." || repo == ".." {
+		return false
+	}
+	if strings.ContainsRune(repo, os.PathSeparator) || strings.ContainsRune(repo, '/') {
+		return false
+	}
+	return repo == filepath.Base(repo)
+}
+
 func (t *memoryDreamTool) ValidParams(_ context.Context, _, arguments string) error {
 	var a struct {
 		Action    string `json:"action"`
 		Decisions string `json:"decisions"`
+		Repo      string `json:"repo"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return err
+	}
+	// repo 只认单段目录名：它直接拼进 ~/.go-code/memory/repos/ 之下，
+	// 放行 ".." 或分隔符就等于让模型指定任意目录当"记忆库"。
+	if a.Repo != "" && !validDreamRepoName(a.Repo) {
+		return fmt.Errorf("memory_dream: repo 只能是记忆库目录名，收到 %q", a.Repo)
 	}
 	switch a.Action {
 	case "evidence":
@@ -75,13 +128,14 @@ func (t *memoryDreamTool) Call(ctx context.Context, _, arguments string) (string
 	var a struct {
 		Action    string `json:"action"`
 		Decisions string `json:"decisions"`
+		Repo      string `json:"repo"`
 	}
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	dir, err := t.host.resolve(ctx, t.workspace)
-	if err != nil || dir == nil {
-		return "", fmt.Errorf("memory_dream: 取不到记忆目录（%v）", err)
+	dir, err := t.memoryDir(ctx, a.Repo)
+	if err != nil {
+		return "", err
 	}
 	cfg := t.host.cfg
 
