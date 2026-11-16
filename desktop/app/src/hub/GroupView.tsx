@@ -12,6 +12,7 @@ import { RoundGroup } from './RoundGroup'
 import ConversationBar from './ConversationBar'
 import { RoundActivityDigest } from './RoundActivityDigest'
 import { StreamingMessage } from './StreamingMessage'
+import { liveDraftIds } from './groupStream'
 import MentionPicker from './MentionPicker'
 import AgentStack from './AgentStack'
 import AgentSigil from './AgentSigil'
@@ -210,6 +211,9 @@ export default function GroupView({ group }: { group: HubGroup }) {
   // 草稿按当前群过滤一次：空态判断和渲染必须用同一份，否则别的群的草稿会让
   // 本群「还没有消息」的引导语消失，却渲染出零个气泡（空面板）。
   const groupDrafts = useMemo(() => drafts.filter((d) => d.groupId === group.id), [drafts, group.id])
+  // 谁在真的流（每 agent 一条）：一轮里会挂多条草稿（每个 LLM 轮次一段），只有最后
+  // 一段还在收 delta —— 光标和「正在输入」只属于它，否则一次回复里好几根光标一起闪。
+  const liveDrafts = useMemo(() => liveDraftIds(groupDrafts), [groupDrafts])
   // 贴底 effect 也要盯「草稿正文长度」：草稿是就地增长的，length 不变时正文已经长了
   // 好几屏；只依赖 length 只能等 ResizeObserver 兜底（晚一帧，且长正文时更明显）。
   const groupDraftChars = groupDrafts.reduce((n, d) => n + d.text.length, 0)
@@ -610,6 +614,7 @@ export default function GroupView({ group }: { group: HubGroup }) {
                 draft={d}
                 name={agentNames[d.agentId] ?? d.agentId}
                 agent={roster.find((a) => a.id === d.agentId)}
+                typing={liveDrafts.has(d.messageId)}
               />
             ))}
           </div>

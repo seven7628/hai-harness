@@ -88,7 +88,8 @@ assert(collapseCode.includes('<Markdown text={text} streaming={streaming}'), '�
 assert(collapseCode.split('streaming={streaming}').length - 1 === 1, '只有折叠壳那一处传 streaming（弹窗里不传）')
 assert(collapseCode.includes('> COLLAPSE_HEIGHT') && !collapseCode.includes('COLLAPSE_HEIGHT + 1'), '折叠阈值是 > COLLAPSE_HEIGHT（419 不折 / 421 折）')
 assert(bubbleSrc.includes('TurnContextLine') && bubbleSrc.includes('compact'), '触发上下文收进消息头，不再单独占一行')
-const humanStart = bubbleSrc.indexOf("if (kind === 'human') {")
+// 渠道外发（external）与人共用右侧气泡分支（ff54a99），锚点跟着源码走。
+const humanStart = bubbleSrc.indexOf("if (kind === 'human' || kind === 'external') {")
 const humanEnd = bubbleSrc.indexOf('<AgentMessage', humanStart)
 assert(humanStart >= 0 && humanEnd > humanStart, '找到 human 分支边界（断言不靠固定窗口）')
 const humanBranch = bubbleSrc.slice(humanStart, humanEnd)

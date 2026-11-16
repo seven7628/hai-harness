@@ -95,6 +95,27 @@ export function finalizeHubDraft(
 }
 
 /**
+ * 哪几条草稿是「此刻真的还在流」的那条（UI 只给它们画光标 / 「正在输入」）。
+ *
+ * 一次输入里的持续回复会被切成多段草稿（bridge 每个 LLM 轮次开一段、新 message_id），
+ * 而 final 要等本轮 AgentEnd 才逐条发下来 —— 所以工作过程中会同时挂着 2~4 条草稿，
+ * 前面几条其实已经在 LLMEnd 收口了，只有最后开的那条还在收 delta。全部画光标就是
+ * 「一句话还没说完，屏幕上三根光标一起闪」（用户 2026-11 报障的截图）。
+ *
+ * 判据：同一个 agent 的 LLM 调用严格串行，所以该 agent 的**最后一条**草稿就是活的；
+ * 并行 agent 各留各的活草稿（群里两个 agent 同时回复 = 两根光标，这是对的）。
+ * 按 groupId + agentId 分桶：群与 DM 的草稿在同一个数组里，互不越界。
+ */
+export function liveDraftIds(drafts: readonly HubStreamDraft[]): Set<string> {
+  const newest = new Map<string, string>()
+  for (const d of drafts) {
+    // 数组按首块到达顺序追加（finalize 用 filter 保序），后来的覆盖前面的 = 最新段。
+    newest.set(`${d.groupId}\u0000${d.agentId}`, d.messageId)
+  }
+  return new Set(newest.values())
+}
+
+/**
  * agent_end 兜底：空回复/中断没有 final，按 agent 清掉本轮所有草稿。
  * groupId 给出时只清该作用域（DM 传空串），否则清该 agent 的全部草稿 ——
  * 同一个 agent 在 DM 与群里可以同时流式，两边的事件互不越界。

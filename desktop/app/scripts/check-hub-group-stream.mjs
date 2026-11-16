@@ -11,12 +11,14 @@
 //   node scripts/check-hub-group-stream.mjs --url http://localhost:5180/   # 复用已起的
 //
 // mock 夹具：?hubFixture=groupstream（transport/mock.ts 的 mockGroupStreamReply）——
-// 两轮回复，每轮 content_chunk 与 hub_message_delta 并发、轮末一条 hub_message；
+// 两轮回复，每轮 content_chunk 与 hub_message_delta 并发，**两轮 final 在 AgentEnd 一起到**
+//（与真 bridge 的 hubDeltaSink 同形：LLMEnd 只收口、AgentEnd 才落账）；
 // message_id 每轮不同，正文带唯一标记 GROUP-R1-A/B、GROUP-R2-A/B。
 //
 // 判据（任一失败 → exit 1）：
-//   · 流式期间任何时刻只有 1 条草稿气泡；
-//   · 草稿带 hub.streaming 标签，final 之后草稿清零；
+//   · 流式期间同一个智能体**多条草稿并存是正常的**（真 bridge 的 final 要等 AgentEnd，
+//     每个 LLM 轮次一段草稿），但**同一时刻只有一根光标 + 一个「正在输入」标签**；
+//   · final 之后草稿清零；
 //   · 最终恰好两条群气泡，每轮标记在每个气泡里各出现一次（不拼接、不重复）；
 //   · content_chunk 没有额外画出一条气泡（流式期间同一条正文不会同时出现在草稿与终态行）；
 //   · 无 console error / pageerror。
@@ -123,11 +125,22 @@ const sample = () => page.evaluate(() => {
   const view = document.querySelector('.hub-group-view')
   const flat = (el) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim()
   const agentOf = (r) => r.getAttribute('data-agent-id') ?? ''
-  const drafts = Array.from(view?.querySelectorAll('.msg-row.agent.streaming') ?? []).map((r) => ({
-    agentId: agentOf(r),
-    text: (r.querySelector('.hub-stream-text')?.textContent ?? '').trim(),
-    tag: r.querySelector('.agent-tag')?.textContent?.trim() ?? '',
-  }))
+  // 光标有两套来源，都要数：
+  //   ① 群草稿的内联 6×14 方块（StreamingMessage 的 .hub-stream-caret）；
+  //   ② demo 版伪元素（.hub-demo .streaming.hub-live .agent-text::after，DM 走这条）。
+  // 少算一种，「一行两根光标」就会漏过去 —— 真机上两根同时存在过。
+  const drafts = Array.from(view?.querySelectorAll('.msg-row.agent.streaming') ?? []).map((r) => {
+    const after = getComputedStyle(r.querySelector('.agent-text') ?? r, '::after')
+    const jsCaret = !!r.querySelector('.hub-stream-caret')
+    const cssCaret = after.content !== 'none' && after.content !== 'normal'
+    return {
+      agentId: agentOf(r),
+      text: (r.querySelector('.hub-stream-text')?.textContent ?? '').trim(),
+      tag: r.querySelector('.agent-tag')?.textContent?.trim() ?? '',
+      // 光标只属于「此刻还在收 delta」的那一段：多段草稿并存时不许一起闪，也不许叠两根。
+      carets: (jsCaret ? 1 : 0) + (cssCaret ? 1 : 0),
+    }
+  })
   const settled = Array.from(view?.querySelectorAll('.msg-row.agent:not(.streaming)') ?? []).map((r) => ({
     agentId: agentOf(r), text: flat(r),
   }))
@@ -153,8 +166,12 @@ try {
 
   // —— 采样到流式结束 ——
   const seenDrafts = []        // 草稿里见过的正文（= 每轮一条）
-  const perAgent = {}          // agentId → 同一时刻的草稿峰值
-  let maxConcurrent = 0
+  const draftsPerAgent = {}    // agentId → 同一时刻的草稿峰值（多段并存是正常的）
+  const caretsPerAgent = {}    // agentId → 同一时刻画出来的光标峰值（必须 ≤ 1）
+  const tagsPerAgent = {}      // agentId → 同一时刻「正在输入」标签峰值（必须 ≤ 1）
+  let doubleCaret = null       // 同一条气泡上叠了两根光标（内联 + 伪元素）
+  let caretsOnStale = null     // 老段（没有「正在输入」标签）还在闪光标
+  let tagOnLiveMissing = null  // 活的（有光标）却没有「正在输入」标签
   let tagMissing = null
   let dupWhileStreaming = null // 草稿 + 终态行同时出现同一条正文（content_chunk 多画了一条）
   let dupSettled = null        // 终态行里同一条正文出现两次
@@ -164,15 +181,27 @@ try {
   let done = false
   while (Date.now() < deadline) {
     const s = await sample()
-    if (s.drafts.length > maxConcurrent) maxConcurrent = s.drafts.length
-    // 真口径是「每个智能体同时 1 条」。本夹具只派给 Researcher 一个人，所以总数也该是 1；
-    // 多 agent 并行（群 @ 两人）时每人各一条才是对的，不能把总数硬钉成 1。
-    const counts = {}
-    for (const d of s.drafts) counts[d.agentId] = (counts[d.agentId] ?? 0) + 1
-    for (const [id, n] of Object.entries(counts)) perAgent[id] = Math.max(perAgent[id] ?? 0, n)
+    // 真口径是**每个智能体**：草稿可以有多段（final 等 AgentEnd），但光标/标签只能是
+    // 最后那一段的。多 agent 并行（群 @ 两人）时每人各一根光标才是对的，不能把总数钉成 1。
+    const draftCount = {}
+    const caretCount = {}
+    const tagCount = {}
+    for (const d of s.drafts) {
+      const live = /正在输入|Typing/.test(d.tag)
+      draftCount[d.agentId] = (draftCount[d.agentId] ?? 0) + 1
+      if (d.carets > 0) caretCount[d.agentId] = (caretCount[d.agentId] ?? 0) + 1
+      if (live) tagCount[d.agentId] = (tagCount[d.agentId] ?? 0) + 1
+      // 同一时刻：有标签 ⇔ 有光标，而且都只有一根/一个。
+      if (d.carets > 1) doubleCaret = doubleCaret ?? `${d.agentId}: ${d.text.slice(0, 24)}`
+      if (!live && d.carets > 0) caretsOnStale = caretsOnStale ?? `${d.agentId}: ${d.text.slice(0, 24)}`
+      if (live && d.carets === 0) tagOnLiveMissing = tagOnLiveMissing ?? `${d.agentId}: ${d.text.slice(0, 24)}`
+    }
+    for (const [id, n] of Object.entries(draftCount)) draftsPerAgent[id] = Math.max(draftsPerAgent[id] ?? 0, n)
+    for (const [id, n] of Object.entries(caretCount)) caretsPerAgent[id] = Math.max(caretsPerAgent[id] ?? 0, n)
+    for (const [id, n] of Object.entries(tagCount)) tagsPerAgent[id] = Math.max(tagsPerAgent[id] ?? 0, n)
     for (const d of s.drafts) {
       if (!seenDrafts.includes(d.text)) seenDrafts.push(d.text)
-      if (!/正在输入|Typing/.test(d.tag)) tagMissing = d.tag
+      if (d.tag && !/正在输入|Typing/.test(d.tag)) tagMissing = d.tag
       // 同一条正文（同一轮标记、同一个 agent）已经在终态行里 = 这条消息被画了两遍
       // （content_chunk 的 live 与 hub_message_delta 的草稿并存）。
       const marker = d.text.includes(R1) ? R1 : d.text.includes(R2) ? R2 : ''
@@ -203,18 +232,26 @@ try {
   }
 
   check(done, '群两轮流式在 25s 内结束（草稿清零 + 两条消息落地）')
-  check(maxConcurrent <= 1, `流式期间同时只有 1 条草稿气泡（峰值 ${maxConcurrent}）`)
-  check(Object.values(perAgent).every((n) => n <= 1),
-    `每个智能体同时只有 1 条草稿（峰值 ${JSON.stringify(perAgent)}）`)
-  check(Object.keys(perAgent).length === 1 && Object.keys(perAgent)[0] !== '',
-    `草稿气泡带 data-agent-id（got=${JSON.stringify(Object.keys(perAgent))}）`)
+  // 夹具照真 bridge 的 final 时机（AgentEnd 一起到），所以两段草稿必须真的并存过 ——
+  // 否则下面的光标断言等于没测。
+  check(Object.values(draftsPerAgent).some((n) => n >= 2),
+    `流式期间两段草稿并存（每 agent 峰值 ${JSON.stringify(draftsPerAgent)}）`)
+  check(Object.values(caretsPerAgent).every((n) => n <= 1),
+    `同一智能体同时只有 1 根光标（峰值 ${JSON.stringify(caretsPerAgent)}）`)
+  check(doubleCaret === null, `一条气泡上不叠两根光标（got=${doubleCaret ?? '无'}）`)
+  check(caretsOnStale === null, `已收口的老段不再闪光标（got=${caretsOnStale ?? '无'}）`)
+  check(tagOnLiveMissing === null, `在流的那段一定有光标（got=${tagOnLiveMissing ?? '无'}）`)
+  check(Object.values(tagsPerAgent).every((n) => n <= 1),
+    `同一智能体同时只有 1 个「正在输入」标签（峰值 ${JSON.stringify(tagsPerAgent)}）`)
+  check(Object.keys(draftsPerAgent).length === 1 && Object.keys(draftsPerAgent)[0] !== '',
+    `草稿气泡带 data-agent-id（got=${JSON.stringify(Object.keys(draftsPerAgent))}）`)
   check(dupWhileStreaming === null, `同一条正文不同时出现在草稿与终态行（got=${JSON.stringify(dupWhileStreaming)}）`)
   check(dupSettled === null, `终态行里没有重复正文（got=${dupSettled ?? '无'}）`)
   check(seenDrafts.length >= 2, `两轮各自流过一条草稿（观测到 ${seenDrafts.length} 种正文）`)
   check(seenDrafts.some((t) => t.includes(R1)), '第一轮正文在草稿里出现过')
   check(seenDrafts.some((t) => t.includes(R2)), '第二轮正文在草稿里出现过')
   check(!seenDrafts.some((t) => t.includes(R1) && t.includes(R2)), '两轮正文不拼进同一条草稿')
-  check(tagMissing === null, `草稿带 hub.streaming 标签（异常标签：${tagMissing ?? '无'}）`)
+  check(tagMissing === null, `草稿上的标签文案是 hub.streaming（异常标签：${tagMissing ?? '无'}）`)
 
   // —— final：恰好两条群气泡，每段正文只出现一次、不拼接 ——
   const final = await sample()
@@ -255,5 +292,5 @@ if (failed.length) {
   for (const f of failed) console.error(`   · ${f}`)
   process.exit(1)
 }
-console.log('✅ 群侧多气泡流式：单草稿 / 两轮不拼接 / final 两条 / 不重复 / 390 全部通过')
+console.log('✅ 群侧多气泡流式：单光标 / 两轮不拼接 / final 两条 / 不重复 / 390 全部通过')
 console.log(`   截图：${OUT}/round1-draft.png ${OUT}/round2-draft.png ${OUT}/final.png ${OUT}/final-390.png`)

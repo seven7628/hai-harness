@@ -142,4 +142,31 @@ assert(mod.dmScopeFromSession('hub.ag_a.g.grp_1') === null, '群会话不是 DM'
 assert(mod.dmScopeFromSession('proj.ag_a.dm') === null, '非 hub 会话不是 DM')
 assert(mod.dmScopeFromSession('') === null && mod.dmScopeFromSession(undefined) === null, '空 session_id')
 
+// 14) 谁在真的流（liveDraftIds）：一轮 AgentEnd 才逐条发 final，所以一次输入的持续回复
+//     会同时挂好几条草稿（每个 LLM 轮次一段）。光标/「正在输入」只给每个 agent 最后
+//     那条 —— 否则用户看到「一句话没说完，三根光标一起闪」。
+let seg = mod.applyHubDelta([], delta('s1', 0, '我先看看'), [])
+seg = mod.applyHubDelta(seg, delta('s2', 0, '找到了'), [])
+seg = mod.applyHubDelta(seg, delta('s3', 0, '建好了'), [])
+let live = mod.liveDraftIds(seg)
+assert(seg.length === 3 && live.size === 1 && live.has('s3'), '同一 agent 三段草稿：只有最后一段活着')
+// 最后一段再涨块，仍然只有它活着（判据是段序，不是「谁的 index 最大」）。
+seg = mod.applyHubDelta(seg, delta('s3', 1, '，发过去'), [])
+assert(mod.liveDraftIds(seg).size === 1 && mod.liveDraftIds(seg).has('s3'), '活草稿涨块不改变归属')
+// 并行 agent：各留各的活草稿（群里两个 agent 同时回 = 两根光标，这是对的）。
+const para = mod.applyHubDelta(seg, delta('b1', 0, '我也在写', { agent_id: 'ag_b' }), [])
+live = mod.liveDraftIds(para)
+assert(live.size === 2 && live.has('s3') && live.has('b1'), '并行 agent 各自一条活草稿')
+// 中间那条 final 落地（删草稿）不抢走活草稿的归属。
+const midFin = mod.finalizeHubDraft(para, [], 's2')
+live = mod.liveDraftIds(midFin.drafts)
+assert(live.size === 2 && live.has('s3') && live.has('b1'), '删掉中间草稿后归属不变')
+// 群与 DM 用同一个 agentId：作用域分开，DM 的草稿不能把群的活草稿顶掉。
+let scopeLive = mod.applyHubDelta([], delta('gl1', 0, '群的'), [])
+scopeLive = mod.applyHubDelta(scopeLive, dmDelta('dl1', 0, '单聊的'), [])
+live = mod.liveDraftIds(scopeLive)
+assert(live.size === 2 && live.has('gl1') && live.has('dl1'), '群与 DM 各自一条活草稿')
+// 空列表：不画光标（返回空集，调用方 has() 恒 false）。
+assert(mod.liveDraftIds([]).size === 0, '没有草稿时没有活草稿')
+
 console.log(`\n✅ hub 流式草稿：${pass} 项全部通过`)

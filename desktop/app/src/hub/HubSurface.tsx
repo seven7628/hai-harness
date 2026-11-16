@@ -10,6 +10,7 @@ import HubErrorBanner from './HubErrorBanner'
 import AgentSigil from './AgentSigil'
 import { AgentMessage, DayDivider, UserMessage } from './ConversationMessage'
 import { dayKey, dayLabel } from './conversationDay'
+import { liveDraftIds } from './groupStream'
 import { formatClockTime } from './conversation'
 import { agentSigilLabel } from './avatarLabels'
 import { useAgentState } from './useAgentState'
@@ -96,6 +97,10 @@ export default function HubSurface() {
     () => groupDrafts.filter((d) => !d.groupId && d.agentId === activeId),
     [groupDrafts, activeId],
   )
+  // 谁在真的流：一轮里每个 LLM 轮次一条草稿，只有最后一条还在收 delta。DM 的光标
+  // 是 .hub-live 上的伪元素、「正在输入」是气泡头标签，两者共用这一份口径 —— 否则
+  // 一次回复里老段跟着闪、三条草稿各说一句「正在输入」（用户 2026-11 报障的截图）。
+  const dmLiveDrafts = useMemo(() => liveDraftIds(dmDrafts), [dmDrafts])
   // 草稿文本增长也要贴底跟随（live 的长度变化原本靠 live 这个依赖项触发）。
   const dmDraftChars = dmDrafts.reduce((n, d) => n + d.text.length, 0)
   // 有 delta 时草稿就是真身：content_chunk 拼出的 live 是同一段正文的第二份，
@@ -400,7 +405,8 @@ export default function HubSurface() {
                       name={activeAgent.name}
                       role={activeAgent.role}
                       tags={<span className="agent-tag reply">{t('hub.streaming')}</span>}
-                      className="streaming"
+                      // hub-live：CSS 伪元素光标的唯一开关（见 hub.css）。群草稿不走它。
+                      className="streaming hub-live"
                     >
                       <CollapsibleMarkdown text={live} streaming ariaLabel={activeAgent.name} />
                     </AgentMessage>
@@ -411,16 +417,17 @@ export default function HubSurface() {
                       agent={activeAgent}
                       name={activeAgent.name}
                       role={activeAgent.role}
-                      tags={<span className="agent-tag reply">{t('hub.streaming')}</span>}
+                      tags={dmLiveDrafts.has(d.messageId) ? <span className="agent-tag reply">{t('hub.streaming')}</span> : undefined}
                       // dm-draft：这是「每轮一条」的草稿气泡（场景2b），与 content_chunk
                       // 兜底出来的 live 气泡不是同一件事 —— 浏览器回归靠它区分两条路径。
-                      className="streaming dm-draft"
+                      // hub-live：光标只挂在还在收 delta 的那一段（多段并存时老段不再闪）。
+                      className={`streaming dm-draft${dmLiveDrafts.has(d.messageId) ? ' hub-live' : ''}`}
                     >
                       <CollapsibleMarkdown text={d.text} streaming ariaLabel={activeAgent.name} />
                     </AgentMessage>
                   ))}
-                  {/* 「思考中」只在完全没有任何流式内容时出现：多气泡时每条草稿
-                      已经自带「正在输入」标签，再来一行就会重复。 */}
+                  {/* 「思考中」只在完全没有任何流式内容时出现：有草稿时活草稿已经自带
+                      「正在输入」标签，再来一行就会重复。 */}
                   {isRunning && !live && dmDrafts.length === 0 ? (
                     <div className="system-line"><span>{t('hub.thinking')}</span></div>
                   ) : null}

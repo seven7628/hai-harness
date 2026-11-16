@@ -2833,7 +2833,13 @@ button.hub-context-chip:focus-visible { outline: 2px solid var(--accent-border);
 .hub-demo .user-meta .user-retry:disabled { opacity: .5; cursor: default; }
 .hub-demo .user-bubble .md p { margin: 0; }
 .hub-demo .user-bubble .md p + p { margin-top: 6px; }
-.hub-demo .streaming .agent-text::after { content: ''; display: inline-block; width: 5px; height: 13px; margin-left: 3px; vertical-align: -1px; background: var(--accent); animation: demo-caret 1s steps(2) infinite; }
+/* 流式光标（demo 版伪元素）：只画在**正在收 delta 的那一段**（.hub-live）。
+   两个坑（用户 2026-11 报障「一次回复里好几个光标」）：
+     ① 真 bridge 的 final 要等 AgentEnd，所以同一个 agent 会同时挂着好几条 .streaming
+        草稿 —— 无脑给 .streaming 画光标 = 每段都闪；
+     ② 群草稿自己带内联 .hub-stream-caret（P3a-09 设计），再叠一条伪元素 = 一行两根。
+   所以：DM 的活草稿挂 .hub-live 走这条伪元素，群行永远不挂（用内联那个）。 */
+.hub-demo .streaming.hub-live .agent-text::after { content: ''; display: inline-block; width: 5px; height: 13px; margin-left: 3px; vertical-align: -1px; background: var(--accent); animation: demo-caret 1s steps(2) infinite; }
 @keyframes demo-caret { 50% { opacity: 0; } }
 
 .hub-demo .system-line { display: flex; align-items: center; justify-content: center; gap: 7px; margin: 18px 0; color: var(--muted-2); font-size: 11px; text-align: center; }

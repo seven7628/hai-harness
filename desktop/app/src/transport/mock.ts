@@ -1632,13 +1632,15 @@ class MockTransport implements Transport {
    * 脚本化群内两轮流式回复（场景2b 群侧浏览器回归，?hubFixture=groupstream）。
    *
    * 与 mockDMStreamReply 同口径：真 bridge 每个 LLM 轮次一条气泡，且 content_chunk 与
-   * hub_message_delta **两条路径同时活着**；轮末一条 hub_message，message.id = 该轮
-   * delta 的 message_id。群 delta 带 group_id/round_id（DM 才是空串），两轮共用同一个
-   * round_id、message_id 每轮不同 —— 前端必须「一轮一条草稿、final 就清」，不能把两轮
-   * 拼成一条，也不能因为 content_chunk 再多画一条。
+   * hub_message_delta **两条路径同时活着**。群 delta 带 group_id/round_id（DM 才是空串），
+   * 两轮共用同一个 round_id、message_id 每轮不同 —— 前端必须「一轮一条草稿、final 就清」，
+   * 不能把两轮拼成一条，也不能因为 content_chunk 再多画一条。
    *
-   * 两轮之间留足间隔（轮 1 的 final 先到、轮 2 才开流）：断言「流式期间同时只有 1 条
-   * 草稿」靠的就是这个时间形状，重叠的轮次本来就该有两条。
+   * **final 的时机照真 bridge**：`:hubDeltaSink` 在 LLMEnd 只收口段，真正落账发
+   * `hub_message` 是在根 AgentEnd（`finishHubReply` → `appendHubReply`/群落账）——
+   * 所以两段 final 是**一起到**的，流式期间同一个智能体同时挂着两条草稿。夹具以前把
+   * final 放在每轮末（时间形状比真机乐观），「一次回复里三根光标一起闪」这类 bug 就
+   * 永远进不了浏览器验收：见 scripts/check-hub-group-stream.mjs 的断言。
    */
   private mockGroupStreamReply(gid: string, triggerSeq: number, targets: string[]): void {
     const first = targets[0]
@@ -1661,7 +1663,8 @@ class MockTransport implements Transport {
       const size = Math.max(1, Math.ceil(runes.length / 6))
       const chunks: string[] = []
       for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
-      // 第二轮等第一轮的 final 落地后再开流（间隔远大于人的点击速度 = 两轮）。
+      // 第二轮紧接着第一轮的最后一个 chunk 开流：真 bridge 的下一轮 LLM 就是接着跑的，
+      // 中间没有「等 final」这一步（final 要等 AgentEnd）。
       const start = 400 + r * 1200
       chunks.forEach((chunk, i) => {
         this.afterBg(start + i * 90, () => {
@@ -1676,16 +1679,21 @@ class MockTransport implements Transport {
         })
       })
       endAt = start + chunks.length * 90 + 120
-      this.afterBg(endAt, () => {
-        if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+    })
+    // 两段 final 一起到（= 根 AgentEnd 落账），顺序 = 段顺序：前端按 message_id 各自替换
+    // 自己那条草稿，先到的不会把还在流的那条挤掉。窗口给足 300ms：浏览器验收按 50ms
+    // 采样，太窄的话慢机器上两段草稿可能在一个采样间隔里先后消失，断言就成了空转。
+    this.afterBg(endAt + 300, () => {
+      if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
+      rounds.forEach((text, r) => {
         const msg = this.hubGroupAppend(gid, {
           kind: 'text', sender: { kind: 'agent', agent_id: first }, text, round_id: roundID,
         })
-        msg.id = messageID
+        msg.id = `gm_mock_groupstream_${triggerSeq}_${r}`
         this.hubGroupEmitMessage(gid, msg)
       })
     })
-    this.afterBg(endAt + 250, () => {
+    this.afterBg(endAt + 600, () => {
       if ((this.hubGroupGen.get(gid) ?? 0) !== gen) return
       this.emit({ event_type: 'agent_end', session_id: sessionID, run_id: runID, parent_run_id: '', depth: 0 })
       this.emit({ event_type: 'hub_agent_status', agent_id: first, status: 'idle' })
@@ -1701,8 +1709,12 @@ class MockTransport implements Transport {
    * 脚本化 DM 两轮回复（场景2b 浏览器回归，?hubFixture=dmstream）。
    *
    * 真 bridge 每个 LLM 轮次一条气泡：content_chunk 与 hub_message_delta **两条路径
-   * 同时活着**（group_id/round_id 是空串），轮末各一条 hub_message（message.id = 该轮的
-   * message_id）。前端只有把 live 让位给草稿才不会画成「1 条 live + 2 条草稿」。
+   * 同时活着**（group_id/round_id 是空串），message.id = 该轮 delta 的 message_id。
+   * 前端只有把 live 让位给草稿才不会画成「1 条 live + 2 条草稿」。
+   *
+   * **final 的时机照真 bridge**（同 mockGroupStreamReply）：LLMEnd 只收口段，落账发
+   * hub_message 是在根 AgentEnd —— 两段 final 一起到，流式期间两条草稿并存。夹具把
+   * final 放到每轮末的话，「一次回复里好几根光标」永远进不了浏览器验收。
    */
   private mockDMStreamReply(agentID: string, triggerSeq: number): void {
     const sid = `hub.${agentID}.dm`
@@ -1719,7 +1731,8 @@ class MockTransport implements Transport {
       const size = Math.max(1, Math.ceil(runes.length / 5))
       const chunks: string[] = []
       for (let i = 0; i < runes.length; i += size) chunks.push(runes.slice(i, i + size).join(''))
-      // 第二轮紧接着第一轮的 final（间隔 < 人的点击速度，模拟工具调用后继续说话）。
+      // 第二轮紧接着第一轮的最后一个 chunk：真 bridge 的下一轮 LLM 就是接着跑的，
+      // 中间没有「等 final」这一步（final 要等 AgentEnd）。
       const start = 400 + r * 700
       chunks.forEach((chunk, i) => {
         this.after(start + i * 70, () => {
@@ -1733,18 +1746,22 @@ class MockTransport implements Transport {
         }, sid)
       })
       endAt = start + chunks.length * 70 + 60
-      this.after(endAt, () => {
+    })
+    // 两段 final 一起到（= 根 AgentEnd 落账），顺序 = 段顺序；窗口给足 300ms，浏览器验收
+    // 按 50ms 采样，太窄的话慢机器上两段草稿可能在一个采样间隔里先后消失。
+    this.after(endAt + 300, () => {
+      rounds.forEach((text, r) => {
         const rseq = (this.hubSeq.get(agentID) ?? 0) + 1
         this.hubSeq.set(agentID, rseq)
         const created = new Date().toISOString()
         this.hubLog(agentID).push({ seq: rseq, sender: { kind: 'agent', agent_id: agentID }, text, created_at: created })
         this.emit({
           event_type: 'hub_message', agent_id: agentID, seq: rseq,
-          message: { id: messageID, seq: rseq, kind: 'text', sender: { kind: 'agent', agent_id: agentID }, text, created_at: created },
+          message: { id: `msg_mock_dm_${triggerSeq}_${r}`, seq: rseq, kind: 'text', sender: { kind: 'agent', agent_id: agentID }, text, created_at: created },
         })
-      }, sid)
-    })
-    this.after(endAt + 200, () => {
+      })
+    }, sid)
+    this.after(endAt + 600, () => {
       this.emit({ event_type: 'agent_end', session_id: sid, run_id: runID, parent_run_id: '', depth: 0 })
     }, sid)
   }

@@ -123,11 +123,20 @@ const sample = () => page.evaluate(() => {
   return {
     // draft=true 是场景2b 的草稿气泡（每轮一条）；false 是 content_chunk 的 live 兜底。
     // 两条路径同时出现 = 同一段正文画了两遍，正是本脚本要抓的回归。
-    streaming: rows.map((r) => ({
-      text: (r.querySelector('.hub-stream-text, .markdown-body, .md-body')?.textContent ?? r.textContent ?? '').trim(),
-      tag: r.querySelector('.agent-tag')?.textContent?.trim() ?? '',
-      draft: r.classList.contains('dm-draft'),
-    })),
+    // carets：DM 的光标是 CSS 伪元素（.hub-demo .streaming.hub-live .agent-text::after），
+    // 只有活的那段该有 —— 多段草稿并存时老段跟着闪就是用户报障的「多个光标」。
+    streaming: rows.map((r) => {
+      const after = getComputedStyle(r.querySelector('.agent-text') ?? r, '::after')
+      const jsCaret = !!r.querySelector('.hub-stream-caret')
+      const cssCaret = after.content !== 'none' && after.content !== 'normal'
+      return {
+        text: (r.querySelector('.hub-stream-text, .markdown-body, .md-body')?.textContent ?? r.textContent ?? '').trim(),
+        tag: r.querySelector('.agent-tag')?.textContent?.trim() ?? '',
+        draft: r.classList.contains('dm-draft'),
+        live: r.classList.contains('hub-live'),
+        carets: (jsCaret ? 1 : 0) + (cssCaret ? 1 : 0),
+      }
+    }),
     systemLines: Array.from(dm?.querySelectorAll('.system-line') ?? []).map((e) => (e.textContent ?? '').trim()),
     agentRows: Array.from(document.querySelectorAll('.hub-dm .msg-row.agent:not(.streaming)'))
       .map((r) => (r.textContent ?? '').replace(/\s+/g, ' ').trim()),
@@ -140,7 +149,12 @@ await composer.press('Enter')
 // —— 采样直到流式结束（草稿清空且两条 final 落地）——
 const seen = []        // 草稿气泡里见过的正文（= 每轮一条）
 const seenLive = []    // live 兜底气泡里见过的正文（有 delta 时不该出现）
-let maxConcurrent = 0
+let maxPerAgentDrafts = 0    // 同一时刻的草稿峰值（多段并存是正常的）
+let maxPerAgentCarets = 0    // 同一时刻画出来的光标峰值（必须 ≤ 1）
+let maxPerAgentTags = 0      // 同一时刻「正在输入」标签峰值（必须 ≤ 1）
+let doubleCaret = null       // 一条气泡上叠了两根光标
+let caretsOnStale = null     // 老段（没有「正在输入」标签）还在闪光标
+let tagOnLiveMissing = null  // 活的（有光标）却没有「正在输入」标签
 let dupWhileStreaming = null
 let tagMissing = null
 let thinkingWhileDraft = null
@@ -150,15 +164,27 @@ const deadline = Date.now() + 20000
 let done = false
 while (Date.now() < deadline) {
   const s = await sample()
-  if (s.streaming.length > maxConcurrent) maxConcurrent = s.streaming.length
-  if (s.streaming.length > 1) {
-    // 同一条正文出现两次 = live 与草稿同时渲染（本脚本要防的回归）。
-    dupWhileStreaming = s.streaming.map((x) => x.text.slice(0, 30))
+  const draftsNow = s.streaming.filter((x) => x.draft)
+  maxPerAgentDrafts = Math.max(maxPerAgentDrafts, draftsNow.length)
+  maxPerAgentCarets = Math.max(maxPerAgentCarets, s.streaming.filter((x) => x.carets > 0).length)
+  maxPerAgentTags = Math.max(maxPerAgentTags, s.streaming.filter((x) => /正在输入|Typing/.test(x.tag)).length)
+  for (const d of s.streaming) {
+    const live = /正在输入|Typing/.test(d.tag)
+    if (d.carets > 1) doubleCaret = doubleCaret ?? d.text.slice(0, 24)
+    if (!live && d.carets > 0) caretsOnStale = caretsOnStale ?? d.text.slice(0, 24)
+    if (live && d.carets === 0) tagOnLiveMissing = tagOnLiveMissing ?? d.text.slice(0, 24)
+  }
+  const liveRows = s.streaming.filter((x) => !x.draft)
+  if (liveRows.length > 0 && draftsNow.length > 0) {
+    // live 兜底与草稿同时渲染 = 同一段正文画两遍（本脚本要防的回归）。
+    // 多段草稿并存本身是正常的（final 等 AgentEnd），不算重复。
+    dupWhileStreaming = s.streaming.map((x) => `${x.draft ? 'draft' : 'live'}:${x.text.slice(0, 24)}`)
   }
   for (const d of s.streaming) {
     const bucket = d.draft ? seen : seenLive
     if (!bucket.includes(d.text)) bucket.push(d.text)
-    if (!/正在输入|Typing/.test(d.tag)) tagMissing = d.tag
+    // 老段（已收口、还没等到 final）不再挂标签，这是对的；只有挂着但文案不对才算异常。
+    if (d.tag && !/正在输入|Typing/.test(d.tag)) tagMissing = d.tag
   }
   if (s.streaming.length > 0 && s.systemLines.some((x) => /正在思考|Thinking/.test(x))) {
     thinkingWhileDraft = s.systemLines.join(' | ')
@@ -183,7 +209,14 @@ while (Date.now() < deadline) {
 }
 
 check(done, 'DM 两轮流式在 20s 内结束（草稿清零 + 两条消息落地）')
-check(maxConcurrent <= 1, `流式期间同时只有 1 条草稿气泡（峰值 ${maxConcurrent}）`)
+// 夹具照真 bridge 的 final 时机（AgentEnd 一起到）：两段草稿必须真的并存过，
+// 否则下面的光标断言等于没测。
+check(maxPerAgentDrafts >= 2, `流式期间两段草稿并存（峰值 ${maxPerAgentDrafts}）`)
+check(maxPerAgentCarets <= 1, `同一时刻只有 1 根光标（峰值 ${maxPerAgentCarets}）`)
+check(doubleCaret === null, `一条气泡上不叠两根光标（got=${doubleCaret ?? '无'}）`)
+check(caretsOnStale === null, `已收口的老段不再闪光标（got=${caretsOnStale ?? '无'}）`)
+check(tagOnLiveMissing === null, `在流的那段一定有光标（got=${tagOnLiveMissing ?? '无'}）`)
+check(maxPerAgentTags <= 1, `同一时刻只有 1 个「正在输入」标签（峰值 ${maxPerAgentTags}）`)
 check(dupWhileStreaming === null, `live 与草稿不同时渲染（同时出现：${JSON.stringify(dupWhileStreaming)}）`)
 check(seen.length >= 2, `两轮各自成一条草稿气泡（观测到 ${seen.length} 种正文：${JSON.stringify(seen.map((t) => t.slice(0, 12)))}）`)
 // 关键分叉：草稿路径活着时 live 兜底一条都不该出现。把 applyHubDelta 的 DM 分支去掉
@@ -192,7 +225,7 @@ check(seenLive.length === 0, `有 delta 时不走 live 兜底气泡（观测到�
 check(seen.some((t) => t.includes(ROUND1)), '第一轮正文在草稿里出现过')
 check(seen.some((t) => t.includes(ROUND2)), '第二轮正文在草稿里出现过')
 check(!seen.some((t) => t.includes(ROUND1) && t.includes(ROUND2)), '两轮正文不拼进同一条气泡')
-check(tagMissing === null, `草稿带 hub.streaming 标签（异常标签：${tagMissing ?? '无'}）`)
+check(tagMissing === null, `草稿上的标签文案是 hub.streaming（异常标签：${tagMissing ?? '无'}）`)
 check(thinkingWhileDraft === null, `草稿在时不额外显示「思考中」（got=${thinkingWhileDraft ?? '无'}）`)
 
 // —— final 之后：不重复 ——
