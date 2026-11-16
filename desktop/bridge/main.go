@@ -1011,11 +1011,11 @@ func (bs *bridgeSession) emit(e events.Event) {
 	if e.Type() == events.AgentEndType && bs.cronLedger != nil && bs.cronRun != "" {
 		bs.finishCronRun(bs.cronEndStatus, bs.cronEndErr, bs.cronEndContent)
 	}
-	// Dream 巡检台账：每次 memory_dream 的工具结果都记下来（运行记录的 repos 字段）。
+	// Dream 巡检台账：每次工具结果都记下来（运行记录的 repos 字段 + 详情视图的时间线）。
 	// 必须在下面的 AgentEnd 分支之前：收口时要立刻读台账，晚一步就少最后一次调用。
 	if e.Type() == events.ToolRunEndType && bs.dreamTally != nil {
 		if tr, ok := e.(*events.ToolResponse); ok && tr != nil {
-			bs.dreamTally.observe(tr.Name, tr.Arguments, tr.Result)
+			bs.dreamTally.observe(tr)
 		}
 	}
 	// Dream 巡检收口：同一时机（事件已落盘），把运行记录补成"已完成"。
@@ -4177,6 +4177,10 @@ func (m *manager) dispatch(c command) {
 
 	case CmdDreamRunNow: // 立刻巡检一次（忽略时刻与"今天跑过"，仍写 LastRunDate）
 		m.handleDreamRunNow(c)
+		return
+
+	case CmdDreamDetail: // 某一轮运行记录的详情（点开列表某一行；不限于最近 20 条）
+		m.handleDreamDetail(c)
 		return
 
 	case CmdMemoryBrowse: // 浏览 Project Memory 文件（官方 §2.7 的 `/memory`）

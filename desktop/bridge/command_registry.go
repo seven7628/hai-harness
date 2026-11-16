@@ -192,6 +192,13 @@ const (
 	CmdDreamGet    Command = "dream_get"
 	CmdDreamSet    Command = "dream_set"
 	CmdDreamRunNow Command = "dream_run_now"
+	// CmdDreamDetail 点开某一行运行记录的详情（收尾正文完整版 + 工具时间线）。
+	//
+	// 单独一条命令而不是把 result/steps 塞进 dream_get：两者虽已限长（正文 4000 字、
+	// 步骤 120 条），乘 20 条仍是打开设置面板就要传的量，而用户通常一条都不点。
+	// 按 session_id 精确取，也不受 dream_get 的 20 条上限约束（列表 20 条、
+	// 详情可查记录文件 200 行范围内任意一轮）。
+	CmdDreamDetail Command = "dream_detail"
 
 	CmdSkillGet   Command = "skill_get"
 	CmdLoadSkill  Command = "load_skill"

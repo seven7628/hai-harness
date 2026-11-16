@@ -241,7 +241,7 @@ func TestCompleteDreamRun(t *testing.T) {
 	appendDreamRun(dreamRun{StartedAt: start.Add(time.Hour), Provider: "openai", Model: "gpt-4o", SessionID: "sB"})
 
 	fin := start.Add(9 * time.Minute)
-	completeDreamRun("sA", fin, "处理 3 个库，归档 2 条", "", []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}})
+	completeDreamRun("sA", fin, "处理 3 个库，归档 2 条", "", []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}}, dreamRunDetail{})
 
 	runs := readDreamRuns(0)
 	if len(runs) != 2 {
@@ -256,13 +256,13 @@ func TestCompleteDreamRun(t *testing.T) {
 	}
 
 	// 找不到会话 → 文件内容原样（不写空文件）。
-	completeDreamRun("nope", fin, "x", "y", nil)
+	completeDreamRun("nope", fin, "x", "y", nil, dreamRunDetail{})
 	if got := readDreamRuns(0); len(got) != 2 || got[0].Summary == "" {
 		t.Fatalf("未知会话不应改动记录: %+v", got)
 	}
 
 	// 错误路径：AgentEnd 带错误 → 记录里能看到，摘要仍可空。
-	completeDreamRun("sB", fin, "", "provider 认证失败", nil)
+	completeDreamRun("sB", fin, "", "provider 认证失败", nil, dreamRunDetail{})
 	got := readDreamRuns(0)
 	if got[1].Error != "provider 认证失败" {
 		t.Fatalf("错误没落进记录: %+v", got[1])
@@ -599,7 +599,8 @@ func TestDreamFireCreatesDerivedSession(t *testing.T) {
 	}
 
 	// 收口：AgentEnd 钩子把同一条记录补成"已完成"（不追加第二条）。
-	m.finishDreamRun(bs.id, "", "已巡检 3 个库，归档 2 条", []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}})
+	m.finishDreamRun(bs.id, "", "已巡检 3 个库，归档 2 条", []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}},
+		[]dreamStep{{Tool: "memory_dream", Arg: "repos", OK: true, Note: "1 个库"}})
 	runs = readDreamRuns(0)
 	if len(runs) != 1 {
 		t.Fatalf("收口应改写而非追加，得到 %d 条", len(runs))
@@ -609,6 +610,10 @@ func TestDreamFireCreatesDerivedSession(t *testing.T) {
 	}
 	if len(runs[0].Repos) != 1 || runs[0].Repos[0].ID != "repo-a" || runs[0].Repos[0].Archived != 2 {
 		t.Fatalf("repos 没进记录: %+v", runs[0].Repos)
+	}
+	// 收口同时落详情：正文全文（此处就是钩子给的 final）+ 时间线。
+	if runs[0].Result != "已巡检 3 个库，归档 2 条" || len(runs[0].Steps) != 1 {
+		t.Fatalf("result/steps 没进记录: %+v", runs[0])
 	}
 	// 闩放开：下一轮可以再触发。
 	if !m.dreamAcquire() {
@@ -788,11 +793,11 @@ func TestDreamReposActionRejectsUnknownAction(t *testing.T) {
 // TestDreamTallyFromToolResults 台账只认工具真的执行了什么（不是模型自述）。
 func TestDreamTallyFromToolResults(t *testing.T) {
 	tl := newDreamTally()
-	tl.observe("bash", `{"action":"repos"}`, "无关工具不记")
-	tl.observe("memory_dream", `{"action":"repos"}`, `{"count":2,"repos":[{"id":"repo-a","topics":9},{"id":"repo-b","topics":0}]}`)
-	tl.observe("memory_dream", `{"action":"evidence","repo":"repo-b"}`, `{"repo":"repo-b","topics":3}`)
-	tl.observe("memory_dream", `{"action":"apply","repo":"repo-a"}`, "记忆归档：归档 2 条：x.md、y.md；快照 .state/dream/1")
-	tl.observe("memory_dream", `{"action":"apply","repo":"repo-a"}`, "记忆归档：归档 0 条；跳过 2 条")
+	tl.observe(dreamToolEvent("bash", `{"action":"repos"}`, "无关工具不记"))
+	tl.observe(dreamToolEvent("memory_dream", `{"action":"repos"}`, `{"count":2,"repos":[{"id":"repo-a","topics":9},{"id":"repo-b","topics":0}]}`))
+	tl.observe(dreamToolEvent("memory_dream", `{"action":"evidence","repo":"repo-b"}`, `{"repo":"repo-b","topics":3}`))
+	tl.observe(dreamToolEvent("memory_dream", `{"action":"apply","repo":"repo-a"}`, "记忆归档：归档 2 条：x.md、y.md；快照 .state/dream/1"))
+	tl.observe(dreamToolEvent("memory_dream", `{"action":"apply","repo":"repo-a"}`, "记忆归档：归档 0 条；跳过 2 条"))
 	got := tl.results()
 	if len(got) != 2 {
 		t.Fatalf("应记 2 个库，得到 %+v", got)
@@ -805,7 +810,7 @@ func TestDreamTallyFromToolResults(t *testing.T) {
 	}
 	// nil 台账安全（非 Dream 会话走不到，但守卫要挡住 nil 解引用）。
 	var empty *dreamTally
-	empty.observe("memory_dream", `{"action":"repos"}`, "{}")
+	empty.observe(dreamToolEvent("memory_dream", `{"action":"repos"}`, "{}"))
 	if len(empty.results()) != 0 {
 		t.Fatal("nil 台账应返回空")
 	}

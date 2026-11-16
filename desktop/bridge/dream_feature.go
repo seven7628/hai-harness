@@ -151,6 +151,38 @@ type dreamRepoResult struct {
 	Note     string `json:"note,omitempty"`
 }
 
+// dreamStep 一轮巡检里的一次工具调用（详情视图的「执行时间线」）。
+//
+// 来源是宿主观察到的 ToolRunEnd 事件（见 dream_tally.go），不是模型自述：
+// 模型可以说"我检查了每个库"，而这里记的是**真的调过**哪些工具、成没成。
+type dreamStep struct {
+	// T 调用结束时间（RFC3339，本地时区）。空 = 事件没带时间戳。
+	T string `json:"t,omitempty"`
+	// Tool 工具真名（memory_dream / bash / read_file …）。
+	Tool string `json:"tool,omitempty"`
+	// Arg 这次调用最有辨识度的一个参数（memory_dream=action、bash=命令、写文件=路径）。
+	Arg string `json:"arg,omitempty"`
+	// OK 从工具结果判定的成败。**宁可 false 不可误判成功**（见 dreamStepOK）。
+	OK bool `json:"ok"`
+	// Note 一句话补充（repos 的库数、apply 的归档条数）。
+	Note string `json:"note,omitempty"`
+	// Omitted 非零 = 这不是一次调用，而是"中间省略了 N 步"的占位条目
+	// （见 capDreamSteps）。前端必须先判它、再判 OK，否则会渲染成一个失败步骤。
+	Omitted int `json:"omitted,omitempty"`
+}
+
+// 记录体积上限：运行记录是**一行一轮**的追加文件，一条记录撑大就会连累整份文件
+// 的每次读改写（completeDreamRun 整份重写）。收尾正文实测很少超过 4000 字，
+// 步骤实测一轮几十条（7 个库约 30 次工具调用），120 步给了 4 倍余量。
+const (
+	// dreamResultMax 收尾正文落盘上限（rune 计，含省略号）。
+	dreamResultMax = 4000
+	// dreamStepsMax 步骤数上限；超出保留前 dreamStepsHead + 后 dreamStepsTail。
+	dreamStepsMax  = 120
+	dreamStepsHead = 60
+	dreamStepsTail = 60
+)
+
 // dreamRun 一次 Dream 运行记录（设置页的"运行记录"读它）。
 type dreamRun struct {
 	StartedAt  time.Time `json:"started_at"`
@@ -163,6 +195,42 @@ type dreamRun struct {
 	Summary string            `json:"summary,omitempty"`
 	Repos   []dreamRepoResult `json:"repos,omitempty"`
 	Error   string            `json:"error,omitempty"`
+	// Result 收尾正文的**完整版**（保留换行，截断见 dreamResultOf）：列表只显示
+	// Summary 那一行，点开某一行看详情时看的才是它。
+	//
+	// 与 Summary 并存而不是取代它：列表要单行、详情要原文，压成一行就回不去了
+	// （原换行是模型分点的结构，压掉后表格和列表全糊在一起）。
+	Result string `json:"result,omitempty"`
+	// Steps 本轮的工具调用时间线（裁剪规则见 capDreamSteps）。
+	Steps []dreamStep `json:"steps,omitempty"`
+}
+
+// dreamResultOf 收尾正文落盘前的截断（保留换行，按 rune 切，绝不切半个汉字）。
+//
+// 截断后总长仍 <= dreamResultMax：省略号占一个字符位，否则"4000 上限"变成 4001。
+func dreamResultOf(final string) string {
+	s := strings.TrimSpace(final)
+	r := []rune(s)
+	if len(r) <= dreamResultMax {
+		return s
+	}
+	return string(r[:dreamResultMax-1]) + "…"
+}
+
+// capDreamSteps 把步骤裁到最多 dreamStepsMax 步：前 60 + 后 60 + 中间一条省略占位。
+//
+// 为什么留两头：一轮巡检的结构是「先 repos 拿清单 → 中间逐库 evidence/apply →
+// 最后收尾」，开头的清单与结尾的归档最能说明这一轮干了什么；中间的重复调用
+// （第 7 个库的 evidence）信息量最低。省略条数照实记，前端如实显示"省略 N 步"，
+// 不能让用户以为这就是全部。
+func capDreamSteps(steps []dreamStep) []dreamStep {
+	if len(steps) <= dreamStepsMax {
+		return steps
+	}
+	out := make([]dreamStep, 0, dreamStepsHead+dreamStepsTail+1)
+	out = append(out, steps[:dreamStepsHead]...)
+	out = append(out, dreamStep{Omitted: len(steps) - dreamStepsHead - dreamStepsTail})
+	return append(out, steps[len(steps)-dreamStepsTail:]...)
 }
 
 func dreamRunsPath() string {
@@ -248,12 +316,23 @@ func trimDreamRunsLocked(p string, keep int) {
 	}
 }
 
+// dreamRunDetail 收口时要补进运行记录的详情（详情视图用）。
+//
+// 单独一个结构而不是往 completeDreamRun 再加两个参数：调用点已经有 5 个参数，
+// 再长就没人看得出哪个是摘要、哪个是正文（两者都是"模型说的话"，形态却不同）。
+type dreamRunDetail struct {
+	// Result 收尾正文完整版（落盘前按 dreamResultOf 截断）。
+	Result string
+	// Steps 工具调用时间线（落盘前按 capDreamSteps 裁剪）。
+	Steps []dreamStep
+}
+
 // completeDreamRun 把某次运行的记录从"已开始"补成"已完成"。
 //
 // 为什么改写而不是再追加一条：设置页一行 = 一次运行。追加第二条（状态行）会把
 // 同一个 session 拆成两行，用户看到的是"跑了两遍"。文件很小（一次运行一行），
 // 整份重写的代价可以忽略。
-func completeDreamRun(sessionID string, finished time.Time, summary, errMsg string, repos []dreamRepoResult) {
+func completeDreamRun(sessionID string, finished time.Time, summary, errMsg string, repos []dreamRepoResult, detail dreamRunDetail) {
 	if sessionID == "" {
 		return
 	}
@@ -275,6 +354,10 @@ func completeDreamRun(sessionID string, finished time.Time, summary, errMsg stri
 			if len(repos) > 0 {
 				records[i].Repos = repos
 			}
+			// 体积上限在**写盘这一道口子**上收，而不是在采集点：老的追加路径
+			// （触发失败/看门狗）也要经过这里，将来新增的调用点同样受这条约束。
+			records[i].Result = dreamResultOf(detail.Result)
+			records[i].Steps = capDreamSteps(detail.Steps)
 			hit = true
 			break
 		}

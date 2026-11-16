@@ -1,6 +1,6 @@
 package main
 
-// Dream 的设置面命令（dream_get / dream_set / dream_run_now）。
+// Dream 的设置面命令（dream_get / dream_set / dream_run_now / dream_detail）。
 //
 // 与 dream_scheduler.go 的分工：那边管"什么时候跑"，这里管"用户怎么改设置、
 // 怎么手动跑一次、怎么看到跑过什么"。三条命令都不碰记忆文件本身——归档只走
@@ -107,6 +107,55 @@ func (m *manager) handleDreamRunNow(c command) {
 		return
 	}
 	m.resp(c, true, "", map[string]any{"session_id": bs.id})
+}
+
+// dreamDetailGone 详情取不到时的**唯一**文案（前端直接展示，不再加工）。
+//
+// 说清楚"为什么没有"：记录文件只保留最近 200 行（dreamRunsKeep 轮转），
+// 用户点到一条老记录时不是出错，是那一轮的详情压根没留在本地。含糊的
+// "未找到"会让人以为记录丢了/程序坏了，去翻日志。
+const dreamDetailGone = "该轮详情已不在本地记录里（记录只保留最近 200 行）"
+
+// handleDreamDetail 某一轮运行记录的详情：整条记录（含 result 全文与 steps 时间线）。
+//
+// 为什么整条记录原样返回、而不是挑字段：详情视图要显示 起止/耗时/provider/model/
+// 状态/逐库/时间线/错误——就是记录的全部内容。逐字段挑选会让前端与 Go 结构体
+// 两处各维护一份字段表，加一个字段就要改两边（且漏改时表现为"详情里永远没有它"）。
+// 记录里没有密钥（provider 只是名字），可以整条给。
+func (m *manager) handleDreamDetail(c command) {
+	sid := strings.TrimSpace(str(c.Payload, "session_id"))
+	if sid == "" {
+		// 空 session_id 不可能是"记录过期"：这是调用方 bug，文案要能区分。
+		m.resp(c, false, "缺少 session_id（要查哪一轮的运行记录）", nil)
+		return
+	}
+	run, found := findDreamRun(sid)
+	if !found {
+		m.resp(c, false, dreamDetailGone, nil)
+		return
+	}
+	m.resp(c, true, "", map[string]any{"run": run, "found": true})
+}
+
+// findDreamRun 按 session_id 精确找一条运行记录（不受 dreamRunsShown=20 限制）。
+//
+// 从文件**尾部**往前找：同一个 session 正常只有一条记录，但重试/看门狗可能留下
+// 重复（后者已按 FinishedAt 幂等收口），取最新的那条最符合用户点的那一行。
+func findDreamRun(sessionID string) (dreamRun, bool) {
+	p := dreamRunsPath()
+	if p == "" {
+		return dreamRun{}, false
+	}
+	// 读盘与 completeDreamRun 的"整份重写"互斥：否则可能在 rename 前后读到半份。
+	dreamRunsMu.Lock()
+	defer dreamRunsMu.Unlock()
+	records := readDreamRuns(0)
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i].SessionID == sessionID {
+			return records[i], true
+		}
+	}
+	return dreamRun{}, false
 }
 
 // dreamClockValid 严格的 "HH:MM" 形状校验。

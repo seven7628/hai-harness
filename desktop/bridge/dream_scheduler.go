@@ -138,9 +138,14 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	}
 
 	bs.isDream = true // 与 cron 派生会话同类：不进会话列表、不被 workspace 级操作误伤
-	// 台账：每次 memory_dream 的工具结果都记进来，收口时写进运行记录的 repos 字段。
+	// 台账：每次工具结果都记进来（repos + 时间线），收口时一起写进运行记录。
+	// 快照在**收口这一刻**取（不是闭包创建时）：闭包里再调 snapshot，才能看到
+	// 最后几次工具调用——它们与 AgentEnd 只隔几条事件。
 	bs.dreamTally = newDreamTally()
-	bs.dreamSessionDone = func(errMsg, final string) { m.finishDreamRun(sid, errMsg, final, bs.dreamTally.results()) }
+	bs.dreamSessionDone = func(errMsg, final string) {
+		steps, repos := bs.dreamTally.snapshot()
+		m.finishDreamRun(sid, errMsg, final, repos, steps)
+	}
 
 	// 先记"已开始"：巡检跑到一半进程被杀，设置页也应当看得到这一轮（FinishedAt 空）。
 	appendDreamRun(dreamRun{
@@ -152,7 +157,7 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	})); err != nil {
 		bs.dreamSessionDone = nil
 		m.dreamRelease()
-		completeDreamRun(sid, time.Now(), "", err.Error(), nil)
+		completeDreamRun(sid, time.Now(), "", err.Error(), nil, dreamRunDetail{})
 		m.emitDreamChanged()
 		return nil, fmt.Errorf("投递 Dream 任务失败: %w", err)
 	}
@@ -162,9 +167,12 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 }
 
 // finishDreamRun 派生会话 AgentEnd 后收口（emit 尾部调用，见 main.go）。
-func (m *manager) finishDreamRun(sessionID, errMsg, final string, repos []dreamRepoResult) {
+//
+// final 是模型收尾正文的**完整版**：摘要归摘要（列表一行），正文归 Result
+// （详情视图看原文，保留换行）——压成摘要就再也还原不回来了。
+func (m *manager) finishDreamRun(sessionID, errMsg, final string, repos []dreamRepoResult, steps []dreamStep) {
 	summary := dreamSummaryOf(final, repos)
-	completeDreamRun(sessionID, time.Now(), summary, errMsg, repos)
+	completeDreamRun(sessionID, time.Now(), summary, errMsg, repos, dreamRunDetail{Result: final, Steps: steps})
 	m.dreamRelease()
 	m.emitDreamChanged()
 }
@@ -338,7 +346,8 @@ func (m *manager) dreamWatchdog(now time.Time) {
 		dreamMaxRunDuration, started.Format("15:04"))
 	fmt.Fprintf(os.Stderr, "dream: %s（派生会话 %s）\n", msg, sid)
 	if sid != "" {
-		completeDreamRun(sid, now, "", msg, nil)
+		// 看门狗收口没有正文也没有步骤（那一轮还在跑，台账归它自己）。
+		completeDreamRun(sid, now, "", msg, nil, dreamRunDetail{})
 	}
 	m.emitDreamChanged()
 }
