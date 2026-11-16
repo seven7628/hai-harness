@@ -529,6 +529,12 @@ type bridgeSession struct {
 	// isCron 标记本会话为定时任务派生会话：不出现在 workspace 会话列表，
 	// 不被 workspace 级操作（中断全部/删除工作区/重建）误伤，独立归 Cron 管理。
 	isCron bool
+	// isDream 标记本会话为 Dream 巡检派生会话：与 cron 同类（不出列表、不参与
+	// workspace 级操作），但收口走 dreamSessionDone（见 dream_scheduler.go）。
+	isDream bool
+	// dreamSessionDone Dream 派生会话的 AgentEnd 钩子（nil = 非 Dream 会话）。
+	// 与 cronEnd* 一样在 emit 的 AgentEnd 分支先暂存状态，等事件落盘后再调用。
+	dreamSessionDone func(errMsg, final string)
 
 	// 注：沙箱放行确认已抽象到工具层审批通道（askSandboxApproval → ToolApprovalRequested
 	// + approve 命令，见 sandboxReleaseGate），不再有独立的 sandbox_blocked 模态。
@@ -656,6 +662,12 @@ func (bs *bridgeSession) askSandboxApproval(ctx context.Context, m *manager, spe
 	ok, err := wait(ctx)
 	return err == nil && ok
 }
+
+// derived 本会话是否由宿主派生（cron 定时任务 / Dream 巡检）。
+//
+// 派生会话不是"用户的会话"：不进会话列表、不参与 workspace 级操作（中断全部 /
+// 关闭 / 删除工作区 / 配置重建），也不做自动标题这类只给用户看的事。
+func (bs *bridgeSession) derived() bool { return bs.isCron || bs.isDream }
 
 func (bs *bridgeSession) wakeRun() {
 	select {
@@ -996,6 +1008,13 @@ func (bs *bridgeSession) emit(e events.Event) {
 	//（含本条 agent_end 的最终回复）。只对定时任务派生会话生效（cronLedger 非空）。
 	if e.Type() == events.AgentEndType && bs.cronLedger != nil && bs.cronRun != "" {
 		bs.finishCronRun(bs.cronEndStatus, bs.cronEndErr, bs.cronEndContent)
+	}
+	// Dream 巡检收口：同一时机（事件已落盘），把运行记录补成"已完成"。
+	// 钩子是**一次性**的：清掉再调，重入（重试/续跑再发 AgentEnd）不会写第二遍。
+	if e.Type() == events.AgentEndType && bs.dreamSessionDone != nil {
+		done := bs.dreamSessionDone
+		bs.dreamSessionDone = nil
+		done(bs.cronEndErr, bs.cronEndContent)
 	}
 	// Hub 任务结算：**根 run** 的 AgentEnd、且事件已落盘（transcript 完整）。
 	// 项目会话（工作区目标）与 Hub 智能体会话（群内 agent 目标，P3b-05）共用
@@ -1496,6 +1515,13 @@ type manager struct {
 	cron            *cron.Store // 全局定时任务库（跨会话；~/.go-code/cron.json + 运行账本）
 	cronCtx         context.Context
 	cronCancel      context.CancelFunc
+	// dream 调度（记忆生命周期巡检，见 dream_scheduler.go）。ctx/cancel 与 cron 同形态；
+	// dreamMu/dreamBusy 把「ticker 到点」与「设置页立即运行」串行化——两条路径同时开跑
+	// 就是两份互不相见的证据，归档决策会互相打脸。
+	dreamCtx    context.Context
+	dreamCancel context.CancelFunc
+	dreamMu     sync.Mutex
+	dreamBusy   bool
 	oauthWaiter     oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
 	// imPlugin IM 集成插件 —— **连接面进程级共享 + 归属面（agent/group/workspace）隔离**。
 	//
@@ -1802,8 +1828,8 @@ func (m *manager) interruptAllIn(wsPath string) int {
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
-		if bs.isCron {
-			continue // 定时任务派生会话不受用户「中断全部」影响
+		if bs.derived() {
+			continue // 派生会话（cron / Dream）不受用户「中断全部」影响
 		}
 		sessions = append(sessions, bs)
 	}
@@ -4129,6 +4155,18 @@ func (m *manager) dispatch(c command) {
 		}
 		m.resp(c, true, "", map[string]any{"enabled": on, "applies_to": "next_session"})
 
+	case CmdDreamGet: // Dream 设置 + 最近运行记录（设置面板打开/收到 dream_changed）
+		m.handleDreamGet(c)
+		return
+
+	case CmdDreamSet: // 改 Dream 设置（开关/provider/model/时刻）；不动 LastRunDate
+		m.handleDreamSet(c)
+		return
+
+	case CmdDreamRunNow: // 立刻巡检一次（忽略时刻与"今天跑过"，仍写 LastRunDate）
+		m.handleDreamRunNow(c)
+		return
+
 	case CmdMemoryBrowse: // 浏览 Project Memory 文件（官方 §2.7 的 `/memory`）
 		if ws == "" {
 			m.resp(c, false, "workspace 为空", nil)
@@ -4778,8 +4816,8 @@ func (m *manager) shutdownWorkspace(wsPath string) {
 	ws.mu.Lock()
 	items := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
-		if bs.isCron {
-			continue // 定时任务派生会话归 Cron 管理，不随 workspace 关闭
+		if bs.derived() {
+			continue // 派生会话（cron / Dream）独立管理，不随 workspace 关闭
 		}
 		items = append(items, bs)
 	}
@@ -5025,8 +5063,8 @@ func (m *manager) deleteWorkspace(wsPath string) {
 		items := make([]*bridgeSession, 0, len(ws.sessions))
 		kept := map[string]*bridgeSession{}
 		for id, bs := range ws.sessions {
-			if bs.isCron {
-				kept[id] = bs // 定时任务派生会话保留：归 Cron 管理（独立存储于 ~/.go-code/cron_sessions）
+			if bs.derived() {
+				kept[id] = bs // 派生会话保留：独立存储（cron_sessions / dream_sessions）
 				continue
 			}
 			items = append(items, bs)
@@ -5122,8 +5160,8 @@ func (m *manager) listSessions(wsPath string) []map[string]any {
 		if seen[id] {
 			continue
 		}
-		if bs.isCron {
-			continue // 定时任务派生会话独立归 Cron 管理，不出现在 workspace 会话列表
+		if bs.derived() {
+			continue // 派生会话（cron / Dream）独立管理，不出现在 workspace 会话列表
 		}
 		seen[id] = true
 		out = append(out, map[string]any{
@@ -6866,7 +6904,7 @@ func firstTextOf(blocks []core.Content) string {
 //
 // 标题约束（prompt 侧 + 后处理双侧保证）：≤15 字符；跟随用户输入语言。
 func (m *manager) maybeGenSessionTitle(wsPath string, bs *bridgeSession, firstText string) {
-	if bs == nil || bs.isCron || strings.TrimSpace(firstText) == "" {
+	if bs == nil || bs.derived() || strings.TrimSpace(firstText) == "" {
 		return
 	}
 	wsKey := workspaceKey(wsPath)
@@ -7253,8 +7291,8 @@ func (m *manager) rebuildWorkspace(wsPath string) {
 	ws.mu.Lock()
 	sessions := make([]*bridgeSession, 0, len(ws.sessions))
 	for _, bs := range ws.sessions {
-		if bs.isCron {
-			continue // 定时任务派生会话保持原 loop（触发即跑、跑完归档）
+		if bs.derived() {
+			continue // 派生会话保持原 loop（触发即跑、跑完归档）
 		}
 		sessions = append(sessions, bs)
 	}
@@ -7379,6 +7417,10 @@ func serve() error {
 	cronStart := time.Now()
 	m.startCron()
 	startupLog("A3.startCron", cronStart)
+	// Dream：记忆生命周期的定时巡检（与 cron 同一条触发链路，见 dream_scheduler.go）。
+	dreamStart := time.Now()
+	m.startDreamScheduler()
+	startupLog("A3.startDreamScheduler", dreamStart)
 
 	// P6-09：把磁盘上的群对话状态装回控制器（未投递的恢复排队、已投递未完成的标
 	// interrupted 并写系统说明、坏文件只告警不覆盖）。放在 ready 之前：前端一打开
@@ -7434,6 +7476,7 @@ func serve() error {
 	}
 	// stdin EOF → 优雅 Shutdown 全部会话（状态落盘）+ 停定时调度器 + 停文件监听
 	m.stopCron()
+	m.stopDreamScheduler()
 	m.shutdownAll()
 	m.stopFileWatches()
 	return nil
