@@ -388,10 +388,10 @@ func TestGuidanceDoesNotClaimPartialWhenNothingOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(inj.Text, "不是全部") {
+	if strings.Contains(inj.Text, "not all of them") {
 		t.Fatalf("没有省略时不该声称是子集：\n%s", inj.Text)
 	}
-	if !strings.Contains(inj.Text, "前 200 行") {
+	if !strings.Contains(inj.Text, "first 200 lines") {
 		t.Fatalf("此时应按全量形态陈述限额：\n%s", inj.Text)
 	}
 }

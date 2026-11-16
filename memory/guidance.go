@@ -54,14 +54,16 @@ import (
 // 不是引导。不加的话模型会把"说明里列了格式、清单却是空的"读成记忆丢失，
 // 而实际上只是还没写过。
 func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
+	// 注入正文统一英文（2026-11）：模型的系统提示与工具描述都是英文语境，
+	// 混排会让"读一遍就能照做"的那部分变慢。中文只留源码注释与给人看的界面。
 	var b strings.Builder
 
-	b.WriteString("记忆目录：")
+	b.WriteString("Project memory: ")
 	b.WriteString(d.Path)
 	b.WriteString("\n")
 
 	if !hasIndex {
-		b.WriteString("\n当前尚无记忆（MEMORY.md 不存在或为空）。\n")
+		b.WriteString("\nNo memories yet (MEMORY.md is missing or empty).\n")
 	}
 
 	// 常驻段只留"是什么 + 去哪读"（2026-11 渐进披露）。详细规则——type 语义、
@@ -69,29 +71,28 @@ func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
 	// 写记忆**时自己去读。
 	//
 	// 指针用**相对路径**：写绝对路径要多付约 90 字节（这段每个会话都付），而
-	// "相对上一行的记忆目录"已经无歧义——省下来的正好是这次改造的净收益。
+	// "相对上一行的记忆目录"已经无歧义。
 	//
 	// 代价是"读到才生效"：模型如果没去读指南，就只知道下面这三条。所以这三条
 	// 必须是**缺了就写不对**的最小集：目录在哪、索引怎么登记、注入是子集。
-	b.WriteString("\n- 一条记忆 = 该目录下一个 .md 文件；在 `")
+	b.WriteString("\n- One memory = one .md file in that directory; register it as a single line in `")
 	b.WriteString(IndexFileName)
-	b.WriteString("` 里一行一条登记，行内要带文件名（没有文件名的行不算作一条记忆）。\n")
-	b.WriteString("- 写之前读 `.state/" + GuideFileName + "`（相对记忆目录）：type 语义、先查重、引用前核对、索引行样例。\n")
+	b.WriteString("`, and that line must carry the filename (a line without one is not an entry).\n")
+	b.WriteString("- Read `.state/" + GuideFileName + "` (relative to the memory directory) before writing: ")
+	b.WriteString("type semantics, dedup, verify-before-rely, index line format.\n")
 
 	if tier == InjectionHot && omitted > 0 {
-		b.WriteString("- 启动时只加载 `")
-		b.WriteString(IndexFileName)
-		b.WriteString("` 中按使用频次挑出的 ")
+		b.WriteString("- Startup loads only the ")
 		b.WriteString(strconv.Itoa(HotListSize))
-		b.WriteString(" 条（不是全部）；完整索引与正文需要时用标准文件工具自行读取。")
+		b.WriteString(" entries with the highest read count (not all of them); read the full index and any memory body with the standard file tools.")
 	} else {
-		b.WriteString("- 启动时只加载 `")
-		b.WriteString(IndexFileName)
-		b.WriteString("` 的前 ")
+		b.WriteString("- Startup loads only the first ")
 		b.WriteString(strconv.Itoa(MaxIndexLines))
-		b.WriteString(" 行 / ")
+		b.WriteString(" lines / ")
 		b.WriteString(strconv.Itoa(MaxIndexBytes))
-		b.WriteString(" 字节（取先到者）；正文不自动加载，需要时用标准文件工具自行读取。")
+		b.WriteString(" bytes of `")
+		b.WriteString(IndexFileName)
+		b.WriteString("`, whichever comes first; memory bodies are not loaded automatically.")
 	}
 
 	return b.String()

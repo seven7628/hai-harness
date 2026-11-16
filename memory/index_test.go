@@ -109,7 +109,7 @@ func TestBuildInjection_NoIndexStillInjectsGuidance(t *testing.T) {
 	if !strings.Contains(inj.Text, d.Path) {
 		t.Fatalf("说明段必须含记忆目录绝对路径 %q：\n%s", d.Path, inj.Text)
 	}
-	if !strings.Contains(inj.Text, "当前尚无记忆") {
+	if !strings.Contains(inj.Text, "No memories yet") {
 		t.Fatalf("无索引时须如实说明尚无记忆：\n%s", inj.Text)
 	}
 }

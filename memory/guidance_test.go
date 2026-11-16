@@ -13,9 +13,9 @@ func TestGuidance_StatesPathAndShape(t *testing.T) {
 	g := guidance(d, true, InjectionFull, 0)
 
 	mustContain := []string{
-		d.Path,        // 目录绝对路径：模型唯一的写入目标
-		IndexFileName, // 索引文件名
-		"行内要带文件名",     // 解析器硬规则：没有文件名就不算条目
+		d.Path,                    // 目录绝对路径：模型唯一的写入目标
+		IndexFileName,             // 索引文件名
+		"must carry the filename", // 解析器硬规则：没有文件名就不算条目
 		// 按需指南的入口用**相对路径**：绝对路径每会话多付约 90 字节，
 		// 而"相对上一行的记忆目录"已无歧义。guidePath(d) 是可解析的落点，测试在那儿钉。
 		".state/" + GuideFileName,
@@ -63,7 +63,7 @@ func TestGuidance_HasNoImperativeAdvice(t *testing.T) {
 	}
 }
 
-// 无索引与有索引只差"当前尚无记忆"一句——其余完全相同。
+// 无索引与有索引只差"No memories yet"一句——其余完全相同。
 //
 // 这样"文件不存在"与"文件存在但没条目"在模型看来是同一件事（都还没有记忆），
 // 不会因为文件碰巧存在就被读成"你的索引空了"（那像是什么丢了）。
@@ -74,7 +74,7 @@ func TestGuidance_EmptyDiffersOnlyByAbsenceLine(t *testing.T) {
 	if with == without {
 		t.Fatal("hasIndex 不影响输出")
 	}
-	const absence = "当前尚无记忆"
+	const absence = "No memories yet"
 	if !strings.Contains(without, absence) {
 		t.Fatalf("无索引时应说明尚无记忆：\n%s", without)
 	}
@@ -82,7 +82,7 @@ func TestGuidance_EmptyDiffersOnlyByAbsenceLine(t *testing.T) {
 		t.Fatalf("有索引时不得说尚无记忆：\n%s", with)
 	}
 	// 去掉那一句之后两者必须逐字节相同（而不是"差不多"）。
-	trimmed := strings.Replace(without, "\n\n"+absence+"（MEMORY.md 不存在或为空）。\n", "\n", 1)
+	trimmed := strings.Replace(without, "\n\n"+absence+" (MEMORY.md is missing or empty).\n", "\n", 1)
 	if trimmed != with {
 		t.Fatalf("去掉“尚无记忆”一句后应与有索引版逐字节相同：\n%q\nwant\n%q", trimmed, with)
 	}
