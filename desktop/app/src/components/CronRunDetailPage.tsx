@@ -1,20 +1,18 @@
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
-import { Back, Clock } from './icons'
+import { Clock } from './icons'
 import Narrative from './Narrative'
 import { fmtDuration } from '../lib/duration'
-
-function fmtTime(v?: string): string {
-  if (!v) return '—'
-  const d = new Date(v)
-  return isNaN(d.getTime()) ? '—' : d.toLocaleString()
-}
+import { fmtStamp } from './ui'
+import PageHead from './PageHead'
+import EmptyState from './EmptyState'
 
 function fmtDur(ms?: number): string {
   if (!ms) return '—'
   return fmtDuration(ms)
 }
 
+// 某次执行的详情页：元信息条（人话字段）+ 叙事区（与主对话页同构）。
 export default function CronRunDetailPage() {
   const t = useT()
   const activeCronRun = useAppStore((s) => s.activeCronRun)
@@ -45,35 +43,47 @@ export default function CronRunDetailPage() {
 
   return (
     <div className="cron-page cron-detail-page">
-      <header className="cron-head">
-        <button className="cron-head-back" onClick={back}><Back /> {t('cron.backRuns')}</button>
-        <div className="cron-head-title">
-          <h1><Clock size={16} /> {t('cron.detailTitle')}</h1>
-          <span className="cron-head-sub">{activeCronRun ? `${activeCronRun.run_id}${activeCronRun.session_id ? ' · ' + activeCronRun.session_id : ''}` : ''}</span>
-        </div>
-        <span className="cron-head-grow" />
-        <div className="cron-head-right">
-          {activeCronRun && (
+      <PageHead
+        className="cron-head"
+        // i18n: 建议 key cron.backRun —— 文案基线：返回记录
+        backLabel="返回记录"
+        onBack={back}
+        icon={<Clock size={15} />}
+        title={t('cron.detailTitle')}
+        subtitle={activeCronRun ? fmtStamp(activeCronRun.fired_at) : ''}
+        right={
+          activeCronRun ? (
             <span className={`cron-status ${activeCronRun.status ?? ''}`}>{statusText(activeCronRun.status)}</span>
-          )}
-        </div>
-      </header>
+          ) : null
+        }
+      />
 
       {cronDetailLoading && !activeCronRun ? (
-        <div className="sp-body"><div className="sp-content"><div className="empty">{t('cron.detailLoading')}</div></div></div>
+        <div className="sp-body"><div className="sp-content"><div className="cron-card"><EmptyState compact icon={<Clock size={18} />} title={t('cron.detailLoading')} /></div></div></div>
       ) : !activeCronRun ? (
-        <div className="sp-body"><div className="sp-content"><div className="empty">{t('cron.detailNotFound')}</div></div></div>
+        <div className="sp-body">
+          <div className="sp-content">
+            <div className="cron-card">
+              <EmptyState
+                icon={<Clock size={18} />}
+                title="未找到该次执行记录"
+                hint={t('cron.detailNotFound')}
+                actions={<button className="btn" onClick={back}>返回执行记录</button>}
+              />
+            </div>
+          </div>
+        </div>
       ) : (
         <>
           {/* 执行元信息条：轻量、不占叙事区空间 */}
           <div className="cron-detail-meta">
             <span className="cron-meta-item">
               <span className="cron-meta-label">{t('cron.meta.triggerAt')}</span>
-              <b>{fmtTime(activeCronRun.fired_at)}</b>
+              <b className="mono">{fmtStamp(activeCronRun.fired_at)}</b>
             </span>
             <span className="cron-meta-item">
               <span className="cron-meta-label">{t('cron.meta.duration')}</span>
-              <b>{fmtDur(activeCronRun.duration_ms)}</b>
+              <b className="mono">{fmtDur(activeCronRun.duration_ms)}</b>
             </span>
             {activeCronRun.session_id && (
               <span className="cron-meta-item">
@@ -92,7 +102,13 @@ export default function CronRunDetailPage() {
 
           {/* 叙事区：与主对话页同构（.narrative-wrap + .narrative，整页滚动/居中） */}
           {!hasView ? (
-            <div className="sp-body"><div className="sp-content"><div className="empty">{t('cron.detailNotArchived')}</div></div></div>
+            <div className="sp-body">
+              <div className="sp-content">
+                <div className="cron-card">
+                  <EmptyState icon={<Clock size={18} />} title="该次执行的历史尚未归档" hint="执行仍在进行中，或数据已缺失。" />
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="cron-detail-narrative">
               <Narrative viewSid={viewSid} />

@@ -66,6 +66,32 @@ export function fmtClock(ts?: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/* 仅有日期没有时间（执行记录/创建时间的紧凑写法）：YYYY-MM-DD */
+export function fmtDate(ts?: number | string | null): string {
+  if (ts == null || ts === '') return '—'
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return '—'
+  const pad = (v: number) => String(v).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/* 用户可见的时间戳（定时任务列表/执行记录/详情共用）：
+   YYYY-MM-DD HH:mm（24h，本地时区），可选到秒；空值/非法值统一给「—」。
+   为什么不用 toLocaleString：中文界面下它会输出 `11/15/2026, 9:11:58 PM`，
+   月份/日期顺序随系统区域漂移，列表里还会被窄列折成两三行。 */
+export function fmtStamp(
+  ts?: number | string | null,
+  opts: { seconds?: boolean; fallback?: string } = {},
+): string {
+  const fallback = opts.fallback ?? '—'
+  if (ts == null || ts === '') return fallback
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return fallback
+  const pad = (v: number) => String(v).padStart(2, '0')
+  const base = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return opts.seconds ? `${base}:${pad(d.getSeconds())}` : base
+}
+
 /* 只有时刻，没有日期：轮头一行是「哪个模型 · 什么时候」，日期在会话标题上
    已经有了（设计里的轮头就是 19:20:02 这个形态）。 */
 export function fmtTime(ts?: number): string {

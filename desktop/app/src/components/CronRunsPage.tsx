@@ -1,18 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
-import type { CronJob, CronRun } from '../transport/types'
-import { Back, Clock } from './icons'
+import type { CronRun } from '../transport/types'
+import { Clock } from './icons'
 import { fmtDuration } from '../lib/duration'
-
-function fmtTime(v?: string): string {
-  if (!v) return '—'
-  const d = new Date(v)
-  return isNaN(d.getTime()) ? '—' : d.toLocaleString()
-}
+import { fmtStamp } from './ui'
+import PageHead from './PageHead'
+import EmptyState from './EmptyState'
 
 const PAGE_SIZE = 10
 
+// 执行历史（某个任务的全部运行记录）。
+// 表格在 ≤900px 由 CSS 变成卡片（thead 隐藏、td 用 data-label 显示字段名），
+// 这样 800px 宽时不会把「执行中」竖排、也不会被 .cron-card 的 overflow 裁掉。
 export default function CronRunsPage() {
   const t = useT()
   const job = useAppStore((s) => s.cronRunsJob)
@@ -58,31 +58,38 @@ export default function CronRunsPage() {
 
   return (
     <div className="cron-page cron-runs-page">
-      <header className="cron-head">
-        <button className="cron-head-back" onClick={closeCronRuns}><Back /> {t('cron.backList')}</button>
-        <div className="cron-head-title">
-          <h1><Clock size={16} /> {t('cron.runsTitle')}</h1>
-          <span className="cron-head-sub">{job.id} · {job.cron} · {job.recurring ? t('cron.recurring') : t('cron.once')}{job.paused ? ` · ${t('cron.paused')}` : ''}</span>
-        </div>
-        <span className="cron-head-grow" />
-        <div className="cron-head-right">
-          <span className="cron-head-count">{t('cron.runsCount').replace('{n}', String(runs.length))}</span>
-          <button className="cron-head-refresh" onClick={() => fetchCronRuns(job.id)}>{t('cron.refresh')}</button>
-        </div>
-      </header>
+      <PageHead
+        className="cron-head"
+        backLabel={t('cron.backList')}
+        onBack={closeCronRuns}
+        icon={<Clock size={15} />}
+        title={t('cron.runsTitle')}
+        // 任务内容放副标题（人话优先）；cron 表达式与内部 id 降级到下面的信息条
+        subtitle={job.prompt}
+        right={
+          <>
+            <span className="page-head-count cron-head-count">{t('cron.runsCount').replace('{n}', String(runs.length))}</span>
+            <button className="btn page-head-refresh cron-head-refresh" onClick={() => fetchCronRuns(job.id)}>{t('cron.refresh')}</button>
+          </>
+        }
+      />
 
       <div className="sp-body">
         <div className="sp-content">
           <div className="cron-card">
             <div className="cron-runs-jobinfo">
-              <span className="cron-runs-job-prompt">{job.prompt}</span>
-              <span className="mono">{job.cron}</span>
+              <span className="mono" title={job.cron}>{job.cron}</span>
               <span>{job.recurring ? t('cron.recurring') : t('cron.once')}</span>
               {job.paused && <span className="cron-status paused">{t('cron.paused')}</span>}
+              <span className="mono cron-runs-job-id" title={job.id}>{job.id}</span>
             </div>
 
             {runs.length === 0 ? (
-              <div className="empty">{t('cron.emptyRuns')}</div>
+              <EmptyState
+                icon={<Clock size={18} />}
+                title="暂无执行记录"
+                hint="到点触发后，每次执行的会话历史都会出现在这里。"
+              />
             ) : (
               <>
                 <table className="cron-table">
@@ -94,12 +101,12 @@ export default function CronRunsPage() {
                   <tbody>
                     {pageRuns.map((r) => (
                       <tr key={r.run_id} className="cron-run-row" onClick={() => openRun(r)}>
-                        <td>{fmtTime(r.fired_at)}</td>
-                        <td><span className={`cron-status ${r.status}`}>{statusText(r.status)}</span></td>
-                        <td>{r.duration_ms ? fmtDuration(r.duration_ms) : '—'}</td>
-                        <td className="mono">{r.session_id || '—'}</td>
-                        <td className="cron-prompt">{r.error || r.final_result || '—'}</td>
-                        <td className="cron-actions">
+                        <td className="cell-time" data-label={t('cron.th.runTime')}>{fmtStamp(r.fired_at)}</td>
+                        <td data-label={t('cron.th.status')}><span className={`cron-status ${r.status}`}>{statusText(r.status)}</span></td>
+                        <td className="cell-time" data-label={t('cron.th.duration')}>{r.duration_ms ? fmtDuration(r.duration_ms) : '—'}</td>
+                        <td className="mono" data-label={t('cron.th.session')}>{r.session_id || '—'}</td>
+                        <td className="cron-prompt cell-summary" data-label={t('cron.th.summary')} title={r.error || r.final_result || ''}>{r.error || r.final_result || '—'}</td>
+                        <td className="cron-actions" data-label={t('cron.th.actions')} onClick={(e) => e.stopPropagation()}>
                           <button className="btn" onClick={(e) => { e.stopPropagation(); openRun(r) }}>{t('cron.viewSession')}</button>
                         </td>
                       </tr>

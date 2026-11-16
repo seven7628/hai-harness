@@ -14985,3 +14985,95 @@ body.is-electron .page-head {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* —— 15. 按钮补充态：ghost（次级/弱动作）与页头里的次级按钮 —— */
+.btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+}
+.btn.ghost:hover {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--text);
+}
+.btn.ghost:active {
+  background: var(--border);
+}
+/* 定时任务：时间列/数字列（等宽数字，窄窗也不折行） */
+.cron-table td.cell-time {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.cron-table td.cell-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+/* 功能未开启提示条：warning 弱底 + 左侧色标（只用 --warning，修掉无效的 --warn） */
+.cron-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  flex: 0 0 auto;
+  margin: 14px 18px 0;
+  padding: 9px 12px 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-left: 3px solid var(--warning);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.cron-warn-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+.cron-warn-link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.cron-warn-link:hover {
+  color: var(--accent-strong);
+}
+@media (max-width: 900px) {
+  .cron-warn {
+    margin: 10px 12px 0;
+  }
+}
+/* 编辑弹窗：与设置弹窗同语言（弹窗体表单样式在 .page-modal-field） */
+.cron-edit {
+  padding: 2px 0 0;
+  gap: 0;
+}
+.cron-edit .page-modal-field {
+  margin-bottom: 14px;
+}
+.cron-edit-modal .page-modal-bd {
+  padding-top: 14px;
+}
+/* 执行历史信息条：内部 id 排在最后、弱色小字（不再占副标题） */
+.cron-runs-job-id {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-3);
+  opacity: .8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
