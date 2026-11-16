@@ -133,20 +133,21 @@ func TestMemoryWiredIntoRealSessionSystemPrompt(t *testing.T) {
 	if onChars <= baseChars {
 		t.Fatalf("开着记忆时提示词侧没有变长：基线 %d → 有记忆 %d（注入未生效）", baseChars, onChars)
 	}
-	// 增量断言按**默认档位 hot** 重写（2026-11）。
+	// 增量断言只保留"注入确实发生"这一条（2026-11 第二次改写）。
 	//
-	// 旧断言要求"增量覆盖整份索引"——那是 full 档的契约。默认改成热点清单后，
-	// 注入的是 Top-64 子集 + 一句"这不是全部"的页脚，必然比整份索引短
-	// （实测 100 条索引 1390 字节 → 增量 954）。所以这里只断言两件不该变的事：
-	// 注入确实发生了、且没有超过索引本身（超了说明说了两遍）。
-	// 档位的细节（K、截断、页脚）由 memory 包自己的测试覆盖，不在这里重复。
+	// 前两版分别假设过"增量覆盖整份索引"（full 档）和"增量小于索引"（hot 档的
+	// 单行渲染）。2026-11 起 `## Memory` 改成结构化 `<memory>` 块：每条多出
+	// name/description/file_path 三行的骨架，而 description 不截断——**块的总字节
+	// 不再与原始索引行有任何大小关系**，它可以更大（索引很稀疏时），也可以更小
+	// （索引行很长、预算砍掉一半条目时）。
+	//
+	// 所以这里不再断言大小，只断言"有注入"。条数、预算、页脚这些语义由 memory
+	// 包自己的测试覆盖（TestHotListByteBudgetDropsWholeEntries 等），不在这里重复。
 	delta := onChars - baseChars
 	if delta <= 0 {
 		t.Fatalf("增量 %d：注入没生效", delta)
 	}
-	if delta >= int64(len(idx)) {
-		t.Fatalf("增量 %d 不小于索引正文 %d：子集档不该把整份索引塞进去", delta, len(idx))
-	}
+	_ = idx
 }
 
 // buildBigIndex 造一份 n 条记忆的索引。
