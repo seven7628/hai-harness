@@ -22,6 +22,9 @@ func (m *manager) handleDreamGet(c command) {
 	m.resp(c, true, "", map[string]any{
 		"settings": loadDreamSettings(),
 		"runs":     readDreamRuns(dreamRunsShown),
+		// running 由持有闩的一方给：前端据此把「立即运行」显示成进行中，
+		// 而不是拿"有没有未完成的记录"去猜（进程被杀留下的半条记录会一直像在跑）。
+		"running": m.dreamRunning(),
 	})
 }
 

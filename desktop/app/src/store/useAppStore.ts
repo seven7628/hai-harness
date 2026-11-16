@@ -345,6 +345,36 @@ export interface MemoryListing {
   files: MemoryListedFile[]
 }
 
+// Dream（记忆生命周期巡检）设置（bridge dream_set 的入参与 dream_get 的 settings 回读）。
+// provider/model 空串 = 沿用当前默认模型（用户没选过时的形态）。
+export interface DreamSettings {
+  enabled: boolean
+  provider: string
+  model: string
+  at: string // 本地时间 "HH:MM"
+  last_run_date?: string // 最近一次触发的本地日期（YYYY-MM-DD），由调度器维护
+}
+
+// 一次巡检的运行记录（dream_get 的 runs；时间均为 RFC3339）。
+// finished_at 缺失 = 还没跑完（进程中途退出时也会停在这个形态）。
+export interface DreamRun {
+  started_at: string
+  finished_at?: string
+  provider: string
+  model: string
+  session_id?: string
+  summary?: string // 收尾摘要（模型最后一段正文压成一行）
+  error?: string
+}
+
+// Dream 设置入参（dream_set）。
+export interface DreamSettingsInput {
+  enabled: boolean
+  provider: string
+  model: string
+  at: string
+}
+
 // 上下文构成分区（bridge context_breakdown 命令）。
 // 分区键与 SDK 常量一一对应：system_prompt / skills / tools / mcp / messages / other。
 // 口径（2026-09-20 重定）：
@@ -3316,6 +3346,20 @@ export interface AppState {
   // 宿主没有"一次运行结束"的可靠观测点，聚合放在这一侧。
   memPendingSaved: number
   memPendingRecalled: number
+  // Dream（记忆生命周期巡检；设置面板 · 记忆组底部区块）。
+  //
+  // settings 与 runs 来自同一条 dream_get：面板打开时取一次，之后由 dream_changed
+  // 事件驱动重取。dreamRunning 只在 bridge 明确报告"正在跑"时为 true —— 它同时
+  // 让「立即运行」显示成进行中并禁止再点（bridge 侧也有闩，这里是给人看的）。
+  dreamSettings?: DreamSettings
+  dreamRuns: DreamRun[]
+  dreamLoading: boolean
+  dreamSaving: boolean
+  dreamRunning: boolean
+  // dreamError 设置/触发被 bridge 拒绝时的**本地**文案（时刻形状、provider 与 model
+  // 不成对、"正在运行中"…）。这些是预期内的校验失败，不该升级成全局 bridgeError
+  // 红条——用户正在这个面板里操作，答案就该出现在这个面板里。
+  dreamError?: string
   marketSkills?: MarketSkill[] // 远程市场浏览结果（skill_browse；SkillsPage 市场区块）
   markets: MarketInfo[] // 已保存市场（market_list；SkillsPage 市场管理）
   mcpServers: MCPServerInfo[] // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
@@ -3493,6 +3537,12 @@ export interface AppState {
   fetchMemorySettings(): void
   setMemoryEnabled(on: boolean): void
   fetchMemoryBrowsing(): void
+  // Dream（记忆生命周期巡检）：读、存、手动跑一次。
+  // 保存与触发都由 bridge 侧校验（时刻形状 / provider 与 model 成对），失败文案
+  // 直接回给面板，前端不重复实现一套规则。
+  fetchDream(): void
+  saveDream(input: DreamSettingsInput): void
+  runDreamNow(): void
   installSkill(url: string, scope: string, name?: string): void // 远程技能下载（skill_install）；name 可选 = 市场浏览后精确安装单个
   browseMarket(url: string): void // 浏览远程市场技能（skill_browse，只读；结果落 marketSkills）
   refreshMarket(url: string): void // 刷新当前浏览的市场（重拉 + 对比本地；安装/更新后调）
@@ -5007,6 +5057,40 @@ function pickDiff(d?: unknown): Diff | undefined {
   }
 }
 
+// —— Dream 响应归一（dream_get / dream_set 共用）——
+function normalizeDreamSettings(raw: unknown): DreamSettings {
+  const o = (raw || {}) as Record<string, unknown>
+  return {
+    enabled: o.enabled === true,
+    provider: String(o.provider ?? ''),
+    model: String(o.model ?? ''),
+    at: typeof o.at === 'string' && o.at ? o.at : '03:00',
+    last_run_date: typeof o.last_run_date === 'string' && o.last_run_date ? o.last_run_date : undefined,
+  }
+}
+
+// normalizeDreamRuns 归一运行记录。
+//
+// Go 的 time.Time 零值会序列化成 "0001-01-01T00:00:00Z" —— 那不是"跑完于公元 1 年"，
+// 而是"还没跑完"。必须在这里抹成 undefined：否则面板会把所有进行中的（以及进程中途
+// 退出留下的）记录显示成"已完成"，而它们恰恰是最需要被看见的那两条。
+function normalizeDreamRuns(raw: unknown): DreamRun[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((x) => {
+    const o = (x || {}) as Record<string, unknown>
+    const fin = String(o.finished_at ?? '')
+    return {
+      started_at: String(o.started_at ?? ''),
+      finished_at: fin && !fin.startsWith('0001-01-01') ? fin : undefined,
+      provider: String(o.provider ?? ''),
+      model: String(o.model ?? ''),
+      session_id: typeof o.session_id === 'string' ? o.session_id : undefined,
+      summary: typeof o.summary === 'string' && o.summary ? o.summary : undefined,
+      error: typeof o.error === 'string' && o.error ? o.error : undefined,
+    }
+  })
+}
+
 // —— 流式 chunk 合并（FIX_OPTIMIZATION 问题3①）：实时 reasoning/content chunk 先入缓冲，
 // 每 ~32ms 合并一次写入 blocks（一次 React 提交），避免逐 token 全量重渲。
 // 快照恢复期间（materializing）不启用：快照事件已提前 coalesce，需同步落库。 ——
@@ -5193,6 +5277,14 @@ export function dispatchEvent(raw: AnyEvent): void {
           // 停留在旧状态（"我明明关了它还显示启用"）。
           if (list.some((p) => p.id === 'im')) send({ type: 'im_status', payload: {} })
         }
+        break
+      }
+      // Dream 运行开始/结束（bridge 在触发与收口各推一次）。
+      // running 由 bridge 决定（dreamRelease 之后才推 false），前端只跟着刷新一次：
+      // 记录与设置的真相始终在 dream.json / dream_runs.jsonl，事件不带状态副本。
+      case 'dream_changed': {
+        setState({ dreamRunning: raw.running === true })
+        getState().fetchDream()
         break
       }
       // 办公组件状态变化（R08d）：bridge 在「kit 的 bin 已经不存在」时主动推一份新状态
@@ -5562,6 +5654,15 @@ export function dispatchEvent(raw: AnyEvent): void {
           setState({ browserBusy: false })
           return
         }
+        // Dream：失败文案落面板内（见 dreamError 字段说明），并复位本面板的 spinner。
+        if (t === 'dream_get' || t === 'dream_set' || t === 'dream_run_now') {
+          setState({
+            dreamError: String(r.error || 'Dream 命令失败'),
+            dreamLoading: false,
+            dreamSaving: false,
+          })
+          return
+        }
         const err = r.error || 'command failed'
         const bridgeDown = looksBridgeDown(err)
         const alreadyDown = getState().bridgeStatus === 'error'
@@ -5897,6 +5998,33 @@ export function dispatchEvent(raw: AnyEvent): void {
       // 乐观更新已经改了本地状态，不回滚就会出现「显示已关闭、重启后又开着」。
       if (t === 'memory_set_enabled') {
         if (!r.ok) send({ type: 'memory_settings', payload: {} })
+        break
+      }
+      // dream_get：Dream 设置 + 最近 20 条运行记录（设置面板 · 记忆组）。
+      // 全局设置，不按工作区过滤：一次巡检覆盖应用内**所有**记忆库。
+      if (t === 'dream_get') {
+        if (r.ok) {
+          setState({
+            dreamSettings: normalizeDreamSettings(d.settings),
+            dreamRuns: normalizeDreamRuns(d.runs),
+            // running 由 bridge 给（它持有"正在跑"的闩）：前端不靠记录形态推断，
+            // 否则进程中途被杀留下的未完成记录会显示成「一直在跑」。
+            dreamRunning: d.running === true,
+            dreamLoading: false,
+            dreamError: undefined,
+          })
+        }
+        break
+      }
+      // dream_set：成功以 bridge 回写的设置为准（它会保留 last_run_date 等由宿主维护的字段）。
+      if (t === 'dream_set') {
+        setState({ dreamSettings: normalizeDreamSettings(d.settings), dreamSaving: false, dreamError: undefined })
+        break
+      }
+      // dream_run_now：失败文案走通用 bridgeError 分支（含"正在运行中"），成功后进入运行中。
+      if (t === 'dream_run_now') {
+        setState({ dreamRunning: true, dreamError: undefined })
+        getState().fetchDream() // 立刻看到那条「已开始」的记录
         break
       }      // context_breakdown：上下文构成分区（Composer ctx 环 hover 面板）。
       // 会话级数据：响应归属的会话 ≠ 当前活跃会话（切会话后迟到）→ 丢弃，避免面板
@@ -10001,6 +10129,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   memPendingSaved: 0,
   memPendingRecalled: 0,
   memoryBrowseError: undefined,
+  // Dream：未加载（dreamSettings undefined）+ 空记录；面板打开时才取。
+  dreamSettings: undefined,
+  dreamRuns: [],
+  dreamLoading: false,
+  dreamSaving: false,
+  dreamRunning: false,
+  dreamError: undefined,
   externalSkillsLoading: false,
   externalSkillsImporting: false,
   externalSkillsError: undefined,
@@ -11587,6 +11722,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ memorySettings: { ...base, enabled: on, explicit: true } })
     send({ type: 'memory_set_enabled', payload: { enabled: on } })
+  },
+  // —— Dream（记忆生命周期巡检）——
+  //
+  // 三件事各有各的失败形态：读失败（面板显示空态 + 错误）、存失败（回滚草稿，
+  // 以 bridge 回写为准）、跑失败（"正在运行中"/"项目记忆已关闭"是**预期**错误，
+  // 直接给文案，不弹全局红条）。
+  fetchDream: () => {
+    set({ dreamLoading: true })
+    send({ type: 'dream_get', payload: {} })
+  },
+  saveDream: (input) => {
+    set({ dreamSaving: true })
+    send({ type: 'dream_set', payload: { ...input } })
+  },
+  runDreamNow: () => {
+    send({ type: 'dream_run_now', payload: {} })
   },
   // 远程技能下载（exec git，全局/工作区作用域）：装完回拉清单；name 可选 = 市场浏览后精确安装单个
   installSkill: (url, scope, name) => {

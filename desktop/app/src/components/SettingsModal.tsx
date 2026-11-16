@@ -15,7 +15,9 @@ import SurfacesPage from './SurfacesPage'
 import MobileTab from './MobileTab'
 import UsageStats from './UsageStats'
 import ProviderPage from './ProviderPage'
+import Sel, { type SelOption } from './Sel'
 import type { MeshSettings, AppSettings, HubConversationSettings } from '../transport/types'
+import type { DreamSettingsInput } from '../store/useAppStore'
 import { bridge } from '../lib/bridge'
 
 // 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
@@ -1568,6 +1570,238 @@ function MemoryTab() {
                 <td>{f.type || '—'}</td>
                 <td>{f.modified || '—'}</td>
                 <td style={{ textAlign: 'right' }}>{f.size}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <DreamSection />
+    </>
+  )
+}
+
+// —— Dream（记忆生命周期巡检）——
+//
+// 这一块回答三个问题：现在开着吗（开关 + 每天几点）、用哪个模型跑（provider/model）、
+// 之前几轮干了什么（运行记录）。**巡检本身不由前端驱动**：到点由 bridge 起一个派生
+// 会话跑（与 cron 同一条链路），面板只负责读写设置与展示记录。
+//
+// 交互决策：逐项保存（每次选择直接 dream_set），不设「保存」按钮 —— 这里的每一项都是
+// 离散选择而不是自由文本，多一个按钮只会多一个"忘了点"的状态。失败时 bridge 的错误
+// 文案落在这里，且草稿回退到磁盘上的值（面板显示的永远是真实生效的设置）。
+const pad2 = (n: number) => String(n).padStart(2, '0')
+
+function fmtDreamRunTime(v?: string): string {
+  if (!v) return '—'
+  const d = new Date(v)
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString()
+}
+
+function DreamSection() {
+  const t = useT()
+  const dream = useAppStore((s) => s.dreamSettings)
+  const runs = useAppStore((s) => s.dreamRuns)
+  const loading = useAppStore((s) => s.dreamLoading)
+  const saving = useAppStore((s) => s.dreamSaving)
+  const running = useAppStore((s) => s.dreamRunning)
+  const err = useAppStore((s) => s.dreamError)
+  const fetchDream = useAppStore((s) => s.fetchDream)
+  const saveDream = useAppStore((s) => s.saveDream)
+  const runDreamNow = useAppStore((s) => s.runDreamNow)
+  const appSettings = useAppStore((s) => s.settings)
+  const presets = useAppStore((s) => s.providerPresets)
+  const fetchProviderPresets = useAppStore((s) => s.fetchProviderPresets)
+
+  useEffect(() => { void fetchDream() }, [fetchDream])
+  // Provider 显示名来自预设表（同一个 providers.json 事实源）；没拉到就先发一次。
+  useEffect(() => { if (presets.length === 0) fetchProviderPresets() }, [presets, fetchProviderPresets])
+
+  // 草稿：面板上当前的选择。bridge 回写（dream_get / dream_set 的响应）之后覆盖 ——
+  // 保存失败时这次覆盖就是"回滚"，用户看到的仍是磁盘上真正生效的值。
+  const [draft, setDraft] = useState<DreamSettingsInput>({ enabled: false, provider: '', model: '', at: '03:00' })
+  useEffect(() => {
+    if (!dream || saving) return
+    setDraft({ enabled: dream.enabled, provider: dream.provider, model: dream.model, at: dream.at || '03:00' })
+  }, [dream, saving])
+
+  // Provider 选项与模型表都取 settings.provider（Composer 模型菜单同一数据源）：
+  // 面板能选到的，一定是运行时真能用的那个 provider。
+  const labelOf = (id: string) => presets.find((p) => p.id === id)?.name || id
+  const modelsOf = (prov: string): string[] => {
+    if (!prov) return []
+    const cfg = (appSettings.provider as Record<string, unknown>)[prov]
+    const own = cfg && typeof cfg === 'object'
+      ? Object.keys((cfg as { models?: Record<string, number> }).models || {})
+      : []
+    if (own.length) return own.sort()
+    // 还没拉过模型表的 provider：用预设清单兜底（bridge 侧对空表 fail-open）
+    return (presets.find((p) => p.id === prov)?.models ?? []).slice()
+  }
+  const providerOptions: SelOption[] = [
+    { value: '', label: t('settings.dream.providerDefault') },
+    ...Object.entries(appSettings.provider)
+      .filter(([k, v]) => k !== 'active' && !!v && typeof v === 'object')
+      .map(([k]) => ({ value: k, label: labelOf(k) })),
+  ]
+  const modelOptions: SelOption[] = modelsOf(draft.provider).map((m) => ({ value: m, label: m }))
+  const hourOptions: SelOption[] = Array.from({ length: 24 }, (_, i) => ({ value: pad2(i), label: pad2(i) }))
+  const minuteOptions: SelOption[] = Array.from({ length: 60 }, (_, i) => ({ value: pad2(i), label: pad2(i) }))
+  const [hh, mm] = (draft.at || '03:00').split(':')
+
+  const commit = (patch: Partial<DreamSettingsInput>) => {
+    const next: DreamSettingsInput = { ...draft, ...patch }
+    setDraft(next)
+    saveDream(next)
+  }
+  // 换 provider 必须连带换 model：bridge 要求两者成对，而模型名带上别的 provider
+  // 的模型就是一次注定失败的夜间运行。默认选第一个可用模型。
+  const onProvider = (prov: string) => {
+    if (!prov) { commit({ provider: '', model: '' }); return }
+    const models = modelsOf(prov)
+    commit({ provider: prov, model: models[0] ?? '' })
+  }
+
+  const now = new Date()
+  const today = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`
+  const ranToday = dream?.last_run_date === today
+  const disabled = running || saving
+
+  return (
+    <>
+      <div className="settings-sec-title" style={{ marginTop: 24 }}>
+        {t('settings.dream')}
+        {running && <span className="tag-warn"> {t('settings.dream.running')}</span>}
+      </div>
+      <p className="set-desc">{t('settings.dream.desc')}</p>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.dream.enable')}</div>
+          <div className="set-desc">
+            {dream?.enabled
+              ? ranToday
+                ? t('settings.dream.state.ranToday').replace('{at}', dream.at || '03:00')
+                : t('settings.dream.state.willRun').replace('{at}', dream.at || '03:00')
+              : t('settings.dream.state.off')}
+          </div>
+        </div>
+        <div className="seg" role="radiogroup" aria-label={t('settings.dream.enable')}>
+          <button className={draft.enabled ? 'cur' : ''} aria-pressed={draft.enabled} disabled={disabled} onClick={() => commit({ enabled: true })}>{t('settings.on')}</button>
+          <button className={!draft.enabled ? 'cur' : ''} aria-pressed={!draft.enabled} disabled={disabled} onClick={() => commit({ enabled: false })}>{t('settings.off')}</button>
+        </div>
+      </div>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.dream.provider')}</div>
+          <div className="set-desc">{t('settings.dream.provider.desc')}</div>
+        </div>
+        <Sel
+          value={draft.provider}
+          options={providerOptions}
+          onChange={onProvider}
+          disabled={disabled}
+          style={{ minWidth: 180 }}
+        />
+      </div>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.dream.model')}</div>
+          <div className="set-desc">
+            {!draft.provider
+              ? t('settings.dream.model.followDefault')
+              : modelOptions.length === 0
+                ? t('settings.dream.model.none')
+                : ''}
+          </div>
+        </div>
+        <Sel
+          value={draft.model}
+          options={modelOptions}
+          onChange={(m) => commit({ model: m })}
+          disabled={disabled || !draft.provider || modelOptions.length === 0}
+          placeholder="—"
+          style={{ minWidth: 220 }}
+        />
+      </div>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.dream.at')}</div>
+          <div className="set-desc">{t('settings.dream.at.desc')}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Sel
+            value={hh}
+            options={hourOptions}
+            onChange={(h) => commit({ at: `${h}:${mm}` })}
+            disabled={disabled}
+            style={{ width: 78 }}
+          />
+          <span className="set-desc">:</span>
+          <Sel
+            value={mm}
+            options={minuteOptions}
+            onChange={(m) => commit({ at: `${hh}:${m}` })}
+            disabled={disabled}
+            style={{ width: 78 }}
+          />
+        </div>
+      </div>
+
+      <div className="set-row">
+        <div>
+          <div className="set-label">{t('settings.dream.runNow')}</div>
+          <div className="set-desc">{t('settings.dream.runNow.desc')}</div>
+        </div>
+        <button className="btn" disabled={disabled} onClick={() => runDreamNow()}>
+          {running ? t('settings.dream.running') : t('settings.dream.runNow.btn')}
+        </button>
+      </div>
+
+      {err && (
+        <p className="set-desc" style={{ marginTop: 8, color: 'var(--danger, #c0392b)' }}>{err}</p>
+      )}
+      {saving && <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.dream.saving')}</p>}
+
+      <div className="set-row" style={{ marginTop: 16 }}>
+        <div>
+          <div className="set-label">{t('settings.dream.runs')}</div>
+          <div className="set-desc">{t('settings.dream.runs.desc')}</div>
+        </div>
+        <button className="btn" disabled={loading} onClick={() => void fetchDream()}>
+          {loading ? t('settings.memory.browse.loading') : t('settings.memory.browse.refresh')}
+        </button>
+      </div>
+
+      {runs.length === 0 ? (
+        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.dream.runs.empty')}</p>
+      ) : (
+        <table className="mem-table" style={{ marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th>{t('settings.dream.runs.time')}</th>
+              <th>{t('settings.dream.provider')}</th>
+              <th>{t('settings.dream.runs.result')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {runs.map((r) => (
+              <tr key={r.session_id || r.started_at}>
+                <td>{fmtDreamRunTime(r.started_at)}</td>
+                <td>
+                  <code>{r.provider || '—'}</code>
+                  {r.model ? <span className="tag-dim"> {r.model}</span> : null}
+                </td>
+                <td>
+                  {r.error
+                    ? <span className="tag-warn">{r.error}</span>
+                    : r.finished_at
+                      ? (r.summary || t('settings.dream.runs.noSummary'))
+                      : t('settings.dream.runs.unfinished')}
+                </td>
               </tr>
             ))}
           </tbody>

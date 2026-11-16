@@ -188,6 +188,13 @@ func (m *manager) dreamRelease() {
 	m.dreamMu.Unlock()
 }
 
+// dreamRunning 当前是否有巡检在跑（设置页据此禁掉「立即运行」）。
+func (m *manager) dreamRunning() bool {
+	m.dreamMu.Lock()
+	defer m.dreamMu.Unlock()
+	return m.dreamBusy
+}
+
 // emitDreamChanged 通知设置页刷新（运行开始/结束各一次）。
 //
 // 前端只是"收到就重拉 dream_get"，不带状态：避免让事件成为第二份真相
@@ -196,7 +203,7 @@ func (m *manager) emitDreamChanged() {
 	if m.out == nil {
 		return
 	}
-	m.out.writeLine(map[string]any{"event_type": "dream_changed"})
+	m.out.writeLine(map[string]any{"event_type": "dream_changed", "running": m.dreamRunning()})
 }
 
 // dreamSessionsRoot 派生会话存储根（~/.go-code/dream_sessions）。
