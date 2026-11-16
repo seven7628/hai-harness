@@ -1425,7 +1425,7 @@ const zh: Record<string, string> = {
   'settings.im.errSave': '保存失败',
   'settings.im.saving': '保存中…',
   'settings.im.loading': '加载消息接入配置…',
-    'settings.im.loadFailed': 'IM 配置加载失败或超时。',
+    'settings.im.loadFailed': '消息配置加载失败或超时。',
   'settings.im.bindTitle': '绑定确认',
   'settings.im.bindDesc': '陌生的聊天发来消息，是否允许它驱动 go-code？确认后该聊天将绑定到指定工作区。',
   'settings.im.bindWorkspace': '目标工作区',
