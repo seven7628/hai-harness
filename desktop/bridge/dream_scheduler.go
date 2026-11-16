@@ -96,7 +96,7 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	dir := filepath.Join(dreamSessionsRoot(), sid)
 	if err := os.MkdirAll(dir, 0o700); err != nil { // 派生会话含记忆正文，0700
 		m.dreamRelease()
-		appendDreamRun(dreamRun{StartedAt: now, FinishedAt: time.Now(), Provider: s.Provider, Model: s.Model, Error: err.Error()})
+		appendDreamRun(dreamRun{StartedAt: now, FinishedAt: time.Now(), Provider: s.Provider, Model: s.Model, SessionID: sid, Error: err.Error()})
 		return nil, fmt.Errorf("创建 Dream 会话目录失败: %w", err)
 	}
 	wsPath := dreamWorkspaceDir()
@@ -109,7 +109,9 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	})
 	if err != nil {
 		m.dreamRelease()
-		appendDreamRun(dreamRun{StartedAt: now, FinishedAt: time.Now(), Provider: s.Provider, Model: s.Model, Error: err.Error()})
+		// 起不来的这一轮也留一条（带 FinishedAt + 错误）：用户要看见"昨晚没跑成"，
+		// 而不是第二天早上对着空记录猜。
+		appendDreamRun(dreamRun{StartedAt: now, FinishedAt: time.Now(), Provider: s.Provider, Model: s.Model, SessionID: sid, Error: err.Error()})
 		return nil, err
 	}
 
