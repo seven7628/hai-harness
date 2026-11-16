@@ -26,6 +26,12 @@ func (m *manager) handleDreamGet(c command) {
 	if runs == nil {
 		runs = []dreamRun{}
 	}
+	// 倒序：最新一轮在最上面。readDreamRuns 保持**存储顺序**（按时间正序，取"最近
+	// N 条"从尾部取），只在出口翻一次——记录文件是追加写的，读时再翻不产生第二份
+	// 真相。看运行记录想知道的是"昨晚跑得怎么样"，不是"第一夜跑得怎么样"。
+	for i, j := 0, len(runs)-1; i < j; i, j = i+1, j-1 {
+		runs[i], runs[j] = runs[j], runs[i]
+	}
 	m.resp(c, true, "", map[string]any{
 		"settings": loadDreamSettings(),
 		"runs":     runs,
