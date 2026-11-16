@@ -38,8 +38,7 @@ export default function MobileTab() {
 
   // 页头三态共用：加载中 / 未启用 / 已启用。未启用时给「为什么没开、怎么开、能做什么」，
   // 而不是原来那一行内部变量名（HAI_MOBILE=off 对用户没有可操作性）。
-  const head = <SetHead // i18n: 建议 key mobile.pageTitle —— 现有 mobile.title 是「手机遥控器」，与导航「手机连接」不一致
-        title="手机连接" subtitle="用手机浏览器接着用同一个工作区" />
+  const head = <SetHead title={t('mobile.title')} subtitle={t('mobile.sub')} />
 
   if (!status) {
     return (
@@ -55,15 +54,15 @@ export default function MobileTab() {
         {head}
         <EmptyState
           icon={<Smartphone size={18} />}
-          title="手机端未启用"
+          title={t('mobile.disabledTitle')}
           hint={
             <ul className="pe-list">
-              <li><b>为什么</b> · 桌面端这次启动时关闭了手机访问。</li>
-              <li><b>怎么开</b> · 用默认启动方式重新打开桌面端，再回到这里。</li>
-              <li><b>能做什么</b> · 在手机浏览器里继续同一个会话、看任务进度、收发消息。</li>
+              <li>{t('mobile.disabled.why')}</li>
+              <li>{t('mobile.disabled.how')}</li>
+              <li>{t('mobile.disabled.what')}</li>
             </ul>
           }
-          actions={<button className="btn" onClick={() => fetchMobileStatus()}>{t('common.retry') ?? '重试'}</button>}
+          actions={<button className="btn" onClick={() => fetchMobileStatus()}>{t('common.retry')}</button>}
         />
       </>
     )

@@ -259,17 +259,14 @@ export default function SurfacesPage() {
       <SetHead
         title={t('settings.surfaces')}
         titleClassName="settings-sec-title"
-        // i18n: 建议 key surfaces.sub —— 原来整段技术说明（ESM/回收站/localStorage）当正文，
-        // 这里先给人话，技术细节降级到下面的弱色小字。
-        subtitle="面板插件为右栏提供自定义视图；安装即信任它的代码。"
+        subtitle={t('surfaces.sub')}
       />
       <p className="set-note-tech">{t('surfaces.hint')}</p>
       {/* 功能开关：模型要装面板，必须先有 surface 工具；技能的能力面过滤（requires.tools）
           又要求这些工具在场。开关放这里，用户看到「没有插件」时就能发现入口。 */}
       <div className="set-block">
       <div className="set-block-hd">
-        {/* i18n: 建议 key surfaces.tools.section */}
-        <span className="set-block-title">宿主工具</span>
+        <span className="set-block-title">{t('surfaces.tools.section')}</span>
       </div>
       <div className="mcp-server" data-surface-tools data-surface-tools-on={surfaceToolsOn ? '1' : '0'}>
         <div className="mcp-s-h">
@@ -293,8 +290,7 @@ export default function SurfacesPage() {
           只有这四条只读命令，写类一条都没开（表在 bridge，页面上只是照抄）。 */}
       <div className="set-block">
         <div className="set-block-hd">
-          {/* i18n: 建议 key surfaces.whitelist.section */}
-          <span className="set-block-title">只读工具</span>
+          <span className="set-block-title">{t('surfaces.whitelist.section')}</span>
           <span className="mk-sec-count">{HOST_READONLY_COMMANDS.length}</span>
         </div>
         <div className="hook-note" style={{ marginBottom: 12 }}>
@@ -309,8 +305,7 @@ export default function SurfacesPage() {
 
       <div className="set-block">
       <div className="set-block-hd">
-        {/* i18n: 建议 key surfaces.installed.section */}
-        <span className="set-block-title">已安装面板</span>
+        <span className="set-block-title">{t('surfaces.installed.section')}</span>
         <span className="mk-sec-count">{items.length}</span>
       </div>
       {loading && !state.index ? (
@@ -319,9 +314,8 @@ export default function SurfacesPage() {
         <EmptyState
           compact
           icon={<span aria-hidden>▦</span>}
-          title={t('surfaces.empty')}
-          // i18n: 建议 key surfaces.emptyHint
-          hint="把插件目录放进 ~/.go-code/surfaces/ 后刷新即可在这里看到。"
+          title={t('surfaces.emptyTitle')}
+          hint={t('surfaces.empty')}
         />
       ) : (
         items.map((item) => (

@@ -807,13 +807,14 @@ export default function ProviderPage() {
           className="pvp-head"
           title={t('settings.provider')}
           titleClassName="settings-sec-title"
-          subtitle={t('provider.windowHint')}
+          subtitle={t('settings.provider.sub')}
           actions={
             <button className="btn primary pvp-add-btn" onClick={() => { setView('add'); setAdding(false); setAddEntry(null); setErr(null) }}>
               <Plus size={14} /> {t('provider.page.add')}
             </button>
           }
         />
+        <p className="set-note-tech">{t('provider.windowHint')}</p>
         {err && <p className="nwf-err" role="alert">{err}</p>}
         <div className="pvp-sec">{t('provider.page.added').replace('{n}', String(rows.length))}</div>
         {rows.length === 0 && <div className="pvp-empty">{t('provider.page.emptyAdded')}</div>}
@@ -1478,6 +1479,7 @@ function NumInput({ value, onCommit, label, className }: { value: number; onComm
 // 输入草稿即时更新、Enter/blur 提交整行（不逐键持久化）；清空全部四格 → 「清除覆盖」
 //（回退注册表内置价）；任意格填值 → 整行覆盖（空格按 0 = 免费段）。
 function PriceInput({ value, onCommit, label, className }: { value: string; onCommit: (v: string) => void; label: string; className?: string }) {
+  const t = useT()
   return (
     <input
       className={className ?? 'prov-price-num'}
@@ -1485,7 +1487,7 @@ function PriceInput({ value, onCommit, label, className }: { value: string; onCo
       min={0}
       step={0.001}
       value={value}
-      placeholder="默认"
+      placeholder={t('common.default')}
       onChange={(e) => onCommit(e.target.value)}
       aria-label={label}
       title={label}

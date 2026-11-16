@@ -108,8 +108,7 @@ export default function CronPage() {
         onBack={closeCron}
         icon={<Clock size={15} />}
         title={t('cron.title')}
-        // i18n: 建议 key cron.subPlain —— 现有 cron.sub 把工具名（CronCreate 等）当副标题
-        subtitle="按计划自动执行；每次执行的会话历史都能回看"
+        subtitle={t('cron.subPlain')}
         right={
           <>
             <span className="page-head-count cron-head-count">{t('cron.count').replace('{n}', String(jobs.length))}</span>
@@ -135,20 +134,20 @@ export default function CronPage() {
         <div className="sp-content">
           <div className="cron-card">
             {loading && empty ? (
-              <EmptyState compact icon={<Clock size={18} />} title="正在读取定时任务…" />
+              <EmptyState compact icon={<Clock size={18} />} title={t('cron.loadingList')} />
             ) : error && empty ? (
               <EmptyState
                 icon={<Clock size={18} />}
-                title="读取定时任务失败"
+                title={t('cron.loadErrorTitle')}
                 hint={error}
-                actions={<button className="btn" onClick={fetchCron}>重试</button>}
+                actions={<button className="btn" onClick={fetchCron}>{t('common.retry')}</button>}
               />
             ) : empty ? (
               <EmptyState
                 icon={<Clock size={18} />}
-                title="暂无定时任务"
-                hint={enabled ? '在会话里描述「什么时候做什么」，到点后这里会列出每次执行。' : '功能开启后，新建的任务会出现在这里。'}
-                actions={enabled ? <button className="btn ghost" onClick={fetchCron}>刷新</button> : null}
+                title={t('cron.emptyTitle')}
+                hint={enabled ? t('cron.emptyHintEnabled') : t('cron.emptyHintDisabled')}
+                actions={enabled ? <button className="btn ghost" onClick={fetchCron}>{t('cron.refresh')}</button> : null}
               />
             ) : (
               <>
@@ -169,7 +168,6 @@ export default function CronPage() {
                       >
                         <td className="cell-title" data-label={t('cron.th.name')}>
                           <div className="cron-prompt">{j.prompt}</div>
-                          <div className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)' }}>{j.id}</div>
                         </td>
                         <td data-label={t('cron.th.schedule')} title={j.cron}>
                           <span className="cell-stack">
@@ -180,8 +178,10 @@ export default function CronPage() {
                         <td className="cell-status" data-label={t('cron.th.status')}>
                           {j.paused ? (
                             <span className="cron-status paused">{t('cron.paused')}</span>
+                          ) : j.last_status ? (
+                            <span className={`cron-status ${j.last_status}`}>{statusText(t, j.last_status)}</span>
                           ) : (
-                            <span className={`cron-status ${j.last_status ?? ''}`}>{statusText(t, j.last_status)}</span>
+                            <span className="cell-dash">—</span>
                           )}
                         </td>
                         <td className="cell-time" data-label={t('cron.th.lastRun')}>{fmtStamp(j.last_run)}</td>
@@ -211,14 +211,13 @@ export default function CronPage() {
 
       {editing && (
         <PageModal
-          title="编辑任务"
-          // i18n: 建议 key cron.editSub —— 内部 id 降级为弱色小字，不再进标题
-          subtitle={<>任务 {editing.id} · {describeCron(draft.cron, t)}</>}
+          title={t('cron.editTitle')}
+          subtitle={<>{t('cron.editSub').replace('{id}', editing.id)} · {describeCron(draft.cron, t)}</>}
           icon={<span aria-hidden>✎</span>}
           onClose={() => setEditing(null)}
           width={560}
           cardClassName="cron-edit-modal"
-          closeLabel={t('cron.cancel')}
+          closeLabel={t('common.close')}
           footer={
             <>
               <button className="btn" onClick={() => setEditing(null)}>{t('cron.cancel')}</button>
@@ -228,15 +227,13 @@ export default function CronPage() {
         >
           <div className="cron-edit">
             <label className="page-modal-field">
-              {/* i18n: 建议 key cron.promptLabel —— 原硬编码英文 Prompt */}
-              <span className="page-modal-label">任务内容</span>
+              <span className="page-modal-label">{t('cron.promptLabel')}</span>
               <textarea rows={3} value={draft.prompt} onChange={(e) => setDraft({ ...draft, prompt: e.target.value })} />
             </label>
             <label className="page-modal-field">
-              {/* i18n: 建议 key cron.planLabel */}
               <span className="page-modal-label">
-                执行计划
-                <span className="page-modal-hint">5 段表达式，如 */5 * * * *</span>
+                {t('cron.planLabel')}
+                <span className="page-modal-hint">{t('cron.exprHint')}</span>
               </span>
               <input className="mono" value={draft.cron} onChange={(e) => setDraft({ ...draft, cron: e.target.value })} placeholder={t('cron.exprPh')} />
             </label>
@@ -281,8 +278,7 @@ export default function CronPage() {
 
       {confirm && (
         <ConfirmModal
-          // i18n: 建议 key cron.deleteTitlePlain —— 原 cron.deleteTitle 把内部 id 放进了标题
-          title="删除任务"
+          title={t('cron.deleteTitle')}
           message={t('cron.deleteMsg').replace('{prompt}', confirm.prompt)}
           confirmLabel={t('cron.delete')}
           cancelLabel={t('cron.cancel')}

@@ -58,7 +58,8 @@ export function MCPTab() {
 
   return (
     <>
-      <SetHead title={t('settings.mcp')} titleClassName="settings-sec-title" subtitle={t('mcp.hint')} />
+      <SetHead title={t('settings.mcp')} titleClassName="settings-sec-title" subtitle={t('settings.mcp.sub')} />
+      <p className="set-note-tech">{t('mcp.hint')}</p>
 
       <div className="src-sec">{t('mcp.sec.global')}</div>
       <SourceCard

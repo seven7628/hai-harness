@@ -103,7 +103,8 @@ export function HooksTab() {
 
   return (
     <>
-      <SetHead title={t('settings.hooks')} titleClassName="settings-sec-title" subtitle={t('hook.hint')} />
+      <SetHead title={t('settings.hooks')} titleClassName="settings-sec-title" subtitle={t('settings.hooks.sub')} />
+      <p className="set-note-tech">{t('hook.hint')}</p>
 
       {!info ? (
         <p className="set-placeholder">{loading ? t('hook.loading') : t('hook.empty')}</p>

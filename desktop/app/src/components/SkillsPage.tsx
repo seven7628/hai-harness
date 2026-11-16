@@ -33,8 +33,7 @@ export default function SkillsPage() {
         backLabel={t('common.backToSession')}
         onBack={closeSkills}
         icon={<Sparkles size={15} />}
-        // i18n: skill.pageTitle 现为「Skills 管理」（术语）；文案基线用「技能管理」
-        title="技能管理"
+        title={t('skill.pageTitle')}
         right={
           <span
             className="page-head-count"
@@ -45,7 +44,7 @@ export default function SkillsPage() {
         }
       />
       <div className="sp-body">
-        <nav className="sp-side" role="tablist" aria-label="Skills">
+        <nav className="sp-side" role="tablist" aria-label={t('skill.pageTitle')}>
           {(['market', 'manager'] as const).map((tb) => (
             <button
               key={tb}

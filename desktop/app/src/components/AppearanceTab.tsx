@@ -89,8 +89,7 @@ export default function AppearanceTab() {
     <>
       <SetHead
         title={t('settings.appearance')}
-        // i18n: 建议 key settings.appearance.sub
-        subtitle="主题、字号、背景与代码配色；改动即时生效。"
+        subtitle={t('settings.appearance.sub')}
       />
 
       <div className="set-row">

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { FileIcon, Sparkles } from './icons'
-import { useT } from '../i18n'
+import { useT, t as tStatic } from '../i18n'
 import EmptyState from './EmptyState'
 import PageModal from './PageModal'
 
@@ -12,20 +12,19 @@ import PageModal from './PageModal'
 //
 // 2026-11 收敛：卡片等高（描述 3 行截断、footer 贴底）、不可用原因中文兜底、
 // 详情弹窗改成与设置弹窗同一套（PageModal：scrim + header/body/footer + Esc）。
-// i18n: 建议 key skill.sourceLocal —— 卡片 footer 的来源文案（本地技能）
 function unavailableText(reason?: string): string {
   if (!reason) return ''
   const r = reason.toLowerCase()
   // 后端英文原因常见两种：能力不满足（requires model input: image）与会话过滤。
   // 能映射的给中文人话；映射不了的原样显示（完整原文始终在 title 里）。
   if (r.includes('requires model input: image') || r.includes('input: image')) {
-    return '当前模型不能读图；换用支持图片输入的模型后即可使用。'
+    return tStatic('skill.cap.imageFix')
   }
   if (r.includes('unavailable for this session')) {
-    return '当前会话不可用该技能；换模型或换会话后再试。'
+    return tStatic('skill.cap.sessionFix')
   }
   if (r.includes('requires tool')) {
-    return '当前会话缺少该技能需要的工具。'
+    return tStatic('skill.cap.toolsFix')
   }
   return reason
 }
@@ -83,7 +82,7 @@ export default function SkillManager({ onBrowseMarket }: { onBrowseMarket?: () =
             <div className="skill-card" key={s.name} onClick={() => openDetail(s.name)} title={t('skill.viewInstructions')}>
               <div className="sc-h">
                 <span className="sc-nm" title={s.name}>{s.name}</span>
-                {s.source && <span className="sc-remote">远程</span>}
+                {s.source && <span className="sc-remote">{t('skill.remoteBadge')}</span>}
                 {/* 三态：可用 / 用户禁用 / 当前模型不支持。
                     后两者都是 enabled=false，但只有**用户禁用**该给开关 —— 给"模型不支持"
                     的卡片一个开关，用户会以为拨一下就生效，而真正要做的是换模型。 */}
@@ -112,7 +111,7 @@ export default function SkillManager({ onBrowseMarket }: { onBrowseMarket?: () =
               {/* 发丝线之上：来源/本地 + 远端动作（贴底，卡片等高时对齐） */}
               <div className="sc-src">
                 <FileIcon size={11} />
-                <span className="mono" title={s.source || '本地技能'}>{s.source || '本地技能'}</span>
+                <span className="mono" title={s.source || t('skill.sourceLocal')}>{s.source || t('skill.sourceLocal')}</span>
                 {s.source && (
                   <>
                     <span className="grow" />
@@ -145,8 +144,7 @@ export default function SkillManager({ onBrowseMarket }: { onBrowseMarket?: () =
       {detail && (
         <PageModal
           title={detail.name}
-          // i18n: 建议 key skill.detailSub —— 详情弹窗副标题
-          subtitle="技能指令（模型按需读取）"
+          subtitle={t('skill.detailSub')}
           icon={<FileIcon size={14} />}
           onClose={() => {
             setViewing(null)
@@ -166,8 +164,7 @@ export default function SkillManager({ onBrowseMarket }: { onBrowseMarket?: () =
               ))}
             </div>
           ) : (
-            // i18n: 建议 key skill.noResources —— 资源缺失时说明一句，不留白
-            <div className="sd-res-empty">该技能没有附带资源文件。</div>
+            <div className="sd-res-empty">{t('skill.noResources')}</div>
           )}
         </PageModal>
       )}

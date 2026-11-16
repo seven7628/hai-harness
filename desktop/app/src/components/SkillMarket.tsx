@@ -93,16 +93,14 @@ export default function SkillMarket() {
       {/* 从链接安装 / 存为市场：字段化（链接 → 安装到 → 动作） */}
       <section className="mk-card">
         <div className="mk-card-hd">
-          {/* i18n: 建议 key skill.installFromLink */}
-          <span className="mk-card-title">从链接安装</span>
+          <span className="mk-card-title">{t('skill.installFromLink')}</span>
         </div>
         <p className="mk-card-desc">
           {t('skill.remoteHint')}
         </p>
         {err && <p className="mk-status error" role="alert">{err}</p>}
         <div className="mk-field">
-          {/* i18n: 建议 key skill.linkLabel */}
-          <label className="mk-field-label" htmlFor="skill-remote-url">链接</label>
+          <label className="mk-field-label" htmlFor="skill-remote-url">{t('skill.linkLabel')}</label>
           <input
             id="skill-remote-url"
             className="sp-remote-url"
@@ -119,8 +117,7 @@ export default function SkillMarket() {
           />
         </div>
         <div className="mk-field">
-          {/* i18n: 建议 key skill.installTo */}
-          <span className="mk-field-label">安装到</span>
+          <span className="mk-field-label">{t('skill.installTo')}</span>
           <div className="seg sp-remote-seg" role="radiogroup" aria-label={t('skill.remoteScope')}>
             {(['global', 'workspace'] as const).map((sc) => (
               <button key={sc} className={scope === sc ? 'cur' : ''} aria-pressed={scope === sc} onClick={() => setScope(sc)}>
@@ -145,17 +142,15 @@ export default function SkillMarket() {
       {/* 已保存的市场（免手填 + 按市场更新已装技能） */}
       <section className="mk-card">
         <div className="mk-sec-hd">
-          {/* i18n: 建议 key skill.savedMarkets */}
-          <span className="mk-sec-title">已保存的市场</span>
+          <span className="mk-sec-title">{t('skill.savedMarkets')}</span>
           <span className="mk-sec-count">{markets.length}</span>
         </div>
         {markets.length === 0 ? (
           <EmptyState
             compact
             icon={<LayersIcon size={16} />}
-            title="还没有保存的市场"
-            // i18n: 建议 key skill.savedMarketsEmptyHint
-            hint="把常逛的市场链接保存下来，下次可以一键浏览、批量更新。"
+            title={t('skill.savedMarketsEmptyTitle')}
+            hint={t('skill.savedMarketsEmptyHint')}
           />
         ) : (
           <ul className="sp-market-list">
@@ -179,8 +174,7 @@ export default function SkillMarket() {
       {marketSkills !== undefined && (
         <section className="mk-card">
           <div className="mk-sec-hd">
-            {/* i18n: 建议 key skill.browseResults */}
-            <span className="mk-sec-title">浏览结果</span>
+            <span className="mk-sec-title">{t('skill.browseResults')}</span>
             <span className="mk-sec-count">{marketSkills.length}</span>
             <span className="grow" />
             <button className="btn ghost" onClick={() => doBrowse(marketUrl)} disabled={browsing}>
@@ -188,7 +182,7 @@ export default function SkillMarket() {
             </button>
           </div>
           {marketSkills.length === 0 ? (
-            <EmptyState compact icon={<LayersIcon size={16} />} title={t('skill.marketEmpty')} hint="换个链接再浏览一次。" />
+            <EmptyState compact icon={<LayersIcon size={16} />} title={t('skill.marketEmpty')} hint={t('skill.browseEmptyHint')} />
           ) : (
             <ul className="sp-market-list">
               {marketSkills.map((s) => {

@@ -15367,6 +15367,9 @@ body.is-electron .page-head {
   min-width: 96px;
   white-space: nowrap;
 }
+.cell-dash {
+  color: var(--text-3);
+}
 .cron-table th {
   white-space: nowrap;
 }

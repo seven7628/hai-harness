@@ -162,11 +162,11 @@ export function IMSettingsEditor() {
               <input
                 className={inputCls}
                 type="password"
-                placeholder={secretSet ? '••••••（已设置）' : f.placeholder ?? ''}
+                placeholder={secretSet ? t('settings.im.secretKeep') : f.placeholder ?? ''}
                 value={(value as string) ?? ''}
                 onChange={(e) => set(e.target.value)}
               />
-              {secretSet && <span className="im-set-badge">✓ 已设置</span>}
+              {secretSet && <span className="im-set-badge">✓ {t('settings.im.secretSet')}</span>}
             </div>
             {f.help && <div className="im-help">{f.help}</div>}
           </div>
@@ -245,7 +245,7 @@ export function IMSettingsEditor() {
             ：{schema.name}
           </span>
           <button
-            className="btn gho"
+            className="btn ghost"
             onClick={() => { setAdding(false); setEditingId(null); setAddDraft({}) }}
           >
             ✕
@@ -314,8 +314,8 @@ export function IMSettingsEditor() {
       {/* 主开关 */}
       <div className="im-master">
         <div>
-          <div className="im-master-title">{t('settings.im.title')}</div>
-          <div className="im-master-desc">{t('settings.im.desc')}</div>
+          <div className="im-master-title">{t('settings.im.master')}</div>
+          <div className="im-master-desc">{t('settings.im.masterDesc')}</div>
         </div>
         <button
           className={`switch ${cfg.enabled ? 'on' : ''}`}
@@ -342,7 +342,7 @@ export function IMSettingsEditor() {
               ? t('settings.im.ownerOn').replace('{n}', String(imOwnerStatus.routes))
               : t('settings.im.ownerOff')}</span>
             <button
-              className="btn gho"
+              className="btn ghost"
               style={{ marginLeft: 8 }}
               disabled={busy}
               onClick={() => (imOwnerStatus.enabled ? disablePlugin('im') : enablePlugin('im'))}
@@ -755,7 +755,7 @@ function RouteAddRow({ gatewayId, gatewayType, cfg, save, onDone, initial }: Rou
       )}
       {err && <span className="im-err" style={{ marginLeft: 6 }}>{err}</span>}
       <button className="btn pri" disabled={busy} onClick={submit}>✓</button>
-      <button className="btn gho" onClick={onDone}>✕</button>
+      <button className="btn ghost" onClick={onDone}>✕</button>
     </div>
   )
 }
@@ -803,7 +803,7 @@ function AllowAddRow({ gatewayId, cfg, save, onDone }: AllowAddRowProps) {
       />
       {err && <span className="im-err" style={{ marginLeft: 6 }}>{err}</span>}
       <button className="btn pri" disabled={busy} onClick={submit}>✓</button>
-      <button className="btn gho" onClick={onDone}>✕</button>
+      <button className="btn ghost" onClick={onDone}>✕</button>
     </div>
   )
 }

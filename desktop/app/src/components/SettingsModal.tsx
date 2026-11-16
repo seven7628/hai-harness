@@ -923,8 +923,7 @@ function IMTab() {
     <>
       <SetHead
         title={t('settings.im')}
-        // i18n: 建议 key settings.im.sub
-        subtitle="在 IM 里远程使用这个工作区：发任务、审批、接收结果。"
+        subtitle={t('settings.im.sub')}
       />
       <IMSettingsEditor />
     </>
@@ -1035,8 +1034,9 @@ function PluginTab() {
     <>
       <SetHead
         title={t('settings.plugin')}
-        subtitle={t('plugin.hint')}
+        subtitle={t('plugin.sub')}
       />
+      <p className="set-note-tech">{t('plugin.hint')}</p>
       {/* 浏览器引擎（mcp | ego 互斥，2026-09） */}
       <div className="set-row" style={{ marginBottom: 6 }}>
         <div>
@@ -1106,8 +1106,7 @@ function PluginTab() {
       {engineMsg && <div className="mcp-s-err mono" style={{ marginBottom: 6 }}>{engineMsg}</div>}
       <div className="set-block">
         <div className="set-block-hd">
-          {/* i18n: 建议 key plugin.list.title */}
-          <span className="set-block-title">已安装</span>
+          <span className="set-block-title">{t('plugin.list.title')}</span>
           <span className="mk-sec-count">{plugins.length}</span>
         </div>
       {plugins.length === 0 ? (
@@ -1115,8 +1114,7 @@ function PluginTab() {
           compact
           icon={<AccessIcon size={16} />}
           title={t('plugin.empty')}
-          // i18n: 建议 key plugin.emptyHint
-          hint="内置组件随应用同步，不需要单独下载；启用后可在这里配置。"
+          hint={t('plugin.emptyHint')}
         />
       ) : (
         plugins
@@ -1298,9 +1296,7 @@ function MeshTab() {
     <>
       <SetHead
         title={t('settings.mesh')}
-        // i18n: 建议 key settings.mesh.sub —— 现有 settings.mesh.desc 把 Session Mesh /
-        // session_send / session_list 直接当正文；人话放页头，技术细节降到弱色小字。
-        subtitle="在多台设备之间续接同一个会话；默认关闭，开启后才可用。"
+        subtitle={t('settings.mesh.sub')}
       />
       <p className="set-note-tech">{t('settings.mesh.desc')}</p>
 
@@ -1366,7 +1362,7 @@ function MeshTab() {
                 {(meshStatus?.links ?? []).map((l) => (
                   <div className="mesh-link" key={l.node_id}>
                     <code className="mesh-code">{l.node_id}</code>
-                    <span className="set-desc">{l.inbound ? '← 连入' : '→ 连出'}</span>
+                    <span className="set-desc">{l.inbound ? t('settings.mesh.inbound') : t('settings.mesh.outbound')}</span>
                   </div>
                 ))}
               </div>
@@ -1591,8 +1587,8 @@ function MemoryTab() {
           <thead>
             <tr>
               <th>{t('settings.memory.browse')}</th>
-              <th>type</th>
-              <th>modified</th>
+              <th>{t('settings.memory.type')}</th>
+              <th>{t('settings.memory.modified')}</th>
               <th style={{ textAlign: 'right' }}>{t('settings.memory.browse.size')}</th>
             </tr>
           </thead>
@@ -1636,7 +1632,9 @@ const pad2 = (n: number) => String(n).padStart(2, '0')
 function fmtDreamRunTime(v?: string): string {
   if (!v) return '—'
   const d = new Date(v)
-  return isNaN(d.getTime()) ? '—' : d.toLocaleString()
+  if (isNaN(d.getTime())) return '—'
+  // 用户可见时间统一 YYYY-MM-DD HH:mm（24h），不跟系统区域跑。
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
 
 function DreamSection() {

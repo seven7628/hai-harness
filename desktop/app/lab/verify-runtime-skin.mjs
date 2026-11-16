@@ -449,6 +449,13 @@ const injected = await page.eval(() => {
   return blocks.length
 })
 await wait(700)
+// 简洁档交卷后的工作盒是**收起**的：折叠内容不挂 DOM（不是 display:none），所以注入
+// 这一行之后先把它所在的那一轮展开，否则 .tool-row 根本不存在。展开所有收起的折叠行，
+// 不假设轮数。
+await page.eval(() => {
+  document.querySelectorAll('.rt-act[aria-expanded="false"]').forEach((el) => el.click())
+})
+await wait(600)
 const failRow = await page.eval(() => {
   const row = [...document.querySelectorAll('.tool-row')].find((r) => r.textContent.includes('agent-server-g') && r.getAttribute('data-s') === 'fail')
   if (!row) return null
@@ -1879,7 +1886,7 @@ check('signals: event name is the raw event_type, untranslated', sigRows.typeTex
 const distinct = new Set(Object.values(sigRows.colors).filter(Boolean))
 check('signals: icon colour differs by kind', distinct.size >= 5, JSON.stringify(sigRows.colors))
 check('signals: zh copy is built from the fact, not prose in the store',
-  sigRows.titles.memory === '已保存 2 条记忆' && sigRows.titles.hook === '工具钩子发出警告' &&
+  sigRows.titles.memory === '已保存 2 条记忆' && sigRows.titles.hook === '自动化规则发出警告' &&
     sigRows.titles.silent === '这次运行没有产出文本' && sigRows.titles.budget === '会话预算已用尽',
   JSON.stringify(sigRows.titles))
 check('signals: sub-line carries only the facts we were given',

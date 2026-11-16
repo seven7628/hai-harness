@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react'
 import { ChevronLeft, ChevronRight } from './icons'
+import { useT } from '../i18n'
 
 // 设置页（MCP / 钩子）通用骨架：来源分组卡片 + 二级详情头 + 开关/开关行。
 //
@@ -48,9 +49,10 @@ export function DetailHead({
   onBack: () => void
   children?: ReactElement | null
 }) {
+  const t = useT()
   return (
     <div className="detail-head">
-      <button type="button" className="detail-back" onClick={onBack} aria-label="back" title="返回">
+      <button type="button" className="detail-back" onClick={onBack} aria-label={t('common.back')} title={t('common.back')}>
         <ChevronLeft size={14} />
       </button>
       <div className="detail-title-box">

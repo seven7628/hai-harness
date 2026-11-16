@@ -81,14 +81,13 @@ export default function CronRunsPage() {
               <span className="mono" title={job.cron}>{job.cron}</span>
               <span>{job.recurring ? t('cron.recurring') : t('cron.once')}</span>
               {job.paused && <span className="cron-status paused">{t('cron.paused')}</span>}
-              <span className="mono cron-runs-job-id" title={job.id}>{job.id}</span>
             </div>
 
             {runs.length === 0 ? (
               <EmptyState
                 icon={<Clock size={18} />}
-                title="暂无执行记录"
-                hint="到点触发后，每次执行的会话历史都会出现在这里。"
+                title={t('cron.emptyRunsTitle')}
+                hint={t('cron.emptyRunsHint')}
               />
             ) : (
               <>

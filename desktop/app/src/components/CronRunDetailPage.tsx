@@ -45,8 +45,7 @@ export default function CronRunDetailPage() {
     <div className="cron-page cron-detail-page">
       <PageHead
         className="cron-head"
-        // i18n: 建议 key cron.backRun —— 文案基线：返回记录
-        backLabel="返回记录"
+        backLabel={t('cron.backRuns')}
         onBack={back}
         icon={<Clock size={15} />}
         title={t('cron.detailTitle')}
@@ -66,9 +65,9 @@ export default function CronRunDetailPage() {
             <div className="cron-card">
               <EmptyState
                 icon={<Clock size={18} />}
-                title="未找到该次执行记录"
+                title={t('cron.detailNotFoundTitle')}
                 hint={t('cron.detailNotFound')}
-                actions={<button className="btn" onClick={back}>返回执行记录</button>}
+                actions={<button className="btn" onClick={back}>{t('cron.backRuns')}</button>}
               />
             </div>
           </div>
@@ -105,7 +104,7 @@ export default function CronRunDetailPage() {
             <div className="sp-body">
               <div className="sp-content">
                 <div className="cron-card">
-                  <EmptyState icon={<Clock size={18} />} title="该次执行的历史尚未归档" hint="执行仍在进行中，或数据已缺失。" />
+                  <EmptyState icon={<Clock size={18} />} title={t('cron.notArchivedTitle')} hint={t('cron.detailNotArchived')} />
                 </div>
               </div>
             </div>
