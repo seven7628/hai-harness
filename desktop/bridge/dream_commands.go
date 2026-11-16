@@ -19,9 +19,16 @@ import (
 const dreamRunsShown = 20
 
 func (m *manager) handleDreamGet(c command) {
+	// runs 必须是 []，不能是 null：readDreamRuns 在没有记录/没有文件时返回 nil，
+	// 而 nil 切片会被 encoding/json 序列化成 null —— 前端已经从"非数组"兜住了，
+	// 但契约上说好是数组就给数组（真机验收时 dream_get 的 runs 是 null）。
+	runs := readDreamRuns(dreamRunsShown)
+	if runs == nil {
+		runs = []dreamRun{}
+	}
 	m.resp(c, true, "", map[string]any{
 		"settings": loadDreamSettings(),
-		"runs":     readDreamRuns(dreamRunsShown),
+		"runs":     runs,
 		// running 由持有闩的一方给：前端据此把「立即运行」显示成进行中，
 		// 而不是拿"有没有未完成的记录"去猜（进程被杀留下的半条记录会一直像在跑）。
 		"running": m.dreamRunning(),

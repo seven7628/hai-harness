@@ -532,6 +532,8 @@ type bridgeSession struct {
 	// isDream 标记本会话为 Dream 巡检派生会话：与 cron 同类（不出列表、不参与
 	// workspace 级操作），但收口走 dreamSessionDone（见 dream_scheduler.go）。
 	isDream bool
+	// dreamTally Dream 巡检台账（nil = 非 Dream 会话）：收口时写进运行记录的 repos。
+	dreamTally *dreamTally
 	// dreamSessionDone Dream 派生会话的 AgentEnd 钩子（nil = 非 Dream 会话）。
 	// 与 cronEnd* 一样在 emit 的 AgentEnd 分支先暂存状态，等事件落盘后再调用。
 	dreamSessionDone func(errMsg, final string)
@@ -1008,6 +1010,13 @@ func (bs *bridgeSession) emit(e events.Event) {
 	//（含本条 agent_end 的最终回复）。只对定时任务派生会话生效（cronLedger 非空）。
 	if e.Type() == events.AgentEndType && bs.cronLedger != nil && bs.cronRun != "" {
 		bs.finishCronRun(bs.cronEndStatus, bs.cronEndErr, bs.cronEndContent)
+	}
+	// Dream 巡检台账：每次 memory_dream 的工具结果都记下来（运行记录的 repos 字段）。
+	// 必须在下面的 AgentEnd 分支之前：收口时要立刻读台账，晚一步就少最后一次调用。
+	if e.Type() == events.ToolRunEndType && bs.dreamTally != nil {
+		if tr, ok := e.(*events.ToolResponse); ok && tr != nil {
+			bs.dreamTally.observe(tr.Name, tr.Arguments, tr.Result)
+		}
 	}
 	// Dream 巡检收口：同一时机（事件已落盘），把运行记录补成"已完成"。
 	// 钩子是**一次性**的：清掉再调，重入（重试/续跑再发 AgentEnd）不会写第二遍。
@@ -1633,6 +1642,10 @@ type manager struct {
 	dreamCancel context.CancelFunc
 	dreamMu     sync.Mutex
 	dreamBusy   bool
+	// dreamSince 本轮起跑时刻 / dreamRunSID 本轮会话 id：看门狗据这两个值判断
+	// "是不是卡住了"与"卡住的是哪一轮"（见 dream_scheduler.go 的 dreamWatchdog）。
+	dreamSince  time.Time
+	dreamRunSID string
 }
 
 // previewService 取（或懒创建）转换服务单例（R08a）。

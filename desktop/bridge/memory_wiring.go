@@ -63,6 +63,14 @@ func (h *memoryHost) resolve(ctx context.Context, workdir string) (*memory.Dir, 
 	if h.cfg.Disabled() || workdir == "" {
 		return nil, nil
 	}
+	// Dream 的空工作目录**没有自己的记忆库**（见 dream_scheduler.go 的 dreamWorkspaceDir）。
+	//
+	// 不挡的话：装配期注入 → resolve 会按路径身份给它建出一个 `repos/path-…-dream-workspace-<hash>/`，
+	// 而巡检脚本正好遍历 repos/* —— 于是模型把这个空库当成"第 9 个记忆库"，取证据、
+	// 裁决、汇报，全是噪声（2026-11 真机验收实测）。空目录没有身份可言，直接判无。
+	if isDreamWorkspacePath(workdir) {
+		return nil, nil
+	}
 	h.once.Do(func() {
 		res := memory.Bootstrap(ctx, workdir, h.cfg)
 		if res.Resolved && res.Dir != nil {

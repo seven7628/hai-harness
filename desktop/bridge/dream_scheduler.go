@@ -27,6 +27,15 @@ import (
 // 半分钟起跑，用户感知不到；而更密的轮询只是白读一次小 JSON。
 const dreamPollInterval = 30 * time.Second
 
+// dreamMaxRunDuration 一轮巡检的最长存活时间，超过就由看门狗强制放闩。
+//
+// 为什么需要（2026-11 真机验收后的健壮性缺口）：闩只在两处释放——触发失败路径
+// 与 `dreamSessionDone`（挂在 AgentEnd 上）。只要有一轮没等到 AgentEnd（派生会话
+// 被中断/被 panic 打死/provider 侧把 goroutine 收掉），闩就**永远**为 true，
+// 之后每一夜都被"Dream 正在运行中"挡在门外，直到进程重启。实测一轮 7 个库的
+// 巡检约 11 分钟，90 分钟给了 8 倍余量：正常的慢不是故障，卡住才是。
+const dreamMaxRunDuration = 90 * time.Minute
+
 // startDreamScheduler 启动调度 goroutine（进程生命周期内常驻，与 startCron 同位）。
 //
 // 刻意不做"启动即补跑"：桥在 23:50 启动、03:00 的设置没到点就不该跑；
@@ -58,6 +67,8 @@ func (m *manager) stopDreamScheduler() {
 //
 // 判定全部交给 dreamDue（纯函数，可测）：开关 / 今天跑过没有 / 到点没有。
 func (m *manager) dreamTick(now time.Time) {
+	// 先兜底放闩，再判到点：一轮卡死的巡检不该让后面所有夜晚都排不上队。
+	m.dreamWatchdog(now)
 	s := loadDreamSettings()
 	if !dreamDue(s, now) {
 		return
@@ -93,6 +104,8 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	}
 
 	sid := m.genID()
+	// 先让闩知道"这一轮是谁"：万一没有 AgentEnd，看门狗要据此给记录收口。
+	m.dreamNoteSession(sid)
 	dir := filepath.Join(dreamSessionsRoot(), sid)
 	if err := os.MkdirAll(dir, 0o700); err != nil { // 派生会话含记忆正文，0700
 		m.dreamRelease()
@@ -125,7 +138,9 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	}
 
 	bs.isDream = true // 与 cron 派生会话同类：不进会话列表、不被 workspace 级操作误伤
-	bs.dreamSessionDone = func(errMsg, final string) { m.finishDreamRun(sid, errMsg, final) }
+	// 台账：每次 memory_dream 的工具结果都记进来，收口时写进运行记录的 repos 字段。
+	bs.dreamTally = newDreamTally()
+	bs.dreamSessionDone = func(errMsg, final string) { m.finishDreamRun(sid, errMsg, final, bs.dreamTally.results()) }
 
 	// 先记"已开始"：巡检跑到一半进程被杀，设置页也应当看得到这一轮（FinishedAt 空）。
 	appendDreamRun(dreamRun{
@@ -137,7 +152,7 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 	})); err != nil {
 		bs.dreamSessionDone = nil
 		m.dreamRelease()
-		completeDreamRun(sid, time.Now(), "", err.Error())
+		completeDreamRun(sid, time.Now(), "", err.Error(), nil)
 		m.emitDreamChanged()
 		return nil, fmt.Errorf("投递 Dream 任务失败: %w", err)
 	}
@@ -147,9 +162,9 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 }
 
 // finishDreamRun 派生会话 AgentEnd 后收口（emit 尾部调用，见 main.go）。
-func (m *manager) finishDreamRun(sessionID, errMsg, final string) {
+func (m *manager) finishDreamRun(sessionID, errMsg, final string, repos []dreamRepoResult) {
 	summary := dreamSummaryOf(final)
-	completeDreamRun(sessionID, time.Now(), summary, errMsg)
+	completeDreamRun(sessionID, time.Now(), summary, errMsg, repos)
 	m.dreamRelease()
 	m.emitDreamChanged()
 }
@@ -180,14 +195,55 @@ func (m *manager) dreamAcquire() bool {
 		return false
 	}
 	m.dreamBusy = true
+	m.dreamSince = time.Now()
+	m.dreamRunSID = ""
 	return true
+}
+
+// dreamNoteSession 记下本轮会话 id：看门狗强制放闩时要用它把记录补成"失败"。
+func (m *manager) dreamNoteSession(sid string) {
+	if sid == "" {
+		return
+	}
+	m.dreamMu.Lock()
+	m.dreamRunSID = sid
+	m.dreamMu.Unlock()
 }
 
 // dreamRelease 放开闩（AgentEnd / 触发失败两条路径都要走到）。
 func (m *manager) dreamRelease() {
 	m.dreamMu.Lock()
 	m.dreamBusy = false
+	m.dreamSince = time.Time{}
+	m.dreamRunSID = ""
 	m.dreamMu.Unlock()
+}
+
+// dreamWatchdog 兜底放闩：一轮巡检超过 dreamMaxRunDuration 还没有收口，就强制释放，
+// 并把那条"已开始"的记录补成失败（用户能看见"昨晚那一轮卡住了"，而不是只有一条
+// 永远停在"运行中"的记录）。
+//
+// 刻意**不去杀**那个派生会话：卡住的原因可能是模型/provider 正在慢慢吐 token，
+// 杀它除了制造一条"被中断"的记录之外没有收益；这里要修的是"闩泄漏导致后续排不上队"。
+// 会话若之后自己结束，finishDreamRun 的收口是幂等的（记录已不再有 FinishedAt 为零，
+// dreamRelease 也重复无害）。
+func (m *manager) dreamWatchdog(now time.Time) {
+	m.dreamMu.Lock()
+	if !m.dreamBusy || m.dreamSince.IsZero() || now.Sub(m.dreamSince) < dreamMaxRunDuration {
+		m.dreamMu.Unlock()
+		return
+	}
+	sid, started := m.dreamRunSID, m.dreamSince
+	m.dreamBusy, m.dreamSince, m.dreamRunSID = false, time.Time{}, ""
+	m.dreamMu.Unlock()
+
+	msg := fmt.Sprintf("运行超过 %s 仍未结束（%s 起跑），闩已强制释放；今天不会自动重试",
+		dreamMaxRunDuration, started.Format("15:04"))
+	fmt.Fprintf(os.Stderr, "dream: %s（派生会话 %s）\n", msg, sid)
+	if sid != "" {
+		completeDreamRun(sid, now, "", msg, nil)
+	}
+	m.emitDreamChanged()
 }
 
 // dreamRunning 当前是否有巡检在跑（设置页据此禁掉「立即运行」）。
@@ -213,17 +269,60 @@ func dreamSessionsRoot() string {
 	return filepath.Join(appDataDir(), "dream_sessions")
 }
 
+// dreamWorkspaceRootOverride 测试注入（生产恒为空）：工作目录根落到临时目录。
+var dreamWorkspaceRootOverride string
+
+// dreamWorkspaceRoot 巡检工作目录的父目录。
+//
+// **必须落在 ~/.go-code 之外**（2026-11 真机验收教训）：沙箱与文件工具都拒绝
+// `~/.go-code`（settings.json 可能含密钥），只放行 memory / plugins / runtime 三个
+// 子树。工作目录放在 `~/.go-code/dream_workspace` 时，派生会话的 cwd 恰好是被拒的
+// 路径，于是**每一次** bash 都以
+//
+//	shell-init: error retrieving current directory: getcwd: cannot access parent directories: Operation not permitted
+//
+// 开头，glob 直接回 "which is go-code's own config/secret directory and is protected"。
+// 模型当时靠 `cd ~/.go-code/memory/repos` 硬绕过去了，但那是一轮巡检里 8 次无效
+// 工具调用——不该让模型替宿主的布局买单。
+//
+// 用 UserCacheDir 而不是 os.TempDir：缓存目录是"按用户、可清理、放可再生数据"的
+// 语义位置，正好对应这个空工作目录；/tmp 在部分平台会被定期清空（也无妨，MkdirAll
+// 会重建）。路径仍然**固定**：m.runtime(path) 按路径缓存运行态（技能表 / MCP 实例 /
+// 配置 watcher），每晚换路径就是每晚泄漏一份装配。
+func dreamWorkspaceRoot() string {
+	if dreamWorkspaceRootOverride != "" {
+		return dreamWorkspaceRootOverride
+	}
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "go-code")
+	}
+	return filepath.Join(os.TempDir(), "go-code")
+}
+
+// dreamWorkspacePath 工作目录的绝对路径（纯函数，不建目录：装配期比较路径时用它）。
+func dreamWorkspacePath() string {
+	return filepath.Join(dreamWorkspaceRoot(), "dream-workspace")
+}
+
+// isDreamWorkspacePath 判断某个工作区是不是 Dream 的空工作目录。
+//
+// 用途：不给它注入"当前项目记忆"（见 buildLoop）。空目录没有记忆，注入只会顺手
+// 在 ~/.go-code/memory/repos 下建出一个空库，把巡检清单搞脏——真机验收里模型就
+// 把那个空库当成第 9 个记忆库认真处理了一遍。
+func isDreamWorkspacePath(workspace string) bool {
+	if strings.TrimSpace(workspace) == "" {
+		return false
+	}
+	return filepath.Clean(workspace) == filepath.Clean(dreamWorkspacePath())
+}
+
 // dreamWorkspaceDir 巡检派生会话的工作目录（固定空目录，不随用户当前项目漂移）。
 //
 // 取舍：Dream 的作用域是**全部**记忆库，不是当前项目。给它一个项目工作区当 cwd，
 // 模型会先读那个项目的 AGENTS.md / 记忆 / 文件树，然后拿"这个项目的标准"去判断
-// 别人的记忆——这正是任务书里要避免的偏移。所以用一个空目录。
-//
-// 为什么是固定目录而不是每次 mktemp：m.runtime(path) 按路径缓存运行态，每条新路径
-// 都会装配一整套（技能表 / MCP 实例 / 配置 watcher / 探活 goroutine）。每晚换一个
-// 临时目录 = 每夜泄漏一份。固定目录则进程内只装配一次。
+// 别人的记忆——这正是任务书里要避免的偏移。所以用一个空目录（位置见 dreamWorkspaceRoot）。
 func dreamWorkspaceDir() string {
-	dir := filepath.Join(appDataDir(), "dream_workspace")
+	dir := dreamWorkspacePath()
 	_ = os.MkdirAll(dir, 0o700)
 	return dir
 }

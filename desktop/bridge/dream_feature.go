@@ -203,7 +203,7 @@ func appendDreamRun(rec dreamRun) {
 // 为什么改写而不是再追加一条：设置页一行 = 一次运行。追加第二条（状态行）会把
 // 同一个 session 拆成两行，用户看到的是"跑了两遍"。文件很小（一次运行一行），
 // 整份重写的代价可以忽略。
-func completeDreamRun(sessionID string, finished time.Time, summary, errMsg string) {
+func completeDreamRun(sessionID string, finished time.Time, summary, errMsg string, repos []dreamRepoResult) {
 	if sessionID == "" {
 		return
 	}
@@ -220,6 +220,11 @@ func completeDreamRun(sessionID string, finished time.Time, summary, errMsg stri
 			records[i].FinishedAt = finished
 			records[i].Summary = summary
 			records[i].Error = errMsg
+			// repos 来自宿主台账（模型真的调过哪些库），不是模型的自述——
+			// 摘要可能漏库，台账不会（见 dream_tally.go）。
+			if len(repos) > 0 {
+				records[i].Repos = repos
+			}
 			hit = true
 			break
 		}
@@ -282,21 +287,22 @@ func readDreamRuns(limit int) []dreamRun {
 func dreamPrompt() string {
 	return `你的任务是巡检本地全部记忆库，让它们保持可用。
 
-范围：~/.go-code/memory/repos/ 下的每一个目录都是一个记忆库（一个项目一份）；
-先列一遍这个目录（子目录名就是下面要用的库名），逐个处理，全部都要看。
+范围：应用内的**每一个**记忆库（一个项目一份），不是当前工作目录那一个。
+第一步先调 memory_dream(action=repos) 拿清单：返回里每个 id 就是一个库名，count 是库数。
+不要把 ls / bash / glob 当第一步去猜目录——工作目录是个空目录，那几步只会浪费轮次。
 
-对每个记忆库：
-1. 用库名调 memory_dream(action=evidence, repo=<库目录名>) 取证据：代码锚点是否还存在、最后一次被引用是什么时候、
+对清单里的每一个库：
+1. 用库名调 memory_dream(action=evidence, repo=<库 id>) 取证据：代码锚点是否还存在、最后一次被引用是什么时候、
    有没有被后续会话推翻、有没有重复或未进索引的条目。
 2. 依据证据判断每一条：仍然成立 → 留着；明显过时/被继任/一次性快照 → 提交 archive；
-   证据不足 → 留着。把判断用 memory_dream(action=apply, repo=<库目录名>) 提交，宿主会再做护栏检查
-   （保护清单、7 天冷却、单次上限、快照）。
+   证据不足 → 留着。把判断用 memory_dream(action=apply, repo=<库 id>) 提交，宿主会再做护栏检查
+   （保护清单、7 天冷却、单次上限、快照）。没有要归档的就不要调 apply 空转。
 3. 归档之外可以顺手修正：把与正文不符的索引摘要改对、把没登记的条目补进 MEMORY.md、
-   合并明显重复的条目。改文件用标准文件工具，改完必须让 MEMORY.md 与文件一致
-   （索引行必须带文件名，否则不算条目）。
+   合并明显重复的条目。改文件用标准文件工具（绝对路径 ~/.go-code/memory/repos/<库 id>/…），
+   改完必须让 MEMORY.md 与文件一致（索引行必须带文件名，否则不算条目）。
 
 不要做的事：不要删除记忆文件（归档是宿主的动作，可恢复）；不要动 .state/ 下的文件；
-不要为了让结果好看而归档仍然有用的条目。
+不要为了让结果好看而归档仍然有用的条目；不要用 bash 改记忆文件（用 read_file / edit_file / write_file）。
 
 做完后用一句话汇总：处理了几个库、归档了几条、修正了几处。`
 }

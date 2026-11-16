@@ -4,12 +4,15 @@ package main
 // 不碰真实 ~/.go-code：那里是用户数据）。
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/seven7628/hai-harness/memory"
 )
 
 // withDreamDir 把 Dream 的配置与记录落点切到临时目录。
@@ -238,7 +241,7 @@ func TestCompleteDreamRun(t *testing.T) {
 	appendDreamRun(dreamRun{StartedAt: start.Add(time.Hour), Provider: "openai", Model: "gpt-4o", SessionID: "sB"})
 
 	fin := start.Add(9 * time.Minute)
-	completeDreamRun("sA", fin, "处理 3 个库，归档 2 条", "")
+	completeDreamRun("sA", fin, "处理 3 个库，归档 2 条", "", []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}})
 
 	runs := readDreamRuns(0)
 	if len(runs) != 2 {
@@ -253,13 +256,13 @@ func TestCompleteDreamRun(t *testing.T) {
 	}
 
 	// 找不到会话 → 文件内容原样（不写空文件）。
-	completeDreamRun("nope", fin, "x", "y")
+	completeDreamRun("nope", fin, "x", "y", nil)
 	if got := readDreamRuns(0); len(got) != 2 || got[0].Summary == "" {
 		t.Fatalf("未知会话不应改动记录: %+v", got)
 	}
 
 	// 错误路径：AgentEnd 带错误 → 记录里能看到，摘要仍可空。
-	completeDreamRun("sB", fin, "", "provider 认证失败")
+	completeDreamRun("sB", fin, "", "provider 认证失败", nil)
 	got := readDreamRuns(0)
 	if got[1].Error != "provider 认证失败" {
 		t.Fatalf("错误没落进记录: %+v", got[1])
@@ -459,13 +462,16 @@ func TestDreamFireCreatesDerivedSession(t *testing.T) {
 	}
 
 	// 收口：AgentEnd 钩子把同一条记录补成"已完成"（不追加第二条）。
-	m.finishDreamRun(bs.id, "", "已巡检 3 个库，归档 2 条")
+	m.finishDreamRun(bs.id, "", "已巡检 3 个库，归档 2 条", []dreamRepoResult{{ID: "repo-a", Topics: 12, Archived: 2}})
 	runs = readDreamRuns(0)
 	if len(runs) != 1 {
 		t.Fatalf("收口应改写而非追加，得到 %d 条", len(runs))
 	}
 	if runs[0].FinishedAt.IsZero() || runs[0].Summary == "" {
 		t.Fatalf("收口没写全: %+v", runs[0])
+	}
+	if len(runs[0].Repos) != 1 || runs[0].Repos[0].ID != "repo-a" || runs[0].Repos[0].Archived != 2 {
+		t.Fatalf("repos 没进记录: %+v", runs[0].Repos)
 	}
 	// 闩放开：下一轮可以再触发。
 	if !m.dreamAcquire() {
@@ -496,5 +502,216 @@ func TestDreamRunNowCommand(t *testing.T) {
 	}
 	if got := loadDreamSettings(); got.LastRunDate != time.Now().Format("2006-01-02") {
 		t.Fatalf("立即运行也应写 LastRunDate，得到 %q", got.LastRunDate)
+	}
+}
+
+// TestDreamWatchdogReleasesStuckLatch 看门狗兜底：一轮没有 AgentEnd 的巡检不能让
+// 后续每一夜都撞在"正在运行中"上（真机验收指出的健壮性缺口）。
+func TestDreamWatchdogReleasesStuckLatch(t *testing.T) {
+	m, _ := dreamTestManager(t)
+	withDreamDir(t)
+
+	start := time.Date(2026, 11, 20, 3, 0, 0, 0, time.Local)
+	appendDreamRun(dreamRun{StartedAt: start, Provider: "deepseek", Model: "deepseek-chat", SessionID: "sStuck"})
+
+	if !m.dreamAcquire() {
+		t.Fatal("首次取闩应成功")
+	}
+	m.dreamNoteSession("sStuck")
+	m.dreamSince = start // 把起跑时刻定格，模拟"这一轮已经跑了很久"
+
+	// 没到阈值：闩保持（正常的慢不是故障）。
+	m.dreamWatchdog(start.Add(dreamMaxRunDuration - time.Minute))
+	if !m.dreamRunning() {
+		t.Fatal("未到 90 分钟不应放闩")
+	}
+	// 过阈值：强制放闩 + 记录收口成失败。
+	m.dreamWatchdog(start.Add(dreamMaxRunDuration + time.Minute))
+	if m.dreamRunning() {
+		t.Fatal("超过 90 分钟应强制放闩")
+	}
+	runs := readDreamRuns(0)
+	if len(runs) != 1 {
+		t.Fatalf("看门狗不应追加第二条记录，得到 %d 条", len(runs))
+	}
+	if runs[0].FinishedAt.IsZero() {
+		t.Fatal("卡住的那一轮应被收口（FinishedAt 非空）")
+	}
+	if !strings.Contains(runs[0].Error, "闩已强制释放") {
+		t.Fatalf("记录里应写明强制释放，得到 %q", runs[0].Error)
+	}
+	// 真的放开了：下一轮能取到闩。
+	if !m.dreamAcquire() {
+		t.Fatal("看门狗之后应能再次触发")
+	}
+	m.dreamRelease()
+
+	// 空闲时什么都不做（不写记录、不推事件）。
+	m.dreamWatchdog(start.Add(24 * time.Hour))
+	if got := readDreamRuns(0); len(got) != 1 {
+		t.Fatalf("空闲时看门狗不应改动记录，得到 %d 条", len(got))
+	}
+}
+
+// TestMemoryDreamReposAction repos 动作：宿主自己列记忆库，不依赖 bash/glob 的路径权限。
+func TestMemoryDreamReposAction(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	root := filepath.Join(home, ".go-code", "memory", "repos")
+	mk := func(repo string, files map[string]string) {
+		dir := filepath.Join(root, repo)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		for name, body := range files {
+			p := filepath.Join(dir, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+		}
+	}
+	mk("repo-with-topics", map[string]string{
+		"MEMORY.md":          "- [a](a.md) — 一\ntopics\n",
+		"a.md":               "---\ntype: project\n---\n\nA\n",
+		"b.md":               "---\ntype: user\n---\n\nB\n",
+		"a.md.lock":          "",
+		"MEMORY.md.bak-1105": "旧索引",
+	})
+	// 只有 .state：空库，不进清单（真机验收里它被模型当成了第 9 个记忆库）
+	mk("empty-repo", map[string]string{".state/repo.json": "{}"})
+	// 索引在、条目为零：算有内容（用户刚写了索引）
+	mk("index-only", map[string]string{"MEMORY.md": "- [x](x.md) — x\n"})
+	// 非法名（带分隔符/点）：不是记忆库目录，忽略
+	if err := os.MkdirAll(filepath.Join(root, ".hidden"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newMemoryHost(memory.Config{})
+	tool := newMemoryDreamTool(h, t.TempDir())
+	out, err := tool.Call(context.Background(), "", `{"action":"repos"}`)
+	if err != nil {
+		t.Fatalf("repos: %v", err)
+	}
+	var payload struct {
+		Root  string `json:"root"`
+		Count int    `json:"count"`
+		Repos []struct {
+			ID        string `json:"id"`
+			Topics    int    `json:"topics"`
+			Bytes     int64  `json:"bytes"`
+			HasIndex  bool   `json:"has_index"`
+			LastWrite string `json:"last_write"`
+		} `json:"repos"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("repos 返回不是 JSON: %v（%s）", err, out)
+	}
+	byID := map[string]int{}
+	for _, r := range payload.Repos {
+		byID[r.ID] = r.Topics
+	}
+	if payload.Count != 2 || len(payload.Repos) != 2 {
+		t.Fatalf("应只列出 2 个有内容的库，得到 count=%d repos=%+v", payload.Count, byID)
+	}
+	if byID["repo-with-topics"] != 2 {
+		t.Fatalf("条目数应为 2（MEMORY.md/.bak/.lock 不算），得到 %d", byID["repo-with-topics"])
+	}
+	if _, ok := byID["empty-repo"]; ok {
+		t.Fatal("只有 .state 的空库不应出现在清单里")
+	}
+	if _, ok := byID["index-only"]; !ok {
+		t.Fatal("只有索引（条目为零）的库应出现在清单里")
+	}
+	// 排序稳定（便于模型逐条对账）
+	if payload.Repos[0].ID > payload.Repos[1].ID {
+		t.Fatalf("清单应按 id 排序，得到 %s > %s", payload.Repos[0].ID, payload.Repos[1].ID)
+	}
+	if payload.Repos[0].LastWrite == "" && payload.Repos[1].LastWrite == "" {
+		t.Fatal("有文件的库应带 last_write")
+	}
+}
+
+// TestDreamReposActionRejectsUnknownAction 第三动作没有挤坏原有的动作校验。
+func TestDreamReposActionRejectsUnknownAction(t *testing.T) {
+	h := newMemoryHost(memory.Config{})
+	tool := newMemoryDreamTool(h, t.TempDir())
+	err := tool.ValidParams(context.Background(), "", `{"action":"delete"}`)
+	if err == nil || !strings.Contains(err.Error(), "repos / evidence / apply") {
+		t.Fatalf("非法动作应被拒且文案列出三种动作，得到 %v", err)
+	}
+	if err := tool.ValidParams(context.Background(), "", `{"action":"repos"}`); err != nil {
+		t.Fatalf("repos 应被接受: %v", err)
+	}
+}
+
+// TestDreamTallyFromToolResults 台账只认工具真的执行了什么（不是模型自述）。
+func TestDreamTallyFromToolResults(t *testing.T) {
+	tl := newDreamTally()
+	tl.observe("bash", `{"action":"repos"}`, "无关工具不记")
+	tl.observe("memory_dream", `{"action":"repos"}`, `{"count":2,"repos":[{"id":"repo-a","topics":9},{"id":"repo-b","topics":0}]}`)
+	tl.observe("memory_dream", `{"action":"evidence","repo":"repo-b"}`, `{"repo":"repo-b","topics":3}`)
+	tl.observe("memory_dream", `{"action":"apply","repo":"repo-a"}`, "记忆归档：归档 2 条：x.md、y.md；快照 .state/dream/1")
+	tl.observe("memory_dream", `{"action":"apply","repo":"repo-a"}`, "记忆归档：归档 0 条；跳过 2 条")
+	got := tl.results()
+	if len(got) != 2 {
+		t.Fatalf("应记 2 个库，得到 %+v", got)
+	}
+	if got[0].ID != "repo-a" || got[0].Topics != 9 || got[0].Archived != 2 {
+		t.Fatalf("repo-a 台账不对: %+v", got[0])
+	}
+	if got[1].ID != "repo-b" || got[1].Topics != 3 || got[1].Archived != 0 {
+		t.Fatalf("repo-b 台账不对: %+v", got[1])
+	}
+	// nil 台账安全（非 Dream 会话走不到，但守卫要挡住 nil 解引用）。
+	var empty *dreamTally
+	empty.observe("memory_dream", `{"action":"repos"}`, "{}")
+	if len(empty.results()) != 0 {
+		t.Fatal("nil 台账应返回空")
+	}
+}
+
+// TestDreamWorkspaceOutsideConfigDir 工作目录必须在 ~/.go-code 之外。
+//
+// 回归：它曾经是 ~/.go-code/dream_workspace，而沙箱与文件工具都拒绝 .go-code
+// （只放行 memory/plugins/runtime）——真机验收里每次 bash 都以
+// "getcwd: cannot access parent directories: Operation not permitted" 开头，
+// glob 直接回"是 go-code 的配置目录，受保护"。
+func TestDreamWorkspaceOutsideConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	prev := dreamWorkspaceRootOverride
+	dreamWorkspaceRootOverride = ""
+	t.Cleanup(func() { dreamWorkspaceRootOverride = prev })
+
+	cfg := filepath.Join(home, ".go-code")
+	ws := dreamWorkspacePath()
+	if ws == cfg || strings.HasPrefix(ws, cfg+string(filepath.Separator)) {
+		t.Fatalf("工作目录不能落在 ~/.go-code 内：%s", ws)
+	}
+	if !isDreamWorkspacePath(ws) {
+		t.Fatalf("isDreamWorkspacePath(%s) 应为 true", ws)
+	}
+	if isDreamWorkspacePath(filepath.Join(home, "some-project")) {
+		t.Fatal("普通工作区不该被认成 Dream 工作目录")
+	}
+	// 固定路径（不随会话变化）：m.runtime 按路径缓存运行态。
+	if dreamWorkspacePath() != dreamWorkspacePath() {
+		t.Fatal("工作目录路径必须稳定")
+	}
+
+	// 空工作目录不产生自己的记忆库（真机验收里它变成了"第 9 个记忆库"）。
+	dirOverride := t.TempDir()
+	prevDir := dreamDirOverride
+	dreamDirOverride = dirOverride
+	t.Cleanup(func() { dreamDirOverride = prevDir })
+	h := newMemoryHost(memory.Config{})
+	got, err := h.resolve(context.Background(), ws)
+	if err != nil || got != nil {
+		t.Fatalf("Dream 工作目录不应解析出记忆库，得到 %+v / %v", got, err)
 	}
 }
