@@ -364,6 +364,71 @@ func TestDreamSummaryOf(t *testing.T) {
 	}
 }
 
+// 运行记录只保留最近 200 行：写失败不动历史、裁剪原子替换、权限不变、仍是时间序。
+func TestDreamRunsRotationKeepsRecentTwoHundred(t *testing.T) {
+	dir := withDreamDir(t)
+	p := filepath.Join(dir, "dream_runs.jsonl")
+	base := time.Date(2026, 1, 1, 3, 0, 0, 0, time.Local)
+
+	total := dreamRunsKeep + 1
+	for i := 0; i < total; i++ {
+		appendDreamRun(dreamRun{
+			StartedAt: base.Add(time.Duration(i) * time.Hour),
+			Provider:  "opencode",
+			Model:     "deepseek-v4.1-flash",
+			SessionID: "s" + itoa(i),
+		})
+	}
+
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("读运行记录: %v", err)
+	}
+	var lines []string
+	for _, ln := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(ln) != "" {
+			lines = append(lines, ln)
+		}
+	}
+	if len(lines) != dreamRunsKeep {
+		t.Fatalf("文件应只剩 %d 行，实际 %d 行", dreamRunsKeep, len(lines))
+	}
+	// 顺序仍是时间序，且丢的是**最旧的**那条（s0），最新的那条（s200）还在。
+	runs := readDreamRuns(0)
+	if len(runs) != dreamRunsKeep {
+		t.Fatalf("解析到 %d 条，want %d", len(runs), dreamRunsKeep)
+	}
+	if runs[0].SessionID != "s1" || runs[len(runs)-1].SessionID != "s"+itoa(total-1) {
+		t.Fatalf("裁剪后的首尾不对: %s … %s", runs[0].SessionID, runs[len(runs)-1].SessionID)
+	}
+	for i := 1; i < len(runs); i++ {
+		if runs[i].StartedAt.Before(runs[i-1].StartedAt) {
+			t.Fatalf("第 %d 条时间倒序：%s < %s", i, runs[i].StartedAt, runs[i-1].StartedAt)
+		}
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if mode := st.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("裁剪后权限 = %o, want 600", mode)
+	}
+	// 临时文件不许留在原地。
+	if _, err := os.Stat(p + ".trim"); !os.IsNotExist(err) {
+		t.Fatalf("裁剪用的临时文件应已被 rename 掉")
+	}
+
+	// 再追加一条：仍是 200 行（不是 201），头部的 s1 被挤掉，尾巴是最新的。
+	appendDreamRun(dreamRun{StartedAt: base.Add(500 * time.Hour), SessionID: "tail"})
+	runs = readDreamRuns(0)
+	if len(runs) != dreamRunsKeep {
+		t.Fatalf("再追加后应仍是 %d 行，实际 %d 行", dreamRunsKeep, len(runs))
+	}
+	if runs[0].SessionID != "s2" || runs[len(runs)-1].SessionID != "tail" {
+		t.Fatalf("第二次裁剪后的首尾不对: %s … %s", runs[0].SessionID, runs[len(runs)-1].SessionID)
+	}
+}
+
 // —— 命令面与调度触发 ——
 
 // dreamTestManager 构造隔离的 manager（HOME 与 APP 数据目录都落临时目录）。

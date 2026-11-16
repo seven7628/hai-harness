@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,6 +179,13 @@ func dreamRunsPath() string {
 // goroutine，而收口是**重写整个文件**（原子 rename）：不加锁会丢掉同时在追加的行。
 var dreamRunsMu sync.Mutex
 
+// dreamRunsKeep 运行记录保留条数上限（200 条约半年）。
+//
+// 文件只追加不裁剪，一年后就是几 MB，而 dream_get 每次都把它全读一遍。200 条足够
+// 看出"最近还正常吗"（设置页本来只展示最近 20 条）。裁剪放在**写入成功之后**做：
+// 写失败时历史一个字都不能动。
+const dreamRunsKeep = 200
+
 // appendDreamRun 追加一条运行记录（best-effort：失败不打断运行）。
 func appendDreamRun(rec dreamRun) {
 	p := dreamRunsPath()
@@ -194,8 +202,50 @@ func appendDreamRun(rec dreamRun) {
 	if err != nil {
 		return
 	}
-	defer f.Close()
-	_, _ = f.Write(append(raw, '\n'))
+	_, werr := f.Write(append(raw, '\n'))
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		// 这一行没落住：连裁剪也不做。历史是下一轮写入成功时才裁的。
+		fmt.Fprintf(os.Stderr, "dream: 追加运行记录失败，跳过裁剪: %v %v\n", werr, cerr)
+		return
+	}
+	trimDreamRunsLocked(p, dreamRunsKeep)
+}
+
+// trimDreamRunsLocked 只保留最近 keep 行（调用方必须持有 dreamRunsMu）。
+//
+// 临时文件 + rename 原子替换，权限仍是 0600；任何一步失败都只打一行 stderr 就放弃
+// ——"这一轮记录没写进去"比"把上一年的历史截断成半截"严重得多。保留的是**文件尾**
+// （追加顺序即时间序），所以裁剪后仍是时间序、最近的那条一定还在。
+func trimDreamRunsLocked(p string, keep int) {
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dream: 读运行记录失败，跳过裁剪: %v\n", err)
+		return
+	}
+	var lines []string
+	for _, ln := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(ln) != "" {
+			lines = append(lines, ln)
+		}
+	}
+	if len(lines) <= keep {
+		return
+	}
+	buf := make([]byte, 0, len(raw)/2)
+	for _, ln := range lines[len(lines)-keep:] {
+		buf = append(buf, ln...)
+		buf = append(buf, '\n')
+	}
+	tmp := p + ".trim"
+	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "dream: 写运行记录临时文件失败，跳过裁剪: %v\n", err)
+		return
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		fmt.Fprintf(os.Stderr, "dream: 原子替换运行记录失败，跳过裁剪: %v\n", err)
+	}
 }
 
 // completeDreamRun 把某次运行的记录从"已开始"补成"已完成"。
