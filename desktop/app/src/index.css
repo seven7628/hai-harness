@@ -15115,3 +15115,36 @@ body.is-electron .page-head {
     margin-bottom: 3px;
   }
 }
+/* 技能详情：资源缺失时的说明行（不留白、不误导） */
+.skill-detail .sd-res-empty {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.skill-detail .page-modal-bd {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.skill-detail .sd-body {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: 46vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+/* 技能网格第二档：800 仍两列（640 才一列）；单列时不再为等高留大空白 */
+@media (max-width: 700px) {
+  .sp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .skill-card {
+    min-height: 0;
+  }
+}
