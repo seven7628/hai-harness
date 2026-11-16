@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // 用户消息块回归（F43 / R05c，2026-11 用户报障）
 //
-// 现象：默认皮肤（设置里 `narrative_skin` 未设 → current）下，用户自己发出的那句话
-// 在转录里**什么都不渲染**；切到 runtime 才看得见。也就是说默认安装打开就是坏的。
+// 现象（历史）：默认皮肤（那时还叫 current）下，用户自己发出的那句话在转录里
+// **什么都不渲染**；切到 runtime 才看得见 —— 默认安装打开就是坏的。
 //
 // 根因（git 考古，见下）：`6d28d60 runtime A2: events that used to be cards are now one
 // line each` 在给 user 块加 runtime 分支的同时，把紧随其后的**老分支整段删掉**：
@@ -12,7 +12,11 @@
 // current/v3 两个皮肤的用户消息被静默吞掉（CSS .msg.user / .user-imgs / .user-refs
 // 全部还在，只是没人再产出这些节点）。
 //
-// 本脚本锁住的行为（共 4 档：默认不设 / current / v3 / runtime，各一遍）：
+// 2026-11 起会话页只有 runtime 一套（current/v3 已删除，data-skin 静态写在 index.html），
+// 所以原来「4 档各跑一遍」的矩阵收敛成**一档**：runtime。断言本身一条没松 ——
+// 它守的是「用户消息必须渲染出来」这条行为，与皮肤无关。
+//
+// 本脚本锁住的行为：
 //   ① 用户消息在转录里**真的存在**（.narrative .msg.user 计数）
 //   ② 渲染出来的内容 = 发出去的内容（逐行出现在块文本里，换行/长行都不许丢）
 //   ③ 它**看得见**：有盒子、有面积、display/visibility/opacity 正常，且块中心点的
@@ -26,16 +30,14 @@
 // 没人断言，转录里少一块也不会报错）。所以它挂在 `npm test` 链尾（e2e:subagent-style
 // 之后）：删掉 Narrative.renderBlock 里任何一条 user 分支，这里立刻红。
 //
-// 皮肤怎么定：与 App.tsx 同一条表达式（`settings.narrative_skin ?? 'current'`），
-// 经同一个 applyNarrativeSkin() 落到 <html data-skin>。`?skin=` 留空 = **什么都不设**，
-// 这就是「默认设置」那一档（复现时必须用它，不能用 current 代打）。
+// 皮肤怎么定：`<html data-skin="runtime">` 是静态属性（index.html 写死，没有运行时开关）。
+// 探针页自己也是这么写的，与产品一致。
 //
-// **探针主文件里的三份皮肤 CSS 必须显式 import（不是冗余）**：index.css 末尾那三行
-// @import（narrative-skin / runtime-palette / runtime-skin）在 vite **dev** 下不下发 ——
-// 实测只 import index.css 时 `.rt-head` 的 display 是 block 而不是 flex、runtime 下
-// `.msg.assistant .who` 也没被隐藏，也就是「皮肤只生效一半」，量出来的 runtime 截图是
-// 假象（`vite build` 的产物里这些规则是在的，所以只有探针会踩）。本脚本量的正是
-// 「用户块在三档皮肤下长什么样」，缺了这三份就变成「在没皮肤的现实里长什么样」。
+// **探针主文件里的皮肤 CSS 必须显式 import（不是冗余）**：index.css 末尾的两行
+// @import（runtime-palette / runtime-skin）在 vite **dev** 下不下发 ——
+// 实测只 import index.css 时 `.rt-head` 的 display 是 block 而不是 flex，也就是
+// 「皮肤只生效一半」，量出来的截图是假象（`vite build` 的产物里这些规则是在的，
+// 所以只有探针会踩）。
 //
 // 用法：cd desktop/app && node e2e/verify_user_blocks.mjs
 //      REPORT=1 node e2e/verify_user_blocks.mjs   # 只取证不判（复现用）
@@ -105,12 +107,11 @@ const REF_OK = 'docs/README.md'
 const REF_MISSING = 'src/ghost.ts'
 
 // 临时探针页：真实 CenterPanel（含真 Narrative）+ 生产同一份 CSS，跑完删除。
-// **三档皮肤各自的那层 CSS 要显式 import**：index.css 末尾那三行 @import（narrative-skin /
-// runtime-palette / runtime-skin）在 vite **dev** 下不下发（实测：探针里只 import
-// index.css 时 .rt-head 的 display 是 block 而不是 flex、.msg.assistant 的 .who 也没被
-// runtime 隐藏 —— 也就是「皮肤只生效了一半」，量出来的 runtime 截图是假象；
-// `vite build` 的产物里这几条规则是在的）。这与其它探针的做法一致（verify_agent_tree /
-// verify_plan_card_skin 都显式 import narrative-skin.css）。
+// **皮肤那两层 CSS 要显式 import**：index.css 末尾的 @import（runtime-palette /
+// runtime-skin）在 vite **dev** 下不下发（实测：探针里只 import index.css 时 .rt-head
+// 的 display 是 block 而不是 flex —— 也就是「皮肤只生效了一半」，量出来的截图是假象；
+// `vite build` 的产物里这几条规则是在的）。这与其它探针的做法一致（verify_agent_tree
+// 也显式 import runtime 两层）。
 const PROBE_DIR = path.join(__dirname, '_userprobe_run')
 fs.mkdirSync(PROBE_DIR, { recursive: true })
 fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
@@ -120,25 +121,12 @@ fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
 import CenterPanel from '../../src/components/CenterPanel'
 import { useAppStore, dispatchEvent } from '../../src/store/useAppStore'
-import { applyNarrativeSkin } from '../../src/lib/narrativeSkin'
 import '../../src/index.css'
-import '../../src/narrative-skin.css'
 import '../../src/runtime-palette.css'
 import '../../src/runtime-skin.css'
 
-const q = new URLSearchParams(location.search)
-const WANT = q.get('skin') || '' // 空 = 不设 narrative_skin（默认设置那一档）
-
-// 默认设置：与 App.tsx 同一条表达式 + 同一个 applyNarrativeSkin。
-// 先按用户可能的样子把设置摆好，**包括不设**（delete 掉键），再由表达式推 data-skin。
-useAppStore.setState((s) => {
-  const settings = { ...s.settings }
-  if (WANT) settings.narrative_skin = WANT
-  else delete settings.narrative_skin
-  return { settings }
-})
-const skin = useAppStore.getState().settings.narrative_skin ?? 'current'
-applyNarrativeSkin(skin)
+// 与 index.html 一致：皮肤是静态属性，没有设置项可读
+document.documentElement.setAttribute('data-skin', 'runtime')
 document.documentElement.setAttribute('data-theme', 'ink')
 
 const SID = 'probe'
@@ -214,8 +202,8 @@ const watchdog = setTimeout(() => {
 watchdog.unref()
 
 // 一条探针：量 .msg.user 的存在 / 内容 / 可见性 / 与助手块的先后。
-async function probe(page, want, label) {
-  await page.goto(`${PROBE_URL}${want ? `?skin=${want}` : ''}`, { waitUntil: 'load' })
+async function probe(page, label) {
+  await page.goto(PROBE_URL, { waitUntil: 'load' })
   await page.waitForSelector('.narrative', { timeout: 15000 })
   // 等助手回复真的落进来（转录铺开有错峰动画，等它静下来再量）
   await page.waitForFunction(() => document.querySelectorAll('.msg.assistant').length > 0, null, { timeout: 15000 })
@@ -288,12 +276,12 @@ async function main() {
   const page = await browser.newPage({ viewport: { width: 1180, height: 820 } })
   page.on('pageerror', (e) => console.error('[pageerror]', e.message))
 
-  // 三档：'' = 默认（不设 narrative_skin），其余按设置里的值
-  const CASES = [['', 'default'], ['current', 'current'], ['v3', 'v3'], ['runtime', 'runtime']]
+  // 只有 runtime 一套皮肤（current/v3 已删除）
+  const CASES = [['runtime', 'runtime']]
   const got = {}
   for (const [want, label] of CASES) {
-    console.log(`\n── 皮肤 ${label}${want ? '' : '（narrative_skin 未设置）'} ──`)
-    const r = await probe(page, want, label)
+    console.log(`\n── 皮肤 ${label} ──`)
+    const r = await probe(page, label)
     got[label] = r
     console.log(`  data-skin=${r.skinAttr}  .msg.user=${r.userCount}  .msg.assistant=${r.assistantCount}`
       + `  .rt-you=${r.userIsRt ? 'yes' : 'no'}`)
@@ -339,11 +327,10 @@ async function main() {
       check(!!b && r.assistantTop != null && b.top < r.assistantTop,
         `${label}：用户消息排在助手回复之前（实际 ${b?.top ?? '无'} vs ${r.assistantTop ?? '无'}）`)
     }
-    // runtime 皮肤必须仍然走 UserBlock（不许被这次修复改掉）
+    // 用户块由 UserBlock（.rt-you）渲染：只有这一条路，没有「另一档皮肤兜底」
     console.log('\n── 断言 皮肤路由 ──')
-    check(got.runtime.userIsRt === true, 'runtime：仍由 UserBlock（.rt-you）渲染，行为未变')
-    check(got.current.userIsRt === false && got.v3.userIsRt === false,
-      'current/v3：不走 runtime 的 UserBlock（各自皮肤的老 DOM）')
+    check(got.runtime.userIsRt === true, 'runtime：用户块由 UserBlock（.rt-you）渲染')
+    check(got.runtime.skinAttr === 'runtime', `<html data-skin> 恒为 runtime（实际 ${got.runtime.skinAttr}）`)
   }
 
   await browser.close()

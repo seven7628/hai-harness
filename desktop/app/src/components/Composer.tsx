@@ -11,7 +11,6 @@ import { CtxRing, fmtTokens, ChipMenu } from './ui'
 import CompactConfirm from './CompactConfirm'
 import CtxBreakdownPanel from './CtxBreakdown'
 import FileRefPanel from './FileRefPanel'
-import { useSkin } from '../lib/useSkin'
 import './runtime/pop/pop.css'
 import './runtime/fan/fan.css'
 import { CapsPop, capsCountOf } from './runtime/prompt/CapsPop'
@@ -243,8 +242,6 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
   const [editingId, setEditingId] = useState<number | null>(null) // 正在编辑的暂存队列项 id
   const [editText, setEditText] = useState('')
   const skills = useAppStore((s) => s.skills)
-  // 运行时皮肤：斜杠菜单与 @ 面板换成设计自己的弹层（.pop*），另两档继续走 .cmd-menu
-  const rt = useSkin() === 'runtime'
   // 灯箱：图片附件的放大视图（设计 .cy-lb）。null = 关。
   const [zoom, setZoom] = useState<number | null>(null)
   useEffect(() => {
@@ -1310,7 +1307,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
-        {dragActive && (rt ? (
+        {dragActive && (
           /* 设计 .p-drop（ui.components.css:2492）：虚线强调边 + 28px 图标块 + 粗体标题 +
              mono 说明，落在整张输入卡上（inset -1px） */
           <div className="p-drop" role="status" aria-live="polite">
@@ -1318,9 +1315,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             <b>{t(dragKind === 'image' ? 'composer.drop.titleImage' : 'composer.drop.titleDoc')}</b>
             <span className="pd-what">{dropText}</span>
           </div>
-        ) : (
-          <div className="drop-hint" role="status" aria-live="polite">{dropText}</div>
-        ))}
+        )}
         {compressing && (
           <div className="composer-status" role="status" aria-live="polite">
             <span className="composer-status-spinner" aria-hidden="true" />
@@ -1418,98 +1413,83 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
         )}
         <div ref={cmdRef}>
           {cmdOpen && (
-            rt ? (
-              <div
-                className="pop"
-                data-pop="cmd"
-                role="listbox"
-                aria-label={t('composer.cmdMenuAria')}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {/* 搜索框镜像正文第一行的 `/x`：在这里改就是改正文（单一数据源） */}
-                <div className="pop-search">
-                  <Sparkles size={12} />
-                  <input
-                    value={slashQuery}
-                    onChange={(e) => {
-                      const v = e.target.value.replace(/^\//, '')
-                      setText((prev) => '/' + v + prev.slice(firstToken.length))
-                    }}
-                    placeholder={t('composer.cmdSearch')}
-                    aria-label={t('composer.cmdSearch')}
-                    spellCheck={false}
-                    onKeyDown={(e) => {
-                      // 搜索框里同样受这套键位管：↑↓ 移、⏎ 插入、数字直选、esc 收起
-                      if (pickDigit(e)) return
-                      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                        e.preventDefault()
-                        setSlashActive((i) => {
-                          const n = filtered.length
-                          if (!n) return 0
-                          return (i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n
-                        })
-                        return
-                      }
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        completeCommand()
-                        return
-                      }
-                      if (e.key === 'Escape') {
-                        e.preventDefault()
-                        setCmdMenu(false)
-                        textareaRef.current?.focus()
-                      }
-                    }}
-                  />
-                </div>
-                {filtered.length === 0 ? (
-                  <div className="pop-row"><span className="k">{t('composer.noCmd')}</span></div>
-                ) : null}
-                {[
-                  { label: t('composer.cmdGroupSkills'), rows: filtered.filter((c) => c !== '/summary' && c !== '/clear' && c !== '/reload_skills') },
-                  { label: t('composer.cmdGroupBuiltin'), rows: filtered.filter((c) => c === '/summary' || c === '/clear' || c === '/reload_skills') },
-                ].filter((g) => g.rows.length > 0).map((g) => (
-                  <div key={g.label}>
-                    <div className="pop-label">{g.label}<b>{g.rows.length}</b></div>
-                    {g.rows.map((c) => {
-                      const i = filtered.indexOf(c)
-                      return (
-                        <button
-                          key={c}
-                          type="button"
-                          className={`pop-row sk${i === slashActive ? ' is-active' : ''}`}
-                          role="option"
-                          aria-selected={i === slashActive}
-                          onClick={() => acceptCommand(c)}
-                          onMouseEnter={() => setSlashActive(i)}
-                          title={descOf(c).full ? `${c} — ${descOf(c).full}` : c}
-                        >
-                          <Sparkles size={12} />
-                          <span className="k">{c}</span>
-                          <span className="m">{shortReason(descOf(c).desc)}</span>
-                          {i < 9 ? <kbd aria-hidden="true">{i + 1}</kbd> : null}
-                        </button>
-                      )
-                    })}
-                  </div>
-                ))}
-                <div className="pop-foot">{t('composer.cmdFoot')}</div>
+            <div
+              className="pop"
+              data-pop="cmd"
+              role="listbox"
+              aria-label={t('composer.cmdMenuAria')}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* 搜索框镜像正文第一行的 `/x`：在这里改就是改正文（单一数据源） */}
+              <div className="pop-search">
+                <Sparkles size={12} />
+                <input
+                  value={slashQuery}
+                  onChange={(e) => {
+                    const v = e.target.value.replace(/^\//, '')
+                    setText((prev) => '/' + v + prev.slice(firstToken.length))
+                  }}
+                  placeholder={t('composer.cmdSearch')}
+                  aria-label={t('composer.cmdSearch')}
+                  spellCheck={false}
+                  onKeyDown={(e) => {
+                    // 搜索框里同样受这套键位管：↑↓ 移、⏎ 插入、数字直选、esc 收起
+                    if (pickDigit(e)) return
+                    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                      e.preventDefault()
+                      setSlashActive((i) => {
+                        const n = filtered.length
+                        if (!n) return 0
+                        return (i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n
+                      })
+                      return
+                    }
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      completeCommand()
+                      return
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      setCmdMenu(false)
+                      textareaRef.current?.focus()
+                    }
+                  }}
+                />
               </div>
-            ) : (
-            <div className="cmd-menu" role="listbox" aria-label={t('composer.cmdMenuAria')} onClick={(e) => e.stopPropagation()}>
               {filtered.length === 0 ? (
-                <div className="hint">{t('composer.noCmd')}</div>
-              ) : (
-                filtered.map((c) => (
-                  <div key={c} className="mi" role="option" onClick={() => { setText(c + ' '); setCmdMenu(false); requestAnimationFrame(() => textareaRef.current?.focus()) }} title={c}>
-                    <span className="spark">✦</span>
-                    <span className="nm">{c}</span>
-                  </div>
-                ))
-              )}
+                <div className="pop-row"><span className="k">{t('composer.noCmd')}</span></div>
+              ) : null}
+              {[
+                { label: t('composer.cmdGroupSkills'), rows: filtered.filter((c) => c !== '/summary' && c !== '/clear' && c !== '/reload_skills') },
+                { label: t('composer.cmdGroupBuiltin'), rows: filtered.filter((c) => c === '/summary' || c === '/clear' || c === '/reload_skills') },
+              ].filter((g) => g.rows.length > 0).map((g) => (
+                <div key={g.label}>
+                  <div className="pop-label">{g.label}<b>{g.rows.length}</b></div>
+                  {g.rows.map((c) => {
+                    const i = filtered.indexOf(c)
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        className={`pop-row sk${i === slashActive ? ' is-active' : ''}`}
+                        role="option"
+                        aria-selected={i === slashActive}
+                        onClick={() => acceptCommand(c)}
+                        onMouseEnter={() => setSlashActive(i)}
+                        title={descOf(c).full ? `${c} — ${descOf(c).full}` : c}
+                      >
+                        <Sparkles size={12} />
+                        <span className="k">{c}</span>
+                        <span className="m">{shortReason(descOf(c).desc)}</span>
+                        {i < 9 ? <kbd aria-hidden="true">{i + 1}</kbd> : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              ))}
+              <div className="pop-foot">{t('composer.cmdFoot')}</div>
             </div>
-            )
           )}
         </div>
         {!mobile && atOpen && workspace && (
@@ -1522,7 +1502,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             />
           </div>
         )}
-        {rt && attachments.length > 0 && (
+        {attachments.length > 0 && (
           /* 扇形：一张图不是一叠牌（data-n='1' 走设计的大缩略图），多张按
              --i/--mid 叠成一手牌，悬停抽出来，点击开全屏 */
           <div className="cy-imgs" data-n={attachments.length} role="list" aria-label={t('composer.attach.strip')}>
@@ -1543,26 +1523,13 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             )}
           </div>
         )}
-        {(docRefs.length > 0 || quotes.length > 0 || (!rt && attachments.length > 0)) && (
+        {(docRefs.length > 0 || quotes.length > 0) && (
           <div className="attach-strip" role="list" aria-label={t('composer.attach.strip')}>
-            {!rt &&
-              attachments.map((a, i) =>
-                a.type === 'image' ? (
-                  <div className="attach-chip" role="listitem" key={i} title={t('composer.attach.remove')}>
-                    <img src={a.content} alt="" />
-                    <button
-                      className="attach-x"
-                      onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
-                      aria-label={t('composer.attach.remove')}
-                    >×</button>
-                  </div>
-                ) : null,
-              )}
             {/* 文档附件：文件名 + 大小 + 移除（不复制，仅记路径 → 发送时进 @引用）。
                 size < 0 = stat 不可用，显示 — 而不是假造 0B。 */}
             {docRefs.map((d, i) => (
               <div className="attach-chip doc-chip" role="listitem" key={`doc-${d.path}`} title={`${d.path}\n${t('composer.attach.docHint')}`}>
-                {rt && <FileIcon size={11} className="att-i" />}
+                <FileIcon size={11} className="att-i" />
                 <span className="doc-chip-name">{d.name}</span>
                 <span className="doc-chip-size">{d.size >= 0 ? fmtBytes(d.size) : '—'}</span>
                 <button
@@ -1594,7 +1561,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             ))}
           </div>
         )}
-        {rt && zoom != null && attachments[zoom] ? (
+        {zoom != null && attachments[zoom] ? (
           <div className="cy-lb" role="dialog" aria-modal="true" aria-label={t('composer.attach.zoomTitle')} onClick={() => setZoom(null)}>
             <figure onClick={(e) => e.stopPropagation()}>
               <button
@@ -1780,7 +1747,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
               onSelect={compressing ? () => undefined : switchMode}
             />
           )}
-          {!mobile && rt && capsOpen && (
+          {!mobile && capsOpen && (
             <CapsPop
               onClose={() => setCapsOpen(false)}
               onInsertSkill={(cmd) => {
@@ -1905,23 +1872,21 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
             {/* 能力入口（设计 index.html:901）：图标 + 「能力」+ 数量 + chevron，落在
                 Effort 之后。数量 = 启用技能 + 内置斜杠命令（这个输入框真能触发的清单），
                 点它写入 `/` 打开**同一份**菜单 —— 不另造一份能力表。 */}
-            {rt && (
-              <button
-                type="button"
-                className="ptool caps-btn"
-                onClick={() => setCapsOpen((v) => !v)}
-                aria-expanded={capsOpen}
-                aria-haspopup="dialog"
-                disabled={queueFull || compressing || Boolean(focused)}
-                title={focused ? t('composer.subInherited') : t('composer.caps.hint').replace('{n}', String(slashItems.length))}
-                aria-label={t('composer.caps.aria').replace('{n}', String(slashItems.length))}
-              >
-                <LayersIcon size={12} />
-                <span className="lbl">{t('composer.caps')}</span>
-                <b>{slashItems.length}</b>
-                <ChevronDown size={11} className="chev" />
-              </button>
-            )}
+            <button
+              type="button"
+              className="ptool caps-btn"
+              onClick={() => setCapsOpen((v) => !v)}
+              aria-expanded={capsOpen}
+              aria-haspopup="dialog"
+              disabled={queueFull || compressing || Boolean(focused)}
+              title={focused ? t('composer.subInherited') : t('composer.caps.hint').replace('{n}', String(slashItems.length))}
+              aria-label={t('composer.caps.aria').replace('{n}', String(slashItems.length))}
+            >
+              <LayersIcon size={12} />
+              <span className="lbl">{t('composer.caps')}</span>
+              <b>{slashItems.length}</b>
+              <ChevronDown size={11} className="chev" />
+            </button>
             {/* hover / 键盘聚焦都能展开构成面板（focus 走同一条路径：键盘用户也能看到占比）。
                 后台工具任务不是子智能体，没有自己的上下文环 —— 不借主会话的读数。 */}
             {(!focused || focusedIsAgent) && (
@@ -1963,7 +1928,7 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
               {/* hover 面板：上下文构成分区（Tools/Skills/MCP/系统提示词/消息/其他） */}
               {ctxPanelOpen && !focused && (
                 <CtxBreakdownPanel
-                  {...(rt && !focused ? {
+                  {...(!focused ? {
                     onCompact: () => {
                       setCtxPanelOpen(false)
                       setConfirmCompact(true)

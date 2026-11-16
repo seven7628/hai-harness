@@ -8,7 +8,6 @@ const page = await b.newPage({ width: 1440, height: 1200 })
 await page.goto(URL, { settleMs: 4000 })
 await page.eval(() => {
   const st = window.__store
-  st.getState().setNarrativeSkin('runtime')
   st.getState().setNarrativeDensity('concise')
 })
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))

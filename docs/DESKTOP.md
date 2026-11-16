@@ -387,7 +387,14 @@ type FileDiff struct {
 - **存储布局**：会话/事件等 APP 级状态落 `~/.go-code/{sessions|events}/<workspaceKey>/`（跨 workspace，见 §5.5）；`{ws}/.go-code/` 仅存 skills 管理（与 git worktree）
 - **安全边界**：文件工具根 = workspace（SDK resolve 已拦越界）；bash 沙箱后端 bridge 配置
 
-### C2. 会话页样式 V3（组件皮肤）
+### C2. 会话页样式 V3（组件皮肤）—— **已于 2026-11 移除**
+
+> 现状：会话页只有 **runtime** 一套皮肤（`<html data-skin="runtime">` 静态写在
+> `desktop/app/index.html` / `mobile.html` 上，`src/runtime-skin.css` 的
+> `html[data-skin='runtime']` 前缀因此不用重写）。`current` / `v3` 两套皮肤、设置里的
+> 「会话页样式」选择项、`src/narrative-skin.css` 以及组件里的 `useSkin()` 结构分支全部删除。
+> 下面这段是 V3 当时的设计与踩坑记录，**只作历史参考**：里面提到的 `.plan-card`、`.ic`
+> 隐藏规则、`verify_plan_card_skin.mjs` 等都已不存在。
 
 - **思考正文段落间距**（2026-09-19 用户报障）：思考正文是 pre-wrap 纯文本，段落用空行分隔 → 空行渲染成
   一整行盒（≈2 倍行高），比正文段落（`.msg .body p` 的 4px）松一个数量级，V3 下尤其明显。修法 =
@@ -401,8 +408,9 @@ type FileDiff struct {
   竖线上；`.plan-raw` / `.plan-err` 的原 26px / 31px 左缩进是挂在卡内盒子上的，一并改成与 `.tool-row-body` /
   `.tool-error-info` 同一套展开体语言（左竖线 + 12px）。默认皮肤一条都没动（卡壳照旧 1px / 8px 圆角）。
   移植复盘：lab 的 `restyle-app-only.css` 里**没有** `.plan-card`（lab 那套 DOM 根本没有这层壳），
-  §16.5 只复盘了"lab 有、本仓没有"的类名，这条是反向漏项 —— 回归脚本
-  `desktop/app/e2e/verify_plan_card_skin.mjs`（真 Narrative + 两皮肤 × 14 条几何断言）现已锁住。
+  §16.5 只复盘了"lab 有、本仓没有"的类名，这条是反向漏项。（当时锁它的
+  `desktop/app/e2e/verify_plan_card_skin.mjs` 已随后续改动一起退场：计划卡在 `45310be`
+  改成一张表之后，`.plan-card` 已经没有任何组件产出。）
 
 ### D. 指标 / 流式 / 工程（体验优先 + 小依赖 + 字体颜色布局交互）
 

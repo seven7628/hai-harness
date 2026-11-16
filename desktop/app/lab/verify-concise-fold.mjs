@@ -30,12 +30,9 @@ const waitUntil = async (expr, timeout = 20000) => {
   return false
 }
 if (!(await waitUntil('!!window.__store'))) throw new Error('window.__store never appeared')
-// 皮肤/密度走 store 动作（手工改 data-skin 会被 App 的 effect 盖回）
+// 密度走 store 动作；皮肤是静态的（index.html 的 <html data-skin="runtime">），不用设
 await page.eval(() => window.__store.getState().setNarrativeDensity('concise'))
-// 皮肤：直接改属性（组件通过 MutationObserver 读它）。要在 boot 完成后设 ——
-// 任何一次 settings 变更都会让 App 的 effect 重新 apply，把属性盖回 current。
 await wait(800)
-await page.eval(() => { document.documentElement.dataset.skin = 'runtime' })
 for (let i = 0; i < 3 && !(await page.eval(() => !!window.__store.getState().activeSessionId)); i++) {
   await page.eval(() => window.__store.getState().newSession())
   await waitUntil('!!window.__store.getState().activeSessionId', 8000)

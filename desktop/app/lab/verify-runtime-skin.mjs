@@ -83,13 +83,12 @@ const waitFor = async (selector, timeout = 30000) => {
 
 await page.goto(URL, { settleMs: 4000 })
 await waitStore()
-// 走 store 的动作，不手写 data-skin：任何一次 settings 变更都会让 App 的 effect
-// 重新 applyNarrativeSkin(settings.narrative_skin)，手工属性会被静默盖回 current。
+// 皮肤是静态的（index.html 的 <html data-skin="runtime">），没有运行时开关可走 ——
+// 这里只调密度（简洁/详细），那是仍在设置里的开关。
 await page.eval(() => {
   const store = window.__store
   if (!store) throw new Error('lab hook missing: window.__store（main.tsx 的 dev 钩子）')
   const st = store.getState()
-  st.setNarrativeSkin('runtime')
   // 工具行/思考折叠这一段的断言要能看见工作行：简洁档运行中它们收在
   // Working 面板里（这是它该有的样子），详细档才是摊开的
   st.setNarrativeDensity('detailed')
@@ -362,7 +361,6 @@ await page.goto(URL, { settleMs: 3000 })
 await waitStore()
 await page.eval(() => {
   const st = window.__store.getState()
-  st.setNarrativeSkin('runtime')
   st.setNarrativeDensity('concise')
 })
 await wait(500)
@@ -605,7 +603,7 @@ if (!jump.skipped) check('follow: clicking the offer goes back to the latest out
 // ---- 提问卡 ---------------------------------------------------------------
 // 这一段要看**简洁档**的 Working 头（LivePanel 只在简洁档渲染），前面的密度段
 // 结束时可能停在详细档 —— 显式设回来，别让断言的成败取决于上一段的残留状态
-await page.eval(() => { window.__store.getState().setNarrativeSkin('runtime'); window.__store.getState().setNarrativeDensity('concise') })
+await page.eval(() => { window.__store.getState().setNarrativeDensity('concise') })
 await say('修复登录接口返回 401')
 // 60s 而不是默认 30s：这一问要等上一轮跑完（mock 的脚本化回放 15s 左右）+ 队列推送，
 // 机器忙的时候 30s 会踩空 —— 踩空是测试的错，不是产品的错
@@ -815,7 +813,6 @@ check('ask: Esc skips the batch instead of only closing the panel', askEsc.panel
 // 指针移上来浮出 [预览 / 源码 / 在访达中打开]。
 await page.goto(URL, { settleMs: 3000 })
 await waitStore()
-await page.eval(() => window.__store.getState().setNarrativeSkin('runtime'))
 await wait(700)
 await say('html 预览')
 await waitFor('.cy-frame .pv-frame', 30000)
@@ -1073,7 +1070,6 @@ await page.goto(URL, { settleMs: 3000 })
 await waitStore()
 await page.eval(() => {
   const st = window.__store.getState()
-  st.setNarrativeSkin('runtime')
   st.setNarrativeDensity('concise')
 })
 await wait(700)
@@ -1116,7 +1112,6 @@ const freshTurn = async (density) => {
 await waitStore()
   await page.eval((d) => {
     const st = window.__store.getState()
-    st.setNarrativeSkin('runtime')
     st.setNarrativeDensity(d)
   }, density)
   await wait(700)
@@ -1654,7 +1649,6 @@ await page.goto(URL, { settleMs: 3000 })
 await waitStore()
 await page.eval(() => {
   const st = window.__store.getState()
-  st.setNarrativeSkin('runtime')
   st.setNarrativeDensity('concise')
 })
 await wait(400)

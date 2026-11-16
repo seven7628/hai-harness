@@ -70,9 +70,9 @@ import { useAppStore, dispatchEvent, hydrateCheckpoint } from '../../src/store/u
 import { aggregateFileActivity } from '../../src/lib/fileActivity'
 import { withAgentToolBlocks } from '../../src/lib/agentSession'
 import '../../src/index.css'
-import '../../src/narrative-skin.css'
 // index.css 末尾的 @import 在浏览器里晚于普通规则，dev 下会被忽略；探针要量
-// runtime 皮肤就必须像 verify_user_blocks 一样显式 import（生产构建由 Vite 处理）。
+// 皮肤层就必须像 verify_user_blocks 一样显式 import（生产构建由 Vite 处理）。
+import '../../src/runtime-palette.css'
 import '../../src/runtime-skin.css'
 
 // —— R07 仪器自检：activity provider 的 render 到底有没有被执行 ——
@@ -91,6 +91,8 @@ if (actProvider) {
 }
 
 const q = new URLSearchParams(location.search)
+// 与 index.html 一致：皮肤是静态属性（会话页只有 runtime 一套）
+document.documentElement.setAttribute('data-skin', 'runtime')
 document.documentElement.setAttribute('data-theme', 'ink')
 const HOST = q.get('host') || 'left'
 
@@ -730,13 +732,10 @@ async function main() {
   // （subagent 的 Poll，所有投递源的唯一汇合点），reducer 追加一条 user 项 →
   // 子会话按主会话的 user 块渲染。
   await page.waitForTimeout(350)
-  /* skin：user 块（`.msg.user`）在**三档皮肤**下都渲染 —— current/v3 走 Narrative.renderBlock
-     的老 DOM（`.msg.user > .who/.body`，F43 恢复；此前 6d28d60 把这条分支连同事件卡一起删了，
-     默认皮肤下用户消息整段消失），runtime 走 UserBlock（`.msg.user.rt-you`）。
-     这一段仍显式切到 runtime 再量：它同时钉住「子会话宿主走的是 UserBlock 那条路」，
-     与主会话的三档断言（e2e/verify_user_blocks.mjs）互补，不重复。
-     皮肤只改显示层（MutationObserver → 重渲染），store 里的 user 项不受影响。 */
-  await page.evaluate(() => document.documentElement.setAttribute('data-skin', 'runtime'))
+  /* skin：user 块（`.msg.user`）由 UserBlock 渲染（`.msg.user.rt-you`）——
+     会话页只有 runtime 一套皮肤（current/v3 已删除，data-skin 静态写在 index.html），
+     所以这里量到的就是用户实际看到的那条路，与主会话断言
+     （e2e/verify_user_blocks.mjs）互补，不重复。 */
   await page.waitForTimeout(300)
   const userInTranscript = {
     blocks: await page.locator('.narrative .msg.user').count(),
@@ -771,9 +770,7 @@ async function main() {
   // 混进主会话历史 —— 正是「TODO 串了」那类 bug 的同构版本）
   const inMain = await page.locator('.narrative .msg.user').allInnerTexts()
   assert(!inMain.some((x) => x.includes('401')), `主会话叙述区不出现子运行的对话（实际 ${JSON.stringify(inMain.map((x) => x.slice(0, 20)))}）`)
-  // 量完把皮肤切回探针默认（后面几段按原皮肤量版式/滚动，不受这一段的临时切换影响）
-  await page.evaluate(() => document.documentElement.setAttribute('data-skin', 'current'))
-  await page.waitForTimeout(200)
+
 
   // ---- ⑤b 功能复用：子会话的滚动/贴底来自 Narrative（不是「看着像」而是「就是它」）----
   //
@@ -807,6 +804,15 @@ async function main() {
   await page.evaluate(() => window.__store.getState().focusAgent({ nodeId: 'task-long', runId: 'sub-long', taskId: 'task-long' }))
   await page.waitForSelector('.narrative .as-hd', { timeout: 10000 })
   await page.waitForTimeout(600)
+  /* runtime 皮肤把**已结束**的一组调用自动收成一行（BatchGroup：全部 settled → open=false，
+     40 条 bash 只剩「Ran 40 commands · …」一行）—— 那是设计口径，不是 bug。所以要先按
+     用户的样子把它**点开**（行本身是折角按钮），才有「超过一屏」可量；否则量的是
+     「一行能不能滚」，永远量不到 Narrative 的贴底/回底手势。 */
+  const folded = page.locator('.narrative .rt-batch[aria-expanded="false"]')
+  if (await folded.count()) {
+    await folded.first().click()
+    await page.waitForTimeout(400)
+  }
   const scrolled = await page.locator('.narrative').evaluate((el) => ({
     sh: el.scrollHeight, ch: el.clientHeight, st: Math.round(el.scrollTop),
     jump: !!el.querySelector('.narrative-jump'),
@@ -978,9 +984,10 @@ async function main() {
   // 切到那个子会话：footer 里必须真的渲染出产出卡
   await page.evaluate(() => window.__store.getState().focusAgent({ nodeId: 'task-3', runId: 'sub-3', taskId: 'task-3' }))
   await page.waitForTimeout(350)
-  // 必须是**主会话那张产出卡**（.msg.artifacts > .artifacts-card），不是卡片内的 .ac-artifacts
-  // —— 后者带 border-top 与卡片内边距，放进叙述区会矮一截（用户一眼看出不一致）。
-  const footerArt = await page.locator('.center .msg.artifacts .artifacts-card').count()
+  // 必须是**主会话那张产出卡**（.msg.artifacts > .ar，即 ArtifactsBlock），不是卡片内的
+  // .ac-artifacts —— 后者带 border-top 与卡片内边距，放进叙述区会矮一截（用户一眼看出不一致）。
+  // （.artifacts-card 是已随 current/v3 皮肤一起删除的 ArtifactCard 外壳，会话页不再用它。）
+  const footerArt = await page.locator('.center .msg.artifacts .ar').count()
   const footerText = await page.locator('.center .msg.artifacts').innerText().catch(() => '')
   const cardInnerArt = await page.locator('.center .ac-artifacts').count()
   assert(footerArt >= 1, `子会话页要渲染产出卡（与主会话同一个 .msg.artifacts 块），实际 ${footerArt}`)

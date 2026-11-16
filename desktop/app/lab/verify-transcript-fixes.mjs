@@ -31,10 +31,7 @@ const waitUntil = async (expr, timeout = 20000) => {
 if (!(await waitUntil('!!window.__store && !!window.__dispatch'))) throw new Error('store/dispatch never appeared')
 await page.eval(() => window.__store.getState().setNarrativeDensity('concise'))
 await wait(700)
-// 皮肤走 store 的设置（settings.narrative_skin）：App 的 effect 会在**任何**外观设置
-// 变更（含 setNarrativeDensity）时重写 data-skin —— 只手改属性会在下一次切档时被盖回
-// current（这个坑 verify-concise-fold.mjs 的注释里也记过）。
-await page.eval(() => window.__store.setState((s) => ({ settings: { ...s.settings, narrative_skin: 'runtime' } })))
+// 皮肤静态写在 index.html（data-skin="runtime"），没有运行时开关；这里只调密度。
 await wait(300)
 await page.eval(() => { document.documentElement.dataset.skin = 'runtime' })
 for (let i = 0; i < 3 && !(await page.eval(() => !!window.__store.getState().activeSessionId)); i++) {
@@ -449,11 +446,13 @@ check('G3 合并后的卡列出两个文件', g3.cardText.length === 1 && /a\.md
    判据 = 盒子按 run 分段，段间的记录落在两个盒子之间。 */
 const shape = () => page.eval(() => {
   const turn = document.querySelector('.rt-turn')
-  if (!turn) return null
+  if (!turn) return ['<no .rt-turn>']
+  // className 在 SVG 元素上是 SVGAnimatedString（不是 string）→ 用 attribute 取，别 .split
+  const clsOf = (el) => (el.getAttribute('class') || '').split(' ')[0]
   return [...turn.children]
     .filter((el) => !el.classList.contains('rt-head'))
     .map((el) => {
-      const c = (el.className || '').split(' ')[0]
+      const c = clsOf(el)
       const t = (el.textContent || '').replace(/\s+/g, ' ').trim()
       return c === 'rt-act' || c === 'cy-live' ? c + ':' + t.slice(0, 22) : c === 'rt-turn-line' ? 'line:' + t.slice(0, 22) : c
     })

@@ -9,8 +9,9 @@
 // 更糟的是转录的字体/颜色靠**继承宿主**（.agent-card 是 mono + text-2，右栏卡当时是
 // 是 sans + text）→ 同一份数据在两处连字号字体色都不一样；V3 皮肤又只覆盖主对话那套。
 //
-// 本脚本用真实 CenterPanel + 真实两份 CSS，把两处转录的类名结构与
-// 计算样式逐项对比（current / v3 两套皮肤），并留档截图。
+// 本脚本用真实 CenterPanel + 真实 CSS，把两处转录的类名结构与计算样式逐项对比，
+// 并留档截图。皮肤只有 runtime 一套（2026-11：current/v3 已删除，data-skin 静态写在
+// index.html），所以这里只跑这一档；对比的仍是「两个宿主是否同构」。
 //
 // **2026-10 宿主变更**：第二处宿主从「右栏任务 tab」改成「对话区的子会话视图」
 // （AgentSessionView —— 左栏树点选某个子智能体后在叙述区渲染它）。右栏任务 tab 已退役为
@@ -68,10 +69,13 @@ import { createRoot } from 'react-dom/client'
 import CenterPanel from '../../src/components/CenterPanel'
 import { useAppStore, dispatchEvent } from '../../src/store/useAppStore'
 import '../../src/index.css'
-import '../../src/narrative-skin.css'
+// index.css 末尾的 @import 在 dev 下不下发，探针显式 import 皮肤两层（与 verify_user_blocks 同）
+import '../../src/runtime-palette.css'
+import '../../src/runtime-skin.css'
 
 const q = new URLSearchParams(location.search)
-document.documentElement.setAttribute('data-skin', q.get('skin') === 'v3' ? 'v3' : 'current')
+// 与 index.html 一致：皮肤是静态属性（会话页只有 runtime 一套）
+document.documentElement.setAttribute('data-skin', 'runtime')
 document.documentElement.setAttribute('data-theme', q.get('theme') || 'ink')
 const HOST = q.get('host') === 'panel' ? 'panel' : 'main'
 
@@ -182,24 +186,29 @@ const TEXT = ['font-size', 'line-height', 'color', 'font-family']
 const ROW = ['font-size', 'font-family', 'color']
 const ARGS = ['font-size', 'color']
 
-// 打开某个宿主页 → 展开子 agent 卡 → 返回转录内的结构与计算样式
-async function probe(page, skin, host) {
-  await page.goto(`${PROBE_URL}?skin=${skin}&host=${host}`, { waitUntil: 'domcontentloaded' })
+/* 打开某个宿主页 → 返回结构与计算样式。
+   host=main  ：主对话里这个子 agent 现在是**一条车道**（.la > .la-row），不再内联转录
+                （2026-11 起 runtime 是唯一皮肤：连续 agent 块合成车道，点车道进子会话）。
+   host=panel ：子会话视图 = 主会话的 Narrative 本身，锚点是它注入的头部行 .as-hd。 */
+async function probe(page, host) {
+  await page.goto(`${PROBE_URL}?host=${host}`, { waitUntil: 'domcontentloaded' })
   if (host === 'panel') {
-    // 子会话视图 = **主会话的 Narrative 本身**（2026-10 用户拍板「复用主会话页面」），
-    // 没有独立的转录外壳 —— 锚点是它注入的头部行 .as-hd。
     await page.waitForSelector('.narrative .as-hd', { timeout: 20000 })
   } else {
-    await page.waitForSelector('.narrative .agent-card', { timeout: 20000 })
-    await page.locator('.narrative .agent-card .ac-main').first().evaluate((el) => el.click())
+    await page.waitForSelector('.narrative .la .la-row', { timeout: 20000 })
   }
-  const tr = host === 'panel' ? '.narrative' : '.agent-card .ac-body'
+  const tr = '.narrative'
   await page.waitForSelector(tr, { timeout: 5000 })
   await page.waitForTimeout(300)
 
   const loc = page.locator(tr).first()
   const first = async (sel, ps) => (await loc.locator(sel).count()) ? css(loc.locator(sel).first(), ps) : null
   const survey = {
+    // 车道（main 宿主）：连续 agent 块合成一组，每行是 .la-row（可点开看事件、点名称进子会话）
+    laneGroups: await loc.locator('.la').count(),
+    laneRows: await loc.locator('.la-row').count(),
+    // 主对话里**不再**内联转录（旧 .agent-card 卡壳在这条路上已退役）
+    inlineCards: await loc.locator('.agent-card').count(),
     atText: await loc.locator('.at-text').count(),
     atTool: await loc.locator('.at-tool').count(),
     mdText: await loc.locator('.md-text').count(),
@@ -218,13 +227,15 @@ async function probe(page, skin, host) {
     legacyResultCard: await page.locator('.task-result-inline').count(),
     resultMd: await loc.locator('.md-text ul li, .md-text ol li').count(),
     taskCards: await page.locator('.agent-card:has(.task-promoted)').count(),
-    // 一条消息的元信息行（2026-10 用户报障「子智能体没有模型信息、消息时刻、
-    // 也没有 LLM 总耗时 · Agent 总耗时 · tokens/s」）—— 子会话必须与主会话一样有三段：
-    // .who 里的模型名、.who 里的时刻、.body 里的 .assistant-turn-meta。
-    msgModel: await loc.locator('.msg.assistant .who .mono').count(),
-    msgTs: await loc.locator('.msg.assistant .who .msg-ts').count(),
-    turnMeta: await loc.locator('.msg.assistant .assistant-turn-meta').count(),
-    turnMetaText: await loc.locator('.msg.assistant .assistant-turn-meta').first().textContent().catch(() => null),
+    // 一条消息的元信息（2026-10 用户报障「子智能体没有模型信息、消息时刻、
+    // 也没有 LLM 总耗时 · Agent 总耗时 · tokens/s」）—— 子会话必须与主会话一样有：
+    // 轮头的模型名与时刻（.rt-head）、轮尾的一行账（.rt-ledger：calls · tokens · cache · turn，
+    // TTFT/LLM/tok-s 在 .rt-lg-more 里，悬停或点开才露出来）。
+    msgModel: await loc.locator('.rt-head span').count(),
+    msgTs: await loc.locator('.rt-head .rt-t').count(),
+    turnMeta: await loc.locator('.rt-ledger').count(),
+    turnMetaText: await loc.locator('.rt-ledger').first().textContent().catch(() => null),
+    turnMetaMore: await loc.locator('.rt-ledger .rt-lg-more').first().textContent().catch(() => null),
   }
   const shellCard = page.locator('.narrative .agent-card').first()
   const styles = {
@@ -240,7 +251,7 @@ async function probe(page, skin, host) {
   // 后台工具任务的展开体（原右栏工具任务卡）：现在只在它的子会话视图里出现 ——
   // 由 e2e/verify_agent_tree.mjs 覆盖（那里断言 .tr-sec/.json-box/pre.tr-code）。
   const taskCard = null
-  const shot = path.join(SHOTS, `${skin}-${host}.png`)
+  const shot = path.join(SHOTS, `${host}.png`)
   await page.screenshot({ path: shot })
   return { survey, styles, shot, taskCard }
 }
@@ -256,44 +267,46 @@ async function main() {
   page.on('pageerror', (e) => console.error('[pageerror]', e.message))
 
   const got = {}
-  for (const skin of ['current', 'v3']) {
-    console.log(`\n── 皮肤 ${skin} ──`)
-    for (const host of ['main', 'panel']) {
-      const r = await probe(page, skin, host)
-      got[`${skin}.${host}`] = r
-      console.log(`  ${host.padEnd(5)} 结构 ${JSON.stringify(r.survey)}`)
-      console.log(`  ${' '.repeat(5)} 正文 ${JSON.stringify(r.styles.text)}`)
-      console.log(`  ${' '.repeat(5)} 工具行 ${JSON.stringify(r.styles.row)}`)
-      console.log(`  ${' '.repeat(5)} 工具参数 ${JSON.stringify(r.styles.args)}`)
-    }
+  console.log('\n── 皮肤 runtime ──')
+  for (const host of ['main', 'panel']) {
+    const r = await probe(page, host)
+    got[host] = r
+    console.log(`  ${host.padEnd(5)} 结构 ${JSON.stringify(r.survey)}`)
+    console.log(`  ${' '.repeat(5)} 正文 ${JSON.stringify(r.styles.text)}`)
+    console.log(`  ${' '.repeat(5)} 工具行 ${JSON.stringify(r.styles.row)}`)
+    console.log(`  ${' '.repeat(5)} 工具参数 ${JSON.stringify(r.styles.args)}`)
   }
   console.log(`\n  📸 截图：${path.relative(APP, SHOTS)}/`)
 
   if (!REPORT) {
-    for (const skin of ['current', 'v3']) {
-      console.log(`\n── 断言（皮肤 ${skin}）──`)
-      const main = got[`${skin}.main`]
-      const panel = got[`${skin}.panel`]
+    {
+      console.log('\n── 断言（皮肤 runtime）──')
+      const main = got.main
+      const panel = got.panel
       assert(main.survey.atText === 0 && panel.survey.atText === 0 && main.survey.atTool === 0 && panel.survey.atTool === 0,
-        '两处转录都不再有 .at-* 旧渲染（同一份 DOM）')
-      assert(main.survey.mdText > 0 && panel.survey.mdText > 0, '两处转录的正文都是 .md-text（走 Markdown）')
-      assert(main.survey.mdList > 0 && panel.survey.mdList > 0, `正文里的有序列表渲染成 <ol><li>（不是裸文本，${panel.survey.mdList} 项）`)
-      assert(main.survey.toolRow === panel.survey.toolRow && main.survey.toolRow >= 2, `两处工具行数量一致（${panel.survey.toolRow} 行）`)
-      assert(main.survey.toolGroup > 0 && panel.survey.toolGroup > 0, '连续工具调用在两处都归组在 .tool-group 里')
-      assert(main.survey.family === main.survey.toolRow && panel.survey.family === panel.survey.toolRow, '每行都带 data-family（族色同源）')
-      assert(main.survey.thinking > 0 && panel.survey.thinking > 0, '两处思考块都用 .thinking')
-      assert(main.survey.icon === panel.survey.icon, `行首图标 .ic 数量一致（V3 皮肤下渲染，本皮肤 ${main.survey.icon} 个）`)
+        '两处都不再有 .at-* 旧渲染（同一份 DOM）')
+      // 主对话：子 agent 是车道的一行，转录只在他的子会话里（不内联、不重复）
+      assert(main.survey.laneGroups === 1 && main.survey.laneRows === 1,
+        `主对话把子 agent 收成一条车道（组 ${main.survey.laneGroups} / 行 ${main.survey.laneRows}）`)
+      assert(main.survey.inlineCards === 0 && main.survey.mdText === 0,
+        `主对话不再内联子 agent 的转录与卡壳（卡 ${main.survey.inlineCards} / .md-text ${main.survey.mdText}）`)
+      assert(panel.survey.mdText > 0, '子会话转录的正文是 .md-text（走 Markdown）')
+      assert(panel.survey.mdList > 0, `正文里的有序列表渲染成 <ol><li>（不是裸文本，${panel.survey.mdList} 项）`)
+      assert(panel.survey.toolRow >= 2, `子会话里有逐条工具行（${panel.survey.toolRow} 行）`)
+      assert(panel.survey.toolGroup > 0, '连续工具调用归组在 .tool-group 里')
+      assert(panel.survey.family === panel.survey.toolRow, '每行都带 data-family（族色同源）')
+      assert(panel.survey.icon === panel.survey.toolRow, `行首图标 .ic 每行一个（${panel.survey.icon} 个）`)
+      assert(panel.survey.thinking > 0, '思考块用 .thinking')
       assert(panel.styles.family === 'cmd', `bash 行按族着色（data-family=${panel.styles.family}）`)
       // 交付结果不再是一张页脚卡：它已经就是转录最后一条正文（见 AgentSessionView 注释）。
       // 两处都不能复活 .task-result-inline，且交付正文必须是 Markdown 列表（不是 mono <pre>）。
       assert(main.survey.legacyResultCard === 0 && panel.survey.legacyResultCard === 0,
         '任务结果页脚卡已退役（两处 .task-result-inline 均为 0）')
-      assert(main.survey.resultMd > 0 && panel.survey.resultMd > 0,
-        `交付结果两处都渲染成 Markdown 列表（不再是 mono <pre>，各 ${panel.survey.resultMd} 项）`)
-      // 2026-10：第二处宿主是子会话视图（无卡壳）。旧 .agent-view/.av-* 已全仓退役。
+      assert(panel.survey.resultMd > 0,
+        `转录里的交付/结论渲染成 Markdown 列表（不再是 mono <pre>，${panel.survey.resultMd} 项）`)
+      // 旧 .agent-view/.av-* 卡壳已全仓退役；子会话视图不套卡壳（转录直接铺在视图里）。
       assert(main.survey.legacyShell === 0 && panel.survey.legacyShell === 0,
         '旧 .agent-view/.av-* 卡壳全仓退役')
-      assert(main.survey.shell > 0, '主对话仍有子 agent 卡（.agent-card）')
       assert(panel.survey.shell === 0, '子会话视图不再套一层卡壳（转录直接铺在视图里）')
       // 每条消息的元信息行：模型名 / 时刻 / 「TTFT · LLM 总耗时 · Agent 总耗时 · tokens/s」。
       // 只断言子会话这一侧 —— 参考侧的「主会话消息」在本探针里没有（main 宿主渲染的是
@@ -304,14 +317,20 @@ async function main() {
       assert(panel.survey.msgTs > 0,
         `子会话的消息显示时刻（${panel.survey.msgTs} 条）`)
       assert(panel.survey.turnMeta > 0,
-        `子会话有本轮指标行（${panel.survey.turnMeta} 条）`)
-      assert(/tokens\/s|tok\/s/.test(panel.survey.turnMetaText ?? ''),
-        `子会话的指标行含 tokens/s（实际「${panel.survey.turnMetaText}」）`)
-      assert(/TTFT/.test(panel.survey.turnMetaText ?? '') && /总耗时/.test(panel.survey.turnMetaText ?? ''),
-        `子会话的指标行含 TTFT 与总耗时（实际「${panel.survey.turnMetaText}」）`)
+        `子会话有轮尾的账（.rt-ledger，${panel.survey.turnMeta} 条）`)
+      assert(/tokens/.test(panel.survey.turnMetaText ?? '') && /turn/.test(panel.survey.turnMetaText ?? ''),
+        `账里含 tokens 与 turn（实际「${(panel.survey.turnMetaText ?? '').replace(/\s+/g, ' ').trim()}」）`)
+      // TTFT / LLM / tok/s 是**悬停/点开**才露出来的三段时间 —— 它们必须在 DOM 里
+      // （.rt-lg-more），只是被 CSS 收起来；收起来≠不存在，用户的指针一落下就要读得到。
+      assert(/TTFT/.test(panel.survey.turnMetaMore ?? '') && /tok\/s/.test(panel.survey.turnMetaMore ?? ''),
+        `账的展开层含 TTFT 与 tok/s（实际「${(panel.survey.turnMetaMore ?? '').replace(/\s+/g, ' ').trim()}」）`)
+      /* 曾经这里逐项比对「主对话卡里的转录」与「子会话视图」的计算样式。主对话现在
+         只画车道一行（没有内联转录可量），同构改由**结构**保证：子会话视图就是
+         Narrative 自己。剩下的可量事实是这些样式真的算出来了（不是 null / 空串）。 */
       for (const [label, key] of [['正文', 'text'], ['工具行', 'row'], ['工具参数', 'args'], ['工具名', 'name']]) {
-        assert(JSON.stringify(main.styles[key]) === JSON.stringify(panel.styles[key]),
-          `${label}计算样式一致：${JSON.stringify(panel.styles[key])}`)
+        const st = panel.styles[key]
+        assert(st && Object.values(st).every((v) => v != null && v !== ''),
+          `${label}计算样式可读：${JSON.stringify(st)}`)
       }
     }
   }

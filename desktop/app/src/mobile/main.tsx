@@ -5,10 +5,10 @@
 //      HTTP /api/cmd + WS /api/events（见 transport/mobile.ts 文件头）。
 //   2. 样式只引 tokens（runtime-tokens/runtime-skin 的令牌层）+ hub.css + mobile.css，
 //      不引整个 index.css（那是三栏桌面布局 + tailwind）。
-//   3. 固定 data-skin='runtime'（MOBILE-UI-REUSE §0.5：手机皮肤收敛到 runtime）。
+//   3. 皮肤固定 runtime（MOBILE-UI-REUSE §0.5）：静态写在 mobile.html 的 <html
+//      data-skin="runtime"> 上，运行时不再改写（桌面同理，见 index.html）。
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { applyNarrativeSkin } from '../lib/narrativeSkin'
 import { applyTheme } from '../lib/theme'
 import { setHubTransport } from '../transport/host'
 import { installThemeColor } from './chrome'
@@ -28,7 +28,6 @@ setHubTransport(() => sharedMobileTransport())
 // 置位必须在首次渲染前：getTransport() 是渲染/动作时调用的，静态 import 只求值模块。
 window.__HAI_MOBILE__ = true
 
-applyNarrativeSkin('runtime')
 applyTheme(readThemePref())
 
 // 软键盘：把 visualViewport 的可见高度/偏移写到 --m-vv-*（见 visual-viewport.ts）。

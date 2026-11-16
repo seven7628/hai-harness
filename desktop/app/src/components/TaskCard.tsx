@@ -6,11 +6,11 @@
 // 转录内容先统一到 NarrativeBlocks 之后，两处的**卡壳**仍是两套 —— 主对话是
 // `.agent-card`/`.ac-*`/`.ag-*`，右栏是 `.agent-view`/`.av-*`，两份六态映射
 // （taskStatusMeta）、两套字号、两套 hover、两套停止按钮文案；更麻烦的是皮肤层
-// （narrative-skin.css）只覆盖了前者，换皮肤后右栏任务卡原地不动。
+// 只覆盖了前者，右栏任务卡原地不动。
 // 现在的约定：**任务卡只有这一份实现**。宿主差异只允许出现在「传什么内容进来」
 // （子 agent → 转录；后台任务 → 结果；工具任务 → 参数/结果），不再出现在样式上。
 //
-// 六态语义、状态色、行首图标（V3）、停止按钮、计时器全部在这里定一次。
+// 六态语义、状态色、行首图标、停止按钮、计时器全部在这里定一次。
 
 import { memo, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -21,9 +21,8 @@ import { fmtDuration, fmtUsd, UsageChip } from './ui'
 import { ElapsedTimer } from './ElapsedTimer'
 import Narrative from './Narrative'
 import { TaskErrorInline } from './NarrativeBlocks'
-import { ArtifactCard, absArtifactPath } from './ArtifactCard'
+import { absArtifactPath } from './ArtifactCard'
 import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
-import { useSkin } from '../lib/useSkin'
 import JsonView from './JsonView'
 import { agentItemsToBlocks } from '../lib/agentSession'
 import { ToolImages } from './ToolImages'
@@ -137,7 +136,6 @@ export const TaskCard = memo(function TaskCard({
 // 「卡片出现在哪里」。
 export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<MsgBlock, { kind: 'agent' }> }) {
   const t = useT()
-  const skin = useSkin()
   const openFile = useAppStore((s) => s.openFile)
   const workspace = useAppStore((s) => s.workspace)
   const interruptTask = useAppStore((s) => s.interruptTask)
@@ -204,20 +202,16 @@ export const AgentTaskCard = memo(function AgentTaskCard({ b }: { b: Extract<Msg
           「主卡 + 另外 N 个」，任务卡片里却是大图标 + 「共 N 个」的另一套。 */}
       {b.artifacts && b.artifacts.length > 0 && (
         <div className="ac-artifacts">
-          {skin === 'runtime' ? (
-            <ArtifactsBlock
-              items={b.artifacts}
-              {...(b.artifactsTruncated ? { truncated: true } : {})}
-              onPreview={(a) => openFile(a.path)}
-              onReveal={(a) => {
-                const d = bridge
-                if (!d?.showItemInFolder) return
-                void d.showItemInFolder(absArtifactPath(a.path, workspace))
-              }}
-            />
-          ) : (
-            <ArtifactCard items={b.artifacts} {...(b.artifactsTruncated ? { truncated: true } : {})} />
-          )}
+          <ArtifactsBlock
+            items={b.artifacts}
+            {...(b.artifactsTruncated ? { truncated: true } : {})}
+            onPreview={(a) => openFile(a.path)}
+            onReveal={(a) => {
+              const d = bridge
+              if (!d?.showItemInFolder) return
+              void d.showItemInFolder(absArtifactPath(a.path, workspace))
+            }}
+          />
         </div>
       )}
       <TaskErrorInline error={b.taskError} />

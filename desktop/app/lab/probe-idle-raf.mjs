@@ -47,7 +47,6 @@ const mount = async (skin) => {
     const views = { ...st.views }
     delete views[arg.sid]
     window.__store.setState({ views, activeSessionId: undefined, blocks: [], runNodes: [], runEnded: true })
-    st.setNarrativeSkin(arg.skin)
     st.setNarrativeDensity('detailed')
   }, { sid: SID, skin })
   await wait(250)
@@ -88,16 +87,12 @@ const measure = async (label) => {
 
 const all = []
 all.push(await measure('对照：会话页未挂载'))
-await mount('current'); all.push(await measure('旧皮肤（current/detailed）'))
-await mount('runtime'); all.push(await measure('新皮肤（runtime/detailed）'))
-// 再测一次新皮肤：确认是稳态而不是一次性（缓存/首帧尾巴）
-all.push(await measure('新皮肤（runtime/detailed）#2'))
-await page.eval(() => document.documentElement.setAttribute('data-skin', 'current'))
-await wait(800)
-all.push(await measure('旧皮肤（current/detailed）#2'))
+// 2026-11：会话页只有 runtime 一套皮肤（current/v3 已删除），只量这一档。
+await mount('runtime'); all.push(await measure('runtime/detailed'))
+// 再测一次：确认是稳态而不是一次性（缓存/首帧尾巴）
+all.push(await measure('runtime/detailed #2'))
 
-const rt = all.filter((r) => r.label.startsWith('新皮肤'))
-const cu = all.filter((r) => r.label.startsWith('旧皮肤'))
+const rt = all.filter((r) => r.label.startsWith('runtime'))
 const base = all[0]
 const avg = (a, k) => a.reduce((n, r) => n + r[k], 0) / a.length
 console.log('\n=== 结论 ===')

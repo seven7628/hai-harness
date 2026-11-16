@@ -2,11 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useAppStore, type PendingQuestionItem } from '../store/useAppStore'
 import { useClock } from '../lib/useNow'
 import { parseQuestionOptions } from '../lib/questionOptions'
-import { Markdown } from './markdown'
 import { useT } from '../i18n'
 import { useScopedQuestion } from './sessionScope'
-import { useSkin } from '../lib/useSkin'
-import './ask-runtime.css'
 import './ask-runtime.css'
 
 // 决策倒计时（2026-09-20 用户要求：让用户知道还剩多长时间做决策）：
@@ -42,10 +39,6 @@ function useCountdown(q?: { timeoutMs?: number; ts?: number }): { leftMs: number
 // 仅单选题走这个版面 —— 多选带预览会被后端 tools/question 直接拒绝。
 export default function AskUserQuestionPanel() {
   const t = useT()
-  // 运行时皮肤：同一份作答状态渲染两套类名。通用 .q-* / .btn 的规则和设计的
-  // .ask-* 同权重、又写在后面（index.css 先加载但选择器更具体），共存就会出现
-  // 「设计的间距对了、底色却是旧的」——类名互斥比堆 !important 干净。
-  const rt = useSkin() === 'runtime'
   // 作用域感知（2026-10，与 ApprovalPanel 同一条判定）：看主会话 → 主 run 的提问；
   // 看子会话 → 那个子 agent 的提问。提问通道在后端同样是 Session 级单槽，
   // 这里只做展示过滤（别人的提问不该在你眼前挡住面板）。
@@ -149,7 +142,7 @@ export default function AskUserQuestionPanel() {
     const pv = it.multi ? null : previewFor(it)
     const list = (
       <div
-        className={`${rt ? 'ask-list' : `q-options${pv ? ' col' : ''}`}`}
+        className="ask-list"
         role="group"
         aria-label={t('ask.optionsAria').replace('{n}', String(i + 1))}
         onPointerLeave={() => setHoverIdx(-1)}
@@ -160,18 +153,16 @@ export default function AskUserQuestionPanel() {
           return (
             <button
               key={o.label}
-              className={rt ? 'ask-opt' : `q-option${sel ? ' sel' : ''}`}
-              {...(rt && it.options.indexOf(o) === cur ? { 'data-cursor': '1' } : {})}
+              className="ask-opt"
+              {...(it.options.indexOf(o) === cur ? { 'data-cursor': '1' } : {})}
               role={it.multi ? 'checkbox' : 'radio'}
               aria-checked={sel}
               // 指针落在一行上时键盘光标要让位（设计 ask.js:461-472 的 sync）：
               // 两个高亮同时亮着，用户会以为选了两个；预览也跟着指针换（shownIdx）
-              {...(rt ? {
-                onPointerEnter: () => {
-                  setCursor(-1)
-                  setHoverIdx(it.options.indexOf(o))
-                },
-              } : {})}
+              onPointerEnter={() => {
+                setCursor(-1)
+                setHoverIdx(it.options.indexOf(o))
+              }}
               onClick={() => (it.multi ? toggle(it.id, o.label) : setAnswer(it.id, o.label))}
             >
               {/* 设计的三段结构：标记（圆点/勾）· 文案 · 序号键位（各占一列，
@@ -185,259 +176,44 @@ export default function AskUserQuestionPanel() {
       </div>
     )
     if (!pv) return list
-    // 运行时皮肤：设计的 .ask-body 本身就是两列（选项 max-content + 预览 1fr），
-    // 再套一层 .q-split 会让它变成「一格」，实测把选项列撑到 687px、预览顶出卡外。
-    const pvEl = (
+    // 设计的 .ask-body 本身就是两列（选项 max-content + 预览 1fr），不再套一层
+    // 分割容器（实测套了会把选项列撑到 687px、预览顶出卡外）。
+    return (
       <>
         {list}
-        {/* 预览走正文同一个 Markdown 渲染器：模型写的代码块/表格/公式在预览里也成立 */}
-        <div className={rt ? 'ask-pv' : 'q-preview'} role="figure" aria-label={t('ask.previewAria').replace('{label}', pv.label)}>
-          <div className={rt ? 'ask-pv-head mono' : 'q-preview-hd mono'}>
+        <div className="ask-pv" role="figure" aria-label={t('ask.previewAria').replace('{label}', pv.label)}>
+          <div className="ask-pv-head mono">
             {/* 设计只写一个词（preview），右侧才是选项名 —— 两处都印名字会把
-                同一句话在一行里说两遍（原来那版就是这样） */}
-            <span>{rt ? 'preview' : t('ask.previewFor').replace('{label}', pv.label)}</span>
+                同一句话在一行里说两遍 */}
+            <span>preview</span>
             <span className="ask-pv-which">{pv.label}</span>
           </div>
-          {rt ? (
-            /* 预览是**排版好的纯文本**（parts/ask.css:238-247：mono + pre + 保留
-               缩进，ASCII 图换行就不是图了）。所以这里不过 markdown 渲染器。 */
-            <pre key={pv.label} className="ask-pv-pre ask-swap" data-empty={pv.preview ? undefined : '1'}>
-              {pv.preview || ''}
-            </pre>
-          ) : (
-            <div className="q-preview-body">
-              <Markdown text={pv.preview} />
-            </div>
-          )}
+          {/* 预览是**排版好的纯文本**（parts/ask.css:238-247：mono + pre + 保留
+             缩进，ASCII 图换行就不是图了）。所以这里不过 markdown 渲染器。 */}
+          <pre key={pv.label} className="ask-pv-pre ask-swap" data-empty={pv.preview ? undefined : '1'}>
+            {pv.preview || ''}
+          </pre>
         </div>
       </>
     )
-    return rt ? pvEl : <div className="q-split">{pvEl}</div>
   }
 
 
-  if (rt) {
-    const at = Math.min(step, Math.max(0, items.length - 1))
-    const it = items[at]
-    const last = at + 1 >= items.length
-    const here = isAnswered(it)
-    const goNext = () => {
-      if (!here || cd?.leftMs === 0) return
-      if (last) submitAll()
-      else {
-        setStep(at + 1)
-        setCursor(-1)
-        requestAnimationFrame(() => firstRef.current?.focus({ preventScroll: true }))
-      }
+  const at = Math.min(step, Math.max(0, items.length - 1))
+  const it = items[at]
+  const last = at + 1 >= items.length
+  const here = isAnswered(it)
+  const goNext = () => {
+    if (!here || cd?.leftMs === 0) return
+    if (last) submitAll()
+    else {
+      setStep(at + 1)
+      setCursor(-1)
+      requestAnimationFrame(() => firstRef.current?.focus({ preventScroll: true }))
     }
-    return (
-      <div className={`dock ask-scope${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
-        <div className="dock-box">
-          <h3
-            className="dock-hd"
-            role="button"
-            tabIndex={0}
-            aria-expanded={!folded}
-            title={folded ? t('ask.expand') : t('ask.fold')}
-            onClick={() => setFolded((v) => !v)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault()
-                setFolded((v) => !v)
-              }
-            }}
-          >
-            <span className="chev" aria-hidden="true">{folded ? '▸' : '▾'}</span>
-            <span className="q-mark">?</span> {t('ask.title')}
-            {items.length > 1 ? t('ask.count').replace('{n}', String(items.length)) : ''}
-            {question.runId && <span className="mono q-run">run {question.runId}</span>}
-            {cd && (
-              <span
-                className={`mono dock-countdown${cd.leftMs === 0 ? ' over' : cd.leftMs <= 60_000 ? ' soon' : ''}`}
-                title={t('ask.countdownTitle').replace('{total}', String(Math.round((question.timeoutMs ?? 0) / 60_000)))}
-              >
-                {cd.leftMs === 0 ? t('ask.timedOut') : t('ask.timeLeft').replace('{t}', cd.label)}
-              </span>
-            )}
-            {folded && (
-              <span className="dock-fold-hint">
-                {t('ask.folded').replace('{answered}', String(answered)).replace('{total}', String(items.length))}
-              </span>
-            )}
-          </h3>
-          {!folded && (
-            <>
-              <div className="q-list">
-                <div
-                  className="ask"
-                  ref={cardRef}
-                  tabIndex={0}
-                  data-form={it.multi ? 'multi' : previewFor(it) ? 'preview' : 'plain'}
-                  {...(items.length > 1 ? { 'data-step': '' } : {})}
-                  role="group"
-                  aria-labelledby={`ask-q-${it.id}`}
-                  // 点卡片空白处 = 把键盘拿回来（设计 parts/ask.js:454-460）；落在按钮上
-                  // 时不抢焦点，否则按钮自己的 ⏎ 会被这一下吃掉
-                  onPointerDown={(e) => {
-                    if ((e.target as HTMLElement).closest('button')) return
-                    cardRef.current?.focus({ preventScroll: true })
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.metaKey || e.ctrlKey || e.altKey) return
-                    const tgt = e.target as HTMLElement
-                    const inInput = tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA'
-                    // 页脚按钮保留自己的键：⏎ 在「上一步」上就该是上一步（设计 ask.js:489）
-                    if (tgt.closest('.ask-btn, .ask-all')) return
-                    if (!inInput && (e.key === 'ArrowDown' || e.key === 'ArrowUp'
-                      || e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
-                      e.preventDefault()
-                      const n = it.options.length
-                      if (!n) return
-                      // 设计里 ←↑ 同义、↓→ 同义（parts/ask.js:497-498）：网格里两个轴都该走
-                      const fwd = e.key === 'ArrowDown' || e.key === 'ArrowRight'
-                      const next = cursor < 0 ? 0 : (cursor + (fwd ? 1 : -1) + n) % n
-                      setCursor(next)
-                      return
-                    }
-                    if (!inInput) {
-                      const k = Number(e.key)
-                      if (Number.isInteger(k) && k >= 1 && k <= Math.min(9, it.options.length)) {
-                        e.preventDefault()
-                        const o = it.options[k - 1]
-                        setCursor(k - 1)
-                        if (it.multi) toggle(it.id, o.label)
-                        else setAnswer(it.id, o.label)
-                        return
-                      }
-                    }
-                    if (e.key === 'Escape') {
-                      // Esc = 跳过这批（设计 ask.js:508）：未答的题按空答案交，不是关掉面板
-                      e.preventDefault()
-                      submitAll(true)
-                      return
-                    }
-                    if (e.key === 'Enter') {
-                      // ⏎：光标处还没选就先选它，已选就下一问/提交
-                      if (!inInput && cursor >= 0 && !here) {
-                        const o = it.options[cursor]
-                        if (o) {
-                          e.preventDefault()
-                          if (it.multi) toggle(it.id, o.label)
-                          else setAnswer(it.id, o.label)
-                          return
-                        }
-                      }
-                      if (!inInput) {
-                        e.preventDefault()
-                        goNext()
-                      }
-                    }
-                  }}
-                >
-                  {items.length > 1 && (
-                    <div className="ask-step">
-                      <span>{t('ask.stepOf').replace('{i}', String(at + 1)).replace('{n}', String(items.length))}</span>
-                      <span className="ask-dots" aria-hidden="true">
-                        {items.map((_, k) => (
-                          <i key={k} data-on={k < at ? 'past' : k === at ? 'now' : 'next'} />
-                        ))}
-                      </span>
-                    </div>
-                  )}
-                  <div className="ask-head">
-                    <span className="ask-ic" aria-hidden="true">
-                      <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
-                        <circle cx="6" cy="6" r="4.5" />
-                        <path d="M4.85 4.7a1.2 1.2 0 1 1 1.55 1.14c-.3.12-.4.36-.4.66" />
-                        <path d="M6 8.3h.01" />
-                      </svg>
-                    </span>
-                    <div className="ask-q" id={`ask-q-${it.id}`}>{it.question}</div>
-                  </div>
-                  <div className="ask-body">
-                    {it.options.length > 0 && renderOptions(it, at, cursor)}
-                  </div>
-                  <input
-                    ref={firstRef}
-                    name={`question-answer-${at}`}
-                    value={answers[it.id] ?? ''}
-                    onChange={(e) => setAnswer(it.id, e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key !== 'Enter') return
-                      if (e.nativeEvent.isComposing || e.keyCode === 229) return
-                      e.preventDefault()
-                      goNext()
-                    }}
-                    placeholder={it.multi ? t('ask.placeholderExtra') : it.options.length ? t('ask.placeholderOptions') : t('ask.placeholder')}
-                    aria-label={t('ask.inputAria').replace('{n}', String(at + 1))}
-                    spellCheck={false}
-                  />
-                  <div className="ask-foot">
-                    <span className="ask-note">
-                      {cd && cd.leftMs === 0
-                        ? t('ask.timedOutHint')
-                        : t('ask.stepNote').replace('{done}', String(answered)).replace('{total}', String(items.length))}
-                    </span>
-                    <div className="ask-acts">
-                      {/* 单选卡（非分步）按设计给三样：多选的全选/清空、跳过、继续。
-                          分步批次只给「上一步 / 下一问」，因为中途跳过会让后面几问失去
-                          上下文（设计 parts/ask.js:190-208 也是这么分的）。 */}
-                      {items.length === 1 && it.multi && it.options.length > 1 && (() => {
-                        const picked = multiSel[it.id] ?? []
-                        const allPicked = it.options.length > 0 && it.options.every((o) => picked.includes(o.label))
-                        return (
-                          <button
-                            type="button"
-                            className="ask-all"
-                            onClick={() => {
-                              // 全选 ⇄ 清空：一个按钮两种文案（设计 ask.js:428-435）
-                              it.options.forEach((o) => {
-                                const has = picked.includes(o.label)
-                                if (allPicked ? has : !has) toggle(it.id, o.label)
-                              })
-                              setCursor(-1)
-                            }}
-                          >
-                            {allPicked ? t('ask.clearAll') : t('ask.selectAll')}
-                          </button>
-                        )
-                      })()}
-                      {items.length === 1 ? (
-                        <button type="button" className="ask-btn ghost" onClick={() => submitAll(true)}>
-                          {t('ask.skip')}
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="ask-btn ghost"
-                          disabled={at === 0}
-                          onClick={() => {
-                            setStep(at - 1)
-                            setCursor(-1)
-                          }}
-                        >
-                          {t('ask.back')}
-                        </button>
-                      )}
-                      <button type="button" className="ask-btn go" disabled={!here || cd?.leftMs === 0} onClick={goNext}>
-                        {last ? t('ask.done') : t('ask.next')}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    )
   }
-
   return (
-    // 非模态：role="region"（不是 dialog/aria-modal —— 叙述区与左右栏都还能用）
-    <div className={`dock${rt ? ' ask-scope' : ''}${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
-      {/* 壳不再是卡片：这档皮肤下一张卡 = 一个问题（.q-item.ask），
-          批次里问三条就是三张卡，壳只负责折叠与倒计时 */}
+    <div className={`dock ask-scope${folded ? ' folded' : ''}`} role="region" aria-label={t('ask.title')}>
       <div className="dock-box">
         <h3
           className="dock-hd"
@@ -454,7 +230,8 @@ export default function AskUserQuestionPanel() {
           }}
         >
           <span className="chev" aria-hidden="true">{folded ? '▸' : '▾'}</span>
-          <span className="q-mark">?</span> {t('ask.title')}{items.length > 1 ? t('ask.count').replace('{n}', String(items.length)) : ''}
+          <span className="q-mark">?</span> {t('ask.title')}
+          {items.length > 1 ? t('ask.count').replace('{n}', String(items.length)) : ''}
           {question.runId && <span className="mono q-run">run {question.runId}</span>}
           {cd && (
             <span
@@ -473,75 +250,163 @@ export default function AskUserQuestionPanel() {
         {!folded && (
           <>
             <div className="q-list">
-              {items.map((it, i) => (
-                <div
-                  className={rt ? 'ask' : 'q-item'}
-                  key={it.id}
-                  data-form={it.multi ? 'multi' : previewFor(it) ? 'preview' : 'plain'}
-                  onKeyDown={(e) => {
-                    // 数字键直选（kbd 列给出的承诺）：只认 1-9、不带修饰键、
-                    // 且焦点不在自由输入框里（那里数字是正文）。
-                    if (e.metaKey || e.ctrlKey || e.altKey) return
-                    if ((e.target as HTMLElement).tagName === 'INPUT') return
-                    const n = Number(e.key)
-                    if (!Number.isInteger(n) || n < 1 || n > Math.min(9, it.options.length)) return
-                    const opt = it.options[n - 1]
+              <div
+                className="ask"
+                ref={cardRef}
+                tabIndex={0}
+                data-form={it.multi ? 'multi' : previewFor(it) ? 'preview' : 'plain'}
+                {...(items.length > 1 ? { 'data-step': '' } : {})}
+                role="group"
+                aria-labelledby={`ask-q-${it.id}`}
+                // 点卡片空白处 = 把键盘拿回来（设计 parts/ask.js:454-460）；落在按钮上
+                // 时不抢焦点，否则按钮自己的 ⏎ 会被这一下吃掉
+                onPointerDown={(e) => {
+                  if ((e.target as HTMLElement).closest('button')) return
+                  cardRef.current?.focus({ preventScroll: true })
+                }}
+                onKeyDown={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.altKey) return
+                  const tgt = e.target as HTMLElement
+                  const inInput = tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA'
+                  // 页脚按钮保留自己的键：⏎ 在「上一步」上就该是上一步（设计 ask.js:489）
+                  if (tgt.closest('.ask-btn, .ask-all')) return
+                  if (!inInput && (e.key === 'ArrowDown' || e.key === 'ArrowUp'
+                    || e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
                     e.preventDefault()
-                    if (it.multi) toggle(it.id, opt.label)
-                    else setAnswer(it.id, opt.label)
-                  }}
-                >
-                  <div className={rt ? 'ask-head' : 'q-title'}>
-                    {/* 设计的问题是「一个图标 + 一句话」两列（--ask-lead 26px），
-                        不是带序号的徽标；批次里的序号由 kbd 列承担 */}
-                    <span className={rt ? 'ask-ic' : 'q-no'} aria-hidden="true">
-                      {rt ? (
-                        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
-                          <circle cx="6" cy="6" r="4.5" />
-                          <path d="M4.85 4.7a1.2 1.2 0 1 1 1.55 1.14c-.3.12-.4.36-.4.66" />
-                          <path d="M6 8.3h.01" />
-                        </svg>
-                      ) : (
-                        i + 1
-                      )}
-                    </span>
-                    <span className={rt ? 'ask-q' : 'q-text'}>{it.question}</span>
-                  </div>
-                  {/* 设计的卡分三段：head / body / foot。body 自带 12px 6px 内距，
-                      没有它选项会贴到卡的边框上 */}
-                  <div className={rt ? 'ask-body' : undefined}>
-                  {it.options.length > 0 && renderOptions(it, i)}
-                  </div>
-                  <input
-                    ref={i === 0 ? firstRef : undefined}
-                    name={`question-answer-${i}`}
-                    value={answers[it.id] ?? ''}
-                    onChange={(e) => setAnswer(it.id, e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key !== 'Enter') return
-                      // 输入法组合态（中文等用 Enter 选字/上屏）不得触发提交；
-                      // isComposing + keyCode 229 双保险兼容各平台 IME（同 Composer 主输入框）。
-                      if (e.nativeEvent.isComposing || e.keyCode === 229) return
-                      submitAll()
-                    }}
-                    placeholder={it.multi ? t('ask.placeholderExtra') : it.options.length ? t('ask.placeholderOptions') : t('ask.placeholder')}
-                    aria-label={t('ask.inputAria').replace('{n}', String(i + 1))}
-                    spellCheck={false}
-                  />
-                </div>
-              ))}
-            </div>
-            <div className={rt ? 'ask-foot' : 'acts'}>
-              <span className="timeout">
-                {cd && cd.leftMs === 0 ? t('ask.timedOutHint') : t('ask.allRequired')}
-              </span>
-              <button
-                className={rt ? 'ask-btn go' : 'btn primary'}
-                disabled={!allAnswered || (cd?.leftMs === 0)}
-                onClick={() => submitAll()}
+                    const n = it.options.length
+                    if (!n) return
+                    // 设计里 ←↑ 同义、↓→ 同义（parts/ask.js:497-498）：网格里两个轴都该走
+                    const fwd = e.key === 'ArrowDown' || e.key === 'ArrowRight'
+                    const next = cursor < 0 ? 0 : (cursor + (fwd ? 1 : -1) + n) % n
+                    setCursor(next)
+                    return
+                  }
+                  if (!inInput) {
+                    const k = Number(e.key)
+                    if (Number.isInteger(k) && k >= 1 && k <= Math.min(9, it.options.length)) {
+                      e.preventDefault()
+                      const o = it.options[k - 1]
+                      setCursor(k - 1)
+                      if (it.multi) toggle(it.id, o.label)
+                      else setAnswer(it.id, o.label)
+                      return
+                    }
+                  }
+                  if (e.key === 'Escape') {
+                    // Esc = 跳过这批（设计 ask.js:508）：未答的题按空答案交，不是关掉面板
+                    e.preventDefault()
+                    submitAll(true)
+                    return
+                  }
+                  if (e.key === 'Enter') {
+                    // ⏎：光标处还没选就先选它，已选就下一问/提交
+                    if (!inInput && cursor >= 0 && !here) {
+                      const o = it.options[cursor]
+                      if (o) {
+                        e.preventDefault()
+                        if (it.multi) toggle(it.id, o.label)
+                        else setAnswer(it.id, o.label)
+                        return
+                      }
+                    }
+                    if (!inInput) {
+                      e.preventDefault()
+                      goNext()
+                    }
+                  }
+                }}
               >
-                {t('ask.submitAll').replace('{answered}', String(answered)).replace('{total}', String(items.length))}
-              </button>
+                {items.length > 1 && (
+                  <div className="ask-step">
+                    <span>{t('ask.stepOf').replace('{i}', String(at + 1)).replace('{n}', String(items.length))}</span>
+                    <span className="ask-dots" aria-hidden="true">
+                      {items.map((_, k) => (
+                        <i key={k} data-on={k < at ? 'past' : k === at ? 'now' : 'next'} />
+                      ))}
+                    </span>
+                  </div>
+                )}
+                <div className="ask-head">
+                  <span className="ask-ic" aria-hidden="true">
+                    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                      <circle cx="6" cy="6" r="4.5" />
+                      <path d="M4.85 4.7a1.2 1.2 0 1 1 1.55 1.14c-.3.12-.4.36-.4.66" />
+                      <path d="M6 8.3h.01" />
+                    </svg>
+                  </span>
+                  <div className="ask-q" id={`ask-q-${it.id}`}>{it.question}</div>
+                </div>
+                <div className="ask-body">
+                  {it.options.length > 0 && renderOptions(it, at, cursor)}
+                </div>
+                <input
+                  ref={firstRef}
+                  name={`question-answer-${at}`}
+                  value={answers[it.id] ?? ''}
+                  onChange={(e) => setAnswer(it.id, e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                    e.preventDefault()
+                    goNext()
+                  }}
+                  placeholder={it.multi ? t('ask.placeholderExtra') : it.options.length ? t('ask.placeholderOptions') : t('ask.placeholder')}
+                  aria-label={t('ask.inputAria').replace('{n}', String(at + 1))}
+                  spellCheck={false}
+                />
+                <div className="ask-foot">
+                  <span className="ask-note">
+                    {cd && cd.leftMs === 0
+                      ? t('ask.timedOutHint')
+                      : t('ask.stepNote').replace('{done}', String(answered)).replace('{total}', String(items.length))}
+                  </span>
+                  <div className="ask-acts">
+                    {/* 单选卡（非分步）按设计给三样：多选的全选/清空、跳过、继续。
+                        分步批次只给「上一步 / 下一问」，因为中途跳过会让后面几问失去
+                        上下文（设计 parts/ask.js:190-208 也是这么分的）。 */}
+                    {items.length === 1 && it.multi && it.options.length > 1 && (() => {
+                      const picked = multiSel[it.id] ?? []
+                      const allPicked = it.options.length > 0 && it.options.every((o) => picked.includes(o.label))
+                      return (
+                        <button
+                          type="button"
+                          className="ask-all"
+                          onClick={() => {
+                            // 全选 ⇄ 清空：一个按钮两种文案（设计 ask.js:428-435）
+                            it.options.forEach((o) => {
+                              const has = picked.includes(o.label)
+                              if (allPicked ? has : !has) toggle(it.id, o.label)
+                            })
+                            setCursor(-1)
+                          }}
+                        >
+                          {allPicked ? t('ask.clearAll') : t('ask.selectAll')}
+                        </button>
+                      )
+                    })()}
+                    {items.length === 1 ? (
+                      <button type="button" className="ask-btn ghost" onClick={() => submitAll(true)}>
+                        {t('ask.skip')}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="ask-btn ghost"
+                        disabled={at === 0}
+                        onClick={() => {
+                          setStep(at - 1)
+                          setCursor(-1)
+                        }}
+                      >
+                        {t('ask.back')}
+                      </button>
+                    )}
+                    <button type="button" className="ask-btn go" disabled={!here || cd?.leftMs === 0} onClick={goNext}>
+                      {last ? t('ask.done') : t('ask.next')}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </>
         )}

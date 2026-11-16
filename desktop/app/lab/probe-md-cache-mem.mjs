@@ -38,7 +38,6 @@ for (let i = 0; i < MSGS; i++) {
 }
 
 await page.eval(() => window.__mdCache.clear())
-await page.eval(() => window.__store.getState().setNarrativeSkin('runtime'))
 await page.eval(() => window.__store.getState().setNarrativeDensity('detailed'))
 await page.eval((arg) => window.__store.setState({ activeSessionId: 'mem-1', blocks: arg, turns: [], runNodes: [], runEnded: true }), blocks)
 await wait(2500)

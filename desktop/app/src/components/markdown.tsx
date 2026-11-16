@@ -18,7 +18,6 @@ import { useAppearance } from '../lib/appearance'
 import { copyText } from '../lib/clipboard'
 import { displayPath, isLocalAssetSrc, resolveLocalAssetPath, useLocalAsset } from '../lib/localAsset'
 import { markTableNumbers } from '../lib/tableNumbers'
-import { useSkin } from '../lib/useSkin'
 import { t as tStatic, useLang, useT } from '../i18n'
 import { splitStreamingMarkdown } from '../lib/mdSplit'
 import { hastToElements, makeKey, parseMarkdown } from '../lib/mdPipeline'
@@ -658,19 +657,11 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
   const hostRef = useRef(host)
   hostRef.current = host
   const resolved = useResolvedTheme()
-  const ap = useAppearance()
-  const codeTheme = resolved === 'paper' ? ap.codeThemeLight : ap.codeThemeDark
   const [mode, setMode] = useState<'preview' | 'source'>('preview')
-  const { state: copyState, copy } = useCopy(code)
-  const [html, setHtml] = useState('')
   const [height, setHeight] = useState<number | undefined>(undefined) // iframe 实测高度（未测前 undefined → CSS 兜底 240px）
   const [frameHover, setFrameHover] = useState(false) // 指针在预览 iframe 内容上方（子探针上报）
-  const [probeDead, setProbeDead] = useState(false) // 子探针没跑起来（如 HTML 自带 CSP script-src 'none'）→ 退回恒显
-  const rt = useSkin() === 'runtime'
   const frameRef = useRef<HTMLIFrameElement>(null)
   const blockRef = useRef<HTMLDivElement>(null)
-  const probeSeenRef = useRef(false) // 本次 srcDoc 是否收到过探针上报
-  const MAX_H = 560 // 预览高度上限：超过则 iframe 内滚（完整可看）
 
   // 组装 iframe 文档：完整 <html> 直接用；片段（无 <html>）包基本骨架。
   // 末尾注入探针脚本（opaque origin 下跨域通信的唯一通道），上报两件事：
@@ -715,20 +706,11 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
     return /<\/body>/i.test(base) ? base.replace(/<\/body>/i, probe + '</body>') : base + probe
   }, [code, resolved])
 
-  // 代码变化 → 重置高度等待重新测量；同时清掉已高亮的源码（否则源码 tab 会一直
-  // 显示「上一次 code 的高亮结果」——流式增长/内容变化后切到源码 tab 看到的是旧内容）。
+  // 代码变化 → 重置高度等待重新测量。
   // 注意不动 frameHover：流式下 srcDoc 会反复重载，若跟着复位，指针停在预览上时
   // 工具条会跟着闪。
   useEffect(() => {
     setHeight(undefined)
-    setHtml('')
-    probeSeenRef.current = false
-    setProbeDead(false)
-    // 探针兜底：HTML 里若自带 CSP（如 script-src 'none'）或脚本被禁，注入的探针不会执行
-    // → 收不到任何上报 → 悬停信号永远没有，工具条就再也点不到。这种文档退回「恒显」
-    // （= 改动前的行为），保证功能不丢。总开关在 .probe-dead 上。
-    const timer = setTimeout(() => { if (!probeSeenRef.current) setProbeDead(true) }, 2500)
-    return () => clearTimeout(timer)
   }, [code])
 
   // 接收 iframe 内探针上报：高度 + 悬停 + 「把这句话发回会话」。
@@ -759,7 +741,6 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
       if (!d || typeof d !== 'object') return
 
       if (d.__haireply === 1) {
-        probeSeenRef.current = true // 能发回复说明探针活着，不需要再等超时判死
         const id = d.id
         const kind = d.kind
         const text = d.text
@@ -781,10 +762,8 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
       }
 
       if (d.__htmlh === undefined && d.__htmlhover === undefined) return
-      probeSeenRef.current = true
       const h = d.__htmlh
-      // 不在这里截断：运行时这档要按内容**完整**渲染，上限只在非运行时那档的
-      // 渲染处施加（见下方 frame 的 height 计算）
+      // 不在这里截断：这块要按内容**完整**渲染（预览没有高度上限，超出由 iframe 内滚）
       if (typeof h === 'number' && h > 0) setHeight(Math.max(h + 2, 40))
       if (d.__htmlhover === 1) setFrameHover(true)
     }
@@ -824,17 +803,6 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
     if (mode !== 'preview') setFrameHover(false)
   }, [mode])
 
-  // 源码高亮（切到源码 tab 时才需要，懒算省一次高亮）；
-  // 高亮失败（shiki chunk 加载失败等）→ 回退未高亮源码，不让 tab 空白。
-  useEffect(() => {
-    let alive = true
-    if (mode !== 'source' || html) return
-    codeToHtml(code, 'html', resolved)
-      .then((h) => { if (alive) setHtml(h) })
-      .catch(() => { /* 高亮不可用：源码 tab 走 <pre> 兜底 */ })
-    return () => { alive = false }
-  }, [mode, code, resolved, codeTheme, html])
-
   // 右侧侧边栏展示用的干净文档：与 doc 同构但**不含探针脚本**（探针只为对话内
   // 自适应高度服务，侧边栏全尺寸展示不需要，避免 postMessage 干扰）。
   const cleanDoc = useMemo(() => {
@@ -866,84 +834,44 @@ function HtmlPreviewBlock({ code, streaming, path }: { code: string; streaming?:
     )
   }
 
-  const frame = (
-    <iframe
-      ref={frameRef}
-      className="htmlblock-frame"
-      sandbox="allow-scripts"
-      srcDoc={doc}
-      style={height != null ? { height: Math.min(height, MAX_H) } : undefined}
-      title={t('md.htmlPreview')}
-    />
-  )
-
-  // 运行时皮肤：这块**不折叠**，直接按内容完整渲染（高度由 iframe 内探针上报），
-  // 指针移上来才浮出三个动作：预览 / 源码 / 在访达中打开（没有落盘路径时那一位是
-  // 「在浏览器打开」—— 同一个位置、说真话，不冒充访达）。
-  if (rt) {
-    const revealLabel = path ? t('md.htmlReveal') : t('md.htmlOpenBrowserBtn')
-    const onReveal = () => {
-      if (path && bridge?.showItemInFolder) {
-        void bridge.showItemInFolder(path)
-        return
-      }
-      openInBrowser()
+  // 这块**不折叠**，直接按内容完整渲染（高度由 iframe 内探针上报）；指针移上来才
+  // 浮出三个动作：预览 / 源码 / 在访达中打开（没有落盘路径时那一位是「在浏览器
+  // 打开」—— 同一个位置、说真话，不冒充访达）。
+  const revealLabel = path ? t('md.htmlReveal') : t('md.htmlOpenBrowserBtn')
+  const onReveal = () => {
+    if (path && bridge?.showItemInFolder) {
+      void bridge.showItemInFolder(path)
+      return
     }
-    return (
-      <div className="cy-frame" data-slot="artifact">
-        <div className={`pv${frameHover ? ' hd-on' : ''}`}>
-          <div className="pv-bar" role="group" aria-label={t('md.htmlTabsAria')}>
-            <button className="pv-btn" aria-pressed={mode === 'preview'} onClick={() => setMode('preview')}>
-              {t('md.htmlPreviewAction')}
-            </button>
-            <button className="pv-btn" aria-pressed={mode === 'source'} onClick={() => setMode('source')}>
-              {t('md.htmlSource')}
-            </button>
-            <button className="pv-btn" onClick={onReveal}>{revealLabel}</button>
-          </div>
-          <div className="pv-body">
-            {mode === 'preview' ? (
-              <iframe
-                ref={frameRef}
-                className="pv-frame"
-                sandbox="allow-scripts"
-                srcDoc={doc}
-                style={height != null ? { height } : undefined}
-                title={t('md.htmlPreview')}
-              />
-            ) : (
-              <pre className="pv-code">{code}</pre>
-            )}
-          </div>
+    openInBrowser()
+  }
+  return (
+    <div className="cy-frame" data-slot="artifact">
+      <div className={`pv${frameHover ? ' hd-on' : ''}`}>
+        <div className="pv-bar" role="group" aria-label={t('md.htmlTabsAria')}>
+          <button className="pv-btn" aria-pressed={mode === 'preview'} onClick={() => setMode('preview')}>
+            {t('md.htmlPreviewAction')}
+          </button>
+          <button className="pv-btn" aria-pressed={mode === 'source'} onClick={() => setMode('source')}>
+            {t('md.htmlSource')}
+          </button>
+          <button className="pv-btn" onClick={onReveal}>{revealLabel}</button>
+        </div>
+        <div className="pv-body">
+          {mode === 'preview' ? (
+            <iframe
+              ref={frameRef}
+              className="pv-frame"
+              sandbox="allow-scripts"
+              srcDoc={doc}
+              style={height != null ? { height } : undefined}
+              title={t('md.htmlPreview')}
+            />
+          ) : (
+            <pre className="pv-code">{code}</pre>
+          )}
         </div>
       </div>
-    )
-  }
-
-  return (
-    <div ref={blockRef} className={`htmlblock ${mode === 'source' ? 'source-mode' : ''} ${frameHover ? 'hd-on' : ''} ${probeDead ? 'probe-dead' : ''}`}>
-      <div className="htmlblock-hd">
-        <span className="htmlblock-tabs" role="group" aria-label={t('md.htmlTabsAria')}>
-          <button className={mode === 'preview' ? 'on' : ''} onClick={() => setMode('preview')} aria-pressed={mode === 'preview'}>{t('md.htmlPreview')}</button>
-          <button className={mode === 'source' ? 'on' : ''} onClick={() => setMode('source')} aria-pressed={mode === 'source'}>{t('md.htmlSource')}</button>
-        </span>
-        <span className="grow" />
-        {mode === 'preview' && (
-          <button className="cb-copy htmlblock-open-btn" onClick={openInBrowser} title={t('md.htmlOpenBrowser')}>
-            {t('md.htmlOpenBrowserBtn')}
-          </button>
-        )}
-        <button className="cb-copy" onClick={copy} aria-label={t('md.copyAria')}>
-          {copyLabel(t, copyState)}
-        </button>
-      </div>
-      {mode === 'preview' ? (
-        frame
-      ) : html ? (
-        <div className="cb-body" dangerouslySetInnerHTML={{ __html: html }} />
-      ) : (
-        <pre className="cb-body cb-plain"><code>{code}</code></pre>
-      )}
     </div>
   )
 }

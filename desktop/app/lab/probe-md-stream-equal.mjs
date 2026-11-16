@@ -34,7 +34,6 @@ for (let i = 0; i < 200; i++) { if (await page.eval(() => !!window.__store && !!
 const SID = 'eq-1'
 await page.eval((sid) => {
   const st = window.__store.getState()
-  st.setNarrativeSkin('runtime')
   st.setNarrativeDensity('detailed')
   window.__store.setState({ activeSessionId: sid, blocks: [], turns: [], runNodes: [], runEnded: true })
 }, SID)

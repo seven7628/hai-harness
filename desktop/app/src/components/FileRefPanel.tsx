@@ -3,7 +3,6 @@ import { getTransport } from '../transport'
 import type { FsEntry, FsListResult } from '../transport/types'
 import { useT } from '../i18n'
 import { FolderIcon, FolderOpenIcon, FileIcon } from './icons'
-import { useSkin } from '../lib/useSkin'
 import './runtime/pop/pop.css'
 
 // 简易文件浏览器（输入框 @ 引用）：浏览工作区 / 任意绝对路径，选择文件或目录。
@@ -151,9 +150,8 @@ export default function FileRefPanel({
       : entries
   })()
   const parent = parentDir(dir)
-  const rt = useSkin() === 'runtime'
-  // 运行时皮肤的行模型：目录导航用设计的 .pop-row.dir，动作（引用此目录/浏览…）
-  // 也进同一份行列表 —— 设计弹层里没有「按钮条」这种东西，按钮条会把它变回对话框。
+  // 行模型：目录导航用 .pop-row.dir，动作（引用此目录/浏览…）也进同一份行列表 ——
+  // 弹层里没有「按钮条」这种东西，按钮条会把它变回对话框。
   const [active, setActive] = useState(0)
   const rows: Array<
     | { kind: 'up'; label: string }
@@ -180,94 +178,33 @@ export default function FileRefPanel({
   // stopImmediatePropagation 保证实际单触发，2026-08-30 去重清理）。
 
 
-  if (rt) {
-    return (
-      <div
-        className="pop"
-        data-pop="src"
-        role="listbox"
-        aria-label={t('composer.refAria')}
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          onKey(e as unknown as React.KeyboardEvent)
-          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-            e.preventDefault()
-            setActive((i) => (i + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length)
-          } else if (e.key === 'Enter') {
-            e.preventDefault()
-            runRow(active)
-          }
-        }}
-      >
-        <div className="pop-search">
-          <FolderOpenIcon size={12} />
-          <input
-            value={pathDraft}
-            placeholder={t('composer.ref.pathPh')}
-            spellCheck={false}
-            aria-label={t('composer.ref.pathPh')}
-            onChange={(e) => setPathDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing || e.keyCode === 229) return
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                goPath()
-              }
-            }}
-          />
-        </div>
-        {/* 面包屑放在标签行：弹层里「你在哪」是位置信息，不是按钮 */}
-        <div className="pop-label" title={dir}>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dir}</span>
-          <b>{shown.length}</b>
-        </div>
-        {loading ? <div className="pop-row"><span className="k">{t('composer.ref.loading')}</span></div> : null}
-        {error ? <div className="pop-row"><span className="k">{error}</span></div> : null}
-        {!loading && !error && shown.length === 0 ? (
-          <div className="pop-row"><span className="k">{t('composer.ref.empty')}</span></div>
-        ) : null}
-        {!loading && !error
-          ? rows.map((r, i) => {
-              const on = i === active
-              const cls = `pop-row${r.kind === 'entry' && r.e.isDir ? ' dir' : ''}${r.kind === 'up' ? ' dir' : ''}${on ? ' is-active' : ''}`
-              return (
-                <button
-                  type="button"
-                  key={r.kind === 'entry' ? r.e.path : `act:${i}`}
-                  className={cls}
-                  role="option"
-                  aria-selected={on}
-                  title={r.kind === 'entry' ? r.e.path : undefined}
-                  onMouseEnter={() => setActive(i)}
-                  onClick={() => runRow(i)}
-                  onMouseDown={(ev) => ev.preventDefault()}
-                >
-                  {r.kind === 'up' ? <FolderOpenIcon size={12} /> : null}
-                  {r.kind === 'entry' ? (r.e.isDir ? <FolderIcon size={12} /> : <FileIcon size={12} />) : null}
-                  <span className="k">
-                    {r.kind === 'entry' ? r.e.name : r.label}
-                  </span>
-                  {r.kind === 'entry' && !r.e.isDir ? <span className="m">{fmtSize(r.e.size)}</span> : null}
-                </button>
-              )
-            })
-          : null}
-        <div className="pop-foot">{t('composer.ref.popFoot')}</div>
-      </div>
-    )
-  }
-
   return (
-    <div className="ref-menu" role="listbox" aria-label={t('composer.refAria')} onClick={(e) => e.stopPropagation()} onKeyDown={onKey}>
-      <div className="ref-head">
+    <div
+      className="pop"
+      data-pop="src"
+      role="listbox"
+      aria-label={t('composer.refAria')}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        onKey(e as unknown as React.KeyboardEvent)
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault()
+          setActive((i) => (i + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length)
+        } else if (e.key === 'Enter') {
+          e.preventDefault()
+          runRow(active)
+        }
+      }}
+    >
+      <div className="pop-search">
+        <FolderOpenIcon size={12} />
         <input
-          className="ref-path"
           value={pathDraft}
           placeholder={t('composer.ref.pathPh')}
           spellCheck={false}
+          aria-label={t('composer.ref.pathPh')}
           onChange={(e) => setPathDraft(e.target.value)}
           onKeyDown={(e) => {
-            // 输入法组合态（中文等用 Enter 选字/上屏）不得触发跳转
             if (e.nativeEvent.isComposing || e.keyCode === 229) return
             if (e.key === 'Enter') {
               e.preventDefault()
@@ -275,47 +212,44 @@ export default function FileRefPanel({
             }
           }}
         />
-        <button className="btn" onClick={() => void load(workspace || '/')}>{t('composer.ref.workspace')}</button>
-        <button className="btn" onClick={() => void getTransport().pickFsFile().then((p) => p && onPick(p, false))}>{t('composer.ref.browseFile')}</button>
-        <button className="btn" onClick={() => void getTransport().pickFsDir().then((p) => p && onPick(p, true))}>{t('composer.ref.browseDir')}</button>
       </div>
-      <div className="ref-body">
-        {loading && <div className="ref-hint">{t('composer.ref.loading')}</div>}
-        {error && <div className="ref-hint err">{error}</div>}
-        {!loading && !error && (
-          <>
-            {parent != null && (
-              <div className="ref-row dir up" role="option" onClick={up} onMouseDown={(e) => e.preventDefault()} title={parent}>
-                <span className="ref-ic"><FolderOpenIcon size={14} /></span>
-                <span className="ref-nm">..</span>
-              </div>
-            )}
-            {shown.length === 0 && <div className="ref-hint">{t('composer.ref.empty')}</div>}
-            {shown.map((e) => (
-              <div
-                className={`ref-row ${e.isDir ? 'dir' : 'file'}`}
+      {/* 面包屑放在标签行：弹层里「你在哪」是位置信息，不是按钮 */}
+      <div className="pop-label" title={dir}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dir}</span>
+        <b>{shown.length}</b>
+      </div>
+      {loading ? <div className="pop-row"><span className="k">{t('composer.ref.loading')}</span></div> : null}
+      {error ? <div className="pop-row"><span className="k">{error}</span></div> : null}
+      {!loading && !error && shown.length === 0 ? (
+        <div className="pop-row"><span className="k">{t('composer.ref.empty')}</span></div>
+      ) : null}
+      {!loading && !error
+        ? rows.map((r, i) => {
+            const on = i === active
+            const cls = `pop-row${r.kind === 'entry' && r.e.isDir ? ' dir' : ''}${r.kind === 'up' ? ' dir' : ''}${on ? ' is-active' : ''}`
+            return (
+              <button
+                type="button"
+                key={r.kind === 'entry' ? r.e.path : `act:${i}`}
+                className={cls}
                 role="option"
-                key={e.path}
-                title={e.path}
-                onClick={() => openEntry(e)}
-                onDoubleClick={(ev) => {
-                  // 双击目录：已在单击进入；双击文件与单击一致（防 double-click 二次触发）
-                  ev.preventDefault()
-                }}
+                aria-selected={on}
+                title={r.kind === 'entry' ? r.e.path : undefined}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => runRow(i)}
                 onMouseDown={(ev) => ev.preventDefault()}
               >
-                <span className="ref-ic">{e.isDir ? <FolderIcon size={14} /> : <FileIcon size={13} />}</span>
-                <span className="ref-nm">{e.name}</span>
-                {!e.isDir && <span className="ref-sz">{fmtSize(e.size)}</span>}
-              </div>
-            ))}
-          </>
-        )}
-      </div>
-      <div className="ref-foot">
-        <span className="ref-cur" title={dir}>{dir}</span>
-        <button className="btn primary" onClick={() => onPick(dir, true)}>{t('composer.ref.useDir')}</button>
-      </div>
+                {r.kind === 'up' ? <FolderOpenIcon size={12} /> : null}
+                {r.kind === 'entry' ? (r.e.isDir ? <FolderIcon size={12} /> : <FileIcon size={12} />) : null}
+                <span className="k">
+                  {r.kind === 'entry' ? r.e.name : r.label}
+                </span>
+                {r.kind === 'entry' && !r.e.isDir ? <span className="m">{fmtSize(r.e.size)}</span> : null}
+              </button>
+            )
+          })
+        : null}
+      <div className="pop-foot">{t('composer.ref.popFoot')}</div>
     </div>
   )
 }

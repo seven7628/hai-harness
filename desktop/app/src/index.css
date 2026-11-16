@@ -2765,9 +2765,9 @@ body.is-electron .left.collapsed .rail .rbtn {
   overflow-wrap: break-word;
 }
 /* 思考正文的段落（组件按空行切分）：段间距用 margin 表达，1.65em = 原「空行」行盒高度
-   （line-height 1.65 × 字号）→ 默认皮肤与此前逐像素一致；V3 在皮肤层收紧（见 narrative-skin.css）。
+   （line-height 1.65 × 字号）→ 与此前逐像素一致（skin-v3 曾在这里收紧，该皮肤已移除）。
    选择器写成 .thinking .thinking-body .tk-p：要压过 .msg .body p（0,2,1，为正文段落设的 4px），
-   否则默认皮肤的思考段间距会被那条规则悄悄改小。
+   否则思考段间距会被那条规则悄悄改小。
    white-space 继承自 .thinking-body：段内的单换行（列表式短行）仍按原样折行。 */
 .thinking .thinking-body .tk-p {
   margin: 0 0 1.65em;
@@ -12879,7 +12879,6 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
   letter-spacing: .02em;
 }
 
-@import './narrative-skin.css';
 @import './runtime-palette.css';
 @import './runtime-skin.css';
 

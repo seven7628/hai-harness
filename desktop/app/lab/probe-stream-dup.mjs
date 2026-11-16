@@ -36,7 +36,6 @@ const setup = async (skin) => {
     const views = { ...st.views }
     delete views[arg.sid]
     window.__store.setState({ views, activeSessionId: undefined, blocks: [], runNodes: [], runEnded: true })
-    st.setNarrativeSkin(arg.skin)
     st.setNarrativeDensity('concise')
   }, { sid: SID, skin })
   await wait(200)

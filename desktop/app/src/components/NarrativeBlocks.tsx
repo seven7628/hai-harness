@@ -7,7 +7,7 @@
 // （主对话卡 .agent-card 是 mono + text-2，右栏卡当时是另一套 .agent-view：sans + text），
 // 连自己的两处宿主都不同。
 // 现在的约定：数据来源可以有两处（MsgBlock / AgentItem），**渲染只能有一套**。
-// 新增块类型/改样式时改这里，两处同时生效；皮肤层（narrative-skin.css）也因此一次覆盖两处。
+// 新增块类型/改样式时改这里，两处同时生效。
 //
 // 宿主差异只允许一项：主 run 专属动作（工具行的「后台/停止」）—— 见 ToolRow 的 host。
 
@@ -15,12 +15,11 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'reac
 import { useAppStore } from '../store/useAppStore'
 import type { CompressionInfo, Diff, QueuedContent, ToolErrorInfo, TodoItem, UsageAgg } from '../store/useAppStore'
 import { Markdown } from './markdown'
-import { Bot, CheckList, FileIcon, PencilIcon, PlayIcon, SearchIcon, Sparkles, TerminalIcon } from './icons'
+import { Bot, CheckList, FileIcon, PencilIcon, PlayIcon, SearchIcon, TerminalIcon } from './icons'
 import { fmtUsd, UsageChip, UnifiedDiff } from './ui'
 import { shortPath } from '../lib/shortPath'
 import { failureLine } from '../lib/failureLine'
 import { fmtMs, toolArgsSummary, toolMetric, toolVerb } from '../lib/toolSummary'
-import { useSkin } from '../lib/useSkin'
 import { bashCommandOf } from '../lib/toolSummary'
 import { FoldIcon } from './runtime/FoldIcon'
 import { toolFamily, fileTypeOf } from '../lib/palette'
@@ -96,7 +95,6 @@ export const InlineCode = memo(function InlineCode({ text }: { text: string }) {
 // 判断留在调用点，渲染只在这里。
 export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart }: { text: string; live: boolean; thinkMs?: number; thinkStart?: number }) {
   const t = useT()
-  const rt = useSkin() === 'runtime'
   const [open, setOpen] = useState(false)
   const running = live && thinkStart != null && thinkMs == null // 思考中：还在生成、已开始且未结算
   // 时钟：仅思考中挂（ElapsedTimer 订阅，每秒走）；结束 timer=thinkMs 显示总耗时
@@ -121,13 +119,10 @@ export const Thinking = memo(function Thinking({ text, live, thinkMs, thinkStart
     <div className="thinking">
       <div className="thinking-hd">
         <button className="thinking-toggle" onClick={() => setOpen((v) => !v)} aria-expanded={showFull} aria-label={showFull ? t('thinking.collapse') : t('thinking.expand')}>
-          {/* V3 皮肤的行首图标：thinking=灵感（默认皮肤下 .ic 不渲染 → 现状不变） */}
-          {/* 运行时皮肤的脸：状态由这一段自己的状态给（生成中/展开/折叠），
-              不另设一套。`.ic` 留给 v3 皮肤，默认皮肤下它整片 display:none。 */}
+          {/* 脸：状态由这一段自己的状态给（生成中/展开/折叠），不另设一套 */}
           <Face state={running ? 'run' : showFull ? 'engaged' : 'done'} />
-          <span className="ic" aria-hidden="true">{<Sparkles size={16} />}</span>
-          <span className="mono">{rt ? null : '▸ '}{t('thinking.label')}{<ElapsedTimer startAt={thinkStart} running={running} durMs={thinkMs} />}</span>
-          {rt ? <FoldIcon open={showFull} /> : null}
+          <span className="mono">{t('thinking.label')}{<ElapsedTimer startAt={thinkStart} running={running} durMs={thinkMs} />}</span>
+          <FoldIcon open={showFull} />
         </button>
         {long && !live && (
           <button className="thinking-more" onClick={() => setOpen((v) => !v)}>
@@ -167,13 +162,12 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
   const t = useT()
   // 出错归一化：主对话块用 isError，子 agent 项用 status==='error'（两边同义）
   const err = b.isError ?? b.status === 'error'
-  // 运行时皮肤的工具行是六列（折角 · 图标 · 动词 · 对象 · 度量 · 时长）：动词用工具名
-  // 的大写形式、度量从结果算；另两档皮肤保留原名与旧版面（.t 里仍是原始工具名）。
-  const rt = useSkin() === 'runtime'
+  // 工具行是六列（折角 · 图标 · 动词 · 对象 · 度量 · 时长）：动词用工具名的大写形式、
+  // 度量从结果算。
   // 度量描述的是**结果**：运行中不画。live 路径的 running 块本来没有 result，但恢复路径会带上
   // checkpoint 里的部分输出（Block.Output）—— 那时画出来的是「已收到的那一截有多大」，
   // 既不是结果也是半句话，还会让行头多占一格（见下面 tool-tail-cell 的注释）。
-  const metric = rt && b.status !== 'running' ? toolMetric(b.name, b.args || '', b.result, b.diff) : null
+  const metric = b.status !== 'running' ? toolMetric(b.name, b.args || '', b.result, b.diff) : null
   const changed = b.status === 'done' && !err
   const summary = toolArgsSummary(b.name, b.args || '', t)
   // 编排型工具（codemode）：档位徽标（检索 / 执行）——判据见 lib/codemodeNested.ts 的 codemodeTier。
@@ -223,10 +217,8 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
   // write_file 落盘 .html → 「打开」在右侧内嵌浏览器以 file:// 加载（内容由用户/
   // LLM 决定落盘位置；代码块本身不猜路径 —— 只有工具卡知道真实 path）。
   const isHtmlWrite = b.name === 'write_file' && /\.html?$/i.test(path)
-  // 工具时钟（时钟方案 A）：仅「异步 Task」（promoted / 有 taskId）走实时计时（ElapsedTimer 订阅）；
-  // 普通短工具不挂时钟，结束后显示 durMs。
+  // 工具时钟（时钟方案 A）：跑着走实时计时（ElapsedTimer 订阅），结束后显示 durMs。
   const running = b.status === 'running'
-  const asyncTask = running && (b.promoted || Boolean(b.taskId))
   const interruptTask = useAppStore((s) => s.interruptTask)
   return (
     // data-family：分类色板的挂钩（看=蓝/跑=青/写=紫/托=橙…，规则在 index.css）。
@@ -254,14 +246,14 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
         }}
       >
         {/* 展开箭头在图标之前：一列行读下来，左侧是「可点开」，右侧才是「这是什么」。 */}
-        {rt ? <FoldIcon open={open} /> : <span className="chev">{open ? '▾' : '▸'}</span>}
-        {/* V3 / 运行时皮肤的行首图标（默认皮肤不渲染）：读=文档 · 检索=放大镜 · 执行=终端 · 改=笔 */}
+        <FoldIcon open={open} />
+        {/* 行首图标：读=文档 · 检索=放大镜 · 执行=终端 · 改=笔 */}
         <span className="ic" data-s={err ? 'fail' : running ? 'warn' : undefined} aria-hidden="true"><ToolIcon name={isCodemode ? (tier === 'search' ? 'search' : 'bash') : b.name} /></span>
         {isSkill ? (
           <span className={`t ${err ? 'err' : ''}`}>SKILL({b.args})</span>
         ) : (
           <>
-            <span className={`t ${err ? 'err' : ''}`}>{rt ? toolVerb(b.name) : b.name}</span>
+            <span className={`t ${err ? 'err' : ''}`}>{toolVerb(b.name)}</span>
             {/* 档位徽标与对象文本共用行头的第五格（1fr）。
                 行头是设计给的六列网格（14 · 14 · 56 · 1fr · auto · 52）；徽标若作为第七个
                 网格子项，网格会把它放进 1fr 那格、把对象/度量/时长挤到第二行 —— 用户 2026-10
@@ -366,7 +358,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
           )}
           {b.status === 'running' && !isCodemode && <span className="run">…</span>}
           {/* 度量列：+a −b / N lines / N hits / N files / x.x KB —— 算不出就不画 */}
-          {rt && metric ? (
+          {metric ? (
             <span className="m">
               {metric.kind === 'diff' ? (
                 <>
@@ -378,15 +370,9 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
             </span>
           ) : null}
         </span>
-        {rt ? (
-          <span className="dur">
-            {b.status === 'running' ? <ElapsedTimer startAt={b.startedAt} running durMs={undefined} /> : fmtMs(b.durMs ?? undefined)}
-          </span>
-        ) : (
-          ((b.status === 'running' && !isCodemode) || b.durMs != null) && (
-            <ElapsedTimer className="ms" startAt={b.startedAt} running={asyncTask} durMs={asyncTask ? undefined : b.durMs} />
-          )
-        )}
+        <span className="dur">
+          {b.status === 'running' ? <ElapsedTimer startAt={b.startedAt} running durMs={undefined} /> : fmtMs(b.durMs ?? undefined)}
+        </span>
         <UsageChip className="mono tu" usage={b.usage} title={t('usage.tip').replace('{tok}', String((b.usage?.input ?? 0) + (b.usage?.output ?? 0))).replace('{cost}', fmtUsd(b.usage?.costUsd ?? 0))} />
         <span className={`st ${err ? 'err' : changed ? 'ok' : ''}`}>{err ? '✗' : changed ? '✓' : ''}</span>
       </div>
@@ -574,8 +560,7 @@ export const ToolRow = memo(function ToolRow({ b, host = 'main' }: { b: ToolRowD
 
 // 连续工具块 → 纵向分组卡片（并行工具上下排；单工具 = 单行卡片）
 // 待办（todo_*）不在这里出现：连续的写会先被并成一张表（见下方 ToolGroup）。
-/** V3 皮肤的行首图标：按工具名取语义（与 docs/agent-ui-lab 的 ICON 映射一致）。
- *  默认皮肤下 .ic 被 CSS 隐藏（html:not([data-skin='v3']) .ic { display: none }），零影响。
+/** 行首图标：按工具名取语义（与 docs/agent-ui-lab 的 ICON 映射一致）。
  *  工具行与任务卡（TaskCard 的 .ic）共用这一份映射。 */
 export const ToolIcon = memo(function ToolIcon({ name }: { name: string }) {
   if (/^(read|view|open)/.test(name)) return <FileIcon size={16} />

@@ -73,7 +73,6 @@ const prep = async (skin, density, blocks) => {
     const views = { ...st.views }
     delete views[arg.sid]
     window.__store.setState({ views, activeSessionId: undefined, blocks: [], runNodes: [], runEnded: true })
-    st.setNarrativeSkin(arg.skin)
   }, { sid: SID, skin })
   await wait(150)
   await page.eval((x) => window.__store.getState().setNarrativeDensity(x), density)
@@ -94,8 +93,6 @@ const prep = async (skin, density, blocks) => {
     requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => res(performance.now() - t0))))
   }), t0)
   const m1 = await metrics()
-  const skinNow = await page.eval(() => document.documentElement.getAttribute('data-skin'))
-  if (skinNow !== skin) console.log(`  !! 皮肤没生效：想要 ${skin}，实际 ${skinNow}`)
   return { paint: Math.round(paint), task: d(m0, m1, 'TaskDuration'), script: d(m0, m1, 'ScriptDuration'), nodes: await page.eval(() => document.querySelectorAll('.narrative *').length) }
 }
 
@@ -116,7 +113,7 @@ const stream = async (n = 120) => {
   return { ...r, script: d(m0, m1, 'ScriptDuration') }
 }
 
-const SKINS = (process.env.SKINS || 'current,runtime').split(',')
+const SKINS = ['runtime'] // 2026-11：current/v3 已删除，只剩 runtime
 const rows = []
 for (const skin of SKINS) {
   for (const density of ['concise', 'detailed']) {
@@ -145,11 +142,9 @@ const pick = (skin, density) => {
 }
 console.log('\n=== 归因（A 空会话流式 / B 大转录挂载） ===')
 for (const density of ['concise', 'detailed']) {
-  const c = pick('current', density)
   const t = pick('runtime', density)
-  if (!c || !t) continue
-  const pc = (a, b) => `${((b / (a || 1) - 1) * 100).toFixed(0)}%`
-  console.log(`${density}  A 流式 script ${c.sScript}s → ${t.sScript}s (${pc(c.sScript, t.sScript)})  mut ${c.sMut} → ${t.sMut}  +nodes ${c.sAdded} → ${t.sAdded}`)
-  console.log(`${density}  B 挂载 ${c.bMount}ms → ${t.bMount}ms (${pc(c.bMount, t.bMount)})  script ${c.bScript}s → ${t.bScript}s (${pc(c.bScript, t.bScript)})  task ${c.bTask}s → ${t.bTask}s  nodes ${c.bNodes} → ${t.bNodes}`)
+  if (!t) continue
+  console.log(`${density}  A 流式 script ${t.sScript}s  mut ${t.sMut}  +nodes ${t.sAdded}`)
+  console.log(`${density}  B 挂载 ${t.bMount}ms  script ${t.bScript}s  task ${t.bTask}s  nodes ${t.bNodes}`)
 }
 await b.close?.()

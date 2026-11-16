@@ -60,18 +60,32 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
 import CenterPanel from '../../src/components/CenterPanel'
-import { useAppStore } from '../../src/store/useAppStore'
+import { useAppStore, dispatchEvent } from '../../src/store/useAppStore'
 import '../../src/index.css'
-import '../../src/narrative-skin.css'
+// index.css 末尾的 @import 在 dev 下不下发，探针显式 import 皮肤两层（与 verify_user_blocks 同）
+import '../../src/runtime-palette.css'
+import '../../src/runtime-skin.css'
 
 const q = new URLSearchParams(location.search)
-document.documentElement.setAttribute('data-skin', q.get('skin') === 'v3' ? 'v3' : 'current')
+// 与 index.html 一致：皮肤是静态属性（会话页只有 runtime 一套）
+document.documentElement.setAttribute('data-skin', 'runtime')
 document.documentElement.setAttribute('data-theme', q.get('theme') || 'ink')
 
-const HISTORY = Array.from({ length: 20 }, (_, i) => ({
-  kind: 'assistant', id: 100 + i, streaming: false, thinking: '', model: 'deepseek-v4',
-  text: '第 ' + (i + 1) + ' 段历史：' + '这段正文用来把叙述区撑高，验证「待审批时仍可滚轮翻历史」。'.repeat(3),
-}))
+// 长历史：叙述区必须溢出，才谈得上「翻历史」。
+// **必须走事件**（不是手搓 blocks）：2026-10 起叙述区按「轮」渲染，一轮由
+// agent_start/llm_start/content_chunk/llm_end/agent_end 这一段事件构成 —— 只有裸
+// assistant 块时 selectTurns 拼不出轮，叙述区是空的（量出来 scrollHeight === clientHeight）。
+const T0 = Date.now() - 120_000
+const ev = (o, at = 0) => dispatchEvent({ session_id: 'probe', timestamp: T0 + at, ...o })
+ev({ event_type: 'user_inputs_consumed', user_texts: ['改一下 auth 的过期语义'] })
+for (let i = 0; i < 20; i++) {
+  const base = i * 4000
+  ev({ event_type: 'agent_start', run_id: 'h' + i, index: 0, content: '历史轮', model: 'deepseek-v4' }, base)
+  ev({ event_type: 'llm_start', run_id: 'h' + i, request_id: 'req-' + i, model: 'deepseek-v4' }, base + 200)
+  ev({ event_type: 'content_chunk', run_id: 'h' + i, request_id: 'req-' + i, content: '第 ' + (i + 1) + ' 段历史：' + '这段正文用来把叙述区撑高，验证「待审批时仍可滚轮翻历史」。'.repeat(3) }, base + 400)
+  ev({ event_type: 'llm_end', run_id: 'h' + i, request_id: 'req-' + i, model: 'deepseek-v4', finish_reason: 'end', usage: { Input: 900, Output: 40, CacheRead: 700, TotalTokens: 940 } }, base + 600)
+  ev({ event_type: 'agent_end', run_id: 'h' + i, index: 0, content: '', finish_reason: 'end', model: 'deepseek-v4' }, base + 800)
+}
 
 // 与桥接层注入同形：timeout_ms（等待窗口）+ diff（文件变更预览）
 const timeoutMs = Number(q.get('timeoutMs') || 30 * 60 * 1000)
@@ -88,7 +102,6 @@ const unified = [
 ].join('\\n')
 
 await useAppStore.getState().start('/tmp/appr-probe-ws') // 建立 transport（mock），approve 才有响应
-const BLOCKS = [{ kind: 'user', id: 1, text: '改一下 auth 的过期语义' }, ...HISTORY]
 const APPROVAL = {
   id: 'call-ap-1', name: 'write_file', index: 0, runId: 'run-7',
   arguments: JSON.stringify({ path: 'auth/login.go', content: 'package auth\\n' }, null, 2),
@@ -98,7 +111,10 @@ const APPROVAL = {
 // 会话视图与顶层镜像都要塞：approve 的幂等守卫读的是 views[sid].approvals
 //（顶层 approvals 只负责渲染）。字段抄自 store 的 emptyView()。
 const VIEW = {
-  blocks: BLOCKS, approvals: [APPROVAL], runNodes: [], diffs: [], compressing: false, todos: [],
+  blocks: useAppStore.getState().blocks, approvals: [APPROVAL], runNodes: [], diffs: [], compressing: false, todos: [],
+  // questions 必须显式给 []：视图 → 顶层镜像的同步会把它盖过来，缺了它
+  // AskUserQuestionPanel 的 questionInScope 就会在 undefined 上 .find（实测 pageerror）
+  questions: [],
   usage: { input: 0, output: 0, cacheRead: 0, reasoning: 0 },
   git: { is_repo: false, ahead: 0, behind: 0, staged: 0, modified: 0, untracked: 0, conflicted: 0, clean: true },
   gitFiles: [], gitHistory: [], gitHasMore: false, gitHistLoading: false, gitLoading: false,
@@ -109,9 +125,8 @@ const VIEW = {
 useAppStore.setState({
   persona: 'code',
   activeSessionId: 'probe',
-  blocks: BLOCKS,
   approvals: [APPROVAL],
-  views: { probe: VIEW },
+  views: { ...useAppStore.getState().views, probe: VIEW },
 })
 
 ; (window as unknown as { __store: unknown }).__store = useAppStore
@@ -165,7 +180,7 @@ async function main() {
   page.on('pageerror', (e) => errs.push('pageerror: ' + e.message))
   page.on('console', (m) => { if (m.type() === 'error') errs.push(m.text().slice(0, 200)) })
 
-  await page.goto(`${PROBE_URL}?skin=current&theme=ink`)
+  await page.goto(`${PROBE_URL}?theme=ink`)
   await page.waitForSelector('.dock .card')
   await page.waitForTimeout(250)
 
@@ -238,7 +253,7 @@ async function main() {
   assert(await page.locator('.dock .appr-diff').count() === 1, '再点标题条展开：diff 预览回来了')
 
   // ⑥ 窗口用尽 → 自动拒绝（队列清空、面板消失）
-  await page.goto(`${PROBE_URL}?skin=current&theme=ink&timeoutMs=2500`)
+  await page.goto(`${PROBE_URL}?theme=ink&timeoutMs=2500`)
   await page.waitForSelector('.dock .card')
   await page.waitForTimeout(3600)
   const left = await page.evaluate(() => window.__store.getState().approvals.length)
@@ -249,7 +264,7 @@ async function main() {
   assert(errs.length === 0, `控制台 0 报错（实得 ${errs.length}：${errs.slice(0, 3).join(' | ')}）`)
 
   // ⑦ 决策链路：批准 → 面板消失
-  await page.goto(`${PROBE_URL}?skin=current&theme=ink`)
+  await page.goto(`${PROBE_URL}?theme=ink`)
   await page.waitForSelector('.dock .card')
   await page.locator('.dock button.btn.primary').click()
   await page.waitForTimeout(250)

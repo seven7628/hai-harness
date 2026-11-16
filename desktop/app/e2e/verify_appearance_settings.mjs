@@ -69,7 +69,6 @@ import { DEFAULT_SETTINGS, useAppStore } from '../../src/store/useAppStore'
 import { applyAppearance, useAppearance } from '../../src/lib/appearance'
 import { applyTheme } from '../../src/lib/theme'
 import '../../src/index.css'
-import '../../src/narrative-skin.css'
 
 // 与 App.tsx 同序：先 data-theme（applyTheme）再 applyAppearance（底色覆盖要看解析后的主题）。
 function Shell() {
@@ -232,8 +231,12 @@ try {
 
   const rowLabels = () => page.$$eval('.set-row .set-label', (els) => els.map((e) => e.textContent?.trim() ?? ''))
   const inAppearance = await rowLabels()
-  assert(inAppearance.includes('主题') && inAppearance.includes('会话页样式'),
-    `主题与会话页样式都在「外观」里（实得：${inAppearance.join(' / ')}）`)
+  assert(inAppearance.includes('主题'),
+    `主题在「外观」里（实得：${inAppearance.join(' / ')}）`)
+  // 2026-11：会话页只剩 runtime 一套皮肤，「会话页样式」这一行已整行删除
+  //（不是禁用、不是只剩一项）—— 用户不该再看到这个选择项。
+  assert(!inAppearance.includes('会话页样式'),
+    `「会话页样式」整行已删除（实得：${inAppearance.join(' / ')}）`)
   await page.click('.settings-nav-item:has-text("通用设置")')
   await page.waitForSelector('.set-row', { timeout: 10000 })
   await sleep(200)

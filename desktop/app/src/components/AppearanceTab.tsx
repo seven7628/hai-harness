@@ -70,7 +70,6 @@ export default function AppearanceTab() {
   const t = useT()
   const settings = useAppStore((s) => s.settings)
   const setTheme = useAppStore((s) => s.setTheme)
-  const setNarrativeSkin = useAppStore((s) => s.setNarrativeSkin)
   const setNarrativeDensity = useAppStore((s) => s.setNarrativeDensity)
   const ap = useAppearance()
 
@@ -78,11 +77,6 @@ export default function AppearanceTab() {
     { value: 'dark', label: t('settings.dark') },
     { value: 'light', label: t('settings.light') },
     { value: 'system', label: t('settings.system') },
-  ]
-  const skinOptions: { value: 'current' | 'v3' | 'runtime'; label: string }[] = [
-    { value: 'current', label: t('settings.narrativeSkin.current') },
-    { value: 'v3', label: t('settings.narrativeSkin.v3') },
-    { value: 'runtime', label: t('settings.narrativeSkin.runtime') },
   ]
 
   const densityOptions: { value: 'concise' | 'detailed'; label: string }[] = [
@@ -125,25 +119,6 @@ export default function AppearanceTab() {
               className={settings.theme === o.value ? 'cur' : ''}
               aria-pressed={settings.theme === o.value}
               onClick={() => setTheme(o.value)}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="set-row">
-        <div>
-          <div className="set-label">{t('settings.narrativeSkin')}</div>
-          <div className="set-desc">{t('settings.narrativeSkin.desc')}</div>
-        </div>
-        <div className="seg" role="radiogroup" aria-label={t('settings.narrativeSkin')}>
-          {skinOptions.map((o) => (
-            <button
-              key={o.value}
-              className={(settings.narrative_skin ?? 'current') === o.value ? 'cur' : ''}
-              aria-pressed={(settings.narrative_skin ?? 'current') === o.value}
-              onClick={() => setNarrativeSkin(o.value)}
             >
               {o.label}
             </button>
