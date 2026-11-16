@@ -111,5 +111,12 @@ func (t *memoryDreamTool) Call(ctx context.Context, _, arguments string) (string
 	if res.Snapshot != "" {
 		out += "\n恢复：memory_dream 支持 --restore（快照保留在 .state/dream/ 下）"
 	}
+	// 注入是会话创建时拍的快照（WithMemoryInjection 传一次），所以刚归档的条目
+	// 仍然列在**当前会话**的 ## Memory 段里。不说这一句，模型会去读一个已经
+	// 不存在的文件，然后花几轮排查一个预期内的 ENOENT。
+	if len(res.Archived) > 0 {
+		out += "\n注意：已归档的条目在**当前会话**的记忆段里仍会出现（注入是会话创建时的快照），" +
+			"读到 ENOENT 是预期行为；新建会话后即消失。"
+	}
 	return out, nil
 }

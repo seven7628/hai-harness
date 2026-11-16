@@ -12,6 +12,13 @@ import (
 )
 
 // memDir 造一个记忆目录并返回 Dir + 其路径。
+
+// memPrefix 注入的两段壳：`## Memory Guide` + 说明 + `## Memory` + 空行。
+// 2026-11 起注入是两段（Guide 教怎么写、Memory 给有什么），此前是一段拼接。
+func memPrefix(d Dir, tier string, omitted int) string {
+	return memoryGuideHeading + "\n\n" + guidance(d, tier, omitted) + "\n\n" + memoryHeading + "\n\n"
+}
+
 func memDir(t *testing.T) Dir {
 	t.Helper()
 	root := t.TempDir()
@@ -65,17 +72,20 @@ func TestBuildInjection_IndexOneLinePerMemory(t *testing.T) {
 	if inj.Empty() {
 		t.Fatal("有索引时不得为空注入")
 	}
-	if !strings.HasPrefix(inj.Text, "# Project Memory") {
-		t.Fatalf("注入段落应以标题开头：%q", inj.Text)
+	if !strings.HasPrefix(inj.Text, memoryGuideHeading) {
+		t.Fatalf("注入段落应以 ## Memory Guide 开头：%q", inj.Text)
 	}
 	for _, want := range []string{"user_role.md", "feedback_testing.md", "build-and-verify.md"} {
 		if !strings.Contains(inj.Text, want) {
 			t.Fatalf("注入缺少 %q：\n%s", want, inj.Text)
 		}
 	}
-	// 官方没有 description / title / 摘要：索引行就是文件名，注入里不该凭空多出描述。
-	if strings.Contains(inj.Text, "description") {
-		t.Fatalf("注入里出现 description（官方没有这个字段）：\n%s", inj.Text)
+	// 宿主不得**给条目凭空加字段**：官方记忆文件没有 description / title 字段，
+	// 索引行就是"文件名 + 摘要"。所以这里禁的是 frontmatter 形态（`description:`），
+	// 而不是英文单词本身——`## Memory Guide` 用 "description" 称呼摘要那一截是允许的
+	// （2026-11 起 Memory 段按 name + description（路径）渲染）。
+	if strings.Contains(inj.Text, "description:") || strings.Contains(inj.Text, "\"description\"") {
+		t.Fatalf("注入里出现了 description 字段：\n%s", inj.Text)
 	}
 	// 度量字段可断言（Step 5 评估要靠它看"到底加载了多少"）。
 	if inj.Load == nil || inj.Load.LoadedLines != 5 || inj.Load.TruncatedBy != "" {
@@ -258,10 +268,9 @@ func TestBuildInjection_IndexWithNonTopicLinesIsPreservedVerbatim(t *testing.T) 
 	}
 	// 逐字节等于「宿主标题 + 原文去掉重复标题行 + 目录说明」：官方没规定索引行格式，
 	// 宿主不得改写模型的写入（唯一例外是那段重复的标题，见 stripIndexHeading）。
-	want := indexHeading + "\n\n" +
+	want := memPrefix(d, InjectionFull, 0) +
 		"Notes live in topic files; keep this list short.\n" +
-		"- user_role.md\n- deleted_topic.md\nsub/nested.md\n- notes.txt\nMEMORY.md" + // 结尾换行由宿主补齐
-		"\n\n" + guidance(d, true, InjectionFull, 0)
+		"- user_role.md\n- deleted_topic.md\nsub/nested.md\n- notes.txt\nMEMORY.md" // 结尾换行由宿主补齐
 	if inj.Text != want {
 		t.Fatalf("注入与原文不一致：\n%q\nwant\n%q", inj.Text, want)
 	}
@@ -440,7 +449,7 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 		t.Fatalf("前提失败：TruncatedBy = %q", inj.Load.TruncatedBy)
 	}
 
-	notice := truncationNotice("line") + "\n\n" + guidance(d, true, InjectionFull, 0)
+	notice := truncationNotice("line")
 	if !strings.Contains(inj.Text, notice) {
 		t.Fatalf("250 行索引应带截断提示，得到：\n%q", inj.Text)
 	}
@@ -457,11 +466,11 @@ func TestBuildInjection_TruncationNoticeIsAppendedAtEnd(t *testing.T) {
 
 	// 条目本身**一字未改**：清单部分与"没有提示时的同样 200 行"逐字节相同。
 	// 即：只追加，不删行、不加行、不改排序。
-	body := strings.TrimSuffix(inj.Text, notice)
-	body = strings.TrimSuffix(body, "\n\n"+guidance(d, true, InjectionFull, 0))
+	body := strings.TrimSuffix(inj.Text, notice) // notice 自带前导空行
+	body = strings.TrimPrefix(body, memPrefix(d, InjectionFull, 0))
 	_, wantBody := boundIndex(d, []byte(buildLinesIndex(250)))
-	if body != indexHeading+"\n\n"+wantBody {
-		t.Fatalf("提示之外的内容被改动了：\n%q", body)
+	if body != wantBody {
+		t.Fatalf("提示之外的内容被改动了：len(body)=%d len(want)=%d", len(body), len(wantBody))
 	}
 	if inj.Load.LoadedLines != MaxIndexLines {
 		t.Fatalf("前提失败：LoadedLines = %d", inj.Load.LoadedLines)
@@ -509,7 +518,7 @@ func TestBuildInjection_NoNoticeWhenWithinBothLimits(t *testing.T) {
 			// 之前完全相同。这里刻意用 boundIndex 而不是"手写一个想当然的原文"：它是那次
 			// 改动**之前**注入文本的逐字节来源，所以这个等式就是"索引字节没变"的证明。
 			_, wantBody := boundIndex(d, []byte(tc.content))
-			want := indexHeading + "\n\n" + wantBody + "\n\n" + guidance(d, true, InjectionFull, 0)
+			want := memPrefix(d, InjectionFull, 0) + wantBody
 			if inj.Text != want {
 				t.Fatalf("注入文本被改动了：\n%q\nwant\n%q", inj.Text, want)
 			}
@@ -541,7 +550,7 @@ func TestBuildInjection_ByteLimitNoticeSaysByte(t *testing.T) {
 		t.Fatalf("TruncatedBy = %q, want \"byte\"", inj.Load.TruncatedBy)
 	}
 	notice := truncationNotice("byte")
-	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true, InjectionFull, 0)) {
+	if !strings.HasSuffix(inj.Text, notice) {
 		t.Fatalf("应带 \"byte\" 提示且紧接目录说明之前：\n%q", inj.Text)
 	}
 	if !strings.Contains(inj.Text, notice) {
@@ -627,7 +636,7 @@ func TestTruncationNoticeLeaksNoDroppedEntries(t *testing.T) {
 	// "25000"（官方字节限额）是规格的一部分，与"泄露丢了多少条"无关。
 	notice := truncationNotice("line")
 	// 截断提示与目录说明一起构成注入的末尾（说明在最后，见 guidance.go）。
-	if !strings.HasSuffix(inj.Text, notice+"\n\n"+guidance(d, true, InjectionFull, 0)) {
+	if !strings.HasSuffix(inj.Text, notice) {
 		t.Fatalf("注入末尾不是常量提示：\n%q", inj.Text)
 	}
 	if !strings.Contains(inj.Text, notice) {

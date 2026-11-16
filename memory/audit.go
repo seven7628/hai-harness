@@ -82,10 +82,6 @@ func (c Config) Audit(d Dir, absPath string) (AuditResult, error) {
 	}
 	body := string(raw)
 
-	// 第一次写记忆之后把按需指南补上：此时目录已存在，且模型正处于"正在写记忆"
-	// 的语境里——下一轮注入的指针不会再指向一个不存在的文件。
-	c.ensureGuide(d)
-
 	// ① 密钥：就地脱敏。
 	if masked, hit := redactSecrets(body); hit {
 		if err := c.atomicWrite(absPath, []byte(masked)); err != nil {

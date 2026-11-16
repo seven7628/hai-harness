@@ -91,6 +91,7 @@ type HotList struct {
 
 // hotEntry 是索引里的一行被解析出来的最小结构。
 type hotEntry struct {
+	title   string // 链接文字（`[标题](x.md)` 里的"标题"）；裸文件名形态时为空
 	target  string // 定位符：相对记忆目录的路径
 	summary string // 定位符之后的说明文字（原样，未截断）
 	order   int    // 在索引里出现的行号（稳定排序的次键）
@@ -186,11 +187,11 @@ func parseHotEntries(body string) []hotEntry {
 		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
-		target, summary, ok := splitLocator(t)
+		title, target, summary, ok := splitLocatorFull(t)
 		if !ok {
 			continue
 		}
-		out = append(out, hotEntry{target: target, summary: summary, order: len(out)})
+		out = append(out, hotEntry{title: title, target: target, summary: summary, order: len(out)})
 	}
 	return out
 }
@@ -205,27 +206,49 @@ func parseHotEntries(body string) []hotEntry {
 //
 // 只取**第一个**定位符：一行里出现多个链接时，第一个是这一条的标题。
 func splitLocator(line string) (target, summary string, ok bool) {
+	_, target, summary, ok = splitLocatorFull(line)
+	return target, summary, ok
+}
+
+// splitLocatorFull 同 splitLocator，额外返回链接文字（`[标题](x.md)` 里的标题）。
+//
+// 为什么要标题：`## Memory` 段落要按"name + description + 路径"渲染（2026-11），
+// 而标题只存在于链接形态里；`- x.md — 摘要` 这种裸文件名形态没有标题，
+// 调用方退回用文件名当名字。
+func splitLocatorFull(line string) (title, target, summary string, ok bool) {
 	if i := strings.Index(line, "]("); i >= 0 {
 		rest := line[i+2:]
 		if j := strings.Index(rest, ")"); j >= 0 {
-			return normalizeTarget(rest[:j]), cleanSummary(rest[j+1:]), true
+			return linkTitle(line[:i]), normalizeTarget(rest[:j]), cleanSummary(rest[j+1:]), true
 		}
-		return "", "", false
+		return "", "", "", false
 	}
 	if i := strings.Index(line, "`"); i >= 0 {
 		rest := line[i+1:]
 		if j := strings.Index(rest, "`"); j >= 0 {
-			return normalizeTarget(rest[:j]), cleanSummary(rest[j+1:]), true
+			return "", normalizeTarget(rest[:j]), cleanSummary(rest[j+1:]), true
 		}
-		return "", "", false
+		return "", "", "", false
 	}
 	// 无 markdown 结构：取第一个以 .md 结尾的字段。
 	for i, f := range strings.Fields(line) {
 		if strings.HasSuffix(strings.ToLower(f), ".md") {
-			return normalizeTarget(f), cleanSummary(strings.Join(strings.Fields(line)[i+1:], " ")), true
+			return "", normalizeTarget(f), cleanSummary(strings.Join(strings.Fields(line)[i+1:], " ")), true
 		}
 	}
-	return "", "", false
+	return "", "", "", false
+}
+
+// linkTitle 取 markdown 链接文字：`[标题](x.md)` 里的"标题"。
+//
+// 只取**最后一个** `[` 之后的部分（列表前缀 `- ` 与强调符号不影响），并去掉
+// 两侧空白与包裹的强调符号——标题只是给人看的名字，不参与解析。
+func linkTitle(head string) string {
+	i := strings.LastIndex(head, "[")
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(strings.Trim(head[i+1:], "*_ "))
 }
 
 // normalizeTarget 把各种写法收敛成"相对记忆目录的路径"：
@@ -251,15 +274,24 @@ func cleanSummary(s string) string {
 // 定位符不截（见 HotLineMaxRunes 的注释）；预算不够时**只丢摘要**，
 // 因为一条没有摘要的热点仍然可用（点开就知道），一条没有路径的热点是废的。
 func renderHotLine(e hotEntry) string {
+	// 两种形态：
+	//   - [名字](x.md) — 摘要   → 渲染成 `- 名字 — 摘要（x.md）`：名字是给人读的，
+	//     路径是给模型读的，两者都要（模型据此决定读哪个文件）。
+	//   - x.md — 摘要           → 名字就是文件名，不重复渲染路径。
 	head := "- " + e.target
-	if e.summary == "" {
-		return head
+	tail := ""
+	if e.title != "" && e.title != e.target {
+		head = "- " + e.title
+		tail = "（" + e.target + "）"
 	}
-	budget := HotLineMaxRunes - utf8.RuneCountInString(head) - len(" — ")
+	if e.summary == "" {
+		return head + tail
+	}
+	budget := HotLineMaxRunes - utf8.RuneCountInString(head) - utf8.RuneCountInString(tail) - len(" — ")
 	if budget < HotSummaryMinRunes {
 		budget = HotSummaryMinRunes
 	}
-	return head + " — " + truncateRunes(e.summary, budget)
+	return head + " — " + truncateRunes(e.summary, budget) + tail
 }
 
 // truncateRunes 截到 n 个 rune，截断时以 `…` 结尾（`…` 计入 n）。

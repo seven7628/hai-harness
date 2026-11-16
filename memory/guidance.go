@@ -53,33 +53,35 @@ import (
 // hasIndex 为 false 时额外加一句「当前尚无记忆」——这是本次加载的既成事实，
 // 不是引导。不加的话模型会把"说明里列了格式、清单却是空的"读成记忆丢失，
 // 而实际上只是还没写过。
-func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
-	// 注入正文统一英文（2026-11）：模型的系统提示与工具描述都是英文语境，
-	// 混排会让"读一遍就能照做"的那部分变慢。中文只留源码注释与给人看的界面。
+func guidance(d Dir, tier string, omitted int) string {
+	// 这一段是 `## Memory Guide`：教模型**怎么写**记忆。
+	//
+	// 英文：模型的系统提示与工具描述都是英文语境，混排会让"读一遍就能照做"的那部分变慢。
+	// 中文只留源码注释与给人看的界面。
 	var b strings.Builder
 
-	b.WriteString("Project memory: ")
+	b.WriteString("Memory directory: ")
 	b.WriteString(d.Path)
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
-	if !hasIndex {
-		b.WriteString("\nNo memories yet (MEMORY.md is missing or empty).\n")
-	}
-
-	// 常驻段只留"是什么 + 去哪读"（2026-11 渐进披露）。详细规则——type 语义、
-	// 先查重、引用前核对、索引行样例——全部搬进 .state/GUIDE.md，由模型在**准备
-	// 写记忆**时自己去读。
-	//
-	// 指针用**相对路径**：写绝对路径要多付约 90 字节（这段每个会话都付），而
-	// "相对上一行的记忆目录"已经无歧义。
-	//
-	// 代价是"读到才生效"：模型如果没去读指南，就只知道下面这三条。所以这三条
-	// 必须是**缺了就写不对**的最小集：目录在哪、索引怎么登记、注入是子集。
-	b.WriteString("\n- One memory = one .md file in that directory; register it as a single line in `")
+	b.WriteString("- One memory = one `.md` file in that directory. `")
 	b.WriteString(IndexFileName)
-	b.WriteString("`, and that line must carry the filename (a line without one is not an entry).\n")
-	b.WriteString("- Read `.state/" + GuideFileName + "` (relative to the memory directory) before writing: ")
-	b.WriteString("type semantics, dedup, verify-before-rely, index line format.\n")
+	b.WriteString("` lists them, one line per memory: ")
+	b.WriteString("`- [name](file.md) — description`. **A line without a filename is not an entry**: ")
+	b.WriteString("it never reaches this prompt, and the archive tool cannot see it.\n")
+
+	b.WriteString("- `type` in the file's frontmatter, when present, is one of: ")
+	b.WriteString("`user` (who the user is: role, expertise, working preferences) · ")
+	b.WriteString("`feedback` (corrections the user gave and approaches they confirmed, with the reason) · ")
+	b.WriteString("`project` (ongoing work, goals or constraints not derivable from code or git history; absolute dates) · ")
+	b.WriteString("`reference` (pointers to external resources: docs, dashboards, tickets). ")
+	b.WriteString("A value outside that set is reported by the post-write audit.\n")
+
+	b.WriteString("- Check for an existing entry first: update it instead of adding a second one. ")
+	b.WriteString("Duplicates dilute the startup budget and are reported as duplicates.\n")
+
+	b.WriteString("- A memory is a snapshot of what was true when it was written. Verify that a file, ")
+	b.WriteString("function or flag it names still exists before relying on it.\n")
 
 	if tier == InjectionHot && omitted > 0 {
 		b.WriteString("- Startup loads only the ")
@@ -92,7 +94,7 @@ func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
 		b.WriteString(strconv.Itoa(MaxIndexBytes))
 		b.WriteString(" bytes of `")
 		b.WriteString(IndexFileName)
-		b.WriteString("`, whichever comes first; memory bodies are not loaded automatically.")
+		b.WriteString("`, whichever comes first; memory bodies are not loaded automatically — read them with the standard file tools.")
 	}
 
 	return b.String()

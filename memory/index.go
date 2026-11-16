@@ -105,11 +105,39 @@ type Injection struct {
 // 注意它现在**只在开关关闭时**为真：无索引/空索引仍会返回说明段。
 func (i Injection) Empty() bool { return strings.TrimSpace(i.Text) == "" }
 
-// indexHeading 注入段落的标题行。
+// 注入段落的两级标题（2026-11 定形）。
 //
-// 标题是必需的：段落拼进系统提示词后，模型需要知道"这一段是记忆索引"而不是文档片段。
-// 它之下依次是：索引正文（若非空）→ 目录说明（guidance.go）。
-const indexHeading = "# Project Memory (MEMORY.md)"
+// 系统提示词里是**两段**，职责不同、缺一不可：
+//
+//	## Memory Guide  怎么"写"记忆（目录、索引行格式、type 语义、查重、时效）
+//	## Memory        现在"有什么"记忆（索引正文：name — description（路径））
+//
+// 分成两段而不是混成一段，是因为它们回答的是两个不同问题，模型在"读"与"写"
+// 两个时刻分别需要其中一个。混在一起时，写的时候要在一堆条目里翻规则，
+// 读的时候又要略过规则——两头都变慢。
+const (
+	memoryGuideHeading = "## Memory Guide"
+	memoryHeading      = "## Memory"
+)
+
+// noMemoryYet 没有索引或索引为空时，`## Memory` 段的正文。
+//
+// 「无索引」与「空索引」在模型看来是同一件事——都还没有记忆——所以给同一句话，
+// 不因为文件碰巧存在就说"你的索引是空的"（那会像是丢了东西）。
+const noMemoryYet = "No memories yet (MEMORY.md is missing or empty)."
+
+// composeInjection 拼两段：Guide 在前，Memory 在后。
+func composeInjection(guide, body string) string {
+	var b strings.Builder
+	b.WriteString(memoryGuideHeading)
+	b.WriteString("\n\n")
+	b.WriteString(guide)
+	b.WriteString("\n\n")
+	b.WriteString(memoryHeading)
+	b.WriteString("\n\n")
+	b.WriteString(body)
+	return b.String()
+}
 
 // BuildInjection 读该记忆目录的索引并组装注入段落（Dir 已知时的入口）。
 //
@@ -122,10 +150,6 @@ func (c Config) BuildInjection(d Dir) (Injection, error) {
 		// 开关前置判定发生在任何 I/O 之前：关闭时**一次读盘都不发生**。
 		return Injection{Enabled: false, Reason: "disabled"}, nil
 	}
-	// 按需指南：缺失或过期就补写。放在这里而不是 Bootstrap，是因为注入是
-	// "确定要读这份记忆"的第一个时刻；Bootstrap 连目录都还没建（它设计上不建目录）。
-	c.ensureGuide(d)
-
 	inj, err := c.buildInjection(d)
 	if err != nil || inj.Empty() {
 		return inj, err
@@ -158,7 +182,7 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 			// 能把记忆目录告诉模型的机会（没有 MEMORY.md 就永远没有"第一条"）。
 			// 见 guidance.go 顶部的闭环分析。
 			return Injection{
-				Text:    indexHeading + "\n\n" + guidance(d, false, c.injectionTier(), 0),
+				Text:    composeInjection(guidance(d, c.injectionTier(), 0), noMemoryYet),
 				Enabled: true, Dir: &d, Reason: "no-index", Tier: c.injectionTier(),
 			}, nil
 		}
@@ -170,7 +194,7 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 		// 「无索引」与「空索引」在模型看来是同一件事——都还没有记忆——所以给同一
 		// 段文本，不因为文件碰巧存在就说"你的索引是空的"（那会像是丢了东西）。
 		return Injection{
-			Text:    indexHeading + "\n\n" + guidance(d, false, c.injectionTier(), 0),
+			Text:    composeInjection(guidance(d, c.injectionTier(), 0), noMemoryYet),
 			Enabled: true, Dir: &d, Reason: "empty-index", Tier: c.injectionTier(),
 		}, nil
 	}
@@ -191,7 +215,7 @@ func (c Config) buildInjection(d Dir) (Injection, error) {
 		omitted = hot.Omitted
 	}
 	return Injection{
-		Text:    indexHeading + "\n\n" + text + "\n\n" + guidance(d, true, tier, omitted),
+		Text:    composeInjection(guidance(d, tier, omitted), text),
 		Enabled: true,
 		Dir:     &d,
 		Load:    load,
