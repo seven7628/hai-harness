@@ -1,8 +1,14 @@
 // CSS 对账：把皮肤层复刻的规则与设计源逐条比声明（值必须逐字相同）。
-// 用法：node lab/css-diff.mjs
+// 用法：node lab/css-diff.mjs [设计源 css]
+// 设计源不在本仓里（它在设计工作区的 worktree 下），所以用参数或环境变量给，
+// 不给就报错退出——把某台机器的绝对路径写死，换个人跑就是 ENOENT。
 import { readFileSync } from 'node:fs'
 
-const DESIGN = '/Users/admin/workspace/go-code/.go-code/worktrees/runtime-frontend-ui/design/agent-runtime/v2/ui.components.css'
+const DESIGN = process.argv[2] || process.env.DESIGN_CSS || ''
+if (!DESIGN) {
+  console.error('用法：node lab/css-diff.mjs <设计源 ui.components.css>（或设 DESIGN_CSS）')
+  process.exit(2)
+}
 const PREFIX = "html[data-skin='runtime'] "
 
 const strip = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '')
