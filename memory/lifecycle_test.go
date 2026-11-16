@@ -287,3 +287,36 @@ func TestApplyArchiveCapScalesWithRepoSize(t *testing.T) {
 		t.Fatalf("硬上限 %d 必须大于小库额度 %d，否则分档没有意义", dreamMaxArchiveCap, dreamMaxArchivePerRun)
 	}
 }
+
+// 比例常数本身要钉住：2% 还是 20% 在"封顶 5 条"那个用例里看不出区别。
+//
+// 20 条的库：2% → 0.4 → 保底 2 条；20% → 4 条。一次多挪一倍是产品口径的偏差，
+// 而不是实现细节——2026-11 真机发现常量写成 0.2、注释写 2%，两者对不上。
+func TestApplyArchiveCapUsesTwoPercent(t *testing.T) {
+	d, now := lifeFixture(t)
+	stale := now.Add(-30 * 24 * time.Hour)
+	var lines []string
+	for i := 0; i < 20; i++ {
+		n := "mid" + itoa(i) + ".md"
+		writeTopicFile(t, d, n, "---\ntype: project\n---\n\n# t\n\nx\n")
+		if err := os.Chtimes(filepath.Join(d.Path, n), stale, stale); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, "- "+n)
+	}
+	writeIndex(t, d, "# Memory Index\n"+strings.Join(lines, "\n")+"\n")
+	cfg := Config{Now: func() time.Time { return now }, ReadDir: os.ReadDir}
+	var decs []Decision
+	for i := 0; i < 20; i++ {
+		decs = append(decs, Decision{File: "mid" + itoa(i) + ".md", Action: ActionArchive})
+	}
+	res, err := cfg.ApplyDecisions(d, decs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 20 * 2% = 0.4，取整为 0 → 保底 dreamMaxArchivePerRun。若比例被写成 20%，
+	// 这里是 4 条，断言会失败并指出"额度算法按 20% 在走"。
+	if want := dreamMaxArchivePerRun; len(res.Archived) != want {
+		t.Fatalf("20 条的库单次应归档 %d 条（2%%），实际 %d —— 比例常数是不是又变成 0.2 了？", want, len(res.Archived))
+	}
+}
