@@ -32,7 +32,6 @@ const prep = async (sid, blocks) => {
 }
 await page.eval(() => {
   const st = window.__store.getState()
-  st.setNarrativeSkin('runtime')
   st.setNarrativeDensity('detailed')
 })
 await prep(BG, cp.blocks)

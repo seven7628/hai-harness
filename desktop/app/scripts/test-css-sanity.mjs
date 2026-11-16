@@ -19,7 +19,10 @@ import postcss from 'postcss'
 const APP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const FILES = [
   'src/index.css',
-  'src/narrative-skin.css',
+  // runtime 皮肤层（唯一的一套皮肤；current/v3 已移除，narrative-skin.css 不再存在）
+  'src/runtime-palette.css',
+  'src/runtime-skin.css',
+  'src/runtime-tokens.css',
   'src/hub/hub.css',
   'src/hub/HubInlineTodos.css',
   'src/hub/CollapsibleMarkdown.css',
@@ -47,6 +50,26 @@ for (const rel of FILES) {
     for (const o of offenders) console.error(`   · ${o}`)
   } else {
     console.log(`  ✅ ${rel}: 注释闭合正常（${root.nodes.length} 个顶层节点）`)
+  }
+}
+
+// 已删除的皮肤层不许偷偷回来：文件不存在，且 index.css 不再 @import 它
+// （残留的 @import 会在 vite 构建时直接失败，dev 下则静默丢样式 —— 两种都难查）。
+{
+  const gone = 'src/narrative-skin.css'
+  try {
+    readFileSync(path.join(APP, gone), 'utf8')
+    console.error(`❌ ${gone}: 文件仍然存在（current/v3 皮肤已移除，该层不该再出现）`)
+    bad++
+  } catch {
+    console.log(`  ✅ ${gone}: 已移除`)
+  }
+  const index = readFileSync(path.join(APP, 'src/index.css'), 'utf8')
+  if (index.includes('narrative-skin.css')) {
+    console.error('❌ src/index.css: 仍在 @import narrative-skin.css')
+    bad++
+  } else {
+    console.log('  ✅ src/index.css: 不再引用 narrative-skin.css')
   }
 }
 

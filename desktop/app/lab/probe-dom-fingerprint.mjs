@@ -31,7 +31,6 @@ const snap = async (skin, density) => {
     const views = { ...st.views }
     delete views[arg.sid]
     window.__store.setState({ views, activeSessionId: undefined, blocks: [], runNodes: [], runEnded: true })
-    st.setNarrativeSkin(arg.skin)
     st.setNarrativeDensity(arg.d)
   }, { sid: SID, skin, d: density })
   await wait(300)

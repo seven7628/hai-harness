@@ -227,9 +227,8 @@ export interface AppSettings {
   lang: 'zh' | 'en'
   // 浏览器引擎（2026-09）：mcp（默认，Browser Use）| ego（ego lite + ego-browser skill）。
   browser_engine?: 'mcp' | 'ego'
-  // 会话页样式（可选的纯样式层开关）：current（默认，现状）| v3（组件样式）。
-  // 缺省 = current，老 settings.json 没有该字段时行为不变。
-  narrative_skin?: 'current' | 'v3' | 'runtime'
+  // 注：会话页皮肤只有 runtime 一套（2026-11 移除 current/v3 选择项），故无 narrative_skin
+  // 字段；旧 settings.json / 老 bridge 若还带着它，按未知字段忽略（不报错、不回写）。
   narrative_density?: 'concise' | 'detailed'
   provider: {
     active: string // 当前活跃 provider id

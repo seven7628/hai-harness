@@ -26,7 +26,7 @@ import { useAppStore } from './store/useAppStore'
 import type { RightLayout } from './lib/layout'
 import { getTransport } from './transport'
 import { applyTheme } from './lib/theme'
-import { applyNarrativeDensity, applyNarrativeSkin } from './lib/narrativeSkin'
+import { applyNarrativeDensity } from './lib/narrativeSkin'
 import { applyAppearance, useAppearance } from './lib/appearance'
 
 // 三栏面板的稳定 id：Group.onLayoutChanged 的 layout 以 id 为键（`{[id]: percentage}`）——
@@ -97,12 +97,12 @@ export default function App() {
   const [mainReady, setMainReady] = useState(false) // main 已挂载（leaving 起挂）
 
   // 主题：store settings.theme → <html data-theme> + Electron 窗口底色（mount 即应用，切换实时）
-  // 会话页样式（data-skin）与主题正交，共用这条 effect（切换实时；缺省 current）
+  // 会话页密度（data-narrative-density）与主题正交，共用这条 effect（切换实时）。
+  // 皮肤（data-skin）不在这里：只有 runtime 一套，静态写在 index.html 的 <html> 上。
   const theme = useAppStore((s) => s.settings.theme)
-  const narrativeSkin = useAppStore((s) => s.settings.narrative_skin ?? 'current')
   const narrativeDensity = useAppStore((s) => s.settings.narrative_density ?? 'concise')
-  // TEMP-STARTUP 打点单独一次（挂载时）：它与"主题/皮肤"无关，
-  // 混在同一条 effect 里会让用户切一次皮肤就往启动时间轴里多写一条 app-mounted。
+  // TEMP-STARTUP 打点单独一次（挂载时）：它与"主题/密度"无关，
+  // 混在同一条 effect 里会让用户切一次密度就往启动时间轴里多写一条 app-mounted。
   useEffect(() => {
     if (bridge) void bridge.startupMark('app-mounted')
   }, [])
@@ -118,11 +118,10 @@ export default function App() {
   const appearance = useAppearance()
   useEffect(() => {
     applyTheme(theme)
-    applyNarrativeSkin(narrativeSkin)
     applyNarrativeDensity(narrativeDensity)
     applyAppearance(appearance) // 必须在 applyTheme 之后：它读的是解析后的 data-theme
     if (bridge) void bridge.applyTheme(theme)
-  }, [theme, narrativeSkin, narrativeDensity, appearance])
+  }, [theme, narrativeDensity, appearance])
 
   // 折叠图标条 tooltip 定位（fixed，避开图标条 overflow 裁剪；左右 rail 共用一次委托）
   useRailTips()

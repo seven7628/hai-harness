@@ -67,7 +67,6 @@ const injected = await page.eval(() => {
     activeSessionId: 's1',
     views: { s1: v },
     blocks: cards, runNodes, turns: [], agentDetached: [], focusedAgent: undefined,
-    settings: { ...st.settings, narrative_skin: 'runtime' },
   })
   st.focusAgent({ nodeId: 'task-x', runId: 'run-2', taskId: 'task-x' })
   return window.__store.getState().focusedAgent

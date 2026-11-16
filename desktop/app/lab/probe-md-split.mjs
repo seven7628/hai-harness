@@ -34,7 +34,6 @@ const dScript = (a, z) => ((z.ScriptDuration ?? 0) - (a.ScriptDuration ?? 0)) * 
 
 await page.eval((sid) => {
   const st = window.__store.getState()
-  st.setNarrativeSkin('runtime')
   st.setNarrativeDensity('detailed')
   window.__store.setState({ activeSessionId: sid, blocks: [], turns: [], runNodes: [], runEnded: true })
 }, SID)

@@ -32,7 +32,6 @@ await page.eval((arg) => {
   const views = { ...st.views }
   delete views[arg.sid]
   window.__store.setState({ views, activeSessionId: undefined, blocks: [], runNodes: [], runEnded: true })
-  st.setNarrativeSkin('runtime')
   st.setNarrativeDensity('concise')
 }, { sid: SID })
 await wait(300)

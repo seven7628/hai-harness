@@ -30,7 +30,6 @@ const waitUntil = async (expr, timeout = 20000) => {
 }
 if (!(await waitUntil('!!window.__store && !!window.__dispatch'))) throw new Error('store never appeared')
 await page.eval(() => window.__store.getState().setNarrativeDensity('concise'))
-await page.eval(() => window.__store.setState((s) => ({ settings: { ...s.settings, narrative_skin: 'runtime' } })))
 await wait(400)
 await page.eval(() => { document.documentElement.dataset.skin = 'runtime' })
 if (!(await page.eval(() => !!window.__store.getState().activeSessionId))) {

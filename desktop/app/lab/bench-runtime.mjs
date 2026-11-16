@@ -1,4 +1,5 @@
-// 性能基准：新会话运行时（data-skin=runtime）vs 旧皮肤（current）/ v3。
+// 性能基准：会话页（data-skin=runtime，唯一的一套皮肤）的挂载 / 流式 / 空闲开销。
+// 2026-11 起 current/v3 已删除，基准只跑这一档，按密度（简洁/详细）分组。
 //
 // 同一份**真实 checkpoint**（/tmp/real-cp-settled.json：140 块真实转录，含工具输出、
 // 产出卡、子 agent 卡、真实长度的 markdown），比较四件事：
@@ -90,23 +91,18 @@ const delta = (a, b) => {
 const SID = 'bench-1'
 const results = []
 const REPS = Number(process.env.REPS || 2)
-for (const skin of (process.env.SKINS || 'current,runtime').split(',')) {
+for (const skin of ['runtime']) {
   for (const density of ['concise', 'detailed']) {
     for (let rep = 0; rep < REPS + 1; rep++) {
     // 每轮都从干净的页面状态开始：清 view + 重置 store 镜像
-    // 皮肤必须走 store 的动作：App.tsx 的 effect 会按 settings.narrative_skin 把
-    // <html data-skin> 写回去（直接改属性会在下一次 store 更新时被覆盖 —— 实测踩到，
-    // 六个组合全跑成了 current，数据看起来「三种皮肤一模一样」）。
+    // 皮肤是静态的（data-skin="runtime" 写在 index.html）：bench 只按密度组合跑。
     await page.eval((arg) => {
       const st = window.__store.getState()
       const views = { ...st.views }
       delete views[arg.sid]
       window.__store.setState({ views, activeSessionId: undefined, blocks: [], runNodes: [], runEnded: true })
-      st.setNarrativeSkin(arg.skin)
     }, { sid: SID, skin })
     await wait(150)
-    const skinNow = await page.eval(() => document.documentElement.getAttribute('data-skin'))
-    if (skinNow !== skin) console.log(`  !! 皮肤没生效：想要 ${skin}，实际 ${skinNow}`)
     await page.eval((d) => window.__store.getState().setNarrativeDensity(d), density)
     await wait(250)
     await page.eval(({ cp, sid }) => window.__hydrate(sid, cp, undefined, { live: true }), { cp, sid: SID })
@@ -181,15 +177,11 @@ const pick = (skin, density) => {
     memMB: med(rows.map((r) => r.memMB ?? 0)),
   }
 }
-console.log('\n=== 汇总（runtime 相对 current） ===')
+console.log('\n=== 汇总（runtime） ===')
 for (const density of ['concise', 'detailed']) {
-  const cur = pick('current', density)
   const rt = pick('runtime', density)
-  if (!cur || !rt) continue
-  const pct = (a, b) => (cur[a] ? `${((rt[a] / cur[a] - 1) * 100).toFixed(0)}%` : '—')
-  console.log(`${density}: 挂载 ${cur.mountMs}ms → ${rt.mountMs}ms (${pct('mountMs')})  ` +
-    `节点 ${cur.dom.nodes} → ${rt.dom.nodes} (${((rt.dom.nodes / cur.dom.nodes - 1) * 100).toFixed(0)}%)  ` +
-    `流式 script ${cur.streamPerf.ScriptDuration}s → ${rt.streamPerf.ScriptDuration}s (${((rt.streamPerf.ScriptDuration / (cur.streamPerf.ScriptDuration || 1) - 1) * 100).toFixed(0)}%)  ` +
-    `空闲 raf ${cur.idle.rafMs}ms → ${rt.idle.rafMs}ms  堆 ${cur.memMB}MB → ${rt.memMB}MB`)
+  if (!rt) continue
+  console.log(`${density}: 挂载 ${rt.mountMs}ms  节点 ${rt.dom.nodes}  ` +
+    `流式 script ${rt.streamPerf.ScriptDuration}s  空闲 raf ${rt.idle.rafMs}ms  堆 ${rt.memMB}MB`)
 }
 await b.close?.()

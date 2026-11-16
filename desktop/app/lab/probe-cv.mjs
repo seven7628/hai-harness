@@ -40,7 +40,6 @@ const run = async (skin, density) => {
     const views = { ...st.views }
     delete views[arg.sid]
     window.__store.setState({ views, activeSessionId: undefined, blocks: [], runNodes: [], runEnded: true })
-    st.setNarrativeSkin(arg.skin)
     st.setNarrativeDensity(arg.d)
   }, { sid: SID, skin, d: density })
   await wait(350)
@@ -81,7 +80,7 @@ const run = async (skin, density) => {
 }
 
 for (const density of ['concise', 'detailed']) {
-  for (const skin of ['current', 'runtime']) {
+  for (const skin of ['runtime']) { // 2026-11：current/v3 已删除
     const r = await run(skin, density)
     console.log(`\n[${density} / ${skin}] nodes ${r.nodes}  msgs ${r.msgs}  scrollH ${r.scrollH}`)
     console.log(`  .msg content-visibility 分布：${JSON.stringify(r.msgCv)}`)

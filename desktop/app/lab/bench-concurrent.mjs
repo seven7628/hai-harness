@@ -83,7 +83,6 @@ const BG = ['bg-1', 'bg-2', 'bg-3']
 const hydrateBg = async (sid, blocks, skin, density) => {
   await page.eval((arg) => {
     const st = window.__store.getState()
-    st.setNarrativeSkin(arg.skin)
     st.setNarrativeDensity(arg.d)
   }, { skin, d: density })
   await page.eval(({ cp, sid }) => window.__hydrate(sid, cp, undefined, { live: true }), { cp: { ...base, blocks }, sid })

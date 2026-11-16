@@ -11,7 +11,8 @@
 2. **会话页**：复用 `useAppStore` 的只读切片（blocks/turns/approvals/questions/loadOlder），不另写精简 store；`Narrative` 通过 host seam 接。
 3. **Hub 皮肤**：手机 Hub 收敛到桌面 `ink/paper`（通过移动 CSS 覆盖 `.hub-demo` 调色板）；桌面 Hub 视觉本轮不动。
 4. **退役节奏**：P8-01/02 新页与旧页并存；P8-03a 视觉收口，P8-03b 通过同一批 e2e 后删除旧 `app.js`/`hub_model.js`，`/m/` 默认新页。
-5. **主题**：手机固定 `data-skin='runtime'`，主题 `ink/paper/system` 与桌面同 key（`hai.theme`）。
+5. **主题**：`data-skin='runtime'` 静态写在 `mobile.html` 的 `<html>` 上（2026-11 起桌面 `index.html`
+   同样静态写死 —— 会话页只有 runtime 一套皮肤，没有运行时开关），主题 `ink/paper/system` 与桌面同 key（`hai.theme`）。
 
 ## 1. 审计结论（2026-11-13）
 
@@ -76,7 +77,7 @@ Hub 屏幕要求：
 - 列表：群组/私聊/Needs 入口，复用 `useHubStore` 的 `groups/agents` 与 `AgentSigil/AgentStack`，点击设置 `activeGroupId`/`activeId`。
 - 群：渲染 `GroupView`；DM：渲染 `HubSurface`；外层移动 header（返回、标题、更多/主题）。
 - 布局：单列、`100dvh`、safe-area、底部 composer 不被遮挡、所有可点 ≥44px、无横向溢出。
-- 主题：`applyTheme` + `data-skin='runtime'`；移动 CSS 覆盖 `.hub-demo` 的色板到 ink/paper（先保证深色一致，浅色跟随）。
+- 主题：`applyTheme` + 静态 `data-skin='runtime'`（写在 `mobile.html`）；移动 CSS 覆盖 `.hub-demo` 的色板到 ink/paper（先保证深色一致，浅色跟随）。
 
 ### P8-01b 落地记录（2026-11-13，`926c94d` / merge `ab5a01f`）
 

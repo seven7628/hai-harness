@@ -255,7 +255,10 @@ export const SETTINGS_SCHEMA: Record<string, FieldKind> = {
   theme: { t: 'enum', values: ['dark', 'light', 'system'] },
   lang: { t: 'enum', values: ['zh', 'en'] },
   browser_engine: { t: 'enum', values: ['mcp', 'ego'] },
-  narrative_skin: { t: 'enum', values: ['current', 'v3', 'runtime'] },
+  // narrative_skin 已从白名单移除：会话页只剩 runtime 一套（静态写在 index.html 的
+  // <html data-skin>），渲染侧不再发这个 patch。旧 settings.json 里带着它**不会**报错 ——
+  // 本 schema 只校验写侧 patch，读侧「未知键一律保留」（见 pruneSection / applySettingsPatch），
+  // 所以老文件原样留着那个键，只是再也不会被读或被改。
   narrative_density: { t: 'enum', values: ['concise', 'detailed'] },
   provider: { t: 'providerMap' },
   mcpServers: { t: 'mcpServers' },

@@ -9,7 +9,6 @@ const b = await Browser.launch({ width: 1440, height: 1200 })
 const page = await b.newPage({ width: 1440, height: 1200 })
 await page.goto(URL, { settleMs: 4000 })
 await page.eval(() => {
-  window.__store.getState().setNarrativeSkin('runtime')
   window.__store.getState().setNarrativeDensity('concise')
 })
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))

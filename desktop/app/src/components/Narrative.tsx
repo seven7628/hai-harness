@@ -1,7 +1,7 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { cloneElement } from 'react'
 import type { ReactElement, ReactNode } from 'react'
-import { useAppStore, genMsOf, mainRunEnded } from '../store/useAppStore'
+import { useAppStore, mainRunEnded } from '../store/useAppStore'
 import { resolveRunState, turnLive } from '../lib/turnSettle'
 import { signalText } from '../lib/signalFacts'
 import type { RevealWindow } from '../lib/scrollFollow'
@@ -9,12 +9,11 @@ import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPin
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
-import { FOLDED_KINDS, answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, rememberSettleMark, runningBody, runWorkBody, segmentUsage, selectTurns, settleIndexOf, settleMarkValid, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
+import { answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, rememberSettleMark, runningBody, runWorkBody, segmentUsage, selectTurns, settleIndexOf, settleMarkValid, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
 import { Ledger } from './runtime/turn/Ledger'
-import { AsyncNote } from './runtime/blocks/AsyncNote'
 import { UserBlock } from './runtime/blocks/UserBlock'
 import { Lane } from './runtime/lane/Lane'
 import { nestCards } from '../lib/nestedCards'
@@ -31,26 +30,14 @@ import { CompressionBlock, InlineCode, Thinking, ToolGroup } from './NarrativeBl
 // 任务卡外壳（子 agent 卡）：与右栏「任务」tab 的同类卡共用同一份实现，见 TaskCard.tsx
 import { AgentTaskCard } from './TaskCard'
 import HaiLogo from './HaiLogo'
-import { CheckCircleIcon, PaperclipIcon } from './icons'
-import { fmtDuration, fmtRun, fmtClock, fmtUsd } from './ui'
+import { fmtRun, fmtClock, fmtUsd } from './ui'
 import { useClock } from '../lib/useNow'
-import { useSkin } from '../lib/useSkin'
-import { ArtifactCard, absArtifactPath } from './ArtifactCard'
+import { absArtifactPath } from './ArtifactCard'
 import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { UsageActivityMini } from './UsageStats'
 import { useLang, useT } from '../i18n'
 import { bridge } from '../lib/bridge'
 
-
-/* 后台任务落地：两种块（回执 / 完整结果）用同一个 note 渲染 —— 它们说的是同一句
-   话，差别只是展开后是纯输出还是 Markdown（见 runtime/blocks/AsyncNote.tsx）。 */
-const TaskDeliveryBlock = memo(function TaskDeliveryBlock({ b }: { b: Extract<MsgBlock, { kind: 'task_delivery' }> }) {
-  return <AsyncNote taskId={b.taskId} status={b.status} result={b.result} error={b.error} from={b.parentTaskId} />
-})
-
-const TaskResultBlock = memo(function TaskResultBlock({ b }: { b: Extract<MsgBlock, { kind: 'task_result' }> }) {
-  return <AsyncNote taskId={b.taskId} status={b.error ? 'failed' : 'completed'} result={b.result} error={b.error} from={b.parentTaskId} rich />
-})
 
 // 压缩结果：和工具调用一样保留在对话流中，默认展示结果概要，展开后给出完整用量与上下文变化。
 // 导出：右栏任务 Tab 的主压缩镜像复用同一组件（同源，不建第二套渲染）。
@@ -92,51 +79,6 @@ function RetryProgress({ ts, delayMs, retrying, startedAt, costUsd }: { ts?: num
     </span>
   )
 }
-
-// 助手块底部的本轮指标行：TTFT / LLM 总耗时 / Agent 总耗时 / 输出速度。
-// 2026-09-29：四个指标**各自独立**渲染。此前整行挂在 `ttftMs != null && durMs != null`
-// 一个门上 —— 中断、run 级失败、达轮数上限截断这三种收尾都没有 llm_end（durMs 的唯一
-// 来源），于是 durMs 缺失把整行藏掉，连已经挂在块上的 Agent 总耗时、已经拿到的 usage
-// 一起消失，用户读作「AgentEnd 时前端没展示耗时信息」。现在缺哪段省哪段，取不到就不显示。
-/* 盒子外面（时间线）的判据不在这里，也不只看种类：error / divider / artifacts 始终在
-   外面，而记录类（signal / task_delivery）看**到达时刻** —— 运行中到达的属于这次运行
-   的过程（盒内、按事件顺序），AgentEnd 之后到达的才留在时间线上。实现与理由同在
-   runtime/turn/selectTurns.ts 的 foldedBody / workBody（那条规则要有测试才算数）。 */
-// 工作过程的种类：简洁档收起时它们全部进工作盒子（外面只剩最后一轮正文、产出卡、
-// 交卷后到达的记录）。运行中到达的 signal / task_delivery 同样进盒子，判据见
-// selectTurns.workBody（含中间轮正文与思考 —— 历史轮的 reasoning 也要能展开读到）。
-// 这里保留这个集合给「有没有工作」用。
-const FOLDED = FOLDED_KINDS
-
-const AssistantTurnMeta = memo(function AssistantTurnMeta({ b }: { b: Extract<MsgBlock, { kind: 'assistant' }> }) {
-  const t = useT()
-  // 输出速度 = outputTokens / 生成窗口。分母口径见 store 的 genMsOf：
-  // 分子含 reasoning token，故思考未流式时必须用整轮 durMs——否则 reasoning 模型会
-  // 算出几十倍虚高（DeepSeek 把 reasoning 塞在末次 usage、流里没有 reasoning chunk 时，
-  // durMs - ttftMs 只剩正文的零点几秒）。刷新后 genMs 未持久化，用同一纯函数重算，数字一致。
-  let speed: string | null = null
-  const out = b.outputTokens
-  if (out != null && out > 0) {
-    const genMs = b.genMs ?? genMsOf(b)
-    if (genMs != null && genMs > 0) speed = t('narrative.tokensPerSec').replace('{speed}', (out / (genMs / 1000)).toFixed(2))
-  }
-  const head = b.ttftMs != null && b.durMs != null
-    ? t('narrative.ttft').replace('{ttft}', fmtDuration(b.ttftMs)).replace('{dur}', fmtDuration(b.durMs))
-    : b.ttftMs != null
-      ? t('narrative.ttftOnly').replace('{ttft}', fmtDuration(b.ttftMs))
-      : b.durMs != null
-        ? t('narrative.llmDurOnly').replace('{dur}', fmtDuration(b.durMs))
-        : null
-  // 一段都拿不到（既无耗时也无速度）→ 整行不渲染，不留空壳。
-  if (!head && !speed) return null
-  return (
-    <div className="assistant-turn-meta mono">
-      {head ?? ''}
-      {b.agentDurMs != null ? `${head || speed ? ' · ' : ''}${t('narrative.agentDur').replace('{dur}', fmtDuration(b.agentDurMs))}` : ''}
-      {speed ?? ''}
-    </div>
-  )
-})
 
 /**
  * NarrativeSource 数据源覆盖：**子智能体子会话**用它把「自己的转录」喂给同一个 Narrative。
@@ -214,10 +156,6 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   }, [focusAgent])
   const turnMetrics = useAppStore((s) => (viewSid ? s.views[viewSid]?.turns : s.turns))
   const storedDensity = useAppStore((s) => s.settings.narrative_density ?? 'concise')
-  // 会话页样式（current/v3/runtime）：用户块与轮头按设计重塑只在 runtime 皮肤下生效，
-  // 另两档保留原结构 —— 那是它们已经被验证过的样子。读 data-skin 属性而非 store：
-  // 属性是「实际渲染成什么」的唯一事实，store 是意图（见 lib/useSkin.ts）。
-  const skin = useSkin()
   const density = densityProp ?? storedDensity
   // run 级「正在跑」：块上的 running 在两次 LLM 调用之间是假的（见下方 live）
   // 主 run 是否已结算（AgentEnd）：折叠行与轮尾账的**唯一**放行信号。
@@ -1055,11 +993,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         </div>
       )
     }
-    // 任务结果/回执：运行时皮肤下是一行信号（设计「Small signals」），另两档保留卡片
+    // 任务结果/回执：一行信号（设计「Small signals」）
     if (b.kind === 'task_result' || b.kind === 'task_delivery') {
-      if (skin !== 'runtime') {
-        return b.kind === 'task_result' ? <TaskResultBlock key={b.id} b={b} /> : <TaskDeliveryBlock key={b.id} b={b} />
-      }
       const st = b.kind === 'task_delivery' ? b.status : b.error ? 'failed' : 'completed'
       const first = ((b.kind === 'task_delivery' ? b.result || b.error : b.error || b.result) || '').split('\n')[0].trim()
       return (
@@ -1086,7 +1021,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     }
     // 老快照里没有 'signal' 块（checkpoint 以前写的是 system 块）：仍按信号行渲染，
     // 但文案只能取那一段文本本身 —— 不为新形态丢掉历史转录。
-    if (b.kind === 'system' && skin === 'runtime') {
+    if (b.kind === 'system') {
       const [first, ...rest] = b.text.split('\n').map((l) => l.trim()).filter(Boolean)
       const kind = b.tone === 'error' ? 'persist' : b.tone === 'success' ? 'closed' : 'silent'
       return (
@@ -1095,89 +1030,25 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         </div>
       )
     }
-    if (b.kind === 'system') {
-      return (
-        <div className={`msg system ${b.tone || 'info'}`} key={b.id} role="status">
-          <span className="sys-dot" aria-hidden="true" />
-          <span className="body"><InlineCode text={b.text} /></span>
-        </div>
-      )
-    }
-    if (b.kind === 'user' && skin === 'runtime') return <UserBlock key={b.id} b={b} />
-    /* 用户自己说的那句话：current/v3 走这条，runtime 走上面那条 UserBlock。
-       **这条分支不能少** —— 函数末尾是 `if (b.kind !== 'assistant') return null`，
-       少一条分支就等于默认皮肤（narrative_skin 未设 → current）下用户消息整段不渲染
-       （F43：6d28d60 把这块连同 system/task_result 的卡片一起删了，但那几样是「事件」，
-       这一样是**对话本身**）。它的样式一直在：index.css 的 .msg.user .who b / 
-       .msg.user .body p（pre-wrap —— 用户按的 ⏎ 必须原样回来）/ .user-imgs / .user-refs。 */
-    if (b.kind === 'user') {
-      // 图文消息：文本 + 图片附件缩略图（data URL 直显）
-      const imgs = b.contents?.filter((c) => c.type === 'image') ?? []
-      // @引用展开状态行（refs_loaded 事件）：loaded → 勾 + 已加载；missing/blocked → 警示
-      const refs = b.refs?.length
-        ? (() => {
-            const loaded = b.refs!.filter((r) => r.status === 'loaded')
-            const missing = b.refs!.filter((r) => r.status === 'missing')
-            const blocked = b.refs!.filter((r) => r.status === 'blocked')
-            // 有缺失/受保护时逐条列出；全成功时合并计数
-            const issues = [...missing.map((r) => ({ ...r, label: t('composer.refs.missing') })), ...blocked.map((r) => ({ ...r, label: t('composer.refs.blocked') }))]
-            return { loaded, issues, allLoaded: issues.length === 0 }
-          })()
-        : undefined
-      return (
-        <div className="msg user" key={b.id}>
-          <div className="who"><b>{t('narrative.user')}</b>{b.ts != null && <span className="msg-ts mono">{fmtClock(b.ts)}</span>}</div>
-          <div className="body"><p><InlineCode text={b.text} /></p></div>
-          {imgs.length > 0 && (
-            <div className="user-imgs">
-              {imgs.map((c, i) => (
-                <img key={i} src={c.content} alt={t('narrative.attachAlt')} />
-              ))}
-            </div>
-          )}
-          {refs && (
-            <div className="user-refs" role="status" aria-label={t('composer.refs.aria')}>
-              {refs.loaded.length > 0 && (
-                <span className={`user-refs-line ${refs.allLoaded ? 'ok' : ''}`}>
-                  <CheckCircleIcon size={12} />
-                  {refs.allLoaded
-                    ? t('composer.refs.loaded').replace('{n}', String(refs.loaded.length))
-                    : t('composer.refs.loadedList').replace('{list}', refs.loaded.map((r) => r.path).join('、'))}
-                </span>
-              )}
-              {refs.issues.map((r, i) => (
-                <span className="user-refs-line warn" key={i}>
-                  <PaperclipIcon size={12} />
-                  <code>{r.path}</code> {r.label}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )
-    }
+    if (b.kind === 'user') return <UserBlock key={b.id} b={b} />
+
     if (b.kind === 'agent') return <AgentTaskCard key={b.id} b={b} />
     // 本轮产出汇总（AgentEnd.Artifacts）：对话页尾部的「本次产出」卡片。
     // 位于本轮最终回复之后（AgentEnd 到达时追加），与截图里的 artifact 卡片同位置。
     if (b.kind === 'artifacts') {
       return (
         <div className="msg artifacts" key={b.id}>
-          {/* 运行时皮肤：产出卡照 parts/artifacts.js 的形态（主卡 + 另外 N 个 + 展开剩余）。
-              其他皮肤仍走原 ArtifactCard（两条路径都在，切换皮肤不丢功能）。 */}
-          {skin === 'runtime' ? (
-            <ArtifactsBlock
-              items={b.items}
-              {...(b.truncated ? { truncated: true } : {})}
-              onPreview={(a) => openFile(a.path)}
-              onReveal={(a) => {
-                const d = bridge
-                if (!d?.showItemInFolder) return
-                void d.showItemInFolder(absArtifactPath(a.path, workspace))
-              }}
-            />
-          ) : (
-            <ArtifactCard items={b.items} {...(b.truncated ? { truncated: true } : {})} />
-          )}
+          {/* 产出卡照 parts/artifacts.js 的形态（主卡 + 另外 N 个 + 展开剩余） */}
+          <ArtifactsBlock
+            items={b.items}
+            {...(b.truncated ? { truncated: true } : {})}
+            onPreview={(a) => openFile(a.path)}
+            onReveal={(a) => {
+              const d = bridge
+              if (!d?.showItemInFolder) return
+              void d.showItemInFolder(absArtifactPath(a.path, workspace))
+            }}
+          />
         </div>
       )
     }
@@ -1213,12 +1084,6 @@ export default function Narrative({ viewSid, source, header, footer, density: de
               {/* streaming 透传：流式中 HTML 围栏不挂 iframe（半截 <script> 会被执行、
                   且 srcDoc 每 token 重载 = 白板闪烁，见 HtmlPreviewBlock 注释）。 */}
               {b.text ? <Markdown text={b.text} streaming={b.streaming} /> : null}
-              {/* 运行时皮肤不画这一行：设计的轮尾只有一条账（calls · tokens · cache ·
-                  s turn，TTFT/LLM/tok-s 在悬停里展开）。这行的 TTFT/LLM/Agent/速度与那条账
-                  是同一份事实，两行并排等于把同一个数报两遍 —— 见 rt-turn-foot 的 Ledger。 */}
-              {!b.streaming && skin !== 'runtime' && (
-                <AssistantTurnMeta b={b} />
-              )}
               {/* 流式光标：设计是 6×14 的 accent 方块，闪在 steps(1) 上（`.rt-caret`，
                   1.05s）—— 一个字符做不到方块的高宽比，也闪不出阶梯而不是渐变 */}
               {b.streaming ? <span className="rt-caret" aria-hidden="true" /> : null}
@@ -1242,8 +1107,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     for (let i = 0; i < list.length; i++) {
       const b = list[i]
       // 连续的子 agent 合成一条「车道」：设计里它们是一块（组标题 + 每行四个事实），
-      // 不是一张张并列的卡片。另两档皮肤保留卡片（那是它们验证过的样子）。
-      if (b.kind === 'agent' && skin === 'runtime') {
+      // 不是一张张并列的卡片。
+      if (b.kind === 'agent') {
         const group: Extract<MsgBlock, { kind: 'agent' }>[] = [b]
         while (i + 1 < list.length && list[i + 1].kind === 'agent') {
           group.push(list[i + 1] as Extract<MsgBlock, { kind: 'agent' }>)
@@ -1261,7 +1126,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         out.push(<ToolGroup key={group[0].id} tools={group} />)
         continue
       }
-      if (b.kind === 'compression' && skin === 'runtime') {
+      if (b.kind === 'compression') {
         // 运行中的压缩要显示「正在读哪几条」：它们就是压缩前的那些块，一行一条
         out.push(renderBlock(b, headsOf(list.slice(0, i))))
         continue
@@ -1317,7 +1182,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   /* 复用判据里的「全局输入」：本组件读到的每个 store 值与本地状态（storeBlocks 除外 ——
      它每个 chunk 都会变，逐轮比块引用就够了）。 */
   const turnGlobals: readonly unknown[] = [
-    lang, skin, density, runEnded, waiting, persona, workspace, openFile,
+    lang, density, runEnded, waiting, persona, workspace, openFile,
     turnMetrics, openTurns, animOn, runStartedAt, mainStartedAt, mainRunId, mainEnded, transcriptKey,
   ]
   const sameList = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((v, i) => v === b[i])
@@ -1367,15 +1232,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        记录（信号/回执）不在这个集合里：它们是时间线，外面已经画过。 */
     const workSet = new Set(workBlocks)
     const liveBox = turn.items.filter((b) => workSet.has(b) || b === turn.answer)
-    const isWork = (b: MsgBlock) => FOLDED.has(b.kind)
     /* 简洁档：收起时正文只剩**结论**（这一轮最后一个有正文的 assistant），中间那些
        「我看看 X」的旁白、思考、工具全在工作过程里。展开才按原顺序读全过程。
        详细档：原顺序整段展开，不折叠（v2 里详细档根本没有折叠行）。 */
-    const workItems = concise
-      ? (skin === 'runtime'
-        ? groupRounds(workBlocks)
-        : groupBlocks(turn.items.filter((b) => !notice.has(b) && (isWork(b) || (b.kind === 'assistant' && b !== turn.answer) || b.kind === 'compression'))))
-      : []
+    const workItems = concise ? groupRounds(workBlocks) : []
     /* 简洁档的外面 = **时间线**：记录（signal / 产出 / 错误 / 分隔线 / 后台任务回执），
        加上结论正文。工作内容（思考、旁白、工具、子 agent、压缩）无论运行中还是跑完、
        无论展开还是收起，都只存在于工作盒子里 —— 展开的是盒子，不是把行摊进流里。
@@ -1399,7 +1259,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       // 否则 Worked 盒的 state key 从 turn#1 切回 turn，刚点开的盒子会弹回收起。
       settledAtRef.current.set(turn.key, rememberSettleMark(settleRec, turn.items))
     }
-    const runs = concise && skin === 'runtime' ? turnRuns(turn, settleAt) : []
+    const runs = concise ? turnRuns(turn, settleAt) : []
     const multiRun = runs.length > 1
     /* 输入全都没变 → 直接交回上一次的那几个元素（React 看到同一个元素对象、props 同一个，
        整棵子树 bailout，连 beginWork 都不进）。 */
@@ -1431,7 +1291,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        按 path 合并（见 mergeArtifacts）。store 里仍是每 run 一块。
        闸门是 `!live`（AgentEnd 已到）而**不是** ledgerShown：产出是 AgentEnd 的事实，
        与「这一轮有没有拿到 usage 指标」无关（没有 llm_end 的轮次也该看到产出清单）。 */
-    const artRaw = skin === 'runtime' && !live ? bodySource.filter((b) => b.kind === 'artifacts') : []
+    const artRaw = !live ? bodySource.filter((b) => b.kind === 'artifacts') : []
     const artBlocks = artRaw.length > 1 ? [mergeArtifacts(artRaw)] : artRaw
     const noArt = artBlocks.length ? bodySource.filter((b) => b.kind !== 'artifacts') : bodySource
     /* 交卷之后到达的记录（见 postRecord）一律排在**结算之后**：账与产出卡是这一轮的交付，
@@ -1440,11 +1300,11 @@ export default function Narrative({ viewSid, source, header, footer, density: de
        前几段的记录必须跟它自己那段的盒子走，否则四条 `Task … completed` 会全部堆在最后一个
        Worked 后面（用户 2026-11 截图）。还在跑的段由 plan 的分段结算负责（那里也保证记录
        落在账/卡之后）。 */
-    const postBlocks = skin === 'runtime' && !live
+    const postBlocks = !live
       ? turn.items.filter((b, i) => postRecord(b, i) && defersToTurnEnd(runs, i))
       : []
     const bodyBlocks = postBlocks.length ? noArt.filter((b) => !postBlocks.includes(b)) : noArt
-    const body = skin === 'runtime' ? groupRounds(bodyBlocks) : groupBlocks(bodyBlocks)
+    const body = groupRounds(bodyBlocks)
     /* —— 情况二（一轮多次运行）：盒子按 run 分开，记录留在段与段之间的时间线上 ——
        用户 2026-11 的两个形态：run1 AgentEnd → 异步任务结果通知（顶层、盒外）→ run2 新盒子。
        盒子是按 run 算的，所以这里按 turn.items 的**顺序**交错渲染：
@@ -1555,7 +1415,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         data-foot={usage.matched ? '1' : undefined}
         key={turn.key}
       >
-        {skin === 'runtime' && (head.model || head.t0 != null) ? (
+        {head.model || head.t0 != null ? (
           <div className="rt-head">
             {head.model ? <span>{head.model}</span> : null}
             {/* 轮头 = 「哪个模型 · 什么时候」。用户 2026-10：只要时刻读不出这是哪天 ——
@@ -1659,7 +1519,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
             （「Edited 1 file +22 −17」），再画一遍是同一个数字说两次。
             有产出卡的轮次也不画：卡里已经逐个列了这次产出的文件，这张卡是同一份
             事实的第三份拷贝（用户 2026-10 截图里「很突兀」的那一行）。 */}
-        {skin === 'runtime' && !live && !hasArtifacts && stats.files > 0 && (!concise || open) ? (
+        {!live && !hasArtifacts && stats.files > 0 && (!concise || open) ? (
           <FilesLine
             path={firstFileOf(turn)}
             added={stats.added}

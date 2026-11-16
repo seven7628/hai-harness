@@ -65,7 +65,7 @@ export const CheckList = ({ size = 15 }: P) => base(size, <><path d="M9 6h12M9 1
 export const EyeIcon = ({ size = 14 }: P) => base(size, <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></>)
 export const EyeOffIcon = ({ size = 14 }: P) => base(size, <><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19M6.61 6.61A18.6 18.6 0 0 0 2 12s3.5 8 10 8a9.12 9.12 0 0 0 5.39-1.61M2 2l20 20M14.12 14.12a3 3 0 1 1-4.24-4.24" /></>)
 
-/* ── 会话过程行的行首图标（V3 皮肤用；默认皮肤下不渲染，见 narrative-skin.css 的 .ic 规则）──
+/* ── 会话过程行的行首图标（工具行/任务卡/思考头共用；runtime 皮肤下显示，见 runtime-skin.css 的 .ic 规则）──
  * 语义固定：读文件=文档(FileIcon) · 检索=放大镜 · 执行=终端 · 改文件=笔 · 子代理=Bot(已有)
  *          计划=CheckList(已有) · 思考=Sparkles(已有) · 压缩=收拢 · 重试=警告 · 后台=播放
  * 画法与既有图标同一口径（base(): 24 格 viewBox、stroke 1.8、currentColor）。 */

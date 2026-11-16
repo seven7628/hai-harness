@@ -46,7 +46,6 @@ const reset = async (skin, density) => {
     const views = { ...st.views }
     delete views[arg.sid]
     window.__store.setState({ views, activeSessionId: arg.sid, blocks: [], blocksTotal: 0, turns: [], runNodes: [], runEnded: true })
-    st.setNarrativeSkin(arg.skin)
     st.setNarrativeDensity(arg.d)
   }, { sid: SID, skin, d: density })
   await wait(400)
@@ -95,7 +94,7 @@ const run = async (flavor) => {
 }
 
 const rows = []
-for (const skin of ['runtime', 'current']) {
+for (const skin of ['runtime']) { // 2026-11：current/v3 已删除
   for (const density of ['detailed']) {
     for (const flavor of ['plain', 'rich']) {
       await reset(skin, density)
@@ -111,11 +110,10 @@ const pick = (skin, flavor) => rows.find((r) => r.skin === skin && r.flavor === 
 console.log('\n=== 结论 ===')
 for (const flavor of ['plain', 'rich']) {
   const rt = pick('runtime', flavor)
-  const cu = pick('current', flavor)
   const first = rt.buckets[0].msPerChunk
   const last = rt.buckets[rt.buckets.length - 1].msPerChunk
   console.log(`${flavor.padEnd(6)} runtime: 首段 ${first}ms/chunk → 末段 ${last}ms/chunk（${rt.ratio}×）`
-    + `  整段 ${rt.total}s / ${rt.chars} 字；旧皮肤对照 首段 ${cu.buckets[0].msPerChunk} → 末段 ${cu.buckets[cu.buckets.length - 1].msPerChunk}（${cu.ratio}×）`)
+    + `  整段 ${rt.total}s / ${rt.chars} 字`)
 }
 const richOverPlain = pick('runtime', 'rich').buckets.at(-1).msPerChunk - pick('runtime', 'plain').buckets.at(-1).msPerChunk
 const plainGrowth = pick('runtime', 'plain').buckets.at(-1).msPerChunk - pick('runtime', 'plain').buckets[0].msPerChunk

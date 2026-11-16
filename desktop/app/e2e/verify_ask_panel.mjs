@@ -61,27 +61,42 @@ fs.writeFileSync(path.join(PROBE_DIR, 'index.html'),
 fs.writeFileSync(path.join(PROBE_DIR, 'main.tsx'), `
 import { createRoot } from 'react-dom/client'
 import CenterPanel from '../../src/components/CenterPanel'
-import { useAppStore } from '../../src/store/useAppStore'
+import { useAppStore, dispatchEvent } from '../../src/store/useAppStore'
 import '../../src/index.css'
-import '../../src/narrative-skin.css'
+// index.css 末尾的 @import 在 dev 下不下发，探针显式 import 皮肤两层（与 verify_user_blocks 同）
+import '../../src/runtime-palette.css'
+import '../../src/runtime-skin.css'
 
 const q = new URLSearchParams(location.search)
-document.documentElement.setAttribute('data-skin', q.get('skin') === 'v3' ? 'v3' : 'current')
+// 与 index.html 一致：皮肤是静态属性（会话页只有 runtime 一套）
+document.documentElement.setAttribute('data-skin', 'runtime')
 document.documentElement.setAttribute('data-theme', q.get('theme') || 'ink')
-
-// 长历史：叙述区必须溢出，才谈得上「翻历史」
-const HISTORY = Array.from({ length: 20 }, (_, i) => ({
-  kind: 'assistant', id: 100 + i, streaming: false, thinking: '', model: 'deepseek-v4',
-  text: '第 ' + (i + 1) + ' 段历史：' + '这段正文用来把叙述区撑高，验证「待答时仍可滚轮翻历史」。'.repeat(3),
-}))
 
 await useAppStore.getState().start('/tmp/ask-probe-ws') // 建立 transport（mock），send 才有响应
 const timeoutMs = Number(q.get('timeoutMs') || 30 * 60 * 1000) // 默认与后端一致（30 分钟）
+
+// 长历史：叙述区必须溢出，才谈得上「翻历史」。
+// **必须走事件**（不是手搓 blocks）：2026-10 起叙述区按「轮」渲染，一轮由
+// agent_start/llm_start/content_chunk/llm_end/agent_end 这一段事件构成 —— 只有裸
+// assistant 块时 selectTurns 拼不出轮，叙述区是空的（量出来 scrollHeight === clientHeight）。
+const T0 = Date.now() - 120_000
+const ev = (o, at = 0) => dispatchEvent({ session_id: 'probe', timestamp: T0 + at, ...o })
+ev({ event_type: 'user_inputs_consumed', user_texts: ['帮我收敛一下 auth 的过期语义'] })
+for (let i = 0; i < 20; i++) {
+  const rid = 'h' + i
+  const base = i * 4000
+  ev({ event_type: 'agent_start', run_id: rid, index: 0, content: '历史轮', model: 'deepseek-v4' }, base)
+  ev({ event_type: 'llm_start', run_id: rid, request_id: 'req-' + i, model: 'deepseek-v4' }, base + 200)
+  ev({ event_type: 'content_chunk', run_id: rid, request_id: 'req-' + i, content: '第 ' + (i + 1) + ' 段历史：' + '这段正文用来把叙述区撑高，验证「待答时仍可滚轮翻历史」。'.repeat(3) }, base + 400)
+  ev({ event_type: 'llm_end', run_id: rid, request_id: 'req-' + i, model: 'deepseek-v4', finish_reason: 'end', usage: { Input: 900, Output: 40, CacheRead: 700, TotalTokens: 940 } }, base + 600)
+  ev({ event_type: 'agent_end', run_id: rid, index: 0, content: '', finish_reason: 'end', model: 'deepseek-v4' }, base + 800)
+}
+
 useAppStore.setState({
   persona: 'code',
   activeSessionId: 'probe',
-  blocks: [{ kind: 'user', id: 1, text: '帮我收敛一下 auth 的过期语义' }, ...HISTORY],
-  question: {
+  // 提问在 store 里是**列表**（多批并存，按作用域过滤 —— 2026-10 起；旧的单槽 question 已删）
+  questions: [{
     id: 'q-batch-1', runId: 'run-7', timeoutMs, ts: Date.now() - 1000,
     items: [
       // 第一条：选项带 preview（「必须看见才能选」的备选）→ 面板走并排预览版面；
@@ -96,7 +111,7 @@ useAppStore.setState({
       },
       { id: 'q-1-2', question: '改动范围？', options: ['仅 auth 包', '连同其余 500 兜底一起收敛'] },
     ],
-  },
+  }],
 })
 
 createRoot(document.getElementById('root')!).render(
@@ -148,7 +163,7 @@ async function main() {
   page.on('pageerror', (e) => errs.push('pageerror: ' + e.message))
   page.on('console', (m) => { if (m.type() === 'error') errs.push(m.text().slice(0, 200)) })
 
-  await page.goto(`${PROBE_URL}?skin=current&theme=ink`)
+  await page.goto(`${PROBE_URL}?theme=ink`)
   await page.waitForSelector('.dock')
   await page.waitForTimeout(200) // 等叙述区置底校准
 
@@ -214,72 +229,92 @@ async function main() {
   assert(/0\/2/.test(foldText), `收起态标题条仍显示作答进度（"${foldText}"）`)
   await page.locator('.dock .dock-hd').click()
   await page.waitForTimeout(150)
-  assert(await page.locator('.dock .q-item').count() === 2, '再点标题条展开：两题都还在（收起不丢状态）')
+  // runtime 的提问面板是**分页**的（一次一题，.ask-step 报进度）：收起再展开仍停在原来那一题
+  assert(await page.locator('.dock .ask').count() === 1, '再点标题条展开：当前那一题还在（收起不丢状态）')
+  assert(/1/.test(await page.locator('.dock .ask-step').innerText()),
+    `展开后仍停在第一题（.ask-step = "${(await page.locator('.dock .ask-step').innerText()).replace(/\n/g, ' ')}"）`)
 
-  // ⑧ 选项预览（模型给选项配 preview）：带预览的题走「左列选项 + 右侧预览」并排版面，
-  //    没预览的题沿用横排按钮；预览跟着所选项切换，并走正文同一条 Markdown 管线。
+  // ⑧ 选项预览（模型给选项配 preview）：runtime 的 .ask-body 本身就是两列
+  //    （选项 max-content + 预览 1fr），预览是**排版好的纯文本**（mono + pre，保缩进）——
+  //    不过 Markdown 渲染器（ASCII 图换行就不是图了，见 parts/ask.css:238-247）。
   const pv = await page.evaluate(() => {
-    const items = [...document.querySelectorAll('.dock .q-item')]
     const R = (el) => { const r = el.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right) } }
-    const first = items[0]
-    const list = first.querySelector('.q-options')
-    const box = first.querySelector('.q-preview')
-    const body = first.querySelector('.q-preview-body')
+    const card = document.querySelector('.dock .ask')
+    const list = card.querySelector('.ask-list')
+    const box = card.querySelector('.ask-pv')
+    const pre = card.querySelector('.ask-pv-pre')
     return {
-      splitCount: document.querySelectorAll('.dock .q-split').length,
-      secondSplit: Boolean(items[1].querySelector('.q-split')),
-      firstCol: getComputedStyle(list).flexDirection,
-      firstOptionCount: first.querySelectorAll('.q-option').length,
-      secondOptionCount: items[1].querySelectorAll('.q-option').length,
+      listCount: card.querySelectorAll('.ask-list').length,
+      optionCount: card.querySelectorAll('.ask-opt').length,
       // 逐字比对按钮文字：只数个数会漏掉「按钮渲染成空 label」这种静默坏掉
-      secondLabels: [...items[1].querySelectorAll('.q-option')].map((b) => b.textContent),
-      secondWrap: getComputedStyle(items[1].querySelector('.q-options')).flexWrap,
+      labels: [...card.querySelectorAll('.ask-opt .ask-lab')].map((b) => b.textContent),
       listBox: R(list),
       previewBox: box ? R(box) : null,
-      hd: first.querySelector('.q-preview-hd')?.textContent || '',
-      bodyText: body?.textContent || '',
-      // 预览走 Markdown 管线（**401** → <strong>），不是纯文本原样吐出
-      strong: Boolean(body?.querySelector('strong')),
+      hd: card.querySelector('.ask-pv-head')?.textContent || '',
+      which: card.querySelector('.ask-pv-which')?.textContent || '',
+      preText: pre?.textContent || '',
+      form: card.getAttribute('data-form'),
       aria: box?.getAttribute('aria-label') || '',
       role: box?.getAttribute('role') || '',
+      // 预览不过 Markdown：正文里的 **401** 必须原样留在纯文本里
+      strong: Boolean(box?.querySelector('strong')),
     }
   })
   console.log('  [preview]', JSON.stringify(pv))
-  assert(pv.splitCount === 1 && !pv.secondSplit, '只有带预览的题走并排版面（另一题沿用横排按钮）')
-  assert(pv.firstCol === 'column' && pv.firstOptionCount === 3, `带预览时选项竖排（flex-direction: ${pv.firstCol}）`)
-  assert(pv.secondWrap === 'wrap' && pv.secondOptionCount === 2, '无预览的题仍是横排换行按钮（老版面未变）')
-  assert(JSON.stringify(pv.secondLabels) === JSON.stringify(['仅 auth 包', '连同其余 500 兜底一起收敛']),
-    `纯字符串选项在面板上逐字渲染出按钮文字（实得 ${JSON.stringify(pv.secondLabels)}）`)
+  assert(pv.form === 'preview' && pv.listCount === 1, `带预览的题走 data-form=preview（实得 ${pv.form}）`)
+  assert(pv.optionCount === 3, `选项逐条渲染（${pv.optionCount} 条）`)
+  assert(JSON.stringify(pv.labels) === JSON.stringify(['401 + token_expired 错误码', '静默自动续期', '记录日志继续放行']),
+    `选项文字逐字渲染（实得 ${JSON.stringify(pv.labels)}）`)
   assert(pv.previewBox !== null && pv.previewBox.left >= pv.listBox.right - 1,
     `预览真的在选项右侧（列表右 ${pv.listBox.right} / 预览左 ${pv.previewBox?.left}）`)
   assert(pv.role === 'figure' && /401/.test(pv.aria), `预览是可读的图注区域（role=${pv.role} aria-label="${pv.aria}"）`)
-  assert(/预览：401 \+ token_expired/.test(pv.hd), `预览标题标出这是哪个选项的预览（"${pv.hd}"）`)
-  assert(/401 Unauthorized/.test(pv.bodyText), '默认先显示第一个带预览选项的预览（面板一展开就看得见备选长什么样）')
-  assert(pv.strong, '预览走正文同一条 Markdown 管线（**401** 渲染成 <strong>）')
+  assert(/preview/.test(pv.hd) && /401 \+ token_expired/.test(pv.which),
+    `预览头标出这是哪个选项的预览（"${pv.hd.replace(/\n/g, ' ').trim()}"）`)
+  assert(/401\*\* Unauthorized/.test(pv.preText), `默认先显示第一个带预览选项的预览（"${pv.preText.slice(0, 40)}"）`)
+  assert(!pv.strong && /\*\*401\*\*/.test(pv.preText),
+    '预览是纯文本 <pre>（**401** 原样保留，不过 Markdown —— 与设计一致）')
   // 点第二个选项 → 预览切到它的内容（单选语义未变：点选 = 作答）
-  await page.locator('.dock .q-item').first().locator('.q-option').nth(1).click()
-  await page.waitForTimeout(120)
+  await page.locator('.dock .ask').first().locator('.ask-opt').nth(1).click()
+  await page.waitForTimeout(150)
   const pv2 = await page.evaluate(() => {
-    const first = document.querySelectorAll('.dock .q-item')[0]
-    return { hd: first.querySelector('.q-preview-hd').textContent, body: first.querySelector('.q-preview-body').textContent }
+    const card = document.querySelector('.dock .ask')
+    return { which: card.querySelector('.ask-pv-which')?.textContent || '', pre: card.querySelector('.ask-pv-pre')?.textContent || '' }
   })
   console.log('  [preview-switch]', JSON.stringify(pv2))
-  assert(/静默自动续期/.test(pv2.hd) && /Set-Cookie/.test(pv2.body), '点另一个选项后预览切到该选项的内容')
+  assert(/静默自动续期/.test(pv2.which) && /Set-Cookie/.test(pv2.pre), '点另一个选项后预览切到该选项的内容')
   await page.screenshot({ path: '/tmp/ask-panel-preview.png' })
   // 预览切换本身已构成作答（单选：点选 = 作答）→ 重新载入探针页，让 ⑥ 从干净未答态断言
-  await page.goto(`${PROBE_URL}?skin=current&theme=ink`)
+  await page.goto(`${PROBE_URL}?theme=ink`)
   await page.waitForSelector('.dock')
-  await page.waitForTimeout(200)
+  await page.waitForTimeout(300)
 
-  // ⑥ 作答链路不变：未答禁用 → 点选项启用 → 提交后面板消失
-  const disabled0 = await page.locator('.dock button.btn.primary').isDisabled()
-  assert(disabled0, '未答完时提交按钮禁用（必须全部作答的语义未变）')
-  await page.locator('.dock .q-item').first().locator('.q-option').first().click()
-  await page.locator('.dock .q-item').nth(1).locator('.q-option').first().click()
-  const disabled1 = await page.locator('.dock button.btn.primary').isDisabled()
-  assert(!disabled1, '两题都选好后提交按钮启用')
-  await page.locator('.dock button.btn.primary').click()
-  await page.waitForTimeout(200)
+  // ⑥ 作答链路不变：未答禁用 → 点选项启用 → 下一题 → 全部答完提交 → 面板消失
+  //    （runtime 一次只渲染一题：最后一题是「完成」，前面几题是「下一步」）
+  const goBtn = page.locator('.dock .ask-btn.go')
+  assert(await goBtn.isDisabled(), '未答完时前进/提交按钮禁用（必须全部作答的语义未变）')
+  await page.locator('.dock .ask-opt').first().click()
+  assert(!(await goBtn.isDisabled()), '第一题选好后按钮启用（1/2）')
+  await goBtn.click() // 下一步 → 第二题
+  await page.waitForTimeout(250)
+  const step2 = await page.locator('.dock .ask-step').innerText()
+  assert(/2/.test(step2), `点「下一步」进入第二题（.ask-step = "${step2.replace(/\n/g, ' ')}"）`)
+  // 第二题是纯字符串选项（历史事件 / 回放形态）：逐字渲染、无预览列
+  const q2 = await page.evaluate(() => {
+    const card = document.querySelector('.dock .ask')
+    return {
+      labels: [...card.querySelectorAll('.ask-opt .ask-lab')].map((b) => b.textContent),
+      form: card.getAttribute('data-form'),
+      hasPv: Boolean(card.querySelector('.ask-pv')),
+    }
+  })
+  assert(JSON.stringify(q2.labels) === JSON.stringify(['仅 auth 包', '连同其余 500 兜底一起收敛']),
+    `纯字符串选项在面板上逐字渲染（实得 ${JSON.stringify(q2.labels)}）`)
+  assert(q2.form === 'plain' && !q2.hasPv, `无预览的题走 plain 版面、不带预览列（form=${q2.form}）`)
+  assert(await goBtn.isDisabled(), '第二题未答 → 按钮仍禁用')
+  await page.locator('.dock .ask-opt').first().click()
+  assert(!(await goBtn.isDisabled()), '两题都答好 → 提交键启用（2/2）')
+  await goBtn.click()
+  await page.waitForTimeout(300)
   assert(await page.locator('.dock').count() === 0, '提交后面板消失（乐观清除，等待模型续跑）')
   const narAfter = await page.evaluate(() => document.querySelector('.narrative').getBoundingClientRect().height)
   assert(narAfter > geo.narrative.h, `面板收起后叙述区回高（${geo.narrative.h} → ${Math.round(narAfter)}px）`)
@@ -287,7 +322,7 @@ async function main() {
   assert(errs.length === 0, `控制台 0 报错（实得 ${errs.length}：${errs.slice(0, 3).join(' | ')}）`)
 
   // ⑦ 决策倒计时：显示剩余时间、每秒在走；到点切「已超时」态并禁用提交
-  await page.goto(`${PROBE_URL}?skin=current&theme=ink`)
+  await page.goto(`${PROBE_URL}?theme=ink`)
   await page.waitForSelector('.dock .dock-countdown')
   const cd1 = await page.locator('.dock .dock-countdown').innerText()
   await page.waitForTimeout(2200)
@@ -297,14 +332,15 @@ async function main() {
   assert(cd1.startsWith('剩余 29:') || cd1.startsWith('剩余 30:'), `倒计时口径 = 后端等待窗口（30 分钟），实得 "${cd1}"`)
   await page.screenshot({ path: '/tmp/ask-panel-countdown.png' })
 
-  await page.goto(`${PROBE_URL}?skin=current&theme=ink&timeoutMs=2000`) // 2s 窗口：直接看超时态
+  await page.goto(`${PROBE_URL}?theme=ink&timeoutMs=2000`) // 2s 窗口：直接看超时态
   await page.waitForSelector('.dock')
   await page.waitForTimeout(2600)
   const over = await page.locator('.dock .dock-countdown').innerText()
-  const overHint = await page.locator('.dock .acts .timeout').innerText()
+  // 超时态：runtime 的面板把提示写在 .ask-foot 的 .ask-note 里（旧皮肤是 .timeout）
+  const overHint = await page.locator('.dock .ask-foot .ask-note').innerText()
   console.log(`  [timeout] "${over}" · "${overHint}"`)
   assert(/已超时/.test(over), `窗口用尽后显示已超时（"${over}"）`)
-  assert(await page.locator('.dock button.btn.primary').isDisabled(), '已超时后提交按钮禁用（后端已放行，不再假装能提交）')
+  assert(await page.locator('.dock .ask-btn.go').isDisabled(), '已超时后提交按钮禁用（后端已放行，不再假装能提交）')
   assert(/未作答/.test(overHint), `已超时提示说明「未作答 → 模型按最佳判断继续」（"${overHint}"）`)
   await page.screenshot({ path: process.env.SHOT || '/tmp/ask-panel-timedout.png' })
 
