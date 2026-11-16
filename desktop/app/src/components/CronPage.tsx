@@ -172,8 +172,10 @@ export default function CronPage() {
                           <div className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)' }}>{j.id}</div>
                         </td>
                         <td data-label={t('cron.th.schedule')} title={j.cron}>
-                          {describeCron(j.cron, t)}
-                          <div className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)' }}>{j.recurring ? t('cron.recurring') : t('cron.once')}</div>
+                          <span className="cell-stack">
+                            <span>{describeCron(j.cron, t)}</span>
+                            <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)' }}>{j.recurring ? t('cron.recurring') : t('cron.once')}</span>
+                          </span>
                         </td>
                         <td data-label={t('cron.th.status')}>
                           {j.paused ? (

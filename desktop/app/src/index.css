@@ -15077,3 +15077,41 @@ body.is-electron .page-head {
   white-space: nowrap;
   max-width: 40%;
 }
+/* 卡片化后：单元格里的「值 + 次要行」作为一个整体靠右（避免 flex 把匿名文本块居中） */
+@media (max-width: 900px) {
+  .cron-card .cron-table .cell-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+    min-width: 0;
+    text-align: right;
+  }
+  .cron-card .cron-table .cell-stack > span:first-child {
+    overflow-wrap: anywhere;
+  }
+}
+/* 返回图标是「›」：作为“返回”语义时镜像成「‹」（LTR 下向左才是返回） */
+.page-head-back svg {
+  transform: scaleX(-1);
+}
+/* 表格态：调度「值 + 类型」分两行（卡片态在媒体查询里覆盖成 flex 右对齐） */
+.cron-table .cell-stack {
+  display: block;
+}
+.cron-table .cell-stack > span:last-child {
+  margin-top: 1px;
+}
+@media (max-width: 900px) {
+  .cron-card .cron-table td {
+    padding: 3px 0;
+  }
+  .cron-card .cron-table td.cron-actions {
+    padding-top: 8px;
+    margin-top: 4px;
+  }
+  .cron-card .cron-table td.cell-title {
+    padding-bottom: 7px;
+    margin-bottom: 3px;
+  }
+}
