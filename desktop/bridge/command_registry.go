@@ -185,6 +185,12 @@ const (
 	// **纯读**（官方承诺"随时可编辑或删除"→ 宿主只列，不做校验也不提供写路径）。
 	// 无 payload；响应带 Listing（目录 / 索引是否存在 / 文件清单）。
 	CmdMemoryBrowse Command = "memory_browse"
+	// —— Dream（记忆生命周期巡检，见 dream_scheduler.go） ——
+	// 设置面三条命令一个闭环：读（设置 + 最近 20 条运行记录）、写（开关/provider/model/
+	// 时刻）、手动触发一次。巡检本身不走命令，走派生会话（与 cron 同链路）。
+	CmdDreamGet    Command = "dream_get"
+	CmdDreamSet    Command = "dream_set"
+	CmdDreamRunNow Command = "dream_run_now"
 	CmdSkillGet     Command = "skill_get"
 	CmdLoadSkill    Command = "load_skill"
 	CmdCommand      Command = "command"
