@@ -13,13 +13,13 @@ func TestGuidance_StatesPathAndShape(t *testing.T) {
 	g := guidance(d, InjectionFull, 0)
 
 	mustContain := []string{
-		d.Path,                    // 目录绝对路径：模型唯一的写入目标
-		IndexFileName,             // 索引文件名
-		"not an entry",            // 解析器硬规则：没有文件名就不算条目
-		"200", "25000",            // 限额
+		d.Path,         // 目录绝对路径：模型唯一的写入目标
+		IndexFileName,  // 索引文件名
+		"not an entry", // 解析器硬规则：没有文件名就不算条目
+		"200", "25000", // 限额
 		"`user`", "`feedback`", "`project`", "`reference`", // 四种 type 的语义
-		"Check for an existing entry first",                // 查重
-		"snapshot of what was true",                        // 时效性
+		"Check for an existing entry first", // 查重
+		"snapshot of what was true",         // 时效性
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(g, want) {
@@ -59,7 +59,7 @@ func TestGuidance_HasNoImperativeAdvice(t *testing.T) {
 // 每会话都付的固定开销，写死上限防止"顺手多加一句"。
 func TestGuidance_StaysSmall(t *testing.T) {
 	g := guidance(memDir(t), InjectionFull, 0)
-	const limit = 1600 // 装下四种 type 的语义 + 查重 + 时效之后的上限
+	const limit = 3200 // 装下四种 type 的语义 + 查重 + 时效之后的上限
 	if len(g) > limit {
 		t.Fatalf("Memory Guide %d 字节，超过上限 %d：\n%s", len(g), limit, g)
 	}
@@ -71,7 +71,7 @@ func TestGuidance_IndexExampleIsParseable(t *testing.T) {
 	g := guidance(memDir(t), InjectionFull, 0)
 	var example string
 	for _, line := range strings.Split(g, "\n") {
-		if i := strings.Index(line, "`- [name](file.md)"); i >= 0 {
+		if i := strings.Index(line, "`- [Title](file.md)"); i >= 0 {
 			example = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line[i:]), "`"))
 			example = strings.TrimSuffix(example, "`")
 			break
@@ -84,8 +84,8 @@ func TestGuidance_IndexExampleIsParseable(t *testing.T) {
 	if !ok {
 		t.Fatalf("样例解析不出定位符：%q", example)
 	}
-	if title != "name" || target != "file.md" {
-		t.Fatalf("样例解析成 title=%q target=%q，期望 name / file.md", title, target)
+	if title != "Title" || target != "file.md" {
+		t.Fatalf("样例解析成 title=%q target=%q，期望 Title / file.md", title, target)
 	}
 	if summary == "" {
 		t.Fatalf("样例缺摘要：%q", example)

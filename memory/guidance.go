@@ -58,46 +58,75 @@ func guidance(d Dir, tier string, omitted int) string {
 	//
 	// 英文：模型的系统提示与工具描述都是英文语境，混排会让"读一遍就能照做"的那部分变慢。
 	// 中文只留源码注释与给人看的界面。
+	//
+	// 结构照着 Claude 的 Memory 规范写（path → 文件形态 → 四种 type → 索引 → 查重/反例
+	// → 时效 → 限额），差异只出现在宿主行为不同的地方，且都写明了：
+	//   - 记忆文件用 `type` + `title`，**不是** `name` + `description`：摘要由索引行承载，
+	//     宿主启动时不逐条读文件（读 64 个文件换一份摘要，不值）；
+	//   - 错误记忆是**归档**（可恢复）而不是删除：宿主不提供删除动作；
+	//   - 没有 `[[双链]]`：宿主不解析它，指别处请写 `file_path`。
 	var b strings.Builder
 
-	b.WriteString("Memory directory: ")
+	b.WriteString("You have a persistent file-based memory at `")
 	b.WriteString(d.Path)
-	b.WriteString("\n\n")
+	b.WriteString("/`. Each memory is one `.md` file holding one fact, with frontmatter:\n\n")
 
-	b.WriteString("- One memory = one `.md` file in that directory. `")
+	b.WriteString("```markdown\n---\ntype: user | feedback | project | reference\n")
+	b.WriteString("title: <short-kebab-case-slug>\n---\n\n<the fact>\n```\n\n")
+
+	b.WriteString("For `feedback` and `project` entries, follow the fact with **Why:** and ")
+	b.WriteString("**How to apply:** lines — the reason is what makes the memory reusable later. ")
+	b.WriteString("To point at another memory, use its `file_path`.\n\n")
+
+	b.WriteString("- `user` — who the user is: role, expertise, working preferences.\n")
+	b.WriteString("- `feedback` — guidance the user has given on how to work: both corrections and ")
+	b.WriteString("confirmed approaches; include the why.\n")
+	b.WriteString("- `project` — ongoing work, goals or constraints not derivable from the code or git ")
+	b.WriteString("history; convert relative dates to absolute.\n")
+	b.WriteString("- `reference` — pointers to external resources: docs, dashboards, tickets.\n\n")
+
+	b.WriteString("After writing the file, add one line to `")
 	b.WriteString(IndexFileName)
-	b.WriteString("` lists them, one line per memory: ")
-	b.WriteString("`- [name](file.md) — description`. **A line without a filename is not an entry**: ")
-	b.WriteString("it never reaches this prompt, and the archive tool cannot see it.\n")
+	b.WriteString("`: `- [Title](file.md) — one-line description`. ")
+	b.WriteString("**A line without a filename is not an entry** — it never reaches this prompt and ")
+	b.WriteString("the archive tool cannot see it. `")
+	b.WriteString(IndexFileName)
+	b.WriteString("` is loaded every session: one line per memory, no frontmatter, never put memory ")
+	b.WriteString("content there.\n\n")
 
-	b.WriteString("- Each entry under `## Memory` below is a `<memory>` block with `name`, `description` and ")
-	b.WriteString("`file_path`. The description is not truncated; when it is not enough, read the body at `file_path`.\n")
+	b.WriteString("Each entry under `## Memory` below is a `<memory>` block with `name`, `description` ")
+	b.WriteString("and `file_path`. The description is not truncated; when it is not enough, read the ")
+	b.WriteString("body at `file_path`.\n\n")
 
-	b.WriteString("- `type` in the file's frontmatter, when present, is one of: ")
-	b.WriteString("`user` (who the user is: role, expertise, working preferences) · ")
-	b.WriteString("`feedback` (corrections the user gave and approaches they confirmed, with the reason) · ")
-	b.WriteString("`project` (ongoing work, goals or constraints not derivable from code or git history; absolute dates) · ")
-	b.WriteString("`reference` (pointers to external resources: docs, dashboards, tickets). ")
-	b.WriteString("A value outside that set is reported by the post-write audit.\n")
+	b.WriteString("Check for an existing entry first: update that file instead of creating a second ")
+	b.WriteString("one. Duplicates dilute the startup budget and are reported by the inventory.\n\n")
 
-	b.WriteString("- Check for an existing entry first: update it instead of adding a second one. ")
-	b.WriteString("Duplicates dilute the startup budget and are reported as duplicates.\n")
+	b.WriteString("Don't save what the repository already records (code structure, past fixes, git ")
+	b.WriteString("history) or what only matters to this conversation; if asked to remember one of ")
+	b.WriteString("those, ask what was non-obvious about it and save that instead.\n\n")
 
-	b.WriteString("- A memory is a snapshot of what was true when it was written. Verify that a file, ")
-	b.WriteString("function or flag it names still exists before relying on it.\n")
+	b.WriteString("A memory is a snapshot of what was true when it was written. Verify that a file, ")
+	b.WriteString("function or flag it names still exists before relying on it — the inventory reports ")
+	b.WriteString("dead code anchors, but only after the fact.\n\n")
+
+	b.WriteString("A memory that turns out to be wrong is **archived, not deleted**: the host moves the ")
+	b.WriteString("file out of the directory and keeps a snapshot, so it can be restored. ")
+	b.WriteString("Deleting memory files yourself bypasses that.\n\n")
 
 	if tier == InjectionHot && omitted > 0 {
-		b.WriteString("- Startup loads only the ")
+		b.WriteString("Startup loads only the ")
 		b.WriteString(strconv.Itoa(HotListSize))
-		b.WriteString(" entries with the highest read count (not all of them); read the full index and any memory body with the standard file tools.")
+		b.WriteString(" entries with the highest read count (not all of them) and stops at a byte ")
+		b.WriteString("budget; read the full index and any memory body with the standard file tools.")
 	} else {
-		b.WriteString("- Startup loads only the first ")
+		b.WriteString("Startup loads only the first ")
 		b.WriteString(strconv.Itoa(MaxIndexLines))
 		b.WriteString(" lines / ")
 		b.WriteString(strconv.Itoa(MaxIndexBytes))
 		b.WriteString(" bytes of `")
 		b.WriteString(IndexFileName)
-		b.WriteString("`, whichever comes first; memory bodies are not loaded automatically — read them with the standard file tools.")
+		b.WriteString("`, whichever comes first; memory bodies are not loaded automatically — read them ")
+		b.WriteString("with the standard file tools.")
 	}
 
 	return b.String()
