@@ -163,7 +163,7 @@ func (m *manager) fireDream(s dreamSettings, now time.Time) (*bridgeSession, err
 
 // finishDreamRun 派生会话 AgentEnd 后收口（emit 尾部调用，见 main.go）。
 func (m *manager) finishDreamRun(sessionID, errMsg, final string, repos []dreamRepoResult) {
-	summary := dreamSummaryOf(final)
+	summary := dreamSummaryOf(final, repos)
 	completeDreamRun(sessionID, time.Now(), summary, errMsg, repos)
 	m.dreamRelease()
 	m.emitDreamChanged()
@@ -173,18 +173,115 @@ func (m *manager) finishDreamRun(sessionID, errMsg, final string, repos []dreamR
 //
 // 取前 200 字而不是第一条非空行：模型经常先来一句"已完成巡检："再分点列，
 // 只要第一行就只剩这句开场白；而整段塞进设置页会把列表撑成一个日志窗。
-func dreamSummaryOf(final string) string {
-	s := strings.TrimSpace(final)
-	if s == "" {
-		return ""
+//
+// 2026-11 真机：真实模型的收尾正文常常是一张 Markdown 表格
+// （`| 库 | 条目 | 证据要点 | 动作 |` + `|---|---|---|---|`），压完空白后"结果"列
+// 就是**一串竖线**，信息量为零。所以这里做三件事：丢掉表格行与分隔线、丢掉
+// 只说话不报数的开场白、整段只剩表格时用**宿主台账**（repos：碰过哪些库、归档了几条）
+// 凑一句可读的话——不去解析模型文字。
+func dreamSummaryOf(final string, repos []dreamRepoResult) string {
+	var body []string
+	for _, line := range strings.Split(final, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || isDreamTableLine(t) {
+			continue
+		}
+		body = append(body, t)
 	}
-	// 换行压成空格：前端按单行渲染，不压会在列表里撑出多行。
-	s = strings.Join(strings.Fields(s), " ")
+	// 开场白被全部丢掉的极端情况（正文真的只有一句"巡检完成。"）：台账也没有时
+	// 至少把原话还回去，别把用户的记录变成一片空白。
+	fallback := dreamCollapse(body)
+	for len(body) > 0 && isDreamPreamble(body[0]) {
+		body = body[1:]
+	}
+	s := dreamCollapse(body)
+	if s == "" {
+		if t := dreamTallySummary(repos); t != "" {
+			return t
+		}
+		s = fallback
+	}
 	r := []rune(s)
 	if len(r) > 200 {
 		return string(r[:200]) + "…"
 	}
 	return s
+}
+
+// dreamCollapse 把多行压成一行（前端按单行渲染，不压会在列表里撑出多行）。
+func dreamCollapse(lines []string) string {
+	return strings.Join(strings.Fields(strings.Join(lines, " ")), " ")
+}
+
+// isDreamTableLine Markdown 表格行 / 分隔行。
+//
+// 以 `|` 开头的一律算表格（`|---|`、`| a | b |` 都在内）；不带竖线的
+// `---`、`:--:` 这类分隔行也算——模型写表时常把表头省掉。
+func isDreamTableLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	if strings.HasPrefix(line, "|") {
+		return true
+	}
+	hasDash := false
+	for _, r := range line {
+		switch r {
+		case '-':
+			hasDash = true
+		case ':', ' ', '\t', '|':
+		default:
+			return false
+		}
+	}
+	return hasDash
+}
+
+// dreamPreambleMarkers 收尾正文里"只说话不报数"的开场白前缀。
+var dreamPreambleMarkers = []string{
+	"巡检完成", "巡检完毕", "巡检结束", "已完成巡检", "本轮巡检", "本次巡检",
+	"以下是", "下面是", "这里是", "如下是", "结果如下",
+}
+
+// isDreamPreamble 判断一行是不是**纯**开场白：以这些词开头、不含数字、且不长。
+//
+// 含数字的（"已完成巡检：3 个库，归档 2 条"）是结论而不是开场白，必须留下——
+// 那正是"结果"列该显示的东西。只掐开头连续的几句，正文里的句子不动。
+func isDreamPreamble(line string) bool {
+	hit := false
+	for _, m := range dreamPreambleMarkers {
+		if strings.HasPrefix(line, m) {
+			hit = true
+			break
+		}
+	}
+	if !hit || len([]rune(line)) > 40 {
+		return false
+	}
+	for _, r := range line {
+		if r >= '0' && r <= '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// dreamTallySummary 用宿主台账凑一句总结（模型正文只有表格时的回落）。
+//
+// 数来自 memory_dream 真的被调用过这件事（见 dream_tally.go），不是模型的自述。
+func dreamTallySummary(repos []dreamRepoResult) string {
+	if len(repos) == 0 {
+		return ""
+	}
+	archived := 0
+	for _, r := range repos {
+		archived += r.Archived
+	}
+	if archived > 0 {
+		return fmt.Sprintf("已处理 %d 个记忆库，归档 %d 条", len(repos), archived)
+	}
+	return fmt.Sprintf("已处理 %d 个记忆库，没有需要归档的条目", len(repos))
 }
 
 // dreamAcquire 取"正在跑"的闩；已有巡检在跑则返回 false。

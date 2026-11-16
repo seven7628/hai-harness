@@ -276,18 +276,90 @@ func TestCompleteDreamRun(t *testing.T) {
 	}
 }
 
+// 摘要的四类真实输入：表格开头、纯表格、正常段落、空串。
+//
+// 真机观察到的原始正文（2026-11，opencode/deepseek-v4.1-flash）：
+//
+//	巡检完成。以下是每个记忆库的处理情况：
+//	| 库 | 条目 | 证据要点 | 动作 |
+//	|---|---|---|---|
+//	| a | 80 | … | 保持 |
 func TestDreamSummaryOf(t *testing.T) {
-	if got := dreamSummaryOf("  已完成巡检：3 个库，归档 2 条。\n第二行不该进列表 "); got != "已完成巡检：3 个库，归档 2 条。 第二行不该进列表" {
-		t.Fatalf("摘要压行不对: %q", got)
+	tally4 := []dreamRepoResult{
+		{ID: "a", Topics: 80}, {ID: "b", Topics: 12}, {ID: "c", Topics: 9}, {ID: "d", Topics: 3, Archived: 1},
 	}
-	if got := dreamSummaryOf(""); got != "" {
-		t.Fatalf("空正文应得空摘要，got %q", got)
+	cases := []struct {
+		name  string
+		final string
+		repos []dreamRepoResult
+		want  string
+	}{
+		{
+			name: "表格开头",
+			final: "巡检完成。以下是每个记忆库的处理情况：\n" +
+				"| 库 | 条目 | 证据要点 | 动作 |\n|---|---|---|---|\n| a | 80 | 锚点还在 | 保持 |\n" +
+				"整体可用：d 库有 1 条被继任，已提交归档。\n下一天继续。",
+			repos: tally4,
+			want:  "整体可用：d 库有 1 条被继任，已提交归档。 下一天继续。",
+		},
+		{
+			name: "纯表格", // 去掉表格后没有任何正文 → 用宿主台账说话（不解析模型文字）
+			final: "| 库 | 条目 | 证据要点 | 动作 |\n" +
+				"|---|---|---|---|\n| a | 80 | 锚点还在 | 保持 |\n| d | 3 | 被继任 | 归档 1 |",
+			repos: tally4,
+			want:  "已处理 4 个记忆库，归档 1 条",
+		},
+		{
+			name:  "纯表格且一条都没归档",
+			final: "| 库 | 动作 |\n|---|---|\n| a | 保持 |",
+			repos: []dreamRepoResult{{ID: "a", Topics: 80}},
+			want:  "已处理 1 个记忆库，没有需要归档的条目",
+		},
+		{
+			name:  "纯表格且没有台账", // 台账为空时不能编数字，宁可空
+			final: "| 库 | 动作 |\n|---|---|\n| a | 保持 |",
+			want:  "",
+		},
+		{
+			name:  "正常段落", // 含数字的首行是结论，不是开场白
+			final: "  已完成巡检：3 个库，归档 2 条。\n第二行不该进列表 ",
+			want:  "已完成巡检：3 个库，归档 2 条。 第二行不该进列表",
+		},
+		{
+			name:  "空串",
+			final: "",
+			want:  "",
+		},
+		{
+			name:  "只有一句开场白、正文全是表格", // 开场白丢完没正文 → 台账顶上
+			final: "巡检完毕。\n| 库 | 动作 |\n|---|---|\n| a | 保持 |",
+			repos: []dreamRepoResult{{ID: "a", Topics: 80, Archived: 2}},
+			want:  "已处理 1 个记忆库，归档 2 条",
+		},
+		{
+			name:  "只有一句开场白、也没有台账", // 什么都凑不出来时，至少把原话还回去
+			final: "巡检完毕。",
+			want:  "巡检完毕。",
+		},
+		{
+			name:  "中转义的分隔行也丢掉",
+			final: "---\n:--:  \n有效结论：a 库的锚点全部失效，已归档。",
+			want:  "有效结论：a 库的锚点全部失效，已归档。",
+		},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := dreamSummaryOf(c.final, c.repos); got != c.want {
+				t.Fatalf("dreamSummaryOf(%q) = %q, want %q", c.final, got, c.want)
+			}
+		})
+	}
+
 	long := ""
 	for i := 0; i < 500; i++ {
 		long += "记"
 	}
-	if got := []rune(dreamSummaryOf(long)); len(got) != 201 || got[200] != '…' {
+	if got := []rune(dreamSummaryOf(long, nil)); len(got) != 201 || got[200] != '…' {
 		t.Fatalf("超长摘要应截到 200 字 + 省略号，得到 %d 字", len(got))
 	}
 }
