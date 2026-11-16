@@ -122,6 +122,10 @@ func (c Config) BuildInjection(d Dir) (Injection, error) {
 		// 开关前置判定发生在任何 I/O 之前：关闭时**一次读盘都不发生**。
 		return Injection{Enabled: false, Reason: "disabled"}, nil
 	}
+	// 按需指南：缺失或过期就补写。放在这里而不是 Bootstrap，是因为注入是
+	// "确定要读这份记忆"的第一个时刻；Bootstrap 连目录都还没建（它设计上不建目录）。
+	c.ensureGuide(d)
+
 	inj, err := c.buildInjection(d)
 	if err != nil || inj.Empty() {
 		return inj, err

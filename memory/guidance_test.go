@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// 说明段必须让模型拿到写记忆所需的**全部**输入：目录在哪、文件长什么样。
-// 缺任何一条，Step 4 的 modified 钩子就仍然不会触发（guidance.go 顶部的闭环）。
+// 常驻段必须让模型拿到**缺了就写不对**的最小集：目录、索引登记规则、注入是子集。
+// 详细规则（type 语义、查重、引用核对、索引行样例）自 2026-11 起在 .state/GUIDE.md，
+// 由 TestGuideDocCarriesTheDetails 单独钉住——那边断的是内容，这边断的是"还给不给得出指针"。
 func TestGuidance_StatesPathAndShape(t *testing.T) {
 	d := memDir(t)
 	g := guidance(d, true, InjectionFull, 0)
@@ -14,13 +15,12 @@ func TestGuidance_StatesPathAndShape(t *testing.T) {
 	mustContain := []string{
 		d.Path,        // 目录绝对路径：模型唯一的写入目标
 		IndexFileName, // 索引文件名
-		"frontmatter", // 记忆文件的形态：官方 modified 规则挂在 frontmatter 上
-		"200",         // 行限额
-		"25000",       // 字节限额
-		"user",        // 四种 kind 的取值域（官方 §2.2 逐字）
-		"feedback",    //
-		"project",     //
-		"reference",   //
+		"行内要带文件名",     // 解析器硬规则：没有文件名就不算条目
+		// 按需指南的入口用**相对路径**：绝对路径每会话多付约 90 字节，
+		// 而"相对上一行的记忆目录"已无歧义。guidePath(d) 是可解析的落点，测试在那儿钉。
+		".state/" + GuideFileName,
+		"200",   // 行限额
+		"25000", // 字节限额
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(g, want) {
@@ -119,30 +119,38 @@ func TestGuidance_DoesNotEchoIndexEntries(t *testing.T) {
 	}
 }
 
-// 说明段与解析器必须对齐：文档给的那行样例，必须真的能被宿主认成一条记忆。
+// 文档与解析器必须对齐：指南里给出的那行样例，必须真的能被宿主认成一条记忆。
 //
 // 这条测试防的是一类静默失效：索引行由模型手写，注入/恢复只认"行内有定位符"的行。
-// 说明段若给出一个解析器不认的样例（或解析器日后收紧而说明段没跟上），模型就会
-// 照着写出永远不进注入的索引行——而这条路径没有任何报错，只有"怎么注入里没有它"。
-func TestGuidance_IndexExampleIsParseable(t *testing.T) {
-	line := strings.Trim(indexLineExample, "`")
-
-	target, summary, ok := splitLocator(line)
-	if !ok {
-		t.Fatalf("说明段给的索引行样例解析不出定位符：%q", line)
+// 指南若给出一个解析器不认的样例（或解析器日后收紧而文档没跟上），模型就会照着
+// 写出永远不进注入的索引行——而这条路径没有任何报错，只有"怎么注入里没有它"。
+// 2026-11 起样例从常驻说明段搬到了 .state/GUIDE.md，所以测试也跟过去。
+func TestGuide_IndexExampleIsParseable(t *testing.T) {
+	doc := guideDoc("/mem")
+	var example string
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.Contains(line, "[Title](file.md)") {
+			example = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
+			break
+		}
 	}
-	if target != "文件名.md" {
-		t.Fatalf("样例定位符 = %q，期望 文件名.md", target)
+	if example == "" {
+		t.Fatalf("指南里找不到索引行样例：\n%s", doc)
+	}
+
+	target, summary, ok := splitLocator(example)
+	if !ok {
+		t.Fatalf("指南给的索引行样例解析不出定位符：%q", example)
+	}
+	if target != "file.md" {
+		t.Fatalf("样例定位符 = %q，期望 file.md", target)
 	}
 	if summary == "" {
-		t.Fatalf("样例没有摘要部分：%q", line)
+		t.Fatalf("样例没有摘要部分：%q", example)
 	}
-
-	// 面板/审计走的是另一套入口，必须得到同一个文件名——否则"已登记"与
-	// "会注入"两处会各说各话。
-	names := parseIndexEntries(line)
-	if len(names) != 1 || names[0] != "文件名.md" {
-		t.Fatalf("parseIndexEntries(%q) = %v，期望 [文件名.md]", line, names)
+	names := parseIndexEntries(example)
+	if len(names) != 1 || names[0] != "file.md" {
+		t.Fatalf("parseIndexEntries(%q) = %v，期望 [file.md]", example, names)
 	}
 }
 

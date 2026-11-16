@@ -64,44 +64,26 @@ func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
 		b.WriteString("\n当前尚无记忆（MEMORY.md 不存在或为空）。\n")
 	}
 
-	// 三条形态事实，逐条对应官方原文：
-	//   ① "MEMORY.md # Index, one line per memory"（§2.3）
-	//   ② "Claude records the kind as a `type` field in the memory file's frontmatter"
-	//      + 四种 kind（§2.2）——这句是 `modified` 能触发的前提，官方对该字段的
-	//      写法有明文，我们只是把它连同取值域一起告知模型。
-	//   ③ "Claude doesn't load topic files at startup. Claude reads them on demand
-	//      using its standard file tools."（§2.4）
+	// 常驻段只留"是什么 + 去哪读"（2026-11 渐进披露）。详细规则——type 语义、
+	// 先查重、引用前核对、索引行样例——全部搬进 .state/GUIDE.md，由模型在**准备
+	// 写记忆**时自己去读。
 	//
-	// ②③④ 里的 200 行 / 25KB 也一并说明：官方
-	// "This limit applies only to MEMORY.md"，模型需要知道限额只管索引，
-	// 否则会误以为记忆正文也该写得很短。
-	b.WriteString("\n- 一条记忆 = 该目录下的一个 .md 文件；文件名在索引 `")
+	// 指针用**相对路径**：写绝对路径要多付约 90 字节（这段每个会话都付），而
+	// "相对上一行的记忆目录"已经无歧义——省下来的正好是这次改造的净收益。
+	//
+	// 代价是"读到才生效"：模型如果没去读指南，就只知道下面这三条。所以这三条
+	// 必须是**缺了就写不对**的最小集：目录在哪、索引怎么登记、注入是子集。
+	b.WriteString("\n- 一条记忆 = 该目录下一个 .md 文件；在 `")
 	b.WriteString(IndexFileName)
-	b.WriteString("` 中一行一条登记。\n")
-	// 索引行的格式也是**形态**，不是行为要求。为什么要写出来：索引行由模型手写，
-	// 而宿主侧认行的规则是"行内要有定位符"（文件名写在 `](…)`、反引号或裸词里）。
-	// 没有定位符的行会被静默跳过——那条记忆永远不出现在启动注入里，而审计只在
-	// 写入那一刻提醒一次。实测两个记忆库已经写出两种都能解析的写法（链接 / 反引号），
-	// 但"写出一行解析不了的东西"这条失败路径此前一个字都没说明。
-	// 示例由 indexLineExample 提供，guidance_test 会拿它去跑真实解析器。
-	b.WriteString("- 索引行形如 " + indexLineExample +
-		"：行内要有文件名（写在 `](…)` 或反引号里），没有文件名的行不算作一条记忆。\n")
-	b.WriteString("- 有 frontmatter 时，`type` 取 ")
-	b.WriteString(strings.Join(memoryTypes(), " / "))
-	b.WriteString(" 之一。\n")
-	// ④ 这一句必须**按档位如实陈述**，不能照抄官方那句"加载前 200 行"：
-	// 官方描述的是全量注入，而 hot 档注入的是 Top-K 子集。说错了会让模型把
-	// "注入里只有 K 条"读成"索引里只有 K 条"，进而重写索引或重记记忆——
-	// 与 truncationNotice 要防的是同一个循环，只是入口不同。
-	//
-	// 只有**真的省略了条目**时才说"K 条"：索引本来就只有 3 条时照说"挑出的 K 条"
-	// 会让模型以为还藏着若干条，然后去找一个不存在的东西。
+	b.WriteString("` 里一行一条登记，行内要带文件名（没有文件名的行不算作一条记忆）。\n")
+	b.WriteString("- 写之前读 `.state/" + GuideFileName + "`（相对记忆目录）：type 语义、先查重、引用前核对、索引行样例。\n")
+
 	if tier == InjectionHot && omitted > 0 {
 		b.WriteString("- 启动时只加载 `")
 		b.WriteString(IndexFileName)
 		b.WriteString("` 中按使用频次挑出的 ")
 		b.WriteString(strconv.Itoa(HotListSize))
-		b.WriteString(" 条（不是全部）；完整索引与记忆正文需要时用标准文件工具自行读取。")
+		b.WriteString(" 条（不是全部）；完整索引与正文需要时用标准文件工具自行读取。")
 	} else {
 		b.WriteString("- 启动时只加载 `")
 		b.WriteString(IndexFileName)
@@ -109,17 +91,11 @@ func guidance(d Dir, hasIndex bool, tier string, omitted int) string {
 		b.WriteString(strconv.Itoa(MaxIndexLines))
 		b.WriteString(" 行 / ")
 		b.WriteString(strconv.Itoa(MaxIndexBytes))
-		b.WriteString(" 字节（取先到者）；记忆正文不自动加载，需要时用标准文件工具自行读取。")
+		b.WriteString(" 字节（取先到者）；正文不自动加载，需要时用标准文件工具自行读取。")
 	}
 
 	return b.String()
 }
-
-// indexLineExample 是说明段里给出的索引行样例。
-//
-// 单独提出来是为了让测试拿它去跑**真实解析器**（splitLocator / parseIndexEntries）：
-// 文档里的示例一旦解析不出条目，这段说明就成了"教模型写出注入不认的行"的说明书。
-const indexLineExample = "`- [标题](文件名.md) — 一句话摘要`"
 
 // memoryTypes 官方的四种记忆 kind（§2.2，原文逐字）：
 //
