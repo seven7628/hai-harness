@@ -18,6 +18,7 @@ import ProviderPage from './ProviderPage'
 import Sel, { type SelOption } from './Sel'
 import SetHead from './SetHead'
 import EmptyState from './EmptyState'
+import DreamRunDrawer from './DreamRunDrawer'
 import type { MeshSettings, AppSettings, HubConversationSettings } from '../transport/types'
 import type { DreamSettingsInput } from '../store/useAppStore'
 import { bridge } from '../lib/bridge'
@@ -89,7 +90,12 @@ export default function SettingsModal() {
   useEffect(() => {
     if (!inSettings) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeSettings()
+      if (e.key !== 'Escape') return
+      // Dream 运行记录抽屉开着时让位：块里的 Esc 只该关抽屉。这个监听器注册得更早，
+      // 会先拿到事件 —— 不让位就会「按一下 Esc，设置连同抽屉一起没了」，用户还得重新
+      // 找回到那一行。抽屉自己也有 Esc 监听（它后注册，在这里 return 之后才跑）。
+      if (useAppStore.getState().dreamDetailFor !== undefined) return
+      closeSettings()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -1648,6 +1654,14 @@ function DreamSection() {
   const fetchDream = useAppStore((s) => s.fetchDream)
   const saveDream = useAppStore((s) => s.saveDream)
   const runDreamNow = useAppStore((s) => s.runDreamNow)
+  // 运行记录详情（点某一行打开的抽屉）。detailFor 既是"哪一行开着"，也是迟到响应的
+  // 归属凭据（见 store 的 openDreamDetail）；SettingsModal 的 Esc 处理也读它来让位。
+  const detail = useAppStore((s) => s.dreamDetail)
+  const detailFor = useAppStore((s) => s.dreamDetailFor)
+  const detailLoading = useAppStore((s) => s.dreamDetailLoading)
+  const detailError = useAppStore((s) => s.dreamDetailError)
+  const openDreamDetail = useAppStore((s) => s.openDreamDetail)
+  const closeDreamDetail = useAppStore((s) => s.closeDreamDetail)
   const appSettings = useAppStore((s) => s.settings)
   // 记忆总开关：关着时巡检无事可做（bridge 的 fireDream 也会拒绝）。
   const memoryOff = useAppStore((s) => s.memorySettings?.enabled) === false
@@ -1847,33 +1861,65 @@ function DreamSection() {
             </tr>
           </thead>
           <tbody>
-            {runs.map((r) => (
-              <tr key={r.session_id || r.started_at}>
-                <td>{fmtDreamRunTime(r.started_at)}</td>
-                <td>
-                  <code>{r.provider || '—'}</code>
-                  {r.model ? <span className="tag-dim"> {r.model}</span> : null}
-                </td>
-                <td>
-                  {r.error
-                    ? <span className="tag-warn">{r.error}</span>
-                    : r.finished_at
-                      ? (r.summary || t('settings.dream.runs.noSummary'))
-                      : t('settings.dream.runs.unfinished')}
-                  {/* 台账那一行：处理了几个库、归档了几条。摘要由模型写，可能漏库；
-                      这一行来自宿主记下的 memory_dream 调用，是"真的碰过谁"的事实。 */}
-                  {r.repos && r.repos.length > 0 && (
-                    <div className="set-desc" style={{ marginTop: 2 }}>
-                      {t('settings.dream.runs.repos')
-                        .replace('{n}', String(r.repos.length))
-                        .replace('{a}', String(r.repos.reduce((a, b) => a + (b.archived || 0), 0)))}
-                    </div>
-                  )}
-                </td>
-              </tr>
-            ))}
+            {runs.map((r) => {
+              // 点一行看这一轮的完整执行情况（详情抽屉）。
+              // 没有 session_id 的记录（字段落地之前写的那些）点不开：命令只认 session_id，
+              // 没有它连"查哪一轮"都说不清 —— 给出禁用的光标与说明，好过点了没反应。
+              const sid = r.session_id
+              const open = !!sid && detailFor === sid
+              return (
+                <tr
+                  key={r.session_id || r.started_at}
+                  tabIndex={sid ? 0 : -1}
+                  aria-expanded={sid ? open : undefined}
+                  aria-controls={sid ? 'dream-detail-drawer' : undefined}
+                  title={sid ? t('settings.dream.detail.openRow') : t('settings.dream.detail.noSessionId')}
+                  onClick={sid ? () => openDreamDetail(sid) : undefined}
+                  // Space 在浏览器里默认滚动页面，必须 preventDefault 才轮得到"打开"。
+                  onKeyDown={sid ? (e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return
+                    e.preventDefault()
+                    openDreamDetail(sid)
+                  } : undefined}
+                  style={sid ? { cursor: 'pointer' } : { cursor: 'default' }}
+                >
+                  <td>{fmtDreamRunTime(r.started_at)}</td>
+                  <td>
+                    <code>{r.provider || '—'}</code>
+                    {r.model ? <span className="tag-dim"> {r.model}</span> : null}
+                  </td>
+                  <td>
+                    {r.error
+                      ? <span className="tag-warn">{r.error}</span>
+                      : r.finished_at
+                        ? (r.summary || t('settings.dream.runs.noSummary'))
+                        : t('settings.dream.runs.unfinished')}
+                    {/* 台账那一行：处理了几个库、归档了几条。摘要由模型写，可能漏库；
+                        这一行来自宿主记下的 memory_dream 调用，是"真的碰过谁"的事实。 */}
+                    {r.repos && r.repos.length > 0 && (
+                      <div className="set-desc" style={{ marginTop: 2 }}>
+                        {t('settings.dream.runs.repos')
+                          .replace('{n}', String(r.repos.length))
+                          .replace('{a}', String(r.repos.reduce((a, b) => a + (b.archived || 0), 0)))}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
+      )}
+
+      {/* 详情抽屉：头部先用表格那一行顶着（dreamDetail 还没回来时也有起止/模型可看），
+          正文等 dream_detail 落地；取不到时由 error 就地说明，不弹全局红条。 */}
+      {detailFor && (
+        <DreamRunDrawer
+          run={detail ?? runs.find((r) => r.session_id === detailFor) ?? { started_at: '', provider: '', model: '' }}
+          onClose={closeDreamDetail}
+          loading={detailLoading}
+          error={detailError}
+        />
       )}
     </>
   )

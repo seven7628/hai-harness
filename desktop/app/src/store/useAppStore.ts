@@ -375,6 +375,24 @@ export interface DreamRun {
   // repos 本轮真的处理过哪些库（来自 memory_dream 的调用记录）。
   repos?: DreamRepoResult[]
   error?: string
+  // result / steps 只在 dream_detail（详情抽屉）里出现：列表的 dream_get 不带它们
+  //（收尾正文全文 + 时间线是"点开才看"的重量级字段）。字段缺失 = 老记录，见抽屉的说明。
+  result?: string
+  steps?: DreamStep[]
+}
+
+// 一轮巡检里的一次工具调用（dream_detail 的 steps）。
+//
+// 来源是宿主观察到的工具结束事件，不是模型自述。omitted > 0 的那条**不是一次调用**，
+// 而是 capDreamSteps 插的"中间省略 N 步"占位（此时 tool 为空、ok 恒 false）——
+// 渲染必须先判 omitted 再判 ok，否则会画成一个失败步骤。
+export interface DreamStep {
+  t?: string // 调用结束时间（RFC3339 本地时区）；空 = 事件没带时间戳
+  tool?: string
+  arg?: string
+  ok: boolean
+  note?: string
+  omitted?: number
 }
 
 // Dream 设置入参（dream_set）。
@@ -3370,6 +3388,17 @@ export interface AppState {
   // 不成对、"正在运行中"…）。这些是预期内的校验失败，不该升级成全局 bridgeError
   // 红条——用户正在这个面板里操作，答案就该出现在这个面板里。
   dreamError?: string
+  // —— Dream 运行记录详情（dream_detail；设置面板里点某一行打开抽屉）——
+  //
+  // dreamDetailFor 是**防迟到响应串行**的闩：用户点 A 行 → 点 B 行时 A 的响应可能
+  // 后到，若只看"有没有在飞"就会把 A 的正文挂到 B 的标题下。响应按 session_id 认领，
+  // 对不上就丢弃（同 context_breakdown 的 sessionId 归属判断）。
+  dreamDetail?: DreamRun
+  dreamDetailFor?: string
+  dreamDetailLoading: boolean
+  // dreamDetailError 与 dreamError 分开：前者是"这轮详情取不到"（多半是记录已被 200 行
+  // 滚动窗口挤掉，**正常态**），后者是设置/触发被拒。混用会让过期提示污染面板级红条。
+  dreamDetailError?: string
   marketSkills?: MarketSkill[] // 远程市场浏览结果（skill_browse；SkillsPage 市场区块）
   markets: MarketInfo[] // 已保存市场（market_list；SkillsPage 市场管理）
   mcpServers: MCPServerInfo[] // MCP 服务器清单 + 状态（mcp_list；SettingsModal MCP tab）
@@ -3553,6 +3582,10 @@ export interface AppState {
   fetchDream(): void
   saveDream(input: DreamSettingsInput): void
   runDreamNow(): void
+  // 运行记录详情：open 某个 session_id 的抽屉并拉详情；close 收抽屉。
+  // 记录过期（"已不在本地记录里"）走 dreamDetailError 就地说明，不升级全局红条。
+  openDreamDetail(sessionId: string): void
+  closeDreamDetail(): void
   installSkill(url: string, scope: string, name?: string): void // 远程技能下载（skill_install）；name 可选 = 市场浏览后精确安装单个
   browseMarket(url: string): void // 浏览远程市场技能（skill_browse，只读；结果落 marketSkills）
   refreshMarket(url: string): void // 刷新当前浏览的市场（重拉 + 对比本地；安装/更新后调）
@@ -5108,6 +5141,32 @@ function normalizeDreamRuns(raw: unknown): DreamRun[] {
   })
 }
 
+// normalizeDreamDetail 详情（dream_detail 的 run）：整条记录 + result 全文 + steps。
+//
+// 复用 normalizeDreamRuns 而不是再抄一遍字段表：零值时间和 repos/error 的归一规则
+// 只该有一份 —— 详情视图与列表视图看到同一个 finished_at，"跑完没跑完"才不会两处不一致。
+// 这里只额外处理 steps（列表不带它，所以上面那份没有）。
+function normalizeDreamDetail(raw: unknown): DreamRun | undefined {
+  const base = normalizeDreamRuns([raw])[0]
+  if (!base) return undefined
+  const o = (raw || {}) as Record<string, unknown>
+  return {
+    ...base,
+    result: typeof o.result === 'string' && o.result ? o.result : undefined,
+    // 空数组 → undefined：抽屉据此说"没有保存步骤"，而不是渲染一个空列表。
+    steps: Array.isArray(o.steps)
+      ? (o.steps as Record<string, unknown>[]).map((s) => ({
+          t: typeof s?.t === 'string' && s.t ? s.t : undefined,
+          tool: typeof s?.tool === 'string' && s.tool ? s.tool : undefined,
+          arg: typeof s?.arg === 'string' && s.arg ? s.arg : undefined,
+          ok: !!s?.ok,
+          note: typeof s?.note === 'string' && s.note ? s.note : undefined,
+          omitted: Number(s?.omitted ?? 0) || 0,
+        }))
+      : undefined,
+  }
+}
+
 // —— 流式 chunk 合并（FIX_OPTIMIZATION 问题3①）：实时 reasoning/content chunk 先入缓冲，
 // 每 ~32ms 合并一次写入 blocks（一次 React 提交），避免逐 token 全量重渲。
 // 快照恢复期间（materializing）不启用：快照事件已提前 coalesce，需同步落库。 ——
@@ -5685,6 +5744,17 @@ export function dispatchEvent(raw: AnyEvent): void {
           })
           return
         }
+        // dream_detail 的失败**不是**面板级失败：「该轮详情已不在本地记录里（记录只保留
+        // 最近 200 行）」是正常态（老记录会被滚动窗口挤掉），落抽屉内的说明即可。
+        // 必须在这里 return —— 掉进下面的通用分支就会弹一条全局红 toast，把一句"翻不到
+        // 了"说成"出错了"。同理不写 dreamError：那是设置/触发的错误，别互相污染。
+        if (t === 'dream_detail') {
+          setState({
+            dreamDetailLoading: false,
+            dreamDetailError: String(r.error || i18nT('settings.dream.detail.error')),
+          })
+          return
+        }
         const err = r.error || 'command failed'
         const bridgeDown = looksBridgeDown(err)
         const alreadyDown = getState().bridgeStatus === 'error'
@@ -6035,6 +6105,23 @@ export function dispatchEvent(raw: AnyEvent): void {
             dreamLoading: false,
             dreamError: undefined,
           })
+        }
+        break
+      }
+      // dream_detail：某一轮运行记录的详情（设置面板里点开一行时取）。
+      //
+      // 归属凭据是**记录自带**的 session_id（响应里没有别的东西能把回答认回到某次请求）：
+      // 用户从 A 行切到 B 行时，A 的响应可能后到 —— 对不上就丢，否则抽屉标题是 B、
+      // 正文是 A。老记录缺 session_id 时无从比对，按当前认领的那一轮收下。
+      if (t === 'dream_detail') {
+        if (r.ok) {
+          const run = normalizeDreamDetail(d.run)
+          if (!run) {
+            // 成功却没有记录内容：与"记录已过期"同样的落点，别让抽屉一直转。
+            setState({ dreamDetailLoading: false, dreamDetailError: i18nT('settings.dream.detail.error') })
+          } else if (!run.session_id || run.session_id === getState().dreamDetailFor) {
+            setState({ dreamDetail: run, dreamDetailLoading: false, dreamDetailError: undefined })
+          }
         }
         break
       }
@@ -10159,6 +10246,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   dreamSaving: false,
   dreamRunning: false,
   dreamError: undefined,
+  dreamDetail: undefined,
+  dreamDetailFor: undefined,
+  dreamDetailLoading: false,
+  dreamDetailError: undefined,
   externalSkillsLoading: false,
   externalSkillsImporting: false,
   externalSkillsError: undefined,
@@ -11759,6 +11850,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   saveDream: (input) => {
     set({ dreamSaving: true })
     send({ type: 'dream_set', payload: { ...input } })
+  },
+  // 详情：先清掉上一条的正文与错误，再置 dreamDetailFor 认领这次请求。
+  // 不在这里清 dreamDetail —— 抽屉头部的起止/模型可以先用表格那一行顶着，
+  // 正文区由 dreamDetailLoading 遮住，避免"点开先白一下"。
+  openDreamDetail: (sessionId) => {
+    const sid = sessionId.trim()
+    if (!sid) return // 无 session_id 的行本来就不可点（记录标识在旧记录里丢了）
+    set({ dreamDetail: undefined, dreamDetailFor: sid, dreamDetailLoading: true, dreamDetailError: undefined })
+    send({ type: 'dream_detail', payload: { session_id: sid } })
+  },
+  closeDreamDetail: () => {
+    set({ dreamDetail: undefined, dreamDetailFor: undefined, dreamDetailLoading: false, dreamDetailError: undefined })
   },
   runDreamNow: () => {
     send({ type: 'dream_run_now', payload: {} })
