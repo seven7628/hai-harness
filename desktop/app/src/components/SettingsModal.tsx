@@ -4,7 +4,7 @@ import { useAppStore, SUBAGENT_CONCURRENCY_DEFAULT, COMPRESS_THRESHOLD_DEFAULT, 
 import { useT } from '../i18n'
 import { meshUUID, meshToken } from '../lib/meshRand'
 import { copyText } from '../lib/clipboard'
-import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, LayersIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Smartphone, Sparkles, TerminalIcon } from './icons'
+import { AccessIcon, BarChart, ChevronDown, EyeIcon, EyeOffIcon, Gear, Globe, HookIcon, LayersIcon, PaletteIcon, PinIcon, SendIcon, SessionIcon, Smartphone, Sparkles, TerminalIcon, UsersIcon } from './icons'
 import { BrowserSettingsEditor } from './BrowserSettingsEditor'
 import { ComputerSettingsEditor } from './ComputerSettingsEditor'
 import { IMSettingsEditor } from './IMSettingsEditor'
@@ -23,9 +23,9 @@ import type { MeshSettings, AppSettings, HubConversationSettings } from '../tran
 import type { DreamSettingsInput } from '../store/useAppStore'
 import { bridge } from '../lib/bridge'
 
-// 左侧导航分组（5 组 13 项：基础 / 模型 / 能力 / 连接 / 数据）。
+// 左侧导航分组（5 组 14 项：基础 / 模型 / 能力 / 连接 / 数据）。
 // 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不显示分组标题）。
-type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'surfaces' | 'im' | 'mesh' | 'mobile' | 'memory' | 'usage'
+type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'surfaces' | 'im' | 'mesh' | 'conversation' | 'mobile' | 'memory' | 'usage'
 const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab; label: string; icon: ReactElement }[] }[] = [
   {
     id: 'base',
@@ -59,6 +59,9 @@ const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab;
     items: [
       { key: 'im', label: 'settings.im', icon: <SessionIcon size={14} /> },
       { key: 'mesh', label: 'settings.mesh', icon: <SendIcon size={14} /> },
+      // 群聊引擎：`hub.conversation` 的全局护栏。原先埋在「通用」里，和语言/沙箱混在一起；
+      // 它调的是群聊怎么防无限接龙，独立成项后从「连接」就能直接找到。
+      { key: 'conversation', label: 'settings.conversation', icon: <UsersIcon size={14} /> },
       { key: 'mobile', label: 'settings.mobile', icon: <Smartphone size={14} /> },
     ],
   },
@@ -74,7 +77,7 @@ const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab;
 
 // 设置弹窗：两栏（左窄导航 + 右宽内容），背景虚化（.modal-hint.blur backdrop-filter）。
 // 分区见 NAV_GROUPS：通用、外观、快捷键、模型服务、外部工具、自动化、插件、面板、消息接入、
-// 会话协作、手机连接、项目记忆、用量。
+// 会话协作、群聊引擎、手机连接、项目记忆、用量。
 // 持久化：settings.json（~/.go-code；mock=localStorage）；API key 明文落 settings.json provider 段
 //（providerSave，2026-08-16 用户决策；key 输入框草稿保存后清空不回显，providerKeys 指示已设置）。
 export default function SettingsModal() {
@@ -143,6 +146,7 @@ export default function SettingsModal() {
           {tab === 'surfaces' && <SurfacesPage />}
           {tab === 'im' && <IMTab />}
           {tab === 'mesh' && <MeshTab />}
+          {tab === 'conversation' && <ConversationTab />}
           {tab === 'mobile' && <MobileTab />}
           {tab === 'memory' && <MemoryTab />}
           {tab === 'usage' && <UsageStats />}
@@ -357,8 +361,6 @@ function GeneralTab() {
       )}
       {/* 办公组件（LibreOffice kit，R08d）：版本/体积/许可/路径/状态 + 重新探测。
           只展示与说明，**不自动下载** —— 分发是 PR-13。 */}
-      {/* 群聊对话引擎护栏（P6-04/D8）：`hub.conversation` 全局旋钮 + provider 并发上限 */}
-      <ConversationSection />
       <OfficeKitSection />
       {/* 语音输入（STT）：整段折进可折叠卡片（默认收起）——OpenAI 兼容 /audio/transcriptions 端点 */}
       <STTSection />
@@ -421,7 +423,7 @@ function ConvRow({
   )
 }
 
-function ConversationSection() {
+function ConversationTab() {
   const t = useT()
   const conv: HubConversationSettings = useAppStore((s) => s.settings.hub?.conversation) ?? {}
   const providerCalls = useAppStore((s) => s.settings.agent?.max_concurrent_provider_calls) ?? 0
@@ -430,13 +432,10 @@ function ConversationSection() {
     Math.max(1, Math.round((ms && ms > 0 ? ms : fallback) / MIN_MS))
   return (
     <>
-      <div className="settings-sec-title">{t('settings.conversation')}</div>
-      <div className="set-row">
-        <div>
-          <div className="set-label">{t('settings.conversation')}</div>
-          <div className="set-desc">{t('settings.conversation.desc')}</div>
-        </div>
-      </div>
+      <SetHead
+        title={t('settings.conversation')}
+        subtitle={t('settings.conversation.desc')}
+      />
       <ConvRow
         label={t('settings.conversation.maxDepth')}
         desc={t('settings.conversation.maxDepth.desc')}

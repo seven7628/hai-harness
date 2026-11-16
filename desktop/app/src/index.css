@@ -14492,7 +14492,9 @@ body.is-electron .page-head {
   background: linear-gradient(var(--surface) 76%, transparent);
 }
 .settings-nav-group {
-  margin-bottom: 10px;
+  /* 14 项（新增「群聊引擎」）在 1440×960 也要一屏放得下：分组间距与条目内边距各收 1–4px，
+     总高从 730 → 约 640；1024 及更矮的窗口仍由上面的 overflow-y:auto 兜底。 */
+  margin-bottom: 6px;
 }
 .settings-nav-group:last-child {
   margin-bottom: 0;
@@ -14502,11 +14504,11 @@ body.is-electron .page-head {
   font-weight: 600;
   letter-spacing: 0.05em;
   color: var(--text-2);
-  padding: 9px 10px 4px;
+  padding: 6px 10px 3px;
 }
 .settings-nav-item {
-  min-height: 30px;
-  padding: 6px 10px;
+  min-height: 29px;
+  padding: 5px 10px;
   font-size: 13px;
 }
 .settings-nav-item:focus-visible {

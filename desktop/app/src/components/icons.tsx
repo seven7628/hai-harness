@@ -51,6 +51,8 @@ export const ScissorsIcon = ({ size = 14 }: P) => base(size, <><circle cx="6" cy
 export const PasteIcon = ({ size = 14 }: P) => base(size, <><rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="M9 13h6M9 17h4" /></>)
 export const Back = ({ size = 15 }: P) => base(size, <path d="m9 18 6-6-6-6" />)
 export const SessionIcon = ({ size = 15 }: P) => base(size, <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />)
+// 群聊（多人）：设置左栏「群聊引擎」；三个人形轮廓，与单人会话气泡区分。
+export const UsersIcon = ({ size = 14 }: P) => base(size, <><circle cx="9" cy="8" r="3.2" /><path d="M2.5 20c0-3.3 2.9-6 6.5-6s6.5 2.7 6.5 6" /><path d="M16 4.5a3 3 0 0 1 0 6" /><path d="M18 14.2c2.1.7 3.5 2.6 3.5 5.8" /></>)
 // 新建会话（消息气泡 + 加号）：与 SessionIcon（气泡）、FolderPlus（文件夹）同族，
 // 三者在展开态与折叠图标条里一一对应（不再是含义模糊的裸加号）。
 export const SessionPlus = ({ size = 15 }: P) => base(size, <><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M12 7v6M9 10h6" /></>)
