@@ -7,6 +7,7 @@ import type { ProviderCfg, ProviderPreset } from '../transport/types'
 import { ChevronDown, ChevronLeft, EyeIcon, EyeOffIcon, ImageIcon, Plus, SearchIcon } from './icons'
 import { ProviderGlyph } from './ProviderGlyph'
 import { fmtMoney, localSpendAll, meterOf, resetIn, rowMeterOf, sortedWindows, type MeterTone, type RowMeterView } from '../lib/billingView'
+import SetHead from './SetHead'
 import { CATEGORY_ORDER, assertCatalogCoverage, availableEntries, catalogByID, categoryCounts, countByHost, hostOfURL, nextFreeID, searchCatalog, sortConfigured, type CatalogEntry, type CatalogCategory } from '../lib/providerCatalog'
 
 // —— Provider：内置快捷添加（DeepSeek/OpenAI/OpenCode Go/Kimi/智谱 + P1 可选 + P2 订阅）+ 用户自定义 ——
@@ -802,15 +803,17 @@ export default function ProviderPage() {
   if (view === 'list') {
     return (
       <div className="pvp">
-        <div className="pvp-head">
-          <div>
-            <div className="settings-sec-title" style={{ marginBottom: 2 }}>{t('settings.provider')}</div>
-            <p className="set-desc" style={{ margin: 0 }}>{t('provider.windowHint')}</p>
-          </div>
-          <button className="btn primary pvp-add-btn" onClick={() => { setView('add'); setAdding(false); setAddEntry(null); setErr(null) }}>
-            <Plus size={14} /> {t('provider.page.add')}
-          </button>
-        </div>
+        <SetHead
+          className="pvp-head"
+          title={t('settings.provider')}
+          titleClassName="settings-sec-title"
+          subtitle={t('provider.windowHint')}
+          actions={
+            <button className="btn primary pvp-add-btn" onClick={() => { setView('add'); setAdding(false); setAddEntry(null); setErr(null) }}>
+              <Plus size={14} /> {t('provider.page.add')}
+            </button>
+          }
+        />
         {err && <p className="nwf-err" role="alert">{err}</p>}
         <div className="pvp-sec">{t('provider.page.added').replace('{n}', String(rows.length))}</div>
         {rows.length === 0 && <div className="pvp-empty">{t('provider.page.emptyAdded')}</div>}

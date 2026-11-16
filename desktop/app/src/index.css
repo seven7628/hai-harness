@@ -536,31 +536,9 @@ body::before {
 .app-root.leaving .main {
   animation: appEnter 380ms var(--ease);
 }
-.seg {
-  display: inline-flex;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 2px;
-  gap: 2px;
-}
-.seg button {
-  border: none;
-  background: transparent;
-  color: var(--text-2);
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.seg button:hover {
-  color: var(--text);
-}
-.seg button.on {
-  background: var(--elevated);
-  color: var(--text);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
-}
+/* 分段控件 .seg 的**唯一实现**见文件末尾「页面级设计系统」第 14 节。
+   2026-11 收敛：这里原有的 .on 定义与 9364 行的 .cur 定义合并为一套
+   （选中态 = 朱砂实底白字；.on 保留为 .cur 的别名）。 */
 /* ============ 左栏 ============ */
 .left {
   flex: 0 0 auto;
@@ -9361,46 +9339,8 @@ body.is-electron .cron-head {
 .external-skills-feedback.error {
   color: var(--error);
 }
-.seg {
-  display: inline-flex;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.seg button {
-  padding: 5px 14px;
-  border: none;
-  background: transparent;
-  color: var(--text-2);
-  font-size: 12.5px;
-  cursor: pointer;
-  border-right: 1px solid var(--border);
-}
-.seg button:last-child {
-  border-right: none;
-}
-.seg button:hover {
-  background: var(--bg);
-  color: var(--text);
-}
-.seg button.cur {
-  background: var(--accent-solid); /* 白字底（设置里的主题/字号等分段选中态） */
-  color: #fff;
-}
-.seg button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-  color: var(--text-3);
-}
-.seg button:disabled:hover {
-  background: transparent;
-  color: var(--text-3);
-}
-.seg .seg-soon {
-  font-size: 11px;
-  margin-left: 4px;
-  opacity: 0.85;
-}
+/* 分段控件 .seg 的第二套历史定义已合并到文件末尾（同一节），
+   此处只留占位注释：两套重复定义曾导致选中态/边框/禁用态不一致。 */
 .sc-table {
   margin-top: 8px;
   border: 1px solid var(--border-strong);
@@ -13674,3 +13614,1810 @@ button.file-operation:hover { background: color-mix(in srgb, var(--surface) 65%,
 .okb-p-supply { min-width: 84px; }
 .okb-p-size { min-width: 56px; }
 .okb-p-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ============================================================================
+   页面级设计系统（2026-11 收敛轮：设置 / 定时任务 / 技能）
+   ----------------------------------------------------------------------------
+   这一节是「同一轮全面 Review」的**唯一新增来源**：页头、空态、弹窗、卡片化表格、
+   技能网格、设置页控件列都在这里定义一次，各页面复用。旧规则保留（不破坏测试与
+   历史 class），只在需要收敛的地方被这里以同样的选择器覆盖。
+   约束：只用既有 token（--surface/--border/--text/--accent/--warning/--bamboo/
+   --crimson/--focus-ring…），不引入新色板；圆角卡片 12、输入/按钮 8、pill 999。
+   ========================================================================== */
+
+/* —— 1. 管理页页头（定时任务列表/执行记录/详情 + Skills 共用）——
+   56px：返回（ghost）｜ 标题 15 serif + 副标题 11 ｜ 右侧计数 + 操作。
+   electron 交通灯左让位与左栏 brand 同距（88px）。 */
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  height: 56px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  -webkit-app-region: drag;
+}
+body.is-electron .page-head {
+  padding-left: 88px;
+}
+.page-head h1,
+.page-head .btn,
+.page-head .page-head-back,
+.page-head .page-head-right,
+.page-head .page-head-count,
+.page-head .seg {
+  -webkit-app-region: no-drag;
+}
+.page-head-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
+}
+.page-head-back:hover {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.page-head-back:active {
+  background: var(--surface-2);
+}
+.page-head-title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.page-head-title h1 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.25;
+  color: var(--text);
+  white-space: nowrap;
+}
+.page-head-title h1 svg {
+  color: var(--accent);
+  opacity: 0.9;
+}
+.page-head-sub {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(52vw, 460px);
+}
+.page-head-grow {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+.page-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.page-head-count {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* 右侧主操作/刷新统一高度：页头内的按钮不再各写 padding */
+.page-head .btn,
+.page-head .page-head-refresh {
+  height: 26px;
+  padding: 0 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.page-head .btn.primary {
+  padding: 0 13px;
+}
+
+/* —— 2. 空态卡（图标 + 标题 + 一句说明 + 一个动作）——
+   列表空 / 功能未开启 / 加载失败 / 市场为空共用；`.empty` 保留为兼容名。 */
+.page-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 44px 24px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.page-empty .pe-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  margin-bottom: 4px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+.page-empty .pe-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+.page-empty .pe-hint {
+  max-width: 460px;
+  color: var(--text-3);
+}
+.page-empty .pe-hint code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.page-empty .pe-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.page-empty.compact {
+  padding: 24px 18px;
+}
+/* 卡片里的空态不额外撑高度 */
+.cron-card > .page-empty,
+.cron-card > .empty {
+  padding: 40px 20px;
+}
+
+/* —— 3. 弹窗（与设置弹窗同一套遮罩/卡片语言）——
+   scrim + centered card，header/body/footer 三段，body 独立滚动。 */
+.page-modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 6, 4, 0.42);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  animation: fadeIn 140ms var(--ease);
+}
+.page-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(var(--pm-w, 680px), 92vw);
+  max-height: 82vh;
+  min-height: 0;
+  background: var(--elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 20px 70px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.page-modal-hd {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.page-modal-hd-main {
+  flex: 1;
+  min-width: 0;
+}
+.page-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.35;
+  min-width: 0;
+}
+.page-modal-title svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+.page-modal-sub {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.page-modal-x {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: -2px -2px 0 0;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.page-modal-x:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.page-modal-bd {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 16px 16px;
+}
+.page-modal-ft {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 11px 16px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+.page-modal-ft .btn {
+  height: 28px;
+  min-width: 64px;
+  padding: 0 14px;
+  justify-content: center;
+}
+.page-modal-ft .btn.primary {
+  min-width: 76px;
+}
+/* 弹窗表单：标签在上、控件满宽；行与行 12px，控高 30 */
+.page-modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+.page-modal-field:last-child {
+  margin-bottom: 0;
+}
+.page-modal-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+.page-modal-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 400;
+}
+.page-modal-field input,
+.page-modal-field textarea,
+.page-modal-field .sel,
+.page-modal-field .sel-btn {
+  width: 100%;
+}
+.page-modal-field input,
+.page-modal-field textarea {
+  box-sizing: border-box;
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: var(--font-ui);
+}
+.page-modal-field textarea {
+  min-height: 76px;
+  resize: vertical;
+  line-height: 1.55;
+}
+.page-modal-field input.mono,
+.page-modal-field textarea.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.page-modal-field input:focus-visible,
+.page-modal-field textarea:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+.page-modal-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+.page-modal-check input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent-solid);
+}
+
+/* —— 4. 表格卡片化（≤900px）——
+   不横向滚动：thead 隐藏，每行变成一张卡；字段名由 td[data-label] 提供。
+   状态 pill 一律 nowrap（窄窗里「执行中」不许竖排）。 */
+.cron-status {
+  white-space: nowrap;
+  min-width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 900px) {
+  .cron-page .sp-content {
+    align-items: stretch;
+    padding: 12px;
+  }
+  .cron-card {
+    max-width: none;
+    padding: 0;
+    background: transparent;
+    border: none;
+    overflow: visible;
+  }
+  .cron-card .cron-table,
+  .cron-card .cron-table tbody {
+    display: block;
+    width: 100%;
+  }
+  .cron-card .cron-table thead {
+    display: none;
+  }
+  .cron-card .cron-table tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .cron-card .cron-table tr {
+    display: block;
+    padding: 10px 12px 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .cron-card .cron-table td,
+  .cron-runs-page .cron-table td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: auto;
+    padding: 4px 0;
+    border: none;
+    white-space: normal;
+    min-width: 0;
+    text-align: right;
+  }
+  .cron-card .cron-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-3);
+    text-align: left;
+    white-space: nowrap;
+  }
+  .cron-card .cron-table td > * {
+    min-width: 0;
+  }
+  .cron-card .cron-table td.cell-title {
+    display: block;
+    padding: 0 0 8px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .cron-card .cron-table td.cell-title::before {
+    display: none;
+  }
+  .cron-card .cron-table .cron-prompt {
+    max-width: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .cron-card .cron-table td.cell-title .mono {
+    font-size: 10.5px;
+    color: var(--text-3);
+  }
+  .cron-card .cron-table td.cron-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 9px;
+    margin-top: 5px;
+    border-top: 1px solid var(--border);
+  }
+  .cron-card .cron-table td.cron-actions::before {
+    display: none;
+  }
+  .cron-card .cron-table td.cron-actions .btn {
+    margin: 0;
+    height: 26px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+  .cron-card .cron-table td.cell-summary {
+    display: block;
+    text-align: left;
+    color: var(--text-2);
+    overflow-wrap: anywhere;
+  }
+  .cron-card .cron-table td.cell-summary::before {
+    display: block;
+    margin-bottom: 2px;
+  }
+  .cron-runs-jobinfo {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 10px;
+    padding: 11px 13px;
+  }
+  .cron-runs-job-prompt {
+    font-size: 13px;
+  }
+  .cron-runs-page .cron-table td.mono,
+  .cron-card .cron-table td.mono {
+    font-size: 11px;
+    color: var(--text-2);
+    overflow-wrap: anywhere;
+    text-align: right;
+  }
+  .cron-pager {
+    padding: 12px 0 4px;
+  }
+}
+
+/* —— 5. Skills：网格与卡片 ——
+   三档：≥1280 三列 / 821–1279 两列 / ≤820 一列。卡片等宽等高、footer 贴底，
+   描述最多 3 行（title 里有全文），不再让一张长描述卡把整行拉高。 */
+.sp-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 18px 22px;
+  align-content: start;
+}
+@media (max-width: 1279px) {
+  .sp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .sp-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 146px;
+  padding: 13px 14px 12px;
+  border-radius: 12px;
+  background: var(--surface);
+}
+.skill-card .sc-h {
+  flex: 0 0 auto;
+  gap: 7px;
+  margin-bottom: 7px;
+  min-width: 0;
+}
+.skill-card .sc-nm {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.skill-card .sc-remote,
+.skill-card .sc-state {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.skill-card .sc-remote {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.skill-card .sc-desc {
+  flex: 0 0 auto;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.skill-card .sc-cap-reason {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+.skill-card .sc-src {
+  flex: 0 0 auto;
+  margin-top: 9px;
+  padding-top: 8px;
+  gap: 6px;
+  min-width: 0;
+}
+.skill-card .sc-src .mono {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+}
+.skill-card .sc-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding-top: 9px;
+  margin-bottom: 0;
+  font-size: 10.5px;
+  color: var(--text-3);
+  min-width: 0;
+}
+.skill-card .sc-meta .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.skill-card .sc-meta svg {
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+/* 卡片内文字行都允许断行，不撑破卡片 */
+.skill-card .sc-h,
+.skill-card .sc-desc,
+.skill-card .sc-cap-reason {
+  min-width: 0;
+}
+
+/* —— 6. 技能市场：安装卡（字段化）+ 已保存市场 + 浏览结果 —— */
+.sp-market-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 18px 24px;
+  max-width: 1080px;
+}
+.mk-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px 13px;
+  min-width: 0;
+}
+.mk-card-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mk-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+.mk-card-sub {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.mk-card-desc {
+  margin: 3px 0 12px;
+  max-width: 560px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.mk-field {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+.mk-field-label {
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.mk-field .sp-remote-url,
+.mk-field .seg {
+  width: 100%;
+  min-width: 0;
+}
+.mk-field .seg {
+  justify-self: start;
+  width: auto;
+}
+.mk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+}
+.mk-actions .btn {
+  height: 28px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+}
+.mk-actions .btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-3);
+}
+.mk-actions .btn.ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.mk-actions .mk-actions-grow {
+  flex: 1 1 auto;
+}
+.mk-status {
+  font-size: 11.5px;
+  color: var(--text-3);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mk-status.ok {
+  color: var(--success);
+}
+.mk-status.error {
+  color: var(--error);
+}
+.mk-sec-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  min-width: 0;
+}
+.mk-sec-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 0.02em;
+}
+.mk-sec-title + .mk-sec-count {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.mk-sec-hd .grow {
+  flex: 1;
+}
+/* 已保存市场 / 浏览结果行：与技能卡同一套发丝线 */
+.sp-market-row {
+  background: var(--bg);
+  border-radius: 8px;
+  min-width: 0;
+}
+.sp-market-row.mk {
+  background: var(--bg);
+}
+.sp-market-nm {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sp-market-desc {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 720px) {
+  .sp-market-view {
+    padding: 12px;
+    gap: 12px;
+  }
+  .mk-field {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
+  }
+  .mk-field .sp-remote-url,
+  .mk-field .seg {
+    width: 100%;
+  }
+  .sp-market-row {
+    flex-wrap: wrap;
+  }
+  .sp-market-desc {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+}
+
+/* —— 7. Skills 页壳：窄窗把左栏 tab 折成顶部横向 tab —— */
+@media (max-width: 760px) {
+  .skills-page .sp-body {
+    flex-direction: column;
+  }
+  .skills-page .sp-side {
+    flex: 0 0 auto;
+    flex-direction: row;
+    width: auto;
+    gap: 6px;
+    padding: 8px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .skills-page .sp-side button {
+    padding: 6px 12px;
+    white-space: nowrap;
+  }
+}
+
+/* —— 8. 技能详情弹窗：复用 .page-modal 骨架，只保留 body/资源区的差异 —— */
+.skill-detail {
+  width: min(680px, 92vw);
+  max-height: 82vh;
+  padding: 0;
+  gap: 0;
+  background: var(--elevated);
+  border-radius: 12px;
+}
+.skill-detail .sd-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.skill-detail .sd-h .sc-nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.skill-detail .sd-body {
+  margin: 0;
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.skill-detail .sd-res {
+  max-height: 132px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.skill-detail .sd-res .mono {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+/* —— 9. 设置弹窗：导航独立滚动 + 层级 + 控件列 ——
+   1024×720 实测：导航内容 744px > 卡片 600px，旧规则 overflow 可见 → 最后三项不可达。
+   这里让导航自己滚动（min-height:0 才能在 flex 里真正滚），并留底部呼吸位。 */
+.settings-nav {
+  flex: 0 0 168px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 8px 16px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.settings-nav::-webkit-scrollbar {
+  width: 8px;
+}
+.settings-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+.settings-nav::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.settings-nav::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+  background-clip: padding-box;
+}
+.settings-title-row {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  margin: -12px -8px 4px;
+  padding: 12px 12px 8px;
+  background: linear-gradient(var(--surface) 76%, transparent);
+}
+.settings-nav-group {
+  margin-bottom: 10px;
+}
+.settings-nav-group:last-child {
+  margin-bottom: 0;
+}
+.settings-nav-sec {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--text-2);
+  padding: 9px 10px 4px;
+}
+.settings-nav-item {
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
+}
+.settings-body {
+  padding: 18px 20px 26px;
+  min-width: 0;
+}
+.settings-sec-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  margin: 0;
+  line-height: 1.35;
+}
+/* 设置页统一页头：标题 14/600 + 一行 11.5 说明 + 右侧动作（主操作实底、其余 ghost） */
+.set-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 0 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.set-head-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.set-head-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+.set-head-title svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+.set-head-sub {
+  margin-top: 2px;
+  max-width: 560px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+.set-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.set-head-actions .btn {
+  height: 28px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.set-head-actions .btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+}
+.set-head-actions .btn.ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+/* 区块：与标题之间 24，标题到行 12；行与行用发丝线分隔，末行不留线 */
+.set-block {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.set-block:first-of-type {
+  margin-top: 14px;
+  padding-top: 0;
+  border-top: none;
+}
+.set-block-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.set-block-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+.set-block-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.set-block-desc {
+  max-width: 560px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.set-row {
+  align-items: flex-start;
+  gap: 18px;
+  padding: 11px 0;
+}
+.set-block .set-row:first-of-type,
+.settings-sec-title + .set-row {
+  padding-top: 9px;
+}
+.set-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.set-row > div:first-child {
+  flex: 1 1 auto;
+}
+.set-label {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.set-desc {
+  max-width: 420px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  margin-top: 2px;
+}
+/* 控件列：数字 88 / 滑轨 160 / 单位 24 / 只读值 120；行在窄窗不挤压 */
+.set-row > .set-inline {
+  gap: 8px;
+}
+.set-inline > .text-input {
+  width: 88px;
+  flex: 0 0 auto;
+  height: 30px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.set-inline > .range-input {
+  width: 160px;
+  flex: 0 0 auto;
+}
+.set-inline > .set-unit {
+  min-width: 24px;
+  width: 24px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.set-row > .text-input[type='number'] {
+  width: 88px;
+  flex: 0 0 auto;
+  height: 30px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.set-value {
+  display: inline-flex;
+  align-items: center;
+  width: 120px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 焦点可见：设置页所有可交互件（不只靠颜色变化） */
+.seg button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+  position: relative;
+  z-index: 1;
+}
+.settings-close:focus-visible,
+.settings-nav-item:focus-visible,
+.switch:focus-visible,
+.bg-sw:focus-visible,
+.bg-custom:focus-visible,
+.ct-card:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.settings-body input:focus-visible,
+.settings-body textarea:focus-visible,
+.settings-body .sel-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+.settings-body .range-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+/* 窄窗：整张设置卡收窄、行改成上下两段，控件不挤压 */
+@media (max-width: 900px) {
+  .settings-card {
+    width: 96vw;
+    height: min(88vh, 760px);
+  }
+  .settings-nav {
+    flex-basis: 142px;
+  }
+  .settings-body {
+    padding: 16px 16px 22px;
+  }
+  .set-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .set-row > .seg,
+  .set-row > .bg-picker,
+  .set-row > .set-inline {
+    align-self: flex-start;
+  }
+  .set-desc {
+    max-width: none;
+  }
+}
+
+/* —— 10. 外观：卡片/色板在 1024 不横向溢出 —— */
+.ct-grid {
+  grid-template-columns: repeat(auto-fill, minmax(214px, 1fr));
+}
+.ct-card {
+  min-width: 0;
+  border-radius: 10px;
+}
+.ct-card-hd {
+  min-width: 0;
+}
+.ct-card-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ct-card-code,
+.ct-card-code .shiki {
+  max-width: 100%;
+}
+.set-row > .bg-picker {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
+  max-width: 100%;
+}
+.bg-custom {
+  max-width: 100%;
+  min-width: 0;
+}
+.bg-custom .mono {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* —— 11. 用量页：7 张 KPI 不再 6+1（4+3 两行；窄窗 3/2）—— */
+.us-cards {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.us-card-v {
+  font-size: clamp(13px, 1.35vw, 17px);
+}
+.us-card-l {
+  font-size: clamp(10.5px, 0.9vw, 11.5px);
+}
+@media (max-width: 860px) {
+  .us-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .us-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.us-hd {
+  align-items: center;
+}
+
+/* —— 12. IM 集成：内外卡片拉开层级；按钮补上设计语言 —— */
+.btn.pri {
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
+  color: #fff;
+}
+.btn.pri:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+.btn.gho {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+}
+.btn.gho:hover {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--text);
+}
+.btn.dan {
+  color: var(--crimson);
+  border-color: var(--border);
+  background: transparent;
+}
+.btn.dan:hover {
+  color: var(--crimson);
+  border-color: color-mix(in srgb, var(--crimson) 45%, var(--border));
+  background: color-mix(in srgb, var(--crimson) 10%, transparent);
+}
+.im-editor {
+  gap: 16px;
+}
+.im-master,
+.im-sec {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 13px 15px;
+  background: var(--surface);
+  min-width: 0;
+}
+.im-master-title,
+.im-sec-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.im-master-desc,
+.im-sec-desc {
+  max-width: 520px;
+  line-height: 1.55;
+}
+.im-gw-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0;
+}
+.im-gw-card .im-gw {
+  padding: 9px 12px;
+}
+.im-gw-sub {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px 12px;
+}
+.im-gw-sub + .im-gw-sub {
+  border-top: 1px solid var(--border);
+}
+.im-route {
+  border-color: var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 6px 9px;
+}
+.im-route:last-child {
+  margin-bottom: 0;
+}
+.im-gw-edit,
+.im-gw-del {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+.im-gw-sub-add {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+.im-inp {
+  height: 30px;
+  border-radius: 8px;
+}
+.im-help {
+  max-width: 520px;
+}
+
+/* —— 13. 面板/插件/手机连接/项目记忆：统一空态与区块节奏 —— */
+.settings-body .sp-empty,
+.settings-body .page-empty {
+  padding: 28px 16px;
+}
+.settings-body .set-placeholder {
+  padding: 18px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: center;
+}
+.mem-table {
+  border-radius: 10px;
+  overflow: hidden;
+}
+/* Dream 子区块：控件列对齐（Provider/模型同一宽，时间选择器成组靠右） */
+.dream-row .sel,
+.dream-row .sel-btn {
+  min-width: 0;
+}
+
+/* —— 14. 分段控件（全仓唯一实现）——
+   设置页 / 用量切换 / 页面 tab / 左栏 persona 共用。选中态 = 朱砂实底白字
+   （原 9364 的 .cur 视觉，设置页保持一致）；.on 是历史别名，旧调用方不必改。 */
+.seg {
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.seg button {
+  padding: 5px 14px;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+.seg button:last-child {
+  border-right: none;
+}
+.seg button:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+.seg button.on,
+.seg button.cur {
+  background: var(--accent-solid);
+  color: #fff;
+}
+.seg button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  color: var(--text-3);
+}
+.seg button:disabled:hover {
+  background: transparent;
+  color: var(--text-3);
+}
+.seg .seg-soon {
+  font-size: 11px;
+  margin-left: 4px;
+  opacity: 0.85;
+}
+.persona-row .seg {
+  display: flex;
+  width: 100%;
+}
+.persona-row .seg button {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* —— 15. 按钮补充态：ghost（次级/弱动作）与页头里的次级按钮 —— */
+.btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+}
+.btn.ghost:hover {
+  background: var(--surface-2);
+  border-color: transparent;
+  color: var(--text);
+}
+.btn.ghost:active {
+  background: var(--border);
+}
+/* 定时任务：时间列/数字列（等宽数字，窄窗也不折行） */
+.cron-table td.cell-time {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.cron-table td.cell-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+/* 功能未开启提示条：warning 弱底 + 左侧色标（只用 --warning，修掉无效的 --warn） */
+.cron-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  flex: 0 0 auto;
+  margin: 14px 18px 0;
+  padding: 9px 12px 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-left: 3px solid var(--warning);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.cron-warn-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+.cron-warn-link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.cron-warn-link:hover {
+  color: var(--accent-strong);
+}
+@media (max-width: 900px) {
+  .cron-warn {
+    margin: 10px 12px 0;
+  }
+}
+/* 编辑弹窗：与设置弹窗同语言（弹窗体表单样式在 .page-modal-field） */
+.cron-edit {
+  padding: 2px 0 0;
+  gap: 0;
+}
+.cron-edit .page-modal-field {
+  margin-bottom: 14px;
+}
+.cron-edit-modal .page-modal-bd {
+  padding-top: 14px;
+}
+/* 执行历史信息条：内部 id 排在最后、弱色小字（不再占副标题） */
+.cron-runs-job-id {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-3);
+  opacity: .8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+/* 卡片化后：单元格里的「值 + 次要行」作为一个整体靠右（避免 flex 把匿名文本块居中） */
+@media (max-width: 900px) {
+  .cron-card .cron-table .cell-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+    min-width: 0;
+    text-align: right;
+  }
+  .cron-card .cron-table .cell-stack > span:first-child {
+    overflow-wrap: anywhere;
+  }
+}
+/* 返回图标是「›」：作为“返回”语义时镜像成「‹」（LTR 下向左才是返回） */
+.page-head-back svg {
+  transform: scaleX(-1);
+}
+/* 表格态：调度「值 + 类型」分两行（卡片态在媒体查询里覆盖成 flex 右对齐） */
+.cron-table .cell-stack {
+  display: block;
+}
+.cron-table .cell-stack > span:last-child {
+  margin-top: 1px;
+}
+@media (max-width: 900px) {
+  .cron-card .cron-table td {
+    padding: 3px 0;
+  }
+  .cron-card .cron-table td.cron-actions {
+    padding-top: 8px;
+    margin-top: 4px;
+  }
+  .cron-card .cron-table td.cell-title {
+    padding-bottom: 7px;
+    margin-bottom: 3px;
+  }
+}
+/* 技能详情：资源缺失时的说明行（不留白、不误导） */
+.skill-detail .sd-res-empty {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.skill-detail .page-modal-bd {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.skill-detail .sd-body {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: 46vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+/* 技能网格第二档：800 仍两列（640 才一列）；单列时不再为等高留大空白 */
+@media (max-width: 700px) {
+  .sp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* —— 16. 设置页：标题层级与说明层级 ——
+   .set-head 是页头；其余 .settings-sec-title 一律降为**区块标题**（12.5/600 + 发丝线），
+   避免「每个 tab 标题大小/间距各写一套」。SetHead 内部仍复用旧 class 的（provider/usage/
+   surfaces/mcp/hooks）由下面的 .set-head-title 复位规则拉回页头口径。 */
+.set-head-title .settings-sec-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  margin: 0;
+  padding: 0;
+  border: none;
+  color: var(--text);
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.settings-body .settings-sec-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text);
+  margin: 20px 0 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.settings-body .settings-sec-title:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.settings-body .settings-sec-title .btn {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+/* 说明文字：技术细节弱色小字（2–3 行可读宽度），与人话正文分开 */
+.set-note-tech {
+  max-width: 560px;
+  margin: 6px 0 14px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+.set-note-warn {
+  max-width: 520px;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--warning);
+}
+/* 手机连接空态里的「为什么 / 怎么开 / 能做什么」 */
+.page-empty .pe-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  max-width: 460px;
+}
+.page-empty .pe-list li {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.page-empty .pe-list b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+/* provider 页头沿用旧 class 时不要叠加两套 padding */
+.set-head.pvp-head {
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+}
+/* 面板/插件卡片：与设置页其它卡片同一圆角与发丝线 */
+.settings-body .mcp-server {
+  border-radius: 10px;
+}
+.settings-body .hook-note {
+  border-radius: 8px;
+}
+/* 项目记忆 / Dream：控件列对齐（选择器宽度一致，时间成组） */
+.dream-grid .sel,
+.dream-grid .sel-btn {
+  min-width: 120px;
+}
+/* 设置页控件列：下拉选择器与数字输入同一宽度体系（Provider/模型 220、时间 78 成组） */
+.set-row > .sel.set-select {
+  width: 220px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+.set-row > .set-inline .sel.set-select.time {
+  width: 78px;
+  flex: 0 0 auto;
+}
+.set-row > .set-inline .set-unit {
+  text-align: center;
+}
+.set-note-danger {
+  max-width: 520px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--danger);
+}
+/* IM 路由行：群 → 目标在窄窗换行，不吃成「w…」 */
+.im-route {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.im-route-chat {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.im-route-ws {
+  flex: 1 1 180px;
+  min-width: 120px;
+}
+.im-route .btn {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+/* 技能网格：行高按内容（max-content），不允许被容器高度压缩 ——
+   否则 min-height:0 的卡片会被压扁，描述第 3 行与不可用原因整行消失（640 实测）。
+   内容超出时让 .sp-grid 自己滚动，而不是压缩卡片。 */
+.sp-grid {
+  grid-auto-rows: max-content;
+}
+
+/* ============================================================================
+   用户追加验收（技能卡统一尺寸 / 状态徽章不换行 / 640 完整性）
+   ========================================================================== */
+
+/* —— 技能卡：**所有卡片同一尺寸**（不只同一行等高）——
+   固定轨道 184（头 27 + 描述 3 行 56 + 原因 2 行 38 + footer 31 + 上下 padding 25），
+   列数走显式断点：1440→3、1024/800→2、≤700→1。
+   不用 auto-fill 的 280 下限：1440 内容区 1080–1254 时会变成 4 列，卡片被压窄；
+   也不用 1fr：.sp-grid 是 flex:1 的滚动容器，1fr 会把行拉满视口、卡片变成竖条。 */
+.sp-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 184px;
+}
+@media (max-width: 1279px) {
+  .sp-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.skill-card {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
+}
+/* 卡片头：固定 20px 行高，名称/状态/开关同基线；没有开关的卡（当前模型不可用）也占同高 */
+.skill-card .sc-h {
+  height: 20px;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+}
+.skill-card .sc-nm {
+  line-height: 20px;
+}
+.skill-card .sc-state,
+.skill-card .sc-remote,
+.skill-card .switch {
+  align-self: center;
+}
+/* footer：贴底 + 固定 28px，来源图标、mono 文本、按钮同一基线 */
+.skill-card .sc-src {
+  margin-top: auto;
+  height: 28px;
+  padding-top: 0;
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+.skill-card .sc-src svg {
+  flex: 0 0 auto;
+  opacity: 0.75;
+}
+.skill-card .sc-src .btn {
+  height: 22px;
+  padding: 0 8px;
+}
+@media (max-width: 700px) {
+  .sp-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: 176px;
+  }
+  /* 单列更窄：原因只留 1 行，把 footer 让出来（不靠加高整行解决） */
+  .skill-card .sc-cap-reason {
+    -webkit-line-clamp: 1;
+  }
+}
+
+/* —— 定时任务：状态徽章 ——
+   不再换行（「已暂停」三字不许竖排），也不允许任何下划线/伪元素装饰；
+   min-width 72 + 居中，状态列给 96px 下限。 */
+.cron-status {
+  min-width: 72px;
+  padding: 2px 10px;
+  line-height: 1.5;
+  text-decoration: none !important;
+  border-bottom: none !important;
+}
+.cron-status::before,
+.cron-status::after {
+  content: none !important;
+}
+.cron-table .cell-status,
+.cron-table td.cell-status {
+  min-width: 96px;
+  white-space: nowrap;
+}
+.cron-table th {
+  white-space: nowrap;
+}
+/* 浅色主题下「已暂停」的琥珀 pill：文字取 ochre→正文的混合，提高对比度（不新增色板） */
+.cron-status.paused {
+  color: color-mix(in srgb, var(--warning) 62%, var(--text));
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 34%, transparent);
+}
+@media (max-width: 900px) {
+  .cron-card .cron-table td.cell-status {
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .cron-card .cron-table td.cron-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
+/* —— 技能市场：ghost 按钮与列表在 640 的收紧 —— */
+.mk-actions .btn.ghost {
+  color: var(--text-2);
+}
+.mk-actions .btn.ghost:hover {
+  color: var(--text);
+}
+@media (max-width: 720px) {
+  .sp-market-row {
+    padding: 8px 10px;
+    gap: 6px 8px;
+  }
+  .sp-market-row .grow {
+    display: none;
+  }
+  .sp-market-row .btn {
+    height: 26px;
+    margin-left: auto;
+  }
+  .sp-market-row .btn + .btn {
+    margin-left: 0;
+  }
+}
+/* 调度列的两行（值 / 循环·一次性）在表格态也必须分行：span 默认 inline，
+   只给容器 display:block 不够（会连成「3 分 · 9 点循环」）。 */
+.cron-table .cell-stack > span {
+  display: block;
+}
+@media (max-width: 900px) {
+  .cron-card .cron-table .cell-stack > span {
+    display: block;
+    text-align: right;
+  }
+}

@@ -16,6 +16,8 @@ import MobileTab from './MobileTab'
 import UsageStats from './UsageStats'
 import ProviderPage from './ProviderPage'
 import Sel, { type SelOption } from './Sel'
+import SetHead from './SetHead'
+import EmptyState from './EmptyState'
 import type { MeshSettings, AppSettings, HubConversationSettings } from '../transport/types'
 import type { DreamSettingsInput } from '../store/useAppStore'
 import { bridge } from '../lib/bridge'
@@ -205,7 +207,7 @@ function GeneralTab() {
   ]
   return (
     <>
-      <div className="settings-sec-title">{t('settings.general')}</div>
+      <SetHead title={t('settings.general')} />
       <div className="set-row">
         <div>
           <div className="set-label">{t('settings.lang')}</div>
@@ -895,7 +897,7 @@ function ShortcutsTab() {
   ]
   return (
     <>
-      <div className="settings-sec-title">{t('settings.shortcuts')}</div>
+      <SetHead title={t('settings.shortcuts')} />
       <div className="sc-table" role="table" aria-label={t('settings.shortcuts')}>
         <div className="sc-row sc-head" role="row">
           <span className="sc-key">{t('sc.key')}</span>
@@ -916,7 +918,17 @@ function ShortcutsTab() {
 }
 
 function IMTab() {
-  return <IMSettingsEditor />
+  const t = useT()
+  return (
+    <>
+      <SetHead
+        title={t('settings.im')}
+        // i18n: 建议 key settings.im.sub
+        subtitle="在 IM 里远程使用这个工作区：发任务、审批、接收结果。"
+      />
+      <IMSettingsEditor />
+    </>
+  )
 }
 
 // 插件 tab：内置能力包清单 + 状态（就绪/已启用/禁用/错误）。
@@ -1021,13 +1033,17 @@ function PluginTab() {
 
   return (
     <>
+      <SetHead
+        title={t('settings.plugin')}
+        subtitle={t('plugin.hint')}
+      />
       {/* 浏览器引擎（mcp | ego 互斥，2026-09） */}
       <div className="set-row" style={{ marginBottom: 6 }}>
         <div>
           <div className="set-label">{t('plugin.engine.title')}</div>
           <div className="set-desc">{t('plugin.engine.desc')}</div>
           {eng === 'ego' && (
-            <div className="set-desc" style={{ color: 'var(--warn, #d29922)' }}>{t('plugin.engine.notice')}</div>
+            <div className="set-note-warn">{t('plugin.engine.notice')}</div>
           )}
         </div>
         <div className="seg" role="radiogroup" aria-label={t('plugin.engine.title')}>
@@ -1088,9 +1104,20 @@ function PluginTab() {
         </div>
       ) : null}
       {engineMsg && <div className="mcp-s-err mono" style={{ marginBottom: 6 }}>{engineMsg}</div>}
-      <p className="set-desc" style={{ marginBottom: 10 }}>{t('plugin.hint')}</p>
+      <div className="set-block">
+        <div className="set-block-hd">
+          {/* i18n: 建议 key plugin.list.title */}
+          <span className="set-block-title">已安装</span>
+          <span className="mk-sec-count">{plugins.length}</span>
+        </div>
       {plugins.length === 0 ? (
-        <p className="set-placeholder">{t('plugin.empty')}</p>
+        <EmptyState
+          compact
+          icon={<AccessIcon size={16} />}
+          title={t('plugin.empty')}
+          // i18n: 建议 key plugin.emptyHint
+          hint="内置组件随应用同步，不需要单独下载；启用后可在这里配置。"
+        />
       ) : (
         plugins
           .filter((p) => !(p.id === 'browser' && eng === 'ego')) // 引擎=ego：Browser Use 工具不注册，卡片隐藏（引擎切换控件在上方，用户可切回 mcp 恢复）
@@ -1153,6 +1180,7 @@ function PluginTab() {
           )
         })
       )}
+      </div>
     </>
   )
 }
@@ -1268,8 +1296,13 @@ function MeshTab() {
 
   return (
     <>
-      <div className="settings-sec-title">{t('settings.mesh')}</div>
-      <p className="set-desc">{t('settings.mesh.desc')}</p>
+      <SetHead
+        title={t('settings.mesh')}
+        // i18n: 建议 key settings.mesh.sub —— 现有 settings.mesh.desc 把 Session Mesh /
+        // session_send / session_list 直接当正文；人话放页头，技术细节降到弱色小字。
+        subtitle="在多台设备之间续接同一个会话；默认关闭，开启后才可用。"
+      />
+      <p className="set-note-tech">{t('settings.mesh.desc')}</p>
 
       {/* —— 能力开关 —— */}
       <div className="set-row">
@@ -1474,8 +1507,7 @@ function MemoryTab() {
 
   return (
     <>
-      <div className="settings-sec-title">{t('settings.memory')}</div>
-      <p className="set-desc">{t('settings.memory.desc')}</p>
+      <SetHead title={t('settings.memory')} subtitle={t('settings.memory.desc')} />
 
       <div className="set-row">
         <div>
@@ -1491,7 +1523,7 @@ function MemoryTab() {
       <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.memory.nextSession')}</p>
 
       {ms?.env_override && (
-        <p className="set-desc" style={{ marginTop: 8, color: 'var(--warn, #d08700)' }}>
+        <p className="set-note-warn" style={{ marginTop: 8 }}>
           {t('settings.memory.envOverride')}
         </p>
       )}
@@ -1702,7 +1734,7 @@ function DreamSection() {
 
       {/* 记忆关着时巡检没有对象（bridge 侧也会拒绝触发）：提前说清楚，
           比让用户点了「立即运行」再收到一句错误更有用。 */}
-      {memoryOff && <p className="set-desc" style={{ marginTop: 8, color: 'var(--warn, #d08700)' }}>{t('settings.dream.memoryOff')}</p>}
+      {memoryOff && <p className="set-note-warn" style={{ marginTop: 8 }}>{t('settings.dream.memoryOff')}</p>}
 
       <div className="set-row">
         <div>
@@ -1731,7 +1763,7 @@ function DreamSection() {
           options={providerOptions}
           onChange={onProvider}
           disabled={disabled}
-          style={{ minWidth: 180 }}
+          className="set-select"
         />
       </div>
 
@@ -1752,7 +1784,7 @@ function DreamSection() {
           onChange={(m) => commit({ model: m })}
           disabled={disabled || !draft.provider || modelOptions.length === 0}
           placeholder="—"
-          style={{ minWidth: 220 }}
+          className="set-select"
         />
       </div>
 
@@ -1761,21 +1793,21 @@ function DreamSection() {
           <div className="set-label">{t('settings.dream.at')}</div>
           <div className="set-desc">{t('settings.dream.at.desc')}</div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div className="set-inline">
           <Sel
             value={hh}
             options={hourOptions}
             onChange={(h) => commit({ at: `${h}:${mm}` })}
             disabled={disabled}
-            style={{ width: 78 }}
+            className="set-select time"
           />
-          <span className="set-desc">:</span>
+          <span className="set-unit" aria-hidden>:</span>
           <Sel
             value={mm}
             options={minuteOptions}
             onChange={(m) => commit({ at: `${hh}:${m}` })}
             disabled={disabled}
-            style={{ width: 78 }}
+            className="set-select time"
           />
         </div>
       </div>
@@ -1791,7 +1823,7 @@ function DreamSection() {
       </div>
 
       {err && (
-        <p className="set-desc" style={{ marginTop: 8, color: 'var(--danger, #c0392b)' }}>{err}</p>
+        <p className="set-note-danger" style={{ marginTop: 8 }}>{err}</p>
       )}
       {saving && <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.dream.saving')}</p>}
 
@@ -1806,7 +1838,7 @@ function DreamSection() {
       </div>
 
       {runs.length === 0 ? (
-        <p className="set-desc" style={{ marginTop: 8 }}>{t('settings.dream.runs.empty')}</p>
+        <EmptyState compact title={t('settings.dream.runs.empty')} />
       ) : (
         <table className="mem-table" style={{ marginTop: 8 }}>
           <thead>

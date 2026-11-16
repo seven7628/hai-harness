@@ -15,6 +15,7 @@ import {
   smoothPath,
 } from '../lib/usageStats'
 import type { HeatCell, Heatmap as HeatmapData, HeatMode, Trend } from '../lib/usageStats'
+import SetHead from './SetHead'
 
 // 使用统计（设置弹窗「数据与统计 → 使用统计」）。
 // 版面对齐设计稿：指标卡（累计/峰值/最长聊天/连续天数/成本）→ Token 活动热力图（每日/每周/累计）
@@ -78,15 +79,16 @@ export default function UsageStats() {
 
   return (
     <div className="usage-stats">
-      <div className="us-hd">
-        <div>
-          <div className="settings-sec-title">{t('settings.usage')}</div>
-          <div className="set-desc">{t('usage.desc')}</div>
-        </div>
-        <button className="panel-refresh" onClick={() => fetchMetrics({ from: metricsWindowFrom() })} title={t('usage.refresh')}>
-          ⟳ {t('usage.refresh')}
-        </button>
-      </div>
+      <SetHead
+        title={t('settings.usage')}
+        subtitle={t('usage.desc')}
+        titleClassName="settings-sec-title"
+        actions={
+          <button className="btn" onClick={() => fetchMetrics({ from: metricsWindowFrom() })} title={t('usage.refresh')}>
+            {t('usage.refresh')}
+          </button>
+        }
+      />
 
       {empty ? (
         <div className="us-empty">{t('usage.empty')}</div>

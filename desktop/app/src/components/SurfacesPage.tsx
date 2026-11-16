@@ -32,6 +32,8 @@ import type { TabSpec } from '../store/useAppStore'
 import { entryItemsOf } from '../surfaces/plugin/entries'
 import { clearPluginData } from '../surfaces/plugin/storage'
 import { bridge } from '../lib/bridge'
+import SetHead from './SetHead'
+import EmptyState from './EmptyState'
 
 /**
  * 宿主允许插件调用的只读命令（**展示用副本**）。
@@ -254,10 +256,21 @@ export default function SurfacesPage() {
 
   return (
     <div className="surfaces-page">
-      <div className="settings-sec-title">{t('settings.surfaces')}</div>
-      <p className="set-desc" style={{ marginBottom: 8 }}>{t('surfaces.hint')}</p>
+      <SetHead
+        title={t('settings.surfaces')}
+        titleClassName="settings-sec-title"
+        // i18n: 建议 key surfaces.sub —— 原来整段技术说明（ESM/回收站/localStorage）当正文，
+        // 这里先给人话，技术细节降级到下面的弱色小字。
+        subtitle="面板插件为右栏提供自定义视图；安装即信任它的代码。"
+      />
+      <p className="set-note-tech">{t('surfaces.hint')}</p>
       {/* 功能开关：模型要装面板，必须先有 surface 工具；技能的能力面过滤（requires.tools）
           又要求这些工具在场。开关放这里，用户看到「没有插件」时就能发现入口。 */}
+      <div className="set-block">
+      <div className="set-block-hd">
+        {/* i18n: 建议 key surfaces.tools.section */}
+        <span className="set-block-title">宿主工具</span>
+      </div>
       <div className="mcp-server" data-surface-tools data-surface-tools-on={surfaceToolsOn ? '1' : '0'}>
         <div className="mcp-s-h">
           <span className={`mcp-state ${surfaceToolsOn ? 'connected' : ''}`} data-surface-tools-state>
@@ -275,21 +288,41 @@ export default function SurfacesPage() {
         <p className="set-desc" style={{ marginTop: 6 }}>{t('surfaces.tools.desc')}</p>
         {toolsError && <p className="mcp-s-err">{t('surfaces.tools.failed')}</p>}
       </div>
+      </div>
       {/* 白名单四条：这是「装插件 = 信任它」这句话的具体边界 —— 面板能读到的宿主数据
           只有这四条只读命令，写类一条都没开（表在 bridge，页面上只是照抄）。 */}
-      <div className="hook-note" style={{ marginBottom: 12 }}>
-        <span>{t('surfaces.whitelist')}</span>
-        {HOST_READONLY_COMMANDS.map((c) => (
-          <span className="mcp-type mono" key={c}>{c}</span>
-        ))}
+      <div className="set-block">
+        <div className="set-block-hd">
+          {/* i18n: 建议 key surfaces.whitelist.section */}
+          <span className="set-block-title">只读工具</span>
+          <span className="mk-sec-count">{HOST_READONLY_COMMANDS.length}</span>
+        </div>
+        <div className="hook-note" style={{ marginBottom: 12 }}>
+          <span>{t('surfaces.whitelist')}</span>
+          {HOST_READONLY_COMMANDS.map((c) => (
+            <span className="mcp-type mono" key={c}>{c}</span>
+          ))}
+        </div>
       </div>
 
       {errors[''] && <p className="mcp-s-err">{errors['']}</p>}
 
+      <div className="set-block">
+      <div className="set-block-hd">
+        {/* i18n: 建议 key surfaces.installed.section */}
+        <span className="set-block-title">已安装面板</span>
+        <span className="mk-sec-count">{items.length}</span>
+      </div>
       {loading && !state.index ? (
-        <p className="set-placeholder">{t('surfaces.loading')}</p>
+        <EmptyState compact icon={<span aria-hidden>▦</span>} title={t('surfaces.loading')} />
       ) : items.length === 0 ? (
-        <p className="set-placeholder">{t('surfaces.empty')}</p>
+        <EmptyState
+          compact
+          icon={<span aria-hidden>▦</span>}
+          title={t('surfaces.empty')}
+          // i18n: 建议 key surfaces.emptyHint
+          hint="把插件目录放进 ~/.go-code/surfaces/ 后刷新即可在这里看到。"
+        />
       ) : (
         items.map((item) => (
           <div className="mcp-server" key={item.id} data-surface-id={item.id} data-enabled={item.enabled ? '1' : '0'}>
@@ -383,8 +416,9 @@ export default function SurfacesPage() {
           </div>
         ))
       )}
+      </div>
 
-      <div className="settings-sec-title" style={{ marginTop: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div className="settings-sec-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         {t('surfaces.audit.title')}
         <button className="btn" disabled={auditLoading} onClick={() => void onRefreshAudit()}>
           {auditLoading ? t('surfaces.audit.refreshing') : t('surfaces.audit.refresh')}
@@ -392,7 +426,7 @@ export default function SurfacesPage() {
       </div>
       <p className="set-desc" style={{ marginBottom: 8 }}>{t('surfaces.audit.hint')}</p>
       {auditRows.length === 0 ? (
-        <p className="set-placeholder">{t('surfaces.audit.empty')}</p>
+        <EmptyState compact title={t('surfaces.audit.empty')} />
       ) : (
         <table className="mem-table">
           <thead>

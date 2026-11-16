@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CopyIcon, RefreshIcon, Smartphone, TrashIcon } from './icons'
+import SetHead from './SetHead'
+import EmptyState from './EmptyState'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
 
@@ -34,17 +36,45 @@ export default function MobileTab() {
     }
   }
 
-  if (!status) return <div className="set-desc">{t('mobile.loading')}</div>
-  if (!status.enabled) return <div className="set-desc">{t('mobile.disabled')}</div>
+  // 页头三态共用：加载中 / 未启用 / 已启用。未启用时给「为什么没开、怎么开、能做什么」，
+  // 而不是原来那一行内部变量名（HAI_MOBILE=off 对用户没有可操作性）。
+  const head = <SetHead // i18n: 建议 key mobile.pageTitle —— 现有 mobile.title 是「手机遥控器」，与导航「手机连接」不一致
+        title="手机连接" subtitle="用手机浏览器接着用同一个工作区" />
+
+  if (!status) {
+    return (
+      <>
+        {head}
+        <EmptyState compact icon={<Smartphone size={18} />} title={t('mobile.loading')} />
+      </>
+    )
+  }
+  if (!status.enabled) {
+    return (
+      <>
+        {head}
+        <EmptyState
+          icon={<Smartphone size={18} />}
+          title="手机端未启用"
+          hint={
+            <ul className="pe-list">
+              <li><b>为什么</b> · 桌面端这次启动时关闭了手机访问。</li>
+              <li><b>怎么开</b> · 用默认启动方式重新打开桌面端，再回到这里。</li>
+              <li><b>能做什么</b> · 在手机浏览器里继续同一个会话、看任务进度、收发消息。</li>
+            </ul>
+          }
+          actions={<button className="btn" onClick={() => fetchMobileStatus()}>{t('common.retry') ?? '重试'}</button>}
+        />
+      </>
+    )
+  }
 
   const urls = status.urls && status.urls.length ? status.urls : status.addr ? [`http://${status.addr}/m/`] : []
   const devices = status.devices ?? []
 
   return (
     <div>
-      <div className="settings-sec-title">
-        <Smartphone size={14} /> {t('mobile.title')}
-      </div>
+      {head}
       <p className="set-desc">{t('mobile.hint')}</p>
 
       <label className="set-row" style={{ gap: 8, cursor: 'pointer' }}>

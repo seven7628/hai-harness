@@ -3207,6 +3207,7 @@ export interface AppState {
   cronJobs: CronJob[] // 定时任务清单（cron_list；CronPage 数据源）
   cronRuns: CronRun[] // 运行账本（cron_runs；CronRunsPage「执行历史」）
   cronLoading: boolean // CronPage 拉取中
+  cronError?: string // CronPage 拉取失败（cron_list 失败时给出可重试的空态；成功后清空）
   cronEnabled: boolean // 定时任务功能开关（cron_list.enabled 镜像；未开启 → 页面提示先去设置开启）
   cronAutoClean: boolean // 自动清理开关镜像
   cronRunsJob: CronJob | null // 正在查看执行历史的任务（CronRunsPage 数据源；进入详情页时保留以便返回）
@@ -5590,6 +5591,11 @@ export function dispatchEvent(raw: AnyEvent): void {
       }
 
       if (!r.ok) {
+        // 定时任务清单失败：页面上要有一个可重试的错误空态，而不是「暂无任务」的假空
+        //（用户会以为任务被删了）。其余命令仍走下面的逐条处理。
+        if (t === 'cron_list') {
+          setState({ cronLoading: false, cronError: r.error || '读取定时任务失败' })
+        }
         // ask_batch 推送失败（session not found / 预算超限 / 队列满 / 全部被跳过）：
         // 回滚该会话暂存队列的 pushed 标记——消息回到「待发送」可编辑可重发，
         // 消灭「乐观标记已推送但服务端从未入队」的静默死局（问题十）。
@@ -6125,6 +6131,7 @@ export function dispatchEvent(raw: AnyEvent): void {
           cronEnabled: d.enabled !== false,
           cronAutoClean: d.auto_clean !== false,
           cronLoading: false,
+          cronError: undefined,
         })
         break
       }
@@ -10200,6 +10207,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   cronJobs: [],
   cronRuns: [],
   cronLoading: false,
+  cronError: undefined,
   cronEnabled: true,
   cronAutoClean: true,
   cronRunsJob: null,
@@ -12690,7 +12698,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   closeCronRuns: () => set({ cronRunsJob: null, cronDetailOpen: false, activeCronRun: undefined }),
   fetchCron: () => {
-    set({ cronLoading: true })
+    set({ cronLoading: true, cronError: undefined })
     send({ type: 'cron_list', payload: {} })
   },
   fetchCronRuns: (jobId) => {

@@ -1,10 +1,15 @@
 import { useState } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import { useT } from '../i18n'
+import { LayersIcon } from './icons'
+import EmptyState from './EmptyState'
 
-// 技能市场（2026-08-15）：只记录市场信息（已保存市场 URL）；技能列表每次实时拉取、不存储。
+// 技能市场：只记录市场信息（已保存市场 URL）；技能列表每次实时拉取、不存储。
 // 刷新/浏览时与本地已装对比标出三态：未安装 → [安装]；已安装·最新 → 「已是最新」；
 // 可更新（同源仓库 HEAD 落后本地记录）→ [更新]。安装/更新后自动重浏览当前市场（替代乐观标记）。
+//
+// 2026-11 收敛（只改组织与样式，安装逻辑与 handler 原样保留）：
+// 页头之下分三块 ——「从链接安装」卡（字段化）→「已保存的市场」（含空态）→「浏览结果」。
 export default function SkillMarket() {
   const t = useT()
   const browseMarket = useAppStore((s) => s.browseMarket)
@@ -85,13 +90,21 @@ export default function SkillMarket() {
 
   return (
     <div className="sp-market-view">
-      {/* 从 URL 安装 / 存为市场 */}
-      <div className="sp-remote">
-        <div className="sp-remote-t">{t('skill.remoteTitle')}</div>
-        <p className="sp-remote-hint">{t('skill.remoteHint')}</p>
-        {err && <p className="nwf-err" role="alert">{err}</p>}
-        <div className="sp-remote-row">
+      {/* 从链接安装 / 存为市场：字段化（链接 → 安装到 → 动作） */}
+      <section className="mk-card">
+        <div className="mk-card-hd">
+          {/* i18n: 建议 key skill.installFromLink */}
+          <span className="mk-card-title">从链接安装</span>
+        </div>
+        <p className="mk-card-desc">
+          {t('skill.remoteHint')}
+        </p>
+        {err && <p className="mk-status error" role="alert">{err}</p>}
+        <div className="mk-field">
+          {/* i18n: 建议 key skill.linkLabel */}
+          <label className="mk-field-label" htmlFor="skill-remote-url">链接</label>
           <input
+            id="skill-remote-url"
             className="sp-remote-url"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
@@ -104,6 +117,10 @@ export default function SkillMarket() {
               if (e.key === 'Enter' && !installing && !browsing) doInstall()
             }}
           />
+        </div>
+        <div className="mk-field">
+          {/* i18n: 建议 key skill.installTo */}
+          <span className="mk-field-label">安装到</span>
           <div className="seg sp-remote-seg" role="radiogroup" aria-label={t('skill.remoteScope')}>
             {(['global', 'workspace'] as const).map((sc) => (
               <button key={sc} className={scope === sc ? 'cur' : ''} aria-pressed={scope === sc} onClick={() => setScope(sc)}>
@@ -111,58 +128,74 @@ export default function SkillMarket() {
               </button>
             ))}
           </div>
-          <button className="btn" onClick={() => doBrowse(url)} disabled={browsing}>
-            {browsing ? t('skill.browsing') : t('skill.browseBtn')}
-          </button>
+        </div>
+        <div className="mk-actions">
           <button className="btn primary" onClick={doInstall} disabled={installing}>
             {installing ? t('skill.remoteInstalling') : t('skill.remoteInstall')}
           </button>
-          <button className="btn" onClick={doSaveMarket} disabled={installing}>
+          <button className="btn" onClick={() => doBrowse(url)} disabled={browsing}>
+            {browsing ? t('skill.browsing') : t('skill.browseBtn')}
+          </button>
+          <button className="btn ghost" onClick={doSaveMarket} disabled={installing}>
             {t('skill.saveMarket')}
           </button>
         </div>
-      </div>
+      </section>
 
-      {/* 已保存市场（免手填 + 按市场更新已装技能） */}
-      {markets.length > 0 && (
-        <div className="sp-market mgmt">
-          <div className="sp-market-t">{t('skill.marketMgmt')}</div>
+      {/* 已保存的市场（免手填 + 按市场更新已装技能） */}
+      <section className="mk-card">
+        <div className="mk-sec-hd">
+          {/* i18n: 建议 key skill.savedMarkets */}
+          <span className="mk-sec-title">已保存的市场</span>
+          <span className="mk-sec-count">{markets.length}</span>
+        </div>
+        {markets.length === 0 ? (
+          <EmptyState
+            compact
+            icon={<LayersIcon size={16} />}
+            title="还没有保存的市场"
+            // i18n: 建议 key skill.savedMarketsEmptyHint
+            hint="把常逛的市场链接保存下来，下次可以一键浏览、批量更新。"
+          />
+        ) : (
           <ul className="sp-market-list">
             {markets.map((mk) => (
               <li className="sp-market-row mk" key={mk.url}>
-                <span className="sp-market-nm">{mk.name}</span>
+                <span className="sp-market-nm" title={mk.name}>{mk.name}</span>
                 <span className="sp-market-desc" title={mk.url}>{mk.url}</span>
                 <span className="grow" />
                 <button className="btn" onClick={() => doBrowse(mk.url)}>{t('skill.browseBtn')}</button>
                 <button className="btn" onClick={() => doUpdateMarket(mk.url)} disabled={updatingMarket === mk.url}>
                   {updatingMarket === mk.url ? '…' : t('skill.updateMarket')}
                 </button>
-                <button className="btn" onClick={() => removeMarket(mk.url)}>{t('skill.unbindMarket')}</button>
+                <button className="btn ghost" onClick={() => removeMarket(mk.url)}>{t('skill.unbindMarket')}</button>
               </li>
             ))}
           </ul>
-        </div>
-      )}
+        )}
+      </section>
 
-      {/* 市场浏览结果（skill_browse 实时拉取，与本地对比：安装/最新/更新） */}
-      {marketSkills && (
-        <div className="sp-market">
-          <div className="sp-market-t sp-market-t-bar">
-            <span>{t('skill.browse')}</span>
+      {/* 浏览结果（skill_browse 实时拉取，与本地对比：安装/最新/更新） */}
+      {marketSkills !== undefined && (
+        <section className="mk-card">
+          <div className="mk-sec-hd">
+            {/* i18n: 建议 key skill.browseResults */}
+            <span className="mk-sec-title">浏览结果</span>
+            <span className="mk-sec-count">{marketSkills.length}</span>
             <span className="grow" />
-            <button className="btn" onClick={() => doBrowse(marketUrl)} disabled={browsing}>
+            <button className="btn ghost" onClick={() => doBrowse(marketUrl)} disabled={browsing}>
               {t('skill.refresh')}
             </button>
           </div>
           {marketSkills.length === 0 ? (
-            <p className="sp-market-empty">{t('skill.marketEmpty')}</p>
+            <EmptyState compact icon={<LayersIcon size={16} />} title={t('skill.marketEmpty')} hint="换个链接再浏览一次。" />
           ) : (
             <ul className="sp-market-list">
               {marketSkills.map((s) => {
                 const busy = acting === s.name
                 return (
                   <li className="sp-market-row" key={s.name}>
-                    <span className="sp-market-nm">{s.name}</span>
+                    <span className="sp-market-nm" title={s.name}>{s.name}</span>
                     <span className="sp-market-desc" title={s.description}>{s.description || t('skill.noDesc')}</span>
                     <span className="grow" />
                     {!s.installed ? (
@@ -181,7 +214,7 @@ export default function SkillMarket() {
               })}
             </ul>
           )}
-        </div>
+        </section>
       )}
     </div>
   )

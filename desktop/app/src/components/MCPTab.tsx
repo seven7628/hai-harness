@@ -3,6 +3,7 @@ import { useAppStore } from '../store/useAppStore'
 import type { MCPLayerInfo, MCPProjectInfo, MCPProjectLayer, MCPProjectServer } from '../store/useAppStore'
 import type { MCPServerCfg } from '../transport/types'
 import { useT } from '../i18n'
+import SetHead from './SetHead'
 import { FolderIcon, Gear } from './icons'
 import { DetailHead, SourceCard, Switch } from './SettingsGroups'
 import { realProjects } from '../lib/pluginProjects'
@@ -57,8 +58,7 @@ export function MCPTab() {
 
   return (
     <>
-      <div className="settings-sec-title">{t('settings.mcp')}</div>
-      <p className="set-desc" style={{ marginBottom: 6 }}>{t('mcp.hint')}</p>
+      <SetHead title={t('settings.mcp')} titleClassName="settings-sec-title" subtitle={t('mcp.hint')} />
 
       <div className="src-sec">{t('mcp.sec.global')}</div>
       <SourceCard
