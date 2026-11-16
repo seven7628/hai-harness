@@ -24,7 +24,7 @@ import (
 
 // dreamSettings 是设置页「Dream」那一段的内容。
 type dreamSettings struct {
-	Enabled bool   `json:"enabled"`
+	Enabled  bool   `json:"enabled"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	// At 每天的执行时刻，本地时间 "HH:MM"。
@@ -152,11 +152,11 @@ type dreamRepoResult struct {
 
 // dreamRun 一次 Dream 运行记录（设置页的"运行记录"读它）。
 type dreamRun struct {
-	StartedAt  time.Time         `json:"started_at"`
-	FinishedAt time.Time         `json:"finished_at"`
-	Provider   string            `json:"provider"`
-	Model      string            `json:"model"`
-	SessionID  string            `json:"session_id,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	Provider   string    `json:"provider"`
+	Model      string    `json:"model"`
+	SessionID  string    `json:"session_id,omitempty"`
 	// Summary 本轮巡检的收尾结论（模型最后一段正文的首行）。人工要看的是
 	// "处理了几个库、归档了几条"，而不是整段对话——正文留在派生会话的事件日志里。
 	Summary string            `json:"summary,omitempty"`

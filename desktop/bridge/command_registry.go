@@ -185,19 +185,21 @@ const (
 	// **纯读**（官方承诺"随时可编辑或删除"→ 宿主只列，不做校验也不提供写路径）。
 	// 无 payload；响应带 Listing（目录 / 索引是否存在 / 文件清单）。
 	CmdMemoryBrowse Command = "memory_browse"
+
 	// —— Dream（记忆生命周期巡检，见 dream_scheduler.go） ——
 	// 设置面三条命令一个闭环：读（设置 + 最近 20 条运行记录）、写（开关/provider/model/
 	// 时刻）、手动触发一次。巡检本身不走命令，走派生会话（与 cron 同链路）。
 	CmdDreamGet    Command = "dream_get"
 	CmdDreamSet    Command = "dream_set"
 	CmdDreamRunNow Command = "dream_run_now"
-	CmdSkillGet     Command = "skill_get"
-	CmdLoadSkill    Command = "load_skill"
-	CmdCommand      Command = "command"
-	CmdMCPList      Command = "mcp_list"
-	CmdMCPSet       Command = "mcp_set"
-	CmdMCPRefresh   Command = "mcp_refresh"
-	CmdMCPReload    Command = "mcp_reload" // 重读配置分层（用户 + 项目）→ 热应用 + 重建本工作区会话
+
+	CmdSkillGet   Command = "skill_get"
+	CmdLoadSkill  Command = "load_skill"
+	CmdCommand    Command = "command"
+	CmdMCPList    Command = "mcp_list"
+	CmdMCPSet     Command = "mcp_set"
+	CmdMCPRefresh Command = "mcp_refresh"
+	CmdMCPReload  Command = "mcp_reload" // 重读配置分层（用户 + 项目）→ 热应用 + 重建本工作区会话
 	// CmdMCPProjects 多项目项目层汇总（MCP 页「项目」区；payload.workspaces = 前端绑定的项目）。
 	// **不创建运行态**：只为查看而读盘，有运行态的项目才附连接状态/工具数。
 	CmdMCPProjects Command = "mcp_projects"

@@ -198,7 +198,7 @@ func (m *manager) dreamRunning() bool {
 // emitDreamChanged 通知设置页刷新（运行开始/结束各一次）。
 //
 // 前端只是"收到就重拉 dream_get"，不带状态：避免让事件成为第二份真相
-//（记录与设置始终以 dream.json / dream_runs.jsonl 为准）。
+// （记录与设置始终以 dream.json / dream_runs.jsonl 为准）。
 func (m *manager) emitDreamChanged() {
 	if m.out == nil {
 		return

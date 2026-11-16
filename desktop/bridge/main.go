@@ -1510,18 +1510,11 @@ type manager struct {
 	memPrefs        *memoryPrefStore // Project Memory 用户开关（设置面板；下一个会话生效）
 	out             *out
 	metrics         *FileMetricsStore // 全局指标（跨 workspace，~/.go-code/metrics.jsonl）
-	seq             int
-	embed           embedBridge // M2：嵌入式浏览器 CDP 转发器（跨工作区共享单个内嵌视图）
-	cron            *cron.Store // 全局定时任务库（跨会话；~/.go-code/cron.json + 运行账本）
+	seq             atomic.Int64      // 会话 id 序号。atomic：cronTick 与 dreamTick 两个 goroutine 都会调 genID
+	embed           embedBridge       // M2：嵌入式浏览器 CDP 转发器（跨工作区共享单个内嵌视图）
+	cron            *cron.Store       // 全局定时任务库（跨会话；~/.go-code/cron.json + 运行账本）
 	cronCtx         context.Context
 	cronCancel      context.CancelFunc
-	// dream 调度（记忆生命周期巡检，见 dream_scheduler.go）。ctx/cancel 与 cron 同形态；
-	// dreamMu/dreamBusy 把「ticker 到点」与「设置页立即运行」串行化——两条路径同时开跑
-	// 就是两份互不相见的证据，归档决策会互相打脸。
-	dreamCtx    context.Context
-	dreamCancel context.CancelFunc
-	dreamMu     sync.Mutex
-	dreamBusy   bool
 	oauthWaiter     oauthPromptWaiter // OAuth 登录 manual 输入等待表（oauth_prompt_answer 命令回填）
 	// imPlugin IM 集成插件 —— **连接面进程级共享 + 归属面（agent/group/workspace）隔离**。
 	//
@@ -1633,6 +1626,13 @@ type manager struct {
 	// surfaceToolsForced 仅测试注入：非 nil 时覆盖 settings.features.surfaceTools
 	//（生产恒 nil）。做成字段而不是全局变量，是为了让并发跑的用例互不污染。
 	surfaceToolsForced *bool
+	// Dream 调度（记忆生命周期巡检，见 dream_scheduler.go）：ctx/cancel 与 cron 同形态。
+	// dreamMu/dreamBusy 把「ticker 到点」与「设置页立即运行」串行化 —— 两轮同时跑，
+	// 就是两份互不相见的证据，归档决策会互相打脸。
+	dreamCtx    context.Context
+	dreamCancel context.CancelFunc
+	dreamMu     sync.Mutex
+	dreamBusy   bool
 }
 
 // previewService 取（或懒创建）转换服务单例（R08a）。
@@ -2577,8 +2577,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 }
 
 func (m *manager) genID() string {
-	m.seq++
-	return fmt.Sprintf("s-%d-%d", time.Now().UnixNano(), m.seq)
+	return fmt.Sprintf("s-%d-%d", time.Now().UnixNano(), m.seq.Add(1))
 }
 
 // 命令响应（回填 workspace，前端按活跃 workspace 门禁，防跨工作区响应串台）
