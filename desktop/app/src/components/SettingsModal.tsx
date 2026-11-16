@@ -20,13 +20,13 @@ import type { MeshSettings, AppSettings, HubConversationSettings } from '../tran
 import type { DreamSettingsInput } from '../store/useAppStore'
 import { bridge } from '../lib/bridge'
 
-// 左侧导航分组（对齐设计稿：基础项 → 模型 → Agent 能力 → 数据与统计）。
-// 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不分组，顶部基础项）。
+// 左侧导航分组（5 组 13 项：基础 / 模型 / 能力 / 连接 / 数据）。
+// 表驱动而非七段硬编码：新增模块只加一行，分组标题由 label 决定（null = 不显示分组标题）。
 type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'provider' | 'mcp' | 'hooks' | 'plugin' | 'surfaces' | 'im' | 'mesh' | 'mobile' | 'memory' | 'usage'
 const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab; label: string; icon: ReactElement }[] }[] = [
   {
     id: 'base',
-    label: null,
+    label: 'settings.nav.base',
     items: [
       { key: 'general', label: 'settings.general', icon: <Gear size={14} /> },
       { key: 'appearance', label: 'settings.appearance', icon: <PaletteIcon size={14} /> },
@@ -39,30 +39,39 @@ const NAV_GROUPS: { id: string; label: string | null; items: { key: SettingsTab;
     items: [{ key: 'provider', label: 'settings.provider', icon: <Sparkles size={14} /> }],
   },
   {
-    id: 'agent',
+    id: 'cap',
+    // 能力组沿用旧 key settings.nav.agent（值已改为「能力」）：key 不改，只改用户可见值。
     label: 'settings.nav.agent',
     items: [
       { key: 'mcp', label: 'settings.mcp', icon: <Globe size={14} /> },
       { key: 'hooks', label: 'settings.hooks', icon: <HookIcon size={14} /> },
       { key: 'plugin', label: 'settings.plugin', icon: <AccessIcon size={14} /> },
-      // 面板插件（PR-14b）：与上面那条 `plugin` 是**两套**插件系统（那套是 MCP/浏览器引擎/
-      // ego 之类的宿主插件，这套是 `~/.go-code/surfaces/` 里的 Surface 面板）。
+      // 面板（Surface）：~/.go-code/surfaces/ 里的自定义 UI；宿主插件是上面那条 `plugin`。
       { key: 'surfaces', label: 'settings.surfaces', icon: <LayersIcon size={14} /> },
+    ],
+  },
+  {
+    id: 'conn',
+    label: 'settings.nav.conn',
+    items: [
       { key: 'im', label: 'settings.im', icon: <SessionIcon size={14} /> },
       { key: 'mesh', label: 'settings.mesh', icon: <SendIcon size={14} /> },
       { key: 'mobile', label: 'settings.mobile', icon: <Smartphone size={14} /> },
-      { key: 'memory', label: 'settings.memory', icon: <PinIcon size={14} /> },
     ],
   },
   {
     id: 'data',
     label: 'settings.nav.data',
-    items: [{ key: 'usage', label: 'settings.usage', icon: <BarChart size={14} /> }],
+    items: [
+      { key: 'memory', label: 'settings.memory', icon: <PinIcon size={14} /> },
+      { key: 'usage', label: 'settings.usage', icon: <BarChart size={14} /> },
+    ],
   },
 ]
 
 // 设置弹窗：两栏（左窄导航 + 右宽内容），背景虚化（.modal-hint.blur backdrop-filter）。
-// 分区：通用设置（主题/语言）、快捷键（只读）、Provider（OpenAI/DeepSeek）、MCP（Server 管理）。
+// 分区见 NAV_GROUPS：通用、外观、快捷键、模型服务、外部工具、自动化、插件、面板、消息接入、
+// 会话协作、手机连接、项目记忆、用量。
 // 持久化：settings.json（~/.go-code；mock=localStorage）；API key 明文落 settings.json provider 段
 //（providerSave，2026-08-16 用户决策；key 输入框草稿保存后清空不回显，providerKeys 指示已设置）。
 export default function SettingsModal() {
