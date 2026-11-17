@@ -58,10 +58,11 @@ var builtinIgnoreDirs = map[string]bool{
 
 // ignoreRule 一条忽略规则（已按 gitignore 语义归一化）。
 type ignoreRule struct {
-	segs    []string // 模式按 / 切段；"**" 表示任意层
-	negate  bool     // ! 前缀 = 反选（重新包含）
-	dirOnly bool     // 尾 / = 只匹配目录
-	baseRel string   // 规则来源目录（相对工作区根）；"" = 根
+	segs     []string // 模式按 / 切段；"**" 表示任意层
+	negate   bool     // ! 前缀 = 反选（重新包含）
+	dirOnly  bool     // 尾 / = 只匹配目录
+	baseRel  string   // 规则来源目录（相对工作区根）；"" = 根
+	baseSegs []string // baseRel 的段（解析时算好：匹配时取路径后缀，零切分）
 }
 
 // scopedRule 带作用域的规则（baseRel 决定相对路径怎么算）。
@@ -127,6 +128,12 @@ func (m *ignoreMatcher) match(abs string, isDir bool) bool {
 	if len(rules) == 0 {
 		return false
 	}
+	// 路径只切一次（不是每条规则切一次）：一个 50 条规则的仓库 × 1800 个文件
+	// ⇒ 原来每文件切 50 次（9 万次分配）。
+	//
+	// 规则的 base 段数在解析时就存好了（baseSegs）：base 下的相对路径 =
+	// 根相对路径去掉前 len(baseSegs) 段 ⇒ 每条规则直接取后缀，零切分。
+	relSegs := strings.Split(rel, "/")
 	ignored := false
 	// 倒序遍历 → **最后命中的规则说了算**（gitignore 语义）⇒ 命中即停。
 	for i := len(rules) - 1; i >= 0; i-- {
@@ -134,11 +141,17 @@ func (m *ignoreMatcher) match(abs string, isDir bool) bool {
 		if r.dirOnly && !isDir {
 			continue
 		}
-		sub, ok := underBase(rel, r.baseRel)
-		if !ok {
+		if !underBase(rel, r.baseRel) {
 			continue
 		}
-		if matchIgnoreSegs(r.segs, strings.Split(sub, "/")) {
+		segs := relSegs
+		if n := len(r.baseSegs); n > 0 {
+			if n > len(relSegs) {
+				continue
+			}
+			segs = relSegs[n:]
+		}
+		if matchIgnoreSegs(r.segs, segs) {
 			return !r.negate
 		}
 	}
@@ -241,26 +254,28 @@ func parseIgnorePattern(line, baseRel string) (ignoreRule, bool) {
 	if !anchored && !strings.Contains(s, "/") {
 		s = "**/" + s
 	}
+	var baseSegs []string
+	if baseRel != "" {
+		baseSegs = strings.Split(baseRel, "/")
+	}
 	return ignoreRule{
-		segs:    strings.Split(s, "/"),
-		negate:  negate,
-		dirOnly: dirOnly,
-		baseRel: baseRel,
+		segs:     strings.Split(s, "/"),
+		negate:   negate,
+		dirOnly:  dirOnly,
+		baseRel:  baseRel,
+		baseSegs: baseSegs,
 	}, true
 }
 
-// underBase 判断 rel 是否在 baseRel 之下，是则返回相对 baseRel 的路径。
-func underBase(rel, baseRel string) (string, bool) {
+// underBase 判断 rel 是否在 baseRel 之下。
+func underBase(rel, baseRel string) bool {
 	if baseRel == "" {
-		return rel, true
+		return true
 	}
 	if rel == baseRel {
-		return "", true
+		return true
 	}
-	if strings.HasPrefix(rel, baseRel+"/") {
-		return rel[len(baseRel)+1:], true
-	}
-	return "", false
+	return strings.HasPrefix(rel, baseRel+"/")
 }
 
 // matchIgnoreSegs 模式段 × 路径段的 DP 匹配（无回溯 ⇒ 无指数退化）。
