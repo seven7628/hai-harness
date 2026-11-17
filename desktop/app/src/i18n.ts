@@ -2023,6 +2023,7 @@ const zh: Record<string, string> = {
   'json.fields': '{n} 个字段',
   // ===== 代码块复制（markdown）=====
   'md.copyAria': '复制代码',
+  'md.streamWindow': '⋯ 前面还有 {n} 行（流式结束后展开）',
   'md.copied': '已复制',
   'md.copy': '复制',
   'md.copyFail': '复制失败',
@@ -4379,6 +4380,7 @@ const en: Record<string, string> = {
   'json.fields': '{n} fields',
   // ===== Code block copy (markdown) =====
   'md.copyAria': 'Copy code',
+  'md.streamWindow': '⋯ {n} earlier lines (expanded when the stream ends)',
   'md.copied': 'Copied',
   'md.copy': 'Copy',
   'md.copyFail': 'Copy failed',

@@ -3355,6 +3355,17 @@ body.is-electron .left.collapsed .rail .rbtn {
   overflow: auto;
   max-height: 480px;
 }
+/* 流式窗口化时顶部那一行：说明「上面的还没铺出来」。
+   它是代码块内的**一行 UI**，不是代码 —— 用弱字色 + 不参与选中（Cmd+A 复制时不该混进去）。 */
+.cb-more {
+  display: block;
+  padding: 4px 0 6px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  user-select: none;
+  border-bottom: 1px dashed color-mix(in srgb, var(--border) 70%, transparent);
+  margin-bottom: 4px;
+}
 /* 对话代码块的行号 gutter：复用 highlight.ts 的 lineNumbersTransformer，与右侧文件栏
    「最终文件」同一套实现（counter 渲染 → 复制选区自动排除；data-line 是真行号）。
    与 .fp-code 的差别：这里**不 sticky** —— 文件栏是全量视图、行号要一直可见；

@@ -10,7 +10,7 @@
 // 下面的断言就是这三条的可执行规格。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { REVEAL_PER_FRAME, decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, snapToTurnStart, stepReveal, wheelConsumedByScroller, FOLLOW_THRESHOLD } from './scrollFollow'
+import { FOLLOW_THRESHOLD, REVEAL_PER_FRAME, decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, revealWindow, shouldHealFollow, shouldPinBottom, shouldResumeFollow, snapToTurnStart, stepReveal, wheelConsumedByScroller } from './scrollFollow'
 
 // 便捷构造：容器高 500、内容高 3000 → max = 2500
 const MAX = 2500
@@ -265,4 +265,43 @@ test('snapToTurnStart：铺开每一步都落在 turn 边界（多轮）', () =>
   s = snapToTurnStart(stepReveal(s), starts)
   assert.equal(s, 0)
   assert.equal(stepReveal(0), 0, '到底后单调停在 0')
+})
+
+// —— 停滞自愈（2026-11「长文本流式不再下滑」）——
+// 现场：一次 30px 的外部回拨 → follow 100%→40% → 最终落后 766px，且没有恢复通道。
+const healBase = {
+  follow: false, hardAway: false, top: 1000, max: 5000, clientHeight: 700,
+  stalledMs: 2000, grewPx: 1200, sinceGestureMs: 5000,
+}
+
+test('shouldHealFollow：几何停止 + 停滞 2s + 长高 1 屏以上 → 自愈', () => {
+  assert.equal(shouldHealFollow(healBase), true)
+})
+
+test('shouldHealFollow：用户手势停的（hardAway）永不自愈', () => {
+  assert.equal(shouldHealFollow({ ...healBase, hardAway: true }), false)
+})
+
+test('shouldHealFollow：还在跟随时不重复恢复', () => {
+  assert.equal(shouldHealFollow({ ...healBase, follow: true }), false)
+})
+
+test('shouldHealFollow：最近 1s 内有手势 → 不自愈（手在按着）', () => {
+  assert.equal(shouldHealFollow({ ...healBase, sinceGestureMs: 400 }), false)
+})
+
+test('shouldHealFollow：停滞不足 1.2s → 不自愈（先让 shouldResumeFollow 试）', () => {
+  assert.equal(shouldHealFollow({ ...healBase, stalledMs: 600 }), false)
+})
+
+test('shouldHealFollow：落后不到 0.8 屏 → 不自愈（贴底阈值内由 shouldResumeFollow 负责）', () => {
+  assert.equal(shouldHealFollow({ ...healBase, top: 4500 }), false, 'max-top=500 < 560（0.8×700）')
+})
+
+test('shouldHealFollow：刚好 1.1 屏（用户现场 766px / 700px）→ 自愈', () => {
+  assert.equal(shouldHealFollow({ ...healBase, top: 4234 }), true)
+})
+
+test('shouldHealFollow：期间内容没长（用户在读历史）→ 不自愈', () => {
+  assert.equal(shouldHealFollow({ ...healBase, grewPx: 200 }), false, '0.3 屏 = 210px，200 不够')
 })
