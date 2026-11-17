@@ -1,76 +1,154 @@
-import { useState } from 'react'
-import { useAppStore } from '../store/useAppStore'
+import { useCallback, useState } from 'react'
+import { mainRunActive, useAppStore } from '../store/useAppStore'
 import type { TodoItem } from '../store/useAppStore'
 import { useT } from '../i18n'
 import { pickTodoList } from '../lib/todoScope'
 import { useFocusTodos } from './useFocusTodos'
+import { useScopedApproval, useScopedQuestion } from './sessionScope'
+import { AgentRunningBar } from './AgentRunningBar'
+import { ChevronDown } from './icons'
 
-// 待办面板：挂在**对应会话框上方**的一条小结（默认折叠成一行进度条+计数，点开展开列表）。
+// 输入框上沿的那一条：**左槽 = 运行状态，右槽 = 待办**（用户 2026-11 拍板的口径）。
 //
-// 2026-11 用户拍板从右栏顶部搬到这里：右栏是「面板宿主」，待办是这一轮对话的计划，
-// 两者生命周期不同 —— 右栏收起/最大化/切标签时，计划不该跟着消失或换位置。
-// 位置在 CenterPanel 的 .narrative-wrap 之前，所以「你在看谁」= 这一块显示谁的清单。
+// 为什么把运行状态也搬进来：它原本是会话框正上方一条居中的文字，待办页签又要在同一侧，
+// 两行叠着就成了「一条居中的字 + 右下角一个页签」—— 视线要先读完中间再跳到右边。
+// 现在它们同占一行：谁在跑看左边，还要不要做事看右边，阅读顺序 = 从左到右一次。
 //
-// **作用域跟随「你在看谁」**（用户 2026-10 报障：子智能体里显示了主会话的 TODO；
-// 以及随后拍板的「子智能体等同于切换个 session」）：
-//   · 看主会话 → 会话待办（主 agent 的清单，数据源 = store.todos）
-//   · 看子会话 → 该子智能体**自己的**清单（它卡片上的 todos 快照 —— 子 agent 是独立
-//                上下文，因此是独立 TODO）
-// 两者**绝不互相回退**：子 agent 没有清单时整块不渲染，而不是显示主会话的清单。
-// 回退会让「这个子智能体没有计划」被显示成「它有一份和主会话一样的计划」，是更难发现的错。
+// 三种形态（同一个组件，靠 open 切换）：
+//   · 收起：右槽一枚**页签**（待办 + 一格一条的进度 + 3/8），贴着会话框上沿；
+//   · 展开：页签消失，换成**比会话框窄的卡片**（左右各缩 36px），下沿钻进会话框**背后**
+//     14px —— 连接处压一层黑色渐变，读起来是「卡片在输入框后面」，不是「又叠了一张卡」；
+//   · 全完成：收成一条 20px 薄唇（8/8 全部完成），点一下才展开。
 //
-// 作用域由面板**自己**解析（不靠调用方传参）：两个调用点各传一份，迟早漂移成
-// 「面板在这边显示 A、角标在那边数 B」。判定收在 useFocusTodos + lib/todoScope.pickTodoList。
+// 三条让位纪律（都是踩过的坑）：
+//   · 零待办 → 只留运行状态，不画空壳；
+//   · 审批 / 提问（阻塞 dock）在等 → 待办整块让位，那一格归审批（运行状态照旧在左槽）；
+//   · 会话框**不动**：不改它的圆角、边框、阴影，也不给它加负边距以外的任何东西 ——
+//     卡片是「钻到它背后」，不是「和它拼成一个整体」。
+
+/* 展开态是**每会话各自的**（用户 2026-11 报障：在 A 会话展开，切到 B 还是展开的）。
+   旧实现是一个全局 localStorage 布尔，切换会话时组件不卸载 → 状态跟着走。
+   现在按 `<sessionId>|<scope>` 存一张表：没开过的会话默认收起，回到 A 仍是你上次的样子。 */
+const OPEN_KEY = 'todo.dock.open.v2'
+type OpenMap = Record<string, boolean>
+const readOpenMap = (): OpenMap => {
+  try {
+    const raw = localStorage.getItem(OPEN_KEY)
+    const v = raw ? (JSON.parse(raw) as unknown) : null
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
+    const out: OpenMap = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) if (val === true) out[k] = true
+    return out
+  } catch {
+    return {}
+  }
+}
+const writeOpenMap = (m: OpenMap) => {
+  try {
+    localStorage.setItem(OPEN_KEY, JSON.stringify(m))
+  } catch { /* 隐私模式写不了：保持内存态即可 */ }
+}
+
 export default function TodoPanel() {
   const storeTodos = useAppStore((s) => (s.focusedAgent ? EMPTY : s.todos))
   const focus = useFocusTodos()
   // 取值规则单一来源（lib/todoScope.pickTodoList）：agent 作用域绝不回退会话清单
   const todos = pickTodoList(focus?.scope ?? 'main', storeTodos, focus?.todos)
-  const [collapsed, setCollapsed] = useState(true)
+  // 运行态只用来决定「要不要占左槽的高度」——真正那条状态条自己会判断跑没跑。
+  const running = useAppStore((s) => mainRunActive(s.activeSessionId ? s.views[s.activeSessionId] : undefined))
+  const approval = useScopedApproval()
+  const question = useScopedQuestion()
+  // 跟随**当前会话 + 作用域**：切会话不卸载组件，所以状态不能是组件级的裸布尔
+  const sessionId = useAppStore((s) => s.activeSessionId ?? '')
+  const openKey = `${sessionId}|${focus?.scope ?? 'main'}`
+  const [openMap, setOpenMap] = useState<OpenMap>(readOpenMap)
+  const open = openMap[openKey] === true
   const t = useT()
 
-  if (todos.length === 0) return null
+  const toggle = useCallback(() => {
+    setOpenMap((m) => {
+      const next: OpenMap = { ...m }
+      if (m[openKey]) delete next[openKey]
+      else next[openKey] = true
+      writeOpenMap(next)
+      return next
+    })
+  }, [openKey])
+
+  // 待办让位的两种情形（运行状态不受影响，它在左槽）
+  const yielding = Boolean(approval || question)
+  const showTodo = todos.length > 0 && !yielding
   const done = todos.filter((item) => item.done).length
-  const pct = Math.round((done / todos.length) * 100)
+  const total = todos.length
+  const allDone = total > 0 && done === total
 
   return (
-    <section className={`todo-panel ${collapsed ? 'collapsed' : ''}`} aria-label={t('todo.title')}>
-      <div
-        className="todo-hd"
-        onClick={() => setCollapsed((v) => !v)}
-        role="button"
-        aria-expanded={!collapsed}
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            setCollapsed((v) => !v)
-          }
-        }}
-      >
-        <span className="todo-title">{t('todo.title')}</span>
-        <span className="todo-count mono">{done}/{todos.length}</span>
-        <span className="todo-bar" aria-hidden="true">
-          <span className="todo-fill" style={{ width: `${pct}%` }} />
-        </span>
-        <span className="todo-chev" aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+    <div className="composer-strip">
+      <div className="composer-strip-row">
+        <AgentRunningBar inline />
+        <span className="sp" aria-hidden="true" />
+        {showTodo && !open && (
+          // 完成与否只改颜色、不改形态：同一枚页签，全绿 = 全做完（用户 2026-11：
+          // 「完成态也这样，只不过全绿」—— 不再为完成态换一套「薄唇」）
+          <button
+            type="button"
+            className={`todo-hd${allDone ? ' done' : ''}`}
+            aria-expanded={false}
+            aria-label={`${t('todo.title')} ${done}/${total}`}
+            title={t('todo.expand')}
+            onClick={toggle}
+          >
+            {running && <span className="todo-live" aria-hidden="true" />}
+            <span className="todo-title">{t('todo.title')}</span>
+            <Segments todos={todos} />
+            <span className="todo-count mono">{done}/{total}</span>
+            <ChevronDown size={13} className="todo-chev" />
+          </button>
+        )}
       </div>
-      {!collapsed && (
-        <ul className="todo-list">
-          {todos.map((todo) => {
-            const blocked = !todo.done && todo.blockedBy && todo.blockedBy.length > 0
-            return (
-              <li key={todo.id} className={`todo-item ${todo.done ? 'done' : ''}`}>
-                <span className="todo-st" aria-hidden="true">{todo.done ? '✓' : '○'}</span>
-                <span className="todo-id mono">{todo.id}</span>
-                <span className="todo-txt" title={todo.title}>{todo.title}</span>
-                {blocked && <span className="todo-blk mono">{t('todo.blockedBy').replace('{ids}', todo.blockedBy!.join(','))}</span>}
-              </li>
-            )
-          })}
-        </ul>
+      {showTodo && open && (
+        <section className="todo-card" aria-label={t('todo.title')}>
+          <button type="button" className="todo-hd open" aria-expanded onClick={toggle} title={t('todo.collapse')}>
+            <span className="todo-title">{t('todo.title')}</span>
+            <span className="todo-count mono">{done}/{total}</span>
+            <span className="sp" aria-hidden="true" />
+            {/* 折叠按钮钉在右上角（用户 2026-11）；进度条不在这里 —— 它要占**整宽**，见下面那条 */}
+            <ChevronDown size={13} className="todo-chev" />
+          </button>
+          {/* 整宽的进度：橘黄底 = 还没做的，绿色 = 已完成的占比（用户 2026-11 口径） */}
+          <span className="todo-progress" aria-hidden="true">
+            <i style={{ width: `${Math.round((done / total) * 100)}%` }} />
+          </span>
+          <ul className="todo-list">
+            {todos.map((todo) => {
+              const blocked = !todo.done && todo.blockedBy && todo.blockedBy.length > 0
+              const state = todo.done ? 'done' : blocked ? 'run' : ''
+              return (
+                <li key={todo.id} className={`todo-item ${state}`} title={todo.id}>
+                  <span className="todo-st" aria-hidden="true">{todo.done ? '✓' : blocked ? '▶' : '○'}</span>
+                  <span className="todo-txt">{todo.title}</span>
+                  {blocked && <span className="todo-blk mono">{t('todo.blockedBy').replace('{ids}', todo.blockedBy!.join(','))}</span>}
+                </li>
+              )
+            })}
+          </ul>
+        </section>
       )}
-    </section>
+    </div>
+  )
+}
+
+// 一格一条的进度：条数多时不换行、不加宽，格子自己收细 —— 「还差几条」靠长度看，不靠读数字。
+// 超过 12 条只画 11 格 + `+N`，再细就看不清了。
+function Segments({ todos }: { todos: TodoItem[] }) {
+  const max = 12
+  const shown = todos.slice(0, max)
+  const rest = todos.length - shown.length
+  return (
+    <span className="todo-segs" aria-hidden="true">
+      {shown.map((td) => <i key={td.id} className={td.done ? 'f' : ''} />)}
+      {rest > 0 && <span className="todo-seg-rest mono">+{rest}</span>}
+    </span>
   )
 }
 

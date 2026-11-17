@@ -3782,40 +3782,145 @@ body.is-electron .left.collapsed .rail .rbtn {
 }
 
 
-/* ============ TODO（会话框上方的一条：默认折叠一行，点开展开列表） ============
-   位置随 2026-11 用户拍板从「右栏顶部常驻」移到「对应会话框上方」：右栏是面板宿主，
-   待办是**这一轮对话**的计划，两者生命周期不同。宽度对齐 .narrative 的内容列
-   （narrative 800 - 左右各 24 = 752，这里取 776 留 12px 呼吸，窄屏按 calc 收）。 */
-.center > .todo-panel {
-  width: calc(100% - 48px);
-  max-width: 776px;
-  margin: 8px auto 0;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--surface) 62%, transparent);
-  box-shadow: 0 1px 2px color-mix(in srgb, #000 6%, transparent);
-}
-.todo-panel {
-  font-size: 12.5px;
-  overflow: hidden;
+/* ============ 输入框上沿那一条：左「运行状态」· 右「待办」（2026-11 第三轮定稿） ============
+   用户的口径（截图拍板）：
+     ① 运行状态放**左**、待办放**右**，同一行 —— 不再有居中的那一条运行文字；
+     ② 展开时页签消失，换成**比会话框窄的卡片**（左右各缩 36px），下沿钻进会话框**背后**；
+     ③ **会话框本身一个字节都不改**：圆角、边框、阴影、内距全保持原样。卡片是「钻到背后」，
+        靠的是它自己的负边距 + 黑色渐变，不是去改 composer 的形状。
+   为什么窄一圈 + 背后：两张等宽的卡叠在一起，读起来是「又加了一个面板」；窄一圈并让底边
+   消失在下沿的阴影里，才是「从输入框背后抽出来的一张纸」。 */
+.composer-strip {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   flex: 0 0 auto;
+  min-width: 0;
 }
-.todo-panel .todo-hd {
-  padding: 5px 12px; /* 折叠态更紧凑 */
+.composer-strip-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  /* 不写 min-height：没有运行、没有待办时这一行必须是**零高**，否则输入框上方永远空 26px
+     （页签自己有 26px、运行条自己有 20px，行高由内容决定）。 */
 }
-.todo-panel.collapsed .todo-hd {
-  padding: 4px 12px;
+.composer-strip-row .sp,
+.todo-hd .sp {
+  /* 两处都要：strip 那一行（运行状态 | 页签）和卡片头（标题 … 右上角一组）。
+     只写前者时卡片头里的 .sp 宽度为 0，整组挤在左边 —— 2026-11 真踩过。 */
+  flex: 1;
+  min-width: 0;
 }
+/* 运行状态进左槽：只改布局（左对齐 / 20px），语义与 DOM 与原来那条完全一致 */
+.agent-running-bar.inline {
+  justify-content: flex-start;
+  min-height: 20px;
+  padding: 0 2px;
+}
+/* —— 收起态：右槽页签（贴会话框上沿；top:1px 让它的底边压住那 1px 边框，不移动 composer） —— */
 .todo-hd {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 12px;
+  height: 26px;
+  margin-right: 12px;
+  padding: 0 11px;
+  position: relative;
+  top: 1px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 76%, transparent);
+  border-bottom: 0;
+  border-radius: 9px 9px 0 0;
+  background: color-mix(in srgb, var(--surface) 96%, var(--bg));
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
   cursor: pointer;
   user-select: none;
 }
 .todo-hd:hover {
-  background: var(--surface);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--border-strong) 100%, transparent);
+  background: color-mix(in srgb, var(--surface) 88%, var(--bg));
+}
+.todo-hd:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+/* —— 展开态：比会话框窄（左右各 36px），下沿钻进 composer 背后 14px —— */
+.todo-card {
+  position: relative;
+  z-index: 1; /* composer 是 z-index:30，卡片在它下面那一层 */
+  margin: 0 20px -14px;
+  /* 悬浮感靠的是**明度差**，不是阴影 —— 深色底上纯黑阴影本来就看不出（页底 #1a1614，
+     黑阴影压上去还是 #1a1614）。所以：
+       ① 卡面整张抬到 --elevated（#2e2622，比输入框的 #231d1a 亮一档），顶部再叠 6% 白
+          做「上面来光」，读起来是一张受光的纸；
+       ② 边框用 10% 白混，四边有一道很淡的亮边（深色 UI 里这条边才是「边缘」的证据）；
+       ③ 阴影只负责把**卡片周围**压暗一圈，让①的明度差更明显；
+       ④ 底边 ::after 渐深 —— 那 14px 钻进输入框背后，接缝处必须比卡面暗，否则读成「截断」。
+     composer 本身一个字节都没动（用户明确：不要改已存在的会话窗口）。 */
+  background: color-mix(in srgb, #fff 13%, var(--elevated));
+  border: 1px solid color-mix(in srgb, #fff 13%, var(--border-strong));
+  border-radius: 12px;
+  /* 黑阴影在这一层是看不见的（页底 #08080a，阴影压上去还是 #08080a），
+     真正把卡片「抬起来」的是**卡片周围那一圈微光**：白 7% 的大模糊从卡片边缘渗出，
+     在纯黑底上就是一层很淡的光晕 —— 这是深色 UI 里唯一能读出「有东西浮在上面」的信号。
+     黑阴影仍然保留一份（浅色主题下它才是主导）。 */
+  box-shadow:
+    0 -16px 46px -8px color-mix(in srgb, #fff 7%, transparent),
+    0 20px 54px color-mix(in srgb, #000 70%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #fff 14%, transparent);
+  overflow: hidden;
+}
+/* 连接处的深色：卡片底边渐深 —— 「被输入框挡住的那一段」的阴影 */
+.todo-card::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* 变高变深：最后两行是**钻进输入框背后**的那一段，接缝处必须明显比卡面暗，
+     否则读起来是「卡片被截断」而不是「卡片在输入框后面」。 */
+  height: 32px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, #000 66%, transparent));
+}
+.todo-card .todo-hd {
+  position: sticky; /* 列表再长也钉在卡片顶上（右上的进度线与按钮不随内容走） */
+  top: 0;
+  z-index: 1;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0 8px 0 12px;
+  border: 0;
+  border-radius: 0;
+  /* sticky 头必须不透光，否则列表滚上来会透在标题底下；色值 = 卡面最顶上那一档 */
+  background: color-mix(in srgb, #fff 13%, var(--elevated));
+}
+/* 右上角那一组：进度线 + 折叠按钮，宽度固定，不参与标题的伸缩 */
+.todo-card .todo-line {
+  order: 2;
+}
+.todo-card .todo-chev {
+  order: 3;
+}
+.todo-card .todo-chev {
+  margin-left: 8px;
+}
+/* 卡片的进度：**整宽**一条（占满卡片左右边），橘黄 = 还没做，绿色 = 已完成占比。
+   为什么不用一根几十 px 的短线段：短线段只够表达「走了一点」，读不出「完成了几成」；
+   整宽的条把比例摊在卡片的整个宽度上，扫一眼就有量级。 */
+.todo-progress {
+  display: block;
+  height: 3px;
+  background: color-mix(in srgb, var(--warning) 48%, transparent);
+}
+.todo-progress i {
+  display: block;
+  height: 100%;
+  background: var(--success);
+  transition: width 200ms var(--ease);
 }
 .todo-title {
   color: var(--text);
@@ -3826,48 +3931,87 @@ body.is-electron .left.collapsed .rail .rbtn {
   font-family: var(--font-mono);
   font-size: 11px;
 }
-.todo-bar {
-  /* 会话框上方是一条 776px 的卡：进度条不再 flex:1（否则拉成一根 600px 的线），
-     固定在右侧、最多 140px，剩下的空间用 margin-left:auto 吃掉。 */
-  flex: 0 1 140px;
-  min-width: 48px;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--bg);
-  overflow: hidden;
-  margin: 0 4px 0 auto;
+.todo-hd.done .todo-count {
+  color: var(--success);
 }
-.todo-fill {
-  display: block;
-  height: 100%;
+/* 运行中的呼吸点（页签里）：光点本身不解释任何新状态，只回答「现在还在跑吗」 */
+.todo-live {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: agent-running-pulse 2s var(--ease) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .todo-live { animation: none; }
+}
+/* 一格一条：条数多时格子收细（6px），不换行 —— 「还差几条」靠长度看 */
+.todo-segs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.todo-segs i {
+  width: 6px;
+  height: 8px;
+  border-radius: 1.5px;
+  background: color-mix(in srgb, var(--text) 22%, transparent);
+}
+.todo-segs i.f {
   background: var(--success);
-  transition: width 200ms var(--ease);
 }
-.todo-chev {
+.todo-seg-rest {
   color: var(--text-3);
   font-size: 10px;
 }
+/* 折叠/展开箭头：系统里同一枚 ChevronDown（12px，与左栏/工具组同一个字形）。
+   收起态 rotate(180deg) = 朝上（往上拉开抽屉），展开态朝下；hover 提亮一档。 */
+.todo-chev {
+  flex: 0 0 auto;
+  box-sizing: content-box;
+  padding: 4px;
+  border-radius: 5px;
+  color: var(--text-3);
+  transition: transform 150ms var(--ease), color 150ms var(--ease), background 150ms var(--ease);
+}
+.todo-hd:hover .todo-chev {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+.todo-hd[aria-expanded='false'] .todo-chev {
+  transform: rotate(180deg);
+}
+.todo-hd:hover .todo-chev {
+  color: var(--text-2);
+}
+/* 列表：24px/行、限高按整行算（7 行）+ 底部淡出；overscroll 不带动外层滚动 */
 .todo-list {
   list-style: none;
   margin: 0;
-  padding: 2px 8px 8px;
-  max-height: 32vh;
+  padding: 0 6px 18px; /* 底部 18px：让最后一行不被 ::after 的深色与 composer 的上沿吃掉 */
+  max-height: min(38vh, 320px);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .todo-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px;
+  min-height: 24px;
+  padding: 0 6px;
   border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-2);
 }
 .todo-item:hover {
-  background: var(--surface);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
 }
 .todo-st {
-  width: 14px;
+  width: 12px;
   flex: 0 0 auto;
   text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--text-3);
 }
 .todo-item.done .todo-st {
@@ -3876,12 +4020,10 @@ body.is-electron .left.collapsed .rail .rbtn {
 .todo-item.done .todo-txt {
   color: var(--text-3);
   text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text) 28%, transparent);
 }
-.todo-id {
-  flex: 0 0 auto;
-  color: var(--text-3);
-  font-size: 11px;
-  font-family: var(--font-mono);
+.todo-item.run .todo-st {
+  color: var(--accent);
 }
 .todo-txt {
   flex: 1;
@@ -3889,12 +4031,12 @@ body.is-electron .left.collapsed .rail .rbtn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-2);
 }
 .todo-blk {
   flex: 0 0 auto;
   color: var(--warning);
-  font-size: 10.5px;
+  font-size: 10px;
+  font-family: var(--font-mono);
 }
 
 /* ============ 计划卡（对话内 todo_add / todo_update 工具的「计划」视图） ============ */

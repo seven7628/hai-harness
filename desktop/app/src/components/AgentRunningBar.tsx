@@ -16,7 +16,10 @@ import type { ViewAgentBlock, ViewRunNode } from '../lib/agentTree'
 // 2026-11 用户报障：切到子智能体后，这条仍显示主 Session 的「Agent 运行中 36s」。
 // 旧实现只读 mainRunActive，子会话复用了同一个 Composer，于是把主会话的运行态也带进来了。
 // 子会话不是主会话的附庸：它没在跑就不显示这条，在跑就只显示它自己的时长。
-export const AgentRunningBar = memo(function AgentRunningBar() {
+// inline：把这条状态条交给**输入框上沿那一行**的左槽（待办页签在右槽，同一行）。
+// 只改布局（左对齐、20px、不居中），语义/DOM/aria 一个字节都没动 —— 运行状态该有的
+// role=status、data-agent-scope、计时来源都不变，变的只是它站哪一行。
+export const AgentRunningBar = memo(function AgentRunningBar({ inline = false }: { inline?: boolean } = {}) {
   const view = useAppStore((s) => (s.activeSessionId ? s.views[s.activeSessionId] : undefined))
   const focused = useAppStore((s) => s.focusedAgent)
   const t = useT()
@@ -39,7 +42,7 @@ export const AgentRunningBar = memo(function AgentRunningBar() {
   if (!active) return null
   return (
     <div
-      className="agent-running-bar"
+      className={inline ? 'agent-running-bar inline' : 'agent-running-bar'}
       role="status"
       aria-live="polite"
       aria-label={t('composer.runningAria')}

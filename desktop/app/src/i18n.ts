@@ -853,6 +853,8 @@ const zh: Record<string, string> = {
   'composer.effort.none': '关思考',
   // 右栏待办
   'todo.title': '待办',
+  'todo.expand': '展开待办（限高滚动）',
+  'todo.collapse': '收起待办',
   // 对话内计划卡（todo_add/todo_update 工具）
   'plan.title': '计划',
   'plan.done': '已完成',
@@ -3235,6 +3237,8 @@ const en: Record<string, string> = {
   'composer.providerDisplay.fireworks': 'Fireworks',
   'composer.effort.none': 'No thinking',
   'todo.title': 'Todo',
+  'todo.expand': 'Show the plan (scrolls when long)',
+  'todo.collapse': 'Hide the plan',
   // Plan card in conversation (todo_add/todo_update tools)
   'plan.title': 'Plan',
   'plan.done': 'done',

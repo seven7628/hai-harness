@@ -15,7 +15,7 @@ import './runtime/pop/pop.css'
 import './runtime/fan/fan.css'
 import { CapsPop, capsCountOf } from './runtime/prompt/CapsPop'
 import './runtime/prompt/caps.css'
-import { AgentRunningBar } from './AgentRunningBar'
+import TodoPanel from './TodoPanel'
 import { useT } from '../i18n'
 import { shortReason } from '../lib/shortReason'
 import {
@@ -1276,7 +1276,9 @@ export default function Composer({ variant = 'desktop' }: { variant?: 'desktop' 
 
   return (
     <div className="composer-wrap">
-      <AgentRunningBar />
+      {/* 运行状态 + 待办页签 = 输入框上沿的那一行（左运行 / 右待办，见 TodoPanel）。
+          运行条不再单独居中一条：两行叠着会让视线在「谁在跑」和「还要做什么」之间来回跳。 */}
+      <TodoPanel />
       {/* 正在看子智能体：这里就是**对它的输入框**（用户 2026-10 要求「打字发送应该发给
           子智能体」）。同时给一条明确的回程 —— 用户此刻的注意力在输入框，把「返回主会话」
           只放在顶部一行的话，切回来要找。 */}

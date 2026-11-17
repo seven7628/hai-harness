@@ -208,7 +208,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 const APP = path.resolve(__dirname, '../..')
-export default defineConfig({ root: APP, plugins: [react()], server: { fs: { allow: [APP] } } })
+export default defineConfig({ root: APP, plugins: [react()], cacheDir: path.join(__dirname, '.vite'), server: { fs: { allow: [APP] } } })
 `)
 
 const URL_BASE = `http://localhost:${PORT}/e2e/_agenttreeprobe_run/index.html`
@@ -890,36 +890,144 @@ async function main() {
   await page.goto(`${URL_BASE}?host=center`, { waitUntil: 'domcontentloaded' })
   await page.waitForSelector('.center', { timeout: 20000 })
   const todoOf = async (focus) => {
-    // 待办现在挂在**会话框上方**（.center > .todo-panel，2026-11 从右栏顶部搬来），
-    // 与右栏开合无关：这里只需切焦点。
+    // 待办现在挂在**输入框上沿**（.composer-wrap > .composer-strip，2026-11 第三轮定稿：
+    // 左槽运行状态 + 右槽待办页签同一行）；与右栏开合无关，这里只需切焦点。
     await page.evaluate((f) => {
       window.__store.getState().focusAgent(f)
     }, focus)
     await page.waitForTimeout(250)
     return {
-      count: await page.locator('.center > .todo-panel').count(),
-      text: await page.locator('.center > .todo-panel').innerText().catch(() => ''),
+      count: await page.locator('.composer-wrap > .composer-strip .todo-hd').count(),
+      text: await page.locator('.composer-wrap > .composer-strip').innerText().catch(() => ''),
       // 反向断言：叙述区内部没有第二份（搬家的判据，而不是「两边都画一份」）
-      inNarrative: await page.locator('.narrative .todo-panel').count(),
+      inNarrative: await page.locator('.narrative .todo-hd').count(),
     }
   }
-  // 主会话：清单显示（默认折叠，计数可见）
+  // 主会话：清单显示（默认收起，计数可见）
   const todoMain = await todoOf(undefined)
   assert(todoMain.count === 1 && todoMain.inNarrative === 0,
-    `待办在会话框上方、不在叙述区内部（center=${todoMain.count} narrative=${todoMain.inNarrative}）`)
+    `待办在输入框上沿、不在叙述区内部（strip=${todoMain.count} narrative=${todoMain.inNarrative}）`)
   assert(/0\/2|2\/2/.test(todoMain.text.replace(/\n/g, ' ')),
     `看主会话 → 显示会话清单（2 条），实际 ${todoMain.text.replace(/\n/g, ' ')}`)
+  // 2026-11 定稿的三条硬约束（都是用户看出来的细节）
+  const tabGeo = await page.evaluate(() => {
+    const strip = document.querySelector('.composer-wrap > .composer-strip')
+    const run = strip?.querySelector('.agent-running-bar')
+    const tab = strip?.querySelector('.todo-hd')
+    const cs = tab ? getComputedStyle(tab) : null
+    const r = (e) => { const b = e.getBoundingClientRect(); return { x: b.x, right: b.right, y: b.y, h: b.height } }
+    const comp = document.querySelector('.composer')
+    return {
+      hasRun: !!run,
+      tabRight: tab ? r(tab).right : 0,
+      tabH: tab ? r(tab).h : 0,
+      chevron: tab ? tab.querySelector('svg') !== null : false,
+      chevronRotate: tab ? getComputedStyle(tab.querySelector('svg')).transform : '',
+      tabBorderBottom: cs ? cs.borderBottomWidth : '',
+      compRadius: comp ? getComputedStyle(comp).borderTopLeftRadius : '',
+      compRight: comp ? r(comp).right : 0,
+    }
+  })
+  assert(tabGeo.tabH === 26, `页签高 26px（实际 ${tabGeo.tabH}）`)
+  assert(tabGeo.chevron && tabGeo.chevronRotate !== 'none',
+    `折叠箭头是真实图标且收起态朝上（rotate=180；实际 ${tabGeo.chevron ? tabGeo.chevronRotate : '没有 svg'}）`)
+  assert(tabGeo.tabBorderBottom === '0px', `页签与输入框共边（border-bottom = ${tabGeo.tabBorderBottom}）`)
   await page.screenshot({ path: path.join(SHOTS, 'right-todo-main.png') })
   // 子 agent：显示它自己的（展开列表读条目文本）
   await page.evaluate(() => window.__store.getState().focusAgent({ nodeId: 'task-1', runId: 'sub-1', taskId: 'task-1' }))
   await page.waitForTimeout(200)
-  await page.locator('.center > .todo-panel .todo-hd').first().click()
-  await page.waitForTimeout(150)
-  const subTodo = await page.locator('.center > .todo-panel').innerText().catch(() => '')
+  await page.locator('.composer-wrap > .composer-strip .todo-hd').first().click()
+  await page.waitForTimeout(200)
+  const openGeo = await page.evaluate(() => {
+    const g = (s) => { const e = document.querySelector(s); if (!e) return null; const b = e.getBoundingClientRect(); const c = getComputedStyle(e); return { x: b.x, right: b.right, top: b.top, h: b.height, radius: c.borderTopLeftRadius } }
+    return { card: g('.todo-card'), comp: g('.composer'), tab: document.querySelectorAll('.composer-wrap > .composer-strip .todo-hd').length }
+  })
+  assert(openGeo.card && openGeo.card.x - openGeo.comp.x === 20 && openGeo.comp.right - openGeo.card.right === 20,
+    `展开的卡片比会话框窄（左右各 20px：左 ${openGeo.card.x - openGeo.comp.x} / 右 ${openGeo.comp.right - openGeo.card.right}）`)
+  const rightGroup = await page.evaluate(() => {
+    const card = document.querySelector('.todo-card')
+    const bar = card?.querySelector('.todo-progress')
+    const chev = card?.querySelector('.todo-chev')
+    if (!card || !bar || !chev) return null
+    const c = card.getBoundingClientRect()
+    const b = bar.getBoundingClientRect()
+    const ch = chev.getBoundingClientRect()
+    return { barW: Math.round(b.width), cardW: Math.round(c.width), chevInRight: c.right - ch.right < 16 }
+  })
+  // 进度条占**整宽**（橘黄底 + 绿色占比），折叠按钮钉在右上角
+  assert(rightGroup && Math.abs(rightGroup.barW - (rightGroup.cardW - 2)) <= 2,
+    `进度条占满卡片宽度（条 ${rightGroup?.barW} / 卡 ${rightGroup?.cardW}）`)
+  assert(rightGroup && rightGroup.chevInRight, `折叠按钮钉在右上角（${JSON.stringify(rightGroup)}）`)
+  // 悬浮感（用户 2026-11 两次报障「还是没有悬浮感」）：
+  // 深色底上黑色阴影等于没有 —— 真正抬起来的是**卡面明度**，所以这里量的是亮度差，
+  // 不是「有没有 box-shadow」（有 shadow 但看不见，正是第一版被否的原因）。
+  const elev = await page.evaluate(() => {
+    // 计算值可能是 `rgb(…)`（0-255）也可能是 `color(srgb …)`（0-1，color-mix 出来的都是这种）
+    const lum = (c) => {
+      const m = (c.match(/[\d.]+/g) || []).map(Number)
+      const k = /^color\(srgb/.test(String(c).trim()) ? 255 : 1
+      return Math.round((0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) * k)
+    }
+    const card = document.querySelector('.todo-card')
+    const comp = document.querySelector('.composer')
+    const cs = getComputedStyle(card)
+    const after = getComputedStyle(card, '::after')
+    return {
+      card: lum(cs.backgroundColor),
+      comp: lum(getComputedStyle(comp).backgroundColor),
+      page: lum(getComputedStyle(document.body).backgroundColor || 'rgb(0,0,0)'),
+      fade: after.backgroundImage.includes('gradient'),
+      radius: cs.borderTopLeftRadius,
+    }
+  })
+  assert(elev.card - elev.comp >= 20 && elev.card - elev.page >= 20,
+    `悬浮感靠明度差：卡面 ${elev.card} vs 输入框 ${elev.comp} / 页底 ${elev.page}（要求差 ≥ 20）`)
+  assert(elev.fade, '卡片底边有渐变（那一截钻进输入框背后，接缝必须比卡面暗）')
+  assert(openGeo.comp.radius === tabGeo.compRadius,
+    `会话框圆角没被改（展开前 ${tabGeo.compRadius} / 展开后 ${openGeo.comp.radius}）`)
+  const subTodo = await page.locator('.composer-wrap > .composer-strip').innerText().catch(() => '')
   assert(subTodo.includes('子计划'), `看子 agent → 显示**它自己的**待办（实际：${subTodo.replace(/\n/g, ' ')}）`)
   assert(!subTodo.includes('主计划甲'), '子 agent 的清单里没有主会话的条目（互不串）')
   await page.screenshot({ path: path.join(SHOTS, 'right-todo-subagent.png') })
-  // 孙 agent：没有清单 → 整块不渲染（绝不回退）
+  // 全完成：同一枚页签，格子全绿 + 计数转绿（不换形态）
+  await page.evaluate(() => window.__store.getState().focusAgent(undefined))
+  await page.waitForTimeout(150)
+  // 展开态是**每会话/每作用域各自的**（用户 2026-11：「我在其他会话展开，切会话时也是展开」）：
+  // 主会话没展开过 → 切回来必须收起，而不是跟着上一个作用域的展开态走。
+  const leakCard = await page.locator('.todo-card').count()
+  assert(leakCard === 0, `切换会话不继承展开态（主会话未展开过，实际卡片 ${leakCard} 个）`)
+  await page.evaluate(() => {
+    const s = window.__store.getState()
+    window.__store.setState({ todos: (s.todos || []).map((td) => ({ ...td, done: true })) })
+  })
+  await page.waitForTimeout(200)
+  const doneGeo = await page.evaluate(() => {
+    const tab = document.querySelector('.composer-wrap > .composer-strip .todo-hd')
+    if (!tab) return null
+    const cnt = tab.querySelector('.todo-count')
+    return {
+      tag: tab.tagName,
+      cls: tab.className,
+      green: tab.querySelectorAll('.todo-segs i.f').length,
+      total: tab.querySelectorAll('.todo-segs i').length,
+      cntColor: cnt ? getComputedStyle(cnt).color : '',
+      // 期望色**从 CSS 变量取**，不写死 rgb —— runtime 皮肤把 --success 换成了另一个绿，
+      // 写死旧值会在换肤后变成假红（2026-11 就踩了这一下）。
+      wantColor: (() => {
+        const probe = document.createElement('span')
+        probe.style.color = 'var(--success)'
+        document.body.appendChild(probe)
+        const c = getComputedStyle(probe).color
+        probe.remove()
+        return c
+      })(),
+    }
+  })
+  assert(doneGeo && doneGeo.green === doneGeo.total && doneGeo.total > 0,
+    `全完成 → 页签里每一格都绿（${doneGeo?.green}/${doneGeo?.total}）`)
+  assert(doneGeo && /done/.test(doneGeo.cls), `全完成只加一个 done 类、形态不变（实际 class=${doneGeo?.cls}）`)
+  assert(doneGeo && doneGeo.cntColor === doneGeo.wantColor,
+    `全完成 → 计数转绿（实际 ${doneGeo?.cntColor}，--success=${doneGeo?.wantColor}）`)
   const todoSun = await todoOf({ nodeId: 'task-2', runId: 'sub-2', taskId: 'task-2' })
   assert(todoSun.count === 0, `孙 agent 没有清单 → 面板整块不渲染（不回退主会话），实际 ${todoSun.count}`)
 
