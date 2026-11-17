@@ -331,6 +331,10 @@ body::before {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  /* 右栏最大化（.right.maximized）的定位基准：absolute 相对整个三栏区域，
+     用布局 px（左栏 offsetWidth + 4）而不是 viewport 坐标 —— #root 的 CSS zoom
+     会让 fixed/rect 两套坐标在缩放档下对不上。 */
+  position: relative;
 }
 .resize-handle {
   /* ⚠ width 必须显式写：库（react-resizable-panels）给分隔条打了 inline `flex: 0 0 auto`，
@@ -893,6 +897,16 @@ body.is-electron .left-brand {
 .ws-head.plugin .plugin-icon {
   font-size: 12px;
   line-height: 1;
+}
+/* 插件图标是**图片**时（manifest.icon / 缺省 icon.svg）：与 15px 的文件夹图标同格，
+   用 object-fit 保证非正方形 SVG 不变形。emoji 分支仍走 .plugin-icon。 */
+.ws-head.plugin .plugin-asset-ico {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  border-radius: 2px;
+  flex: 0 0 auto;
+  color: var(--accent);
 }
 .ws-head.plugin .plugin-badge {
   flex: 0 0 auto;
@@ -3761,10 +3775,20 @@ body.is-electron .left.collapsed .rail .rbtn {
 }
 
 
-/* ============ TODO 面板（右栏顶部常驻小结：默认折叠一行，点开展开列表） ============ */
+/* ============ TODO（会话框上方的一条：默认折叠一行，点开展开列表） ============
+   位置随 2026-11 用户拍板从「右栏顶部常驻」移到「对应会话框上方」：右栏是面板宿主，
+   待办是**这一轮对话**的计划，两者生命周期不同。宽度对齐 .narrative 的内容列
+   （narrative 800 - 左右各 24 = 752，这里取 776 留 12px 呼吸，窄屏按 calc 收）。 */
+.center > .todo-panel {
+  width: calc(100% - 48px);
+  max-width: 776px;
+  margin: 8px auto 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 62%, transparent);
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 6%, transparent);
+}
 .todo-panel {
-  background: transparent; /* 融入右栏，弱化「面板头」感，避免与 tab 栏叠成双头 */
-  border-bottom: 1px solid var(--border);
   font-size: 12.5px;
   overflow: hidden;
   flex: 0 0 auto;
@@ -3796,12 +3820,15 @@ body.is-electron .left.collapsed .rail .rbtn {
   font-size: 11px;
 }
 .todo-bar {
-  flex: 1;
+  /* 会话框上方是一条 776px 的卡：进度条不再 flex:1（否则拉成一根 600px 的线），
+     固定在右侧、最多 140px，剩下的空间用 margin-left:auto 吃掉。 */
+  flex: 0 1 140px;
+  min-width: 48px;
   height: 3px;
   border-radius: 2px;
   background: var(--bg);
   overflow: hidden;
-  margin: 0 4px;
+  margin: 0 4px 0 auto;
 }
 .todo-fill {
   display: block;
@@ -5400,6 +5427,21 @@ body.is-electron .left.collapsed .rail .rbtn {
 .right.expanded {
   /* 全量态（宽度在 Panel；聚焦预设由 App resize 控制） */
 }
+/* 最大化：覆盖会话区，只保留左栏（左边界由 App 写入的 --right-max-left 决定，
+   值 = 左栏实际宽度 + 4px 分隔条）。仍在同一个 DOM/Panel 里 —— 不 portal、不换实例，
+   所以多标签、web 内嵌视图、编辑器草稿都原样活着。
+   contain 范围内的 absolute 不受右侧 Panel 的 overflow:auto 裁剪（包含块在 .main-group）。 */
+.right.maximized {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--right-max-left, 240px);
+  right: 0;
+  width: auto;
+  height: auto;
+  z-index: 30;
+  box-shadow: -24px 0 48px color-mix(in srgb, #000 22%, transparent);
+}
 .tabs {
   display: flex;
   gap: 2px;
@@ -5427,33 +5469,41 @@ body.is-electron .left.collapsed .rail .rbtn {
   color: var(--text);
   border-bottom-color: var(--accent-strong);
 }
-/* 右栏宽度预设（三态：平分 / 居中 / 右重；拖拽后变「自定义」，不高亮） */
-.rp-bias {
+/* 右栏右上角动作组（最大化 / 关闭）。原来是三态宽度预设按钮 —— 2026-11 用户拍板
+   右栏只有「默认右重 + 自定义拖拽」两态，预设按钮整组下线，位置让给最大化与关闭。 */
+.rtabs-actions {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 2px;
-  padding: 0 4px;
 }
-.rp-bias-b {
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 5px;
+.tab-collapse.on {
+  color: var(--accent);
+  background: var(--accent-weak);
+  border-radius: 6px;
+}
+/* 右侧 rail 的插件入口：与内置四类同一条 34px 按键，图片按 16px 居中 */
+.rail-sep {
+  width: 22px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+.right-rail .plugin-entry img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+/* ＋ 菜单里的快捷键提示：用伪元素而不是 DOM 文本 —— 菜单项的文本必须保持「就是入口标题」
+   （e2e 与读屏都按文本认条目；多一个 ⌥⌘3 会让「零入口默认标题 = 插件名」这类断言变红）。 */
+.rtabs-mi[data-kbd]::after {
+  content: attr(data-kbd);
+  margin-left: auto;
+  padding-left: 12px;
   color: var(--text-3);
   font-size: 10.5px;
-  line-height: 1;
-  padding: 3px 5px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.rp-bias-b:hover {
-  color: var(--text);
-  border-color: var(--border);
-}
-.rp-bias-b.on {
-  color: var(--text);
-  border-color: var(--accent-strong);
-  background: color-mix(in srgb, var(--accent-strong) 12%, transparent);
+  letter-spacing: 0.02em;
 }
 /* 右栏自身收缩按钮（归属右栏，顶栏已移除） */
 .tab-collapse {

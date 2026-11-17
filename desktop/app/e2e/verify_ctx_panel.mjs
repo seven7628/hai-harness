@@ -167,7 +167,9 @@ try {
     pct: el.querySelector('.ctx-pct')?.textContent ?? '',
   })))
   assert(rows.length === 7, `分区行数 = ${rows.length}, want 7`)
-  for (const n of ['消息上下文', '工具', 'MCP', '系统提示词', '技能', '记忆', '其他']) {
+  // 分区名 = i18n(zh) 的 ctx.panel.part.*；2026-11 更名把 mcp 的显示名改成「外部工具」
+  //（与设置导航的 settings.mcp 同一词），所以这里不再写 'MCP'。
+  for (const n of ['消息上下文', '工具', '外部工具', '系统提示词', '技能', '记忆', '其他']) {
     assert(rows.some((r) => r.name === n), `分区行含「${n}」`)
   }
   const pcts = rows.map((r) => Number(r.pct.replace('%', '')))

@@ -736,7 +736,9 @@ try {
 
   // ---- T4：打开插件面板（＋ 菜单 → 真 hai-surface:// 协议 import panel.js）----
   console.log('\nT4 ＋ 菜单 → 面板（真协议）')
-  const activityBtn = win.getByRole('button', { name: '链路', exact: true }).first()
+  // 按 data-kind 找，不按文案找：可读名 = tab 的 i18n 文案，2026-11「链路 → 过程」更名后
+  // `name: '链路'` 永不匹配。data-kind 是折叠 rail 与展开标签条共用的机器可读出口（R11b）。
+  const activityBtn = win.locator('[data-kind="activity"]').first()
   await waitFor(() => activityBtn.count().then((n) => n > 0), { label: '右栏图标条' })
   await activityBtn.click({ timeout: 5000 }).catch(() => {})
   await waitFor(() => win.locator('.rtabs-add').count().then((n) => n > 0), { label: '＋ 按钮' })
@@ -1015,7 +1017,9 @@ try {
   const writeRun = await waitRunAck(SCENE_WRITE_TOOL)
   // P2c：read_only:false 的插件工具实现 MandatoryApproval —— 即使会话是「自动执行」，
   // 也必须出现审批卡；批准前面板不得收到 write_note、上游不得有第二轮。
-  const approve = win.getByRole('button', { name: '批准', exact: true }).first()
+  // 按结构定位（审批面板里那颗 primary），不按文案：2026-11 更名把「批准」改成「允许」，
+  // 文案定位会静默变成 15s 超时（看起来像「审批卡没出现」，其实卡就在那儿）。
+  const approve = win.locator('.appr-dock .acts button.primary').first()
   let approveVisible = true
   try {
     await approve.waitFor({ state: 'visible', timeout: 15000 })

@@ -1,6 +1,6 @@
 ---
 name: create-mode
-version: 1.2.0
+version: 1.3.0
 description: 'Build custom HAI CreateMode extensions by combining the exposed panel, agent, and host APIs — dashboards, document panels, tools, and workflows. Use when a developer wants to create, extend, or debug a custom right panel, plugin, surface, PDF viewer, or integration (插件、面板、右栏、看板、文档面板、PDF 阅读器、自定义开发).'
 requires:
   tools: [ui_inspect, surface_install]
@@ -59,10 +59,18 @@ supported fallback when the surface tools are off.
    panel is live**. `rejected` carries the reason; fix the folder, install again. If the tool is
    unavailable, `bash <this-skill>/scripts/install-smoke.sh <plugin-dir>` proves the installer
    accepts it; say clearly that the live in-app install still needs the settings switch.
-3. `ui_inspect` again: the kind must be in `surfaces` with `disabled:false`. If it has `error`,
-   that string is your bug report.
-4. `surface_list` to confirm what is installed; `surface_remove({ id })` to take it away
-   (the panel's tab becomes a tombstone, nothing else is deleted).
+3. **Iterate without reinstalling.** `dev` defaults to `true`: the installed id is a symlink to
+   your folder and the bridge watches the files it loads (`panel.js`, `surface.json`, `icon.svg`,
+   imported js/css/images). Save a file → ~250 ms later the panel reloads with the new bytes; no
+   reinstall, no restart, no re-approval. `surface.json` edits (entries/icon/commands) reload too.
+   Only the *tracked* files count — `node_modules`, `.git` and dot-dirs are ignored. To freeze a
+   stable copy instead, install with `{ dev: false }` (then edits need a reinstall).
+4. `ui_inspect` again: the kind must be in `surfaces` with `disabled:false`. If it has `error`,
+   that string is your bug report. A reload keeps the tab and the plugin's sessions; only the
+   panel module is re-imported.
+5. `surface_list` to confirm what is installed; `surface_remove({ id })` to take it away
+   (the panel's tab becomes a tombstone, nothing else is deleted; a dev install only moves the
+   symlink, your source folder is untouched).
 
 > `surface_install` / `surface_remove` / `surface_list` need
 > `settings.json` → `"features": { "surfaceTools": true }` (default **false** — the tools are

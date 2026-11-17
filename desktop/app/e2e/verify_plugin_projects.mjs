@@ -34,7 +34,8 @@ const PLUG_C = '/u/.go-code/plugin-sessions/gamma/home' // 已安装，还没有
 const PLUGIN_PROJECTS = [
   { path: PLUG_A, plugin_id: 'alpha', name: 'PDF 阅读器', icon: '📕', installed: true, sessions: [{ id: 'ps-a1', title: '翻译草稿' }] },
   { path: PLUG_B, plugin_id: 'beta', name: '成本看板', installed: false, sessions: [{ id: 'ps-b1', title: '上个月的账' }] },
-  { path: PLUG_C, plugin_id: 'gamma', name: '课表', installed: true },
+  // gamma 的 icon 是**目录内路径**（新 manifest 的形态）：必须走图片分支，不能当文本画
+  { path: PLUG_C, plugin_id: 'gamma', name: '课表', icon: 'icon.svg', installed: true },
 ]
 
 let pass = 0
@@ -80,7 +81,9 @@ async function main() {
   const badges = await page.locator('.ws-head.plugin .plugin-badge').evaluateAll((els) => els.map((e) => e.textContent))
   assert(badges.length === 3 && badges.every((b) => b === '插件'), `每行都有「插件」徽标（实得 ${JSON.stringify(badges)}）`)
   const icons = await page.locator('.ws-head.plugin .plugin-icon').evaluateAll((els) => els.map((e) => e.textContent))
-  assert(icons.includes('📕'), '回执里的 icon 原样渲染（📕）')
+  assert(icons.includes('📕'), '回执里的 emoji icon 原样渲染（📕）')
+  // 用户 2026-11 报障：manifest.icon = "icon.svg" 被当文本画成「icon.svg」四个字。
+  assert(!icons.includes('icon.svg'), '目录内路径图标不进入文本分支（不是「icon.svg」四个字）')
   // 会话列表要等 list 回执（plugin_projects_list → 每个虚拟 path 一条 list）：轮询到稳定
   await page.waitForFunction(
     () => [...document.querySelectorAll('.ws-head.plugin .ws-count')].map((e) => e.textContent).join(',') === '1,0,1',
@@ -96,7 +99,7 @@ async function main() {
 
   // —— P1 两个子组 + 已卸载只读 ——
   const subtitles = await page.locator('.left-sub-title.sub').evaluateAll((els) => els.map((e) => e.textContent))
-  assert(JSON.stringify(subtitles) === JSON.stringify(['已安装', '已卸载']), `两个子组标题（实得 ${JSON.stringify(subtitles)}）`)
+  assert(JSON.stringify(subtitles) === JSON.stringify(['已安装', '未安装']), `两个子组标题（实得 ${JSON.stringify(subtitles)}）`)
   const betaRow = page.locator('.ws-head.plugin', { hasText: '成本看板' })
   const alphaRow = page.locator('.ws-head.plugin', { hasText: 'PDF 阅读器' })
   assert(await betaRow.locator('.ws-new').count() === 0, '已卸载插件行没有「新建会话」')

@@ -80,3 +80,6 @@ export const PlayIcon = ({ size = 13, className }: P) => base(size, <path d="M7 
 export const PaletteIcon = ({ size = 14, className }: P) => base(size, <><path d="M12 3a9 9 0 1 0 0 18h1.2a2.3 2.3 0 0 0 0-4.6H12a2.4 2.4 0 0 1 0-4.8h4.6A4.4 4.4 0 0 0 21 7.2 4.2 4.2 0 0 0 16.8 3z" /><circle cx="8" cy="9.5" r="1.1" /><circle cx="12" cy="7" r="1.1" /><circle cx="16" cy="9" r="1.1" /></>, className)
 // PluginIcon 插件（模块方块）：左栏插件分组头 —— 虚拟 Project 没有文件夹语义，用方块组区分。
 export const PluginIcon = ({ size = 13, className }: P) => base(size, <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>, className)
+// 右栏最大化/还原：两对「外扩/内收」的折角，取代此前没有入口的「铺满」状态。
+export const MaximizeIcon = ({ size = 15, className }: P) => base(size, <><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" /></>, className)
+export const RestoreIcon = ({ size = 15, className }: P) => base(size, <><path d="M8 3v3a2 2 0 0 1-2 2H3M16 3v3a2 2 0 0 0 2 2h3M8 21v-3a2 2 0 0 0-2-2H3M16 21v-3a2 2 0 0 1 2-2h3" /></>, className)

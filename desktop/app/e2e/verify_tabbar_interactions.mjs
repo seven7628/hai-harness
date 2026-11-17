@@ -286,7 +286,7 @@ try {
     check('A2 +N 是 <button>', b.overflowTag === 'BUTTON', b.overflowTag)
     // 标题走生产口径：activity/git 是 kindLabel，file 是文件名，web 是 webSurface 给的页面标题
     //（这里是 url 的 host）。这条断言锁的是「窗口 = 前 5 个」，不是标题文案本身。
-    check('A2 可见窗口 = 前 5 个（a1..a5）', b.rows.map((r) => r.title).join(',') === '链路,变更,a.example,f4.ts,f5.ts', b.rows.map((r) => r.title).join(','))
+    check('A2 可见窗口 = 前 5 个（a1..a5）', b.rows.map((r) => r.title).join(',') === '过程,改动,a.example,f4.ts,f5.ts', b.rows.map((r) => r.title).join(','))
     await click('.rtabs-overflow', '+N 按钮')
     b = await bar()
     check('A2 点 +N → 弹出下拉，role=menu', b.overflowMenu && b.overflowMenuRole === 'menu', JSON.stringify({ menu: b.overflowMenu, role: b.overflowMenuRole }))
@@ -508,7 +508,7 @@ try {
     check('D1 空集 → 保留原提示文案', b.emptyText.includes('点 ＋ 打开一个标签，或从左侧文件树打开文件。'), b.emptyText)
     check('D2 空态列出 ADDABLE_KINDS 的每一项（3 个按钮）', b.emptyAdds.length === 3, `实得 ${b.emptyAdds.length}`)
     check('D2 三项 = activity / git / web（与 ＋ 菜单同一份 ADDABLE_KINDS）', b.emptyAdds.map((x) => x.kind).join(',') === 'activity,git,web', b.emptyAdds.map((x) => x.kind).join(','))
-    check('D2 每项都带图标 + kindLabel 文案', b.emptyAdds.every((x) => x.icon) && b.emptyAdds.map((x) => x.label).join(',') === '链路,变更,网页', JSON.stringify(b.emptyAdds))
+    check('D2 每项都带图标 + kindLabel 文案', b.emptyAdds.every((x) => x.icon) && b.emptyAdds.map((x) => x.label).join(',') === '过程,改动,浏览器', JSON.stringify(b.emptyAdds))
     await click('.rtabs-empty-add', '空态第一个按钮')
     await settle()
     b = await bar()

@@ -1067,7 +1067,8 @@ export interface Project {
   pluginId?: string
   /** 左栏显示名（后端回执的 name；缺省用 pluginId） */
   name?: string
-  /** 插件图标（emoji 或短字符串；后端回执原样转发） */
+  /** 插件图标：老回执是 emoji（`📕`），新回执是**目录内相对路径**（`icon.svg`）；
+   *  后者由 LeftPanel 走 hai-surface 协议渲染成图片，不能当文本画。 */
   icon?: string
   /** 已卸载（false）= 只读：会话可打开/删除，不提供新建。缺省按已安装处理。 */
   installed?: boolean
@@ -1568,7 +1569,9 @@ function loadViewToTop(s: AppState, sid: string): Partial<AppState> {
 
 // 切项目/切会话时重置当前会话视图镜像（顶层字段）
 function resetView(): Partial<AppState> {
-  return viewFields(emptyView())
+  // 最大化不是会话状态（不进 SessionView），但任何「换一屏」的动作都该回到正常三栏：
+  // 否则删会话/切项目后会停在一个没有会话的满屏右栏上。
+  return { ...viewFields(emptyView()), rightMaximized: false }
 }
 
 // —— 右侧栏标签模型 helper（阶段 1）——
@@ -3186,6 +3189,8 @@ export interface AppState {
   // 「现在是哪个面板」= `selectRightTab(this)`（lib/rightPanel）。R11b 之前这里有一个
   // `rightTab: RightTab` 字段，是 activeId 的写穿副本 —— 见文件顶部「标签模型」的注释。
   rightSize: number | null // M3：期望的右侧面板宽度（null = 不强制；浏览器内嵌时按 viewport 设）
+  /** 右栏最大化（覆盖会话区、只留左栏）。临时视图状态，不进 SessionView、不落盘。 */
+  rightMaximized: boolean
   // panelMenuOpen：右栏**面板级**下拉/右键菜单是否开着（R06c 从 RightPanel 的局部 state 上移）。
   //
   // 为什么必须上移：它参与原生内嵌视图的**可见性仲裁** —— WebContentsView 恒合成在窗口 DOM
@@ -3635,7 +3640,8 @@ export interface AppState {
   setRightExpanded(b: boolean): void
   setRightLayout(l: RightLayout): void
   setRightLayoutFromDrag(rightPct: number, leftPct: number): void
-  applyBias(b: 'even' | 'center' | 'right'): void
+  /** 右栏最大化（覆盖会话区、只留左栏）。临时视图状态：不落盘、切会话复位。 */
+  setRightMaximized(b: boolean): void
   togglePin(): void
   // R06c：右栏面板级菜单（⌄ 重开 / ＋ 新建 / 标签右键）开合的**唯一**写点，由 RightPanel 的
   // 两个 setter 调用点镜像进来 —— 它是 WebTab 可见性仲裁的输入（见 AppState.panelMenuOpen）。
@@ -10287,6 +10293,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   rightExpanded: false,
   rightLayout: layoutCollapse,
   rightSize: null,
+  rightMaximized: false,
   // 菜单关着（与 menu/ctx 的初值一致）；RP 挂载后由两个 setter 镜像维护。
   panelMenuOpen: false,
   previewEmbedActive: false,
@@ -10766,6 +10773,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       send({ type: 'new_session', payload: { id, blocks_limit: OPEN_BLOCKS_LIMIT, ...(virtual ? { workspace: path } : {}) } }, false)
       return
     }
+    // 切会话 = 回到会话页：最大化是**这一屏视图**的选择，不该跟着用户去看另一个会话。
+    if (s.rightMaximized) set({ rightMaximized: false })
     // 记录最近点开（顶部横条 + 快捷键切换）：队列语义见 withRecent —— 新打开的
     // 追加到队尾；已存在的保持原位不动；满员（RECENT_MAX）才挤掉队首（最久未看）。
     const recentSessions = withRecent(s.recentSessions, path, id)
@@ -12148,19 +12157,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (next.open && Math.abs(next.ratio - cur.ratio) < 1) return // 无实质变化不重渲
     get().setRightLayout(next)
   },
-  // 点预设：清 rightSize（内嵌浏览器 viewport 宽度）与写布局同一个 set，避免先按旧比例闪一帧
-  applyBias: (b) => {
-    const s = get()
-    const layout = layoutExpand(b)
-    const sid = s.activeSessionId
-    const patch = sid
-      ? setView(s, sid, { ...(s.views[sid] ?? emptyView()), rightLayout: layout, rightExpanded: true })
-      : { rightLayout: layout, rightExpanded: true }
-    set({ ...patch, rightSize: null })
-  },
+  // 右栏开关：收起时同时退出最大化（否则会留下一个没有面板的最大化状态）。
   toggleRight: () => {
     const s = get()
-    get().setRightLayout(s.rightLayout.open ? layoutCollapse : layoutExpand('even'))
+    if (s.rightMaximized) set({ rightMaximized: false })
+    get().setRightLayout(s.rightLayout.open ? layoutCollapse : layoutExpand('right'))
+  },
+  // 右栏最大化：覆盖会话区（只保留左栏），是一种**临时视图**而不是持久布局 ——
+  // 不写进 SessionView、不落盘（重启后回到正常三栏），切换会话时由 setActiveSession 复位。
+  setRightMaximized: (b) => {
+    if (b) {
+      // 最大化前提是右栏已展开；收起态调用 = 打开并最大化（例如快捷键/空态入口）。
+      if (!get().rightLayout.open) get().setRightLayout(layoutExpand('right'))
+      set({ rightMaximized: true })
+    } else {
+      set({ rightMaximized: false })
+    }
   },
   setLeftExpanded: (b) => set({ leftExpanded: b }),
   // 兼容旧调用点（Panel onResize / 快捷键 / 测试 reset）：以 rightExpanded 为「已展开」判据，
@@ -12169,9 +12181,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const s = get()
     if (b) {
       if (s.rightLayout.open && s.rightExpanded) return
-      const bias = s.rightLayout.open && s.rightLayout.bias !== 'custom' ? s.rightLayout.bias : 'even'
-      get().setRightLayout(layoutExpand(bias)) // 同时自愈 rightExpanded 镜像
+      // 收起后重新打开 = 回到默认右重；只有用户拖出来的 custom 才保留比例。
+      const bias = s.rightLayout.open && s.rightLayout.bias === 'custom' ? 'custom' : 'right'
+      const next = bias === 'custom' && s.rightLayout.open
+        ? s.rightLayout
+        : layoutExpand('right')
+      get().setRightLayout(next) // 同时自愈 rightExpanded 镜像
     } else {
+      if (s.rightMaximized) set({ rightMaximized: false })
       if (!s.rightLayout.open && !s.rightExpanded) return
       get().setRightLayout(layoutCollapse)
     }
@@ -12299,7 +12316,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       : {}
     // D-A：**内容触发**才展开（用户手势走 toggleRight/setRightExpanded，不在这里）；
     // 后台静默打开（activate:false）不碰面板；已展开时不重置 bias。
-    const layout = !activate || s.rightLayout.open ? undefined : layoutExpand('even')
+    const layout = !activate || s.rightLayout.open ? undefined : layoutExpand('right')
     set({ ...tabPatch(s, scope, next, layout), ...sizePatch })
     return id
   },

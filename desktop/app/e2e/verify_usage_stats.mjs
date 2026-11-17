@@ -5,7 +5,7 @@
 // 并在新建会话（无任何消息）中部展示近 90 天热力图。本脚本锁住的关键行为 ——
 //   ① 空会话中部：近 90 天热力图 = 5 行 × 18 天（横向扁平、水平居中、空态整块垂直居中），
 //      格子按时间从左到右排列，hover 把当日/累计内联到标题下一行
-//   ② 设置导航：分组标题（模型 / Agent 能力 / 数据与统计）+「使用统计」入口可进入
+//   ② 设置导航：5 组（基础 / 模型 / 能力 / 连接 / 数据）+「使用统计」（住在「数据」组）可进入
 //   ③ 指标卡 7 张，数值与 `metrics` 报告逐项对账（累计 / 峰值 / 最长聊天 / 连续天数 / 成本 /
 //      无价调用占比 2026-09-23），无价卡 title 定位到具体模型（补价入口）
 //   ④ 热力图 53 列 × 7 格 + ≥11 个月份刻度；切「累计」后末格 = 全量累计（CumTokens）
@@ -230,10 +230,12 @@ try {
   await page.evaluate(() => window.__store.setState({ inSettings: true }))
   await page.waitForSelector('.settings-card', { timeout: 5000 })
   const groups = await page.$$eval('.settings-nav .settings-nav-sec', (ns) => ns.map((n) => n.textContent.trim()))
-  assert(groups.join('|') === '模型|Agent 能力|数据与统计', `分组标题 = ${groups.join(' / ')}`)
+  // 2026-11 拍板：设置左栏压成 5 组（原来 14 个平级分区），组名与顺序见 SettingsModal 的 NAV_GROUPS。
+  assert(groups.join('|') === '基础|模型|能力|连接|数据', `分组标题 = ${groups.join(' / ')}`)
   const segsBefore = await page.locator('.usage-stats').count()
   assert(segsBefore === 0, '未点击「使用统计」前不渲染统计页')
-  await page.click('.settings-nav button:has-text("使用统计")')
+  // 导航项文案 2026-11 由「使用统计」改成「用量」（settings.usage）；页面标题仍是「使用统计」。
+  await page.click('.settings-nav button:has-text("用量")')
   await page.waitForSelector('.usage-stats', { timeout: 5000 })
   ok('点击「使用统计」→ 统计页渲染')
 
@@ -249,7 +251,7 @@ try {
   const expect = [
     [U.fmtBigTokens(st.TotalTokens, 'zh').replace(/\s+/g, ''), '累计 Token 数'],
     [U.fmtBigTokens(st.PeakDayTokens, 'zh').replace(/\s+/g, ''), '峰值 Token 数'],
-    [U.fmtChatDuration(st.LongestChatMs, 'zh').replace(/\s+/g, ''), '最长聊天时长'],
+    [U.fmtChatDuration(st.LongestChatMs, 'zh').replace(/\s+/g, ''), '最长会话时长'],
     [`${st.CurrentStreak}天`, '当前连续天数'],
     [`${st.LongestStreak}天`, '最长连续天数'],
     ['$' + st.TotalCostUsd.toFixed(st.TotalCostUsd >= 100 ? 0 : 2), '累计成本'],

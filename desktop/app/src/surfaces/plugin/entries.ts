@@ -98,9 +98,16 @@ export function entriesOf(item: SurfaceIndexItem): SurfaceEntryDecl[] {
 export function entryItemsOf(item: SurfaceIndexItem): PluginEntryItem[] {
   const kind = `plugin:${item.id}` as const
   const pluginName = String(item.name ?? '').trim() || item.id
+  // 插件图标是入口图标的**缺省**：manifest.icon 是「这个插件的图标」，条目没声明自己的
+  // 图标时沿用它。不沿用的表现是「标签条上图标好好的，入口菜单/右侧 rail 全是通用方块」。
+  const pluginIcon = String(item.icon ?? '').trim()
   const declared = entriesOf(item)
   if (declared.length === 0) {
-    return [{ pluginId: item.id, pluginName, kind, entryId: DEFAULT_ENTRY_ID, title: pluginName, fallback: true }]
+    return [{
+      pluginId: item.id, pluginName, kind, entryId: DEFAULT_ENTRY_ID, title: pluginName,
+      ...(pluginIcon ? { icon: pluginIcon } : {}),
+      fallback: true,
+    }]
   }
   return declared.map((e) => ({
     pluginId: item.id,
@@ -108,7 +115,7 @@ export function entryItemsOf(item: SurfaceIndexItem): PluginEntryItem[] {
     kind,
     entryId: e.id,
     title: e.title,
-    ...(e.icon ? { icon: e.icon } : {}),
+    ...(e.icon || pluginIcon ? { icon: e.icon || pluginIcon } : {}),
     fallback: false,
   }))
 }

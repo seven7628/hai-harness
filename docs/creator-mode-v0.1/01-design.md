@@ -21,7 +21,7 @@
 2. 一句 prompt 装出一个「成本看板」Tab，**不重启**出现，重启后仍在，卸载后标签变墓碑且无残留；
 3. 插件面板写坏时，**只黑自己那块**，连续 3 次挂载失败自动禁用并给出原因；
 4. 卸载一个内置能力（如 git）后，右栏其它能力与已装插件不受影响；
-5. 布局三态可复现：默认中间占满 → 展开右栏自动收左栏、中右各半 → 一键放大中间/放大右侧；
+5. 布局可复现：默认中间占满 → 展开右栏即右重（64%）→ 可拖成自定义比例 → 可一键最大化（覆盖会话区、只留左栏）；
 6. 右栏里改一个文件能保存；agent 同时改同一文件时**不会静默覆盖**（冲突条出现，三条出路都在）；
 7. 全程不改 `agents`/`tools`/`session` 的任何现有语义。
 
@@ -187,7 +187,8 @@ listSurfaces(): SurfaceProvider[]           // 按 group/order 排序
 
 ```ts
 type RightLayout = { open: false }
-                 | { open: true; bias: 'even' | 'center' | 'right'; ratio: number }
+                 | { open: true; bias: 'right' | 'custom'; ratio: number }
+// 2026-11：删除「平分 / 居中」两个预设 —— 展开就是右重（64%），其它宽度只能自己拖。
 // 左栏宽度只有 leftExpanded 一个真值源（rail / 展开），rightLayout 不推导左栏；
 // leftPinned 只表达「pin 住不被其它规则收起」，不参与右栏比例换算
 ```
@@ -195,19 +196,18 @@ type RightLayout = { open: false }
 | 事件 | 结果 |
 |---|---|
 | 启动（有会话） | `open:false`；左栏 expanded；中间占满 |
-| 点右上角「展开右栏」/ `⌘\` | `open:true, bias:'even'`；**左栏不动**（2026-09 修复：展开/预览右栏不收左栏） |
-| 内容触发（点 diff / 文件树 / 打开网页 / 打开 PPT） | 自动 `open:true`（沿用现状），bias 不变 |
-| 点「放大中间」 | `bias:'center'`（中 64 / 右 36） |
-| 点「放大右侧」 | `bias:'right'`（中 36 / 右 64） |
-| 收起右栏 | `open:false`；左栏不动 |
-| 手动拖分隔条 | 只改像素并把 bias 标为 `custom`（按钮组显示"自定义"），不改 open |
+| 点右上角「展开右栏」/ `⌘\` | `open:true, bias:'right'`（64%）；**左栏不动**（2026-09 修复：展开/预览右栏不收左栏） |
+| 内容触发（点 diff / 文件树 / 打开网页 / 打开 PPT） | 自动 `open:true`（沿用现状），已展开则比例不变 |
+| 收起右栏 | `open:false`；左栏不动；若正在最大化则同时退出最大化 |
+| 手动拖分隔条 | 只改像素并把 bias 标为 `custom`，不改 open |
+| 点「最大化」 | `rightMaximized:true`：右栏 absolute 覆盖会话区（左边界 = 左栏实际宽度 + 4px），标签栏/多标签原样保留；`Esc` 或「还原」退出。临时视图，不落盘，切会话/进 Hub 复位 |
 | 左栏手动展开（pin） | 只影响左栏自身；右栏比例换算始终用**左栏真实像素**（44 或 236） |
 
 **必须删掉的旧规则**：`App.tsx:160` 的「右栏拖过 50% 就自动收起左栏」（`rightOverHalf`）。它和上面的显式状态机冲突，也是"左栏莫名其妙消失"的来源。有了 `open` 之后这条判据不再需要。
 
 **宽度与最小尺寸**：左 rail **44**（`index.css --rail-w` 与 `collapsedSize` 的实测值，不是 56）/ expanded 236；中 min 300；右 min 200。比例换算在 `react-resizable-panels` 的百分比里做，`minSize` 兜底防压死。
 
-**按钮位置**：右栏头部左侧 = 标签条；右侧 = `[平分] [居中] [右重] [✕ 收起]`（M0 落地为文字按钮，custom 时不亮任何预设）。四个按钮都是 `aria-label` + tooltip，不占数字快捷键（硬规则 1）。
+**按钮位置**：右栏头部左侧 = 标签条；右侧 = `[最大化/还原] [✕ 收起]`。两个按钮都是 `aria-label` + tooltip；最大化另有 `Esc` 退出。折叠态 rail 里每个插件入口带 `⌥⌘1..9`（顺序与 ＋ 菜单一致，见 `surfaces/plugin/shortcuts.ts`）。
 
 **不做**：右栏内部再并排两个面板（`Ctrl+O` 聚焦循环在 `SettingsModal.tsx:731` 里标记 `done:false`，从未实现；本方案不复活它，改用上面三个显式按钮——可发现性更好，也不必给 `react-resizable-panels` 加嵌套 Group）。
 
@@ -507,7 +507,7 @@ bridge   ──(安装/卸装完成)──> renderer: 信封 {type:'ui', payload
 
 ```
 ~/.go-code/surfaces/
-  index.json                 # 有序列表：[{id, version, hash, source, enabled, installedAt, disabledReason?}]
+  index.json                 # 有序列表：[{id, version, hash, source, enabled, installedAt, disabledReason?, dev?}]
   index.json.bak             # 每次变更前的快照（只留 1 份）
   <id>/surface.json          # manifest
   <id>/panel.js              # 单个 ESM 文件（无构建步骤）
@@ -515,7 +515,8 @@ bridge   ──(安装/卸装完成)──> renderer: 信封 {type:'ui', payload
   audit.jsonl                # 每次 ctx.host.command 一行（id, cmd, ts, ok）
 ```
 
-- 安装 = 校验 manifest → 计算 `sha256(panel.js)` → 快照 index → 原子写（目录 0700 / 文件 0600，复用 `config_patch.go` 的"临时文件 + rename"套路）→ 推 `surfaces_changed`；
+- 安装 = 校验 manifest → 计算**内容修订**（拷贝安装 = 全部文件；`dev:true` 安装 = 受追踪的 js/css/json/svg/图片）→ 快照 index → 原子写（目录 0700 / 文件 0600，复用 `config_patch.go` 的"临时文件 + rename"套路）→ 推 `surfaces_changed`；
+  `dev:true` 时 `<surfaces>/<id>` 是指向源目录的软链，bridge 的 fsnotify watcher 盯受追踪文件，保存即更新 hash 并推 `surfaces_changed`（渲染层按 hash 重载模块）；拷贝安装仍是「装上的字节 = 校验过的字节」。
 - 卸载 = 从 index 移除 → 关闭该 kind 的所有标签 → 推 `surfaces_changed` → 目录移到 `~/.go-code/surfaces/.trash/<id>-<ts>`（不直接删，给"手滑"一次后悔的机会）；
 - 回滚 = `index.json.bak` 覆盖 + 重新推送（V0.1 只做手动回滚，不做自动）。
 
@@ -628,7 +629,7 @@ M0 与 M1 可以并行两周：M0 先在 `web` 之前插一个"假 provider"验�
 ## 7. 明确不做（V0.1）
 
 1. **不做 Host 侧动态工具**——`plugin.Capability` 仍是编译期注册；Go 没有可卸载模块，硬做只能出进程，那是 M2；
-2. **不做 HMR / 热重载**——装完把新 provider 挂上就够；改代码重装一次，成本远低于造重组引擎；
+2. **不做重组引擎；热加载走「dev 软链 + 文件监听」**（2026-11 修订）——`surface_install` 缺省 `dev:true`，源目录保存即生效；实现只是 fsnotify + 改 index hash + 复用已有的 `surfaces_changed` 通道，没有新的模块系统或 HMR 运行时；要稳定快照显式传 `dev:false`；
 3. **不做 iframe 面板**——拿不到主题/语言/会话作用域，等于自断"长得像原生"；
 4. **不做插件市场**——先把 `surface_install(绝对目录)` 跑稳；
 5. **不做 YAML preset 体系**——模式和工具集的关系用 `Mode` 表达足够，声明式装配等有第二个消费者再说；

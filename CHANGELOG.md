@@ -4,6 +4,45 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **CreateMode hot reload** — `surface_install` now defaults to `dev: true`: the installed
+  id is a symlink to the source folder and the bridge watches the files the panel loads
+  (`panel.js`, `surface.json`, `icon.svg`, imported js/css/images). Saving a file updates
+  the content revision and pushes `surfaces_changed`; the panel reloads in ~250 ms with no
+  reinstall, restart or re-approval. Pass `dev: false` for a frozen copy.
+- **Right panel rail plugin entries** — installed plugins show their own `icon.svg` in the
+  collapsed right rail, each with a `⌥⌘1..9` shortcut (also listed in the ＋ menu and on the
+  `aria-keyshortcuts` attribute). Clicking one opens that entry in a tab.
+- **Right panel maximize** — the panel can cover the session area (left sidebar stays),
+  keeping the whole tab strip and every open page; restore with the corner button or `Esc`,
+  or close it back to the session.
+
+### Changed
+
+- **TODO moved above the session** — the todo list is no longer pinned at the top of the
+  right panel; it renders just above the conversation and still follows the focused
+  sub-agent (a sub-agent never falls back to the parent's list). The rail todo badge moved
+  with it.
+- **Right panel width** — the 平分 / 居中 / 右重 preset buttons are gone. Opening the panel
+  is always 右重 (64%); dragging still yields a custom ratio. Legacy `even`/`center` layouts
+  migrate to 右重, user-dragged custom ratios are preserved.
+- **`hash` is a content revision** — the index hash now covers every file a plugin install
+  copies (or, for dev installs, the tracked js/css/json/svg/image files) instead of only the
+  entry file.
+
+### Fixed
+
+- Plugin icons stored as a relative path (`icon.svg`) render as an image in the left
+  sidebar instead of the literal text `icon.svg`; emoji icons keep rendering as text and a
+  broken asset falls back to the kind icon.
+- Reinstalling after editing only `surface.json` or `icon.svg` no longer returns
+  `already_installed` with the old bytes.
+- Walking a plugin directory given through a symlink now works (`filepath.WalkDir` does not
+  follow a symlink root), which was also why dev hash/links initially looked empty.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added

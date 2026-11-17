@@ -50,6 +50,15 @@ var surfaceExternalHome = flag.String("home", "",
 var surfaceExternalExpect = flag.String("expect", "applied",
 	"期望安装结果：applied（缺省）或 rejected（用于 D11 旧命令的安装期拒绝）")
 
+// surfaceExternalDev 让同一条外部安装链装成 **dev**（软链 + 热加载）。
+//
+// 存在的理由与 -home 相同：热加载只有在「应用真会去读的那一份」上才有意义 ——
+// `-dev=1 -home=<HOME>` 装上，再 `HAI_DATA_DIR=<HOME>` 起真 Electron，改源目录里的
+// panel.js 就能断言面板自己换内容（e2e/_surface_dev_reload.mjs）。缺省 false =
+// 与既有拷贝快照语义逐字相同（模板/第三方目录的安装仍然是「拷一份进来」）。
+var surfaceExternalDev = flag.Bool("dev", false,
+	"以 dev 模式安装（软链源目录 + 热加载）；缺省 false = 拷贝快照")
+
 // TestSurfaceInstallExternal 把 `-dir` 指向的目录用真安装器装进临时 HOME。
 //
 // 不指定 -dir 时**跳过**（不失败）：这条命令属于 Creator Mode 的验收链，普通 `go test ./...`
@@ -87,7 +96,14 @@ func TestSurfaceInstallExternal(t *testing.T) {
 		t.Fatalf("store 根目录 = %q，必须在 -home 之下（否则应用读的是另一份）", root)
 	}
 
-	rec := st.Install(dir, true)
+	// dev 与拷贝快照是同一个 install 的两条分支（dev 形参）；不要先拷一份再改装 ——
+	// 那会白写一遍磁盘，还会在 index 里留下一次「拷贝 → 软链」的中间态。
+	var rec surfaceReceipt
+	if *surfaceExternalDev {
+		rec = st.InstallDev(dir, true, true)
+	} else {
+		rec = st.Install(dir, true)
+	}
 	recJSON, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		t.Fatalf("回执序列化失败：%v", err)
@@ -160,16 +176,24 @@ func TestSurfaceInstallExternal(t *testing.T) {
 		entryRel = surfaceDefaultEntry
 	}
 	installedEntry := filepath.Join(root, rec.ID, entryRel)
-	sum := sha256.Sum256(readBytes(t, installedEntry))
-	wantHash := hex.EncodeToString(sum[:])
-	if rec.Hash != wantHash || idx.Items[0].Hash != wantHash {
-		t.Fatalf("hash = %q（回执）/ %q（index），want sha256(%s) = %q",
-			rec.Hash, idx.Items[0].Hash, entryRel, wantHash)
-	}
-	// 源文件没被安装器改动（安装是「读源、写目标」，不是「就地加工」）。
-	srcSum := sha256.Sum256(readBytes(t, filepath.Join(dir, entryRel)))
-	if hex.EncodeToString(srcSum[:]) != wantHash {
-		t.Fatalf("装进来的 %s 与源目录里的字节不同（安装器改了内容？）", entryRel)
+	// hash 的口径随安装模式而异，这两条断言只对**拷贝快照**成立：
+	//   · 拷贝：hash = sha256(入口文件) —— 装进来的字节就是源字节；
+	//   · dev：hash = **内容修订**（surfaceContentHash 覆盖全部受追踪文件，见 surfaces.go），
+	//     改 panel.js / surface.json / icon.svg 任何一处都会变 —— 否则 watcher 认不出改动。
+	if !*surfaceExternalDev {
+		sum := sha256.Sum256(readBytes(t, installedEntry))
+		wantHash := hex.EncodeToString(sum[:])
+		if rec.Hash != wantHash || idx.Items[0].Hash != wantHash {
+			t.Fatalf("hash = %q（回执）/ %q（index），want sha256(%s) = %q",
+				rec.Hash, idx.Items[0].Hash, entryRel, wantHash)
+		}
+		// 源文件没被安装器改动（安装是「读源、写目标」，不是「就地加工」）。
+		srcSum := sha256.Sum256(readBytes(t, filepath.Join(dir, entryRel)))
+		if hex.EncodeToString(srcSum[:]) != wantHash {
+			t.Fatalf("装进来的 %s 与源目录里的字节不同（安装器改了内容？）", entryRel)
+		}
+	} else if len(rec.Hash) < 8 {
+		t.Fatalf("dev 安装的内容修订太短：%q", rec.Hash)
 	}
 
 	// —— entries：条数、id、能渲染的标题 ——
@@ -193,9 +217,15 @@ func TestSurfaceInstallExternal(t *testing.T) {
 	}
 
 	// —— 权限：目录 0700 / 文件 0600（与他人共享的机器上，插件目录是用户数据）——
-	wantMode(t, filepath.Join(root, rec.ID), surfaceDirMode)
-	wantMode(t, filepath.Join(root, rec.ID, "surface.json"), surfaceFileMode)
-	wantMode(t, installedEntry, surfaceFileMode)
+	// dev 安装落盘的是软链：这几处 os.Stat 会跟到**源目录**上，权限归源目录作者所有，
+	// 安装器不该（也做不到）替它改权限 —— 只对拷贝快照断言。
+	if !*surfaceExternalDev {
+		wantMode(t, filepath.Join(root, rec.ID), surfaceDirMode)
+		wantMode(t, filepath.Join(root, rec.ID, "surface.json"), surfaceFileMode)
+		wantMode(t, installedEntry, surfaceFileMode)
+	} else if fi, lerr := os.Lstat(filepath.Join(root, rec.ID)); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dev 安装的 %s 不是软链：%v", filepath.Join(root, rec.ID), lerr)
+	}
 
 	t.Logf("✅ 装上 %s → %s（%d 个入口：%s）", dir, filepath.Join(root, rec.ID), *rec.Entries, strings.Join(titles, ", "))
 }

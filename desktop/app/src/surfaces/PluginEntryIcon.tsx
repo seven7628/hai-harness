@@ -7,23 +7,27 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { pluginAssetUrl } from './plugin/loader'
+import { canLoadPluginAsset } from './pluginAsset'
 import type { PluginEntryItem } from './plugin/entries'
 
-export default function PluginEntryIcon({ entry, fallback }: {
+export default function PluginEntryIcon({ entry, fallback, size = 12 }: {
   entry: PluginEntryItem
   /** kind 图标（由调用方从 registry 取，见 RightPanel 的 kindIcon）：读不到图时用它 */
   fallback: ReactNode
+  /** 像素。菜单/标签 12（历史值），右侧 rail 的 34px 按钮用 16 */
+  size?: number
 }) {
   // 每项一份状态：一个坏图标只影响自己那一行（放在父级会让整组退回同一个图标）。
   const [broken, setBroken] = useState(false)
   const src = entry.icon ? pluginAssetUrl(entry.pluginId, entry.icon) : ''
-  if (!src || broken) return <>{fallback}</>
+  if (!canLoadPluginAsset(src) || broken) return <>{fallback}</>
   return (
     <img
       className="rtabs-entry-ico"
       src={src}
-      width={12}
-      height={12}
+      width={size}
+      height={size}
+      style={{ width: size, height: size }}
       alt=""
       draggable={false}
       data-plugin-icon={entry.pluginId}

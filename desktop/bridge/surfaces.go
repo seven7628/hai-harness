@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,11 @@ const (
 	maxSurfaceEntryBytes = 256 << 10
 	// maxSurfaceDirBytes 整目录上限（1 MiB）：manifest + panel.js + icon 的合理量级。
 	maxSurfaceDirBytes = 1 << 20
+	// dev 安装的上限（CreateMode 热加载）：源目录通常是一个真实仓库（含 .git/README/
+	// 截图），不能拿 1 MiB 整目录上限去卡它。只对**受追踪文件**（js/css/json/svg/图片）
+	// 计体积：4 MiB / 400 个文件足够一面板插件，也挡住「把 node_modules 链进来」。
+	maxSurfaceDevBytes = 4 << 20
+	maxSurfaceDevFiles = 400
 
 	// maxSurfaceEntries manifest.entries[] 的条数上限（D-2 / R16）。
 	// 20 是「一个插件能一眼列完入口」的量级：再多就不是菜单，是目录页了。
@@ -113,9 +119,16 @@ var surfaceToolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
 type surfaceEntry struct {
 	ID      string `json:"id"`
 	Version string `json:"version"`
-	Hash    string `json:"hash"`   // sha256(入口文件) 的十六进制
-	Source  string `json:"source"` // 安装来源目录的绝对路径（追溯「从哪装的」）
-	Enabled bool   `json:"enabled"`
+	// Hash 内容修订（sha256 十六进制）：拷贝安装 = 全部文件内容；dev 安装 = 受追踪文件
+	//（manifest/entry/icon/js/css/图片）的内容。**不再只是入口文件** —— 只改 surface.json
+	// 或 icon.svg 时旧口径 hash 不变，安装器会回 already_installed、渲染层也不会重载，
+	// 表现为「改了清单/图标，重装没反应」。渲染层只拿它当模块 URL 的缓存键，口径是内部事务。
+	Hash   string `json:"hash"`
+	Source string `json:"source"` // 安装来源目录的绝对路径（追溯「从哪装的」）
+	// Dev 开发模式（CreateMode 热加载）：<root>/<id> 是指向 Source 的软链，watcher 盯
+	// 受追踪文件，改动 → 更新 Hash + 推 surfaces_changed。拷贝安装为 false（省略）。
+	Dev     bool `json:"dev,omitempty"`
+	Enabled bool `json:"enabled"`
 	// InstalledAt 这一版装上的时刻（RFC3339，UTC）。升级会刷新 —— 它描述的是
 	// 「当前这版何时落盘」，不是「这个 id 第一次出现」。
 	InstalledAt    string `json:"installedAt"`
@@ -331,6 +344,8 @@ type surfaceReceipt struct {
 	ID      string `json:"id,omitempty"`
 	Version string `json:"version,omitempty"`
 	Hash    string `json:"hash,omitempty"`
+	// Dev 这次安装是不是开发模式（软链 + 热加载）。工具层回执要能回答「我改文件会不会生效」。
+	Dev bool `json:"dev,omitempty"`
 	// Entries 这次安装的入口条数（R16b）：0 = manifest 没声明 → 宿主合成一个默认入口。
 	// 指针而不是 int：`entries: 0` 与「没有这个字段」是两件事，前者是「一个入口都没声明，
 	// 但有一个默认入口」，后者属于别的回执（uninstall / rejected）。
@@ -385,84 +400,125 @@ func (s *surfaceStore) Dir() string {
 
 // ---- 安装 ----
 
-// Install 安装（或升级）target 目录里的插件，返回回执（**永不返回 error**：
-// 失败是一种可编程状态，由调用方按 status 分支）。
+// Install 安装（或升级）target 目录里的插件（**拷贝快照**），返回回执
+// （永不返回 error：失败是一种可编程状态，由调用方按 status 分支）。
 func (s *surfaceStore) Install(target string, enable bool) surfaceReceipt {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.install(target, enable)
+	return s.install(target, enable, false)
 }
 
-func (s *surfaceStore) install(target string, enable bool) surfaceReceipt {
+// InstallDev 安装并可选择 dev 模式（CreateMode 热加载）。
+//
+// dev=true：<root>/<id> 是指向 target 的**软链**，watcher 盯着受追踪文件；
+// 改 panel.js / surface.json / icon.svg 保存即生效，无需重装或重启。
+// dev=false：与 Install 逐字相同（拷贝快照）。
+func (s *surfaceStore) InstallDev(target string, enable, dev bool) surfaceReceipt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.install(target, enable, dev)
+}
+
+func (s *surfaceStore) install(target string, enable, dev bool) surfaceReceipt {
 	// ① 校验（不碰 index、不建目录）：任何一条不过都直接 rejected。
-	src, verr := validateSurfaceSource(target)
+	src, verr := validateSurfaceSource(target, dev)
 	mf, hash := src.manifest, src.hash
 	if verr != nil {
 		s.audit(mf.ID, "install", false, verr.Error())
-		return surfaceReceipt{Status: surfaceRejected, Reason: verr.Error(), ID: mf.ID}
+		return surfaceReceipt{Status: surfaceRejected, Reason: verr.Error(), ID: mf.ID, Dev: dev}
 	}
 
 	root := s.Dir()
 	if err := s.ensureStore(); err != nil {
 		s.audit(mf.ID, "install", false, err.Error())
-		return surfaceReceipt{Status: surfaceStatusError, Reason: "创建 surfaces 目录失败：" + err.Error(), ID: mf.ID}
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "创建 surfaces 目录失败：" + err.Error(), ID: mf.ID, Dev: dev}
+	}
+	// dev 的落盘物是软链：目标必须是解析后的真实目录，且不能是 store 自己（自链 = 递归）。
+	realTarget := filepath.Clean(target)
+	if dev {
+		rt, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			s.audit(mf.ID, "install", false, err.Error())
+			return surfaceReceipt{Status: surfaceRejected, Reason: "解析源目录失败：" + err.Error(), ID: mf.ID, Dev: true}
+		}
+		realTarget = rt
+		realRoot, rerr := filepath.EvalSymlinks(root)
+		if rerr == nil {
+			if rel, rerr := filepath.Rel(realRoot, realTarget); rerr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				s.audit(mf.ID, "install", false, "target 在 surfaces 目录内")
+				return surfaceReceipt{Status: surfaceRejected, Reason: "target 不能是 surfaces 目录自身（dev 安装会形成自链）", ID: mf.ID, Dev: true}
+			}
+		}
 	}
 
 	// ② 加锁并读出当前 index（损坏则在此隔离为 .corrupt-<ts>）。
 	idx, prev, lock, lerr := s.lockIndex()
 	if lerr != nil {
 		s.audit(mf.ID, "install", false, lerr.Error())
-		return surfaceReceipt{Status: surfaceStatusError, Reason: "读 index 失败：" + lerr.Error(), ID: mf.ID}
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "读 index 失败：" + lerr.Error(), ID: mf.ID, Dev: dev}
 	}
 	defer closeLock(lock)
 
-	// ③ 幂等：同 id 同 hash = 什么都不做（脚本重试安全）。
+	// ③ 幂等：同 id、同 hash、同安装模式 = 什么都不做（脚本重试安全）。
 	pos := idx.pos(mf.ID)
-	if pos >= 0 && idx.Items[pos].Hash == hash {
-		s.audit(mf.ID, "install", true, "already installed (same sha256)")
+	if pos >= 0 && idx.Items[pos].Hash == hash && idx.Items[pos].Dev == dev {
+		s.audit(mf.ID, "install", true, "already installed (same content revision)")
 		it := idx.Items[pos]
 		// 幂等路径也带入口条数：脚本重跑一次不该让「有几个入口」这个答案消失。
-		return surfaceReceipt{Status: surfaceAlreadyInstalled, ID: it.ID, Version: it.Version, Hash: it.Hash}.
+		return surfaceReceipt{Status: surfaceAlreadyInstalled, ID: it.ID, Version: it.Version, Hash: it.Hash, Dev: it.Dev}.
 			withEntries(len(mf.Entries))
 	}
 
-	// ④ 拷到暂存目录：只有全部校验通过才会变成 <id>。
-	stage, err := os.MkdirTemp(root, surfaceStagingPref)
-	if err != nil {
-		s.audit(mf.ID, "install", false, err.Error())
-		return surfaceReceipt{Status: surfaceStatusError, Reason: "建暂存目录失败：" + err.Error(), ID: mf.ID}
-	}
-	defer os.RemoveAll(stage) // 成功后已被 rename 走，这里是无害清理
+	var stage string
+	if !dev {
+		// ④ 拷到暂存目录：只有全部校验通过才会变成 <id>。
+		st, err := os.MkdirTemp(root, surfaceStagingPref)
+		if err != nil {
+			s.audit(mf.ID, "install", false, err.Error())
+			return surfaceReceipt{Status: surfaceStatusError, Reason: "建暂存目录失败：" + err.Error(), ID: mf.ID, Dev: false}
+		}
+		stage = st
+		defer os.RemoveAll(stage) // 成功后已被 rename 走，这里是无害清理
 
-	if err := copySurfaceTree(target, stage); err != nil {
-		s.audit(mf.ID, "install", false, err.Error())
-		return surfaceReceipt{Status: surfaceRejected, Reason: err.Error(), ID: mf.ID}
-	}
-	// ⑤ 复制后复算 hash：拷贝中途源文件被改 / 写了一半，到这里为止都还能退。
-	staged := filepath.Join(stage, src.entryRel)
-	gotHash, err := sha256File(staged)
-	if err != nil {
-		s.audit(mf.ID, "install", false, err.Error())
-		return surfaceReceipt{Status: surfaceStatusError, Reason: "校验拷贝结果失败：" + err.Error(), ID: mf.ID}
-	}
-	if gotHash != hash {
-		reason := fmt.Sprintf("拷贝后 sha256 不符（源 %s / 拷贝 %s）：源目录在安装过程中被改过？", shortHash(hash), shortHash(gotHash))
-		s.audit(mf.ID, "install", false, reason)
-		return surfaceReceipt{Status: surfaceRejected, Reason: reason, ID: mf.ID}
+		if err := copySurfaceTree(target, stage); err != nil {
+			s.audit(mf.ID, "install", false, err.Error())
+			return surfaceReceipt{Status: surfaceRejected, Reason: err.Error(), ID: mf.ID, Dev: false}
+		}
+		// ⑤ 复制后复算内容修订：拷贝中途源文件被改 / 写了一半，到这里为止都还能退。
+		gotHash, err := surfaceContentHash(stage, false)
+		if err != nil {
+			s.audit(mf.ID, "install", false, err.Error())
+			return surfaceReceipt{Status: surfaceStatusError, Reason: "校验拷贝结果失败：" + err.Error(), ID: mf.ID, Dev: false}
+		}
+		if gotHash != hash {
+			reason := fmt.Sprintf("拷贝后内容修订不符（源 %s / 拷贝 %s）：源目录在安装过程中被改过？", shortHash(hash), shortHash(gotHash))
+			s.audit(mf.ID, "install", false, reason)
+			return surfaceReceipt{Status: surfaceRejected, Reason: reason, ID: mf.ID, Dev: false}
+		}
 	}
 
-	// ⑥ 就位：旧目录（升级/残留）先挪进 .trash，再把暂存目录改名成 <id>。
-	//    目录就位后 index 才写；index 写失败则把目录回滚 —— 两边必须同进同退。
+	// ⑥ 就位：旧目录（升级/残留）先挪进 .trash，再把暂存目录改名成 <id>
+	//    （dev 则建软链）。目录就位后 index 才写；index 写失败则把目录回滚。
 	prevTrash, err := s.displaceOld(root, mf.ID)
 	if err != nil {
 		s.audit(mf.ID, "install", false, err.Error())
-		return surfaceReceipt{Status: surfaceStatusError, Reason: "清旧目录失败：" + err.Error(), ID: mf.ID}
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "清旧目录失败：" + err.Error(), ID: mf.ID, Dev: dev}
 	}
 	final := filepath.Join(root, mf.ID)
-	if err := os.Rename(stage, final); err != nil {
+	if dev {
+		if err := os.Symlink(realTarget, final); err != nil {
+			restoreOld(prevTrash, final)
+			s.audit(mf.ID, "install", false, err.Error())
+			return surfaceReceipt{Status: surfaceStatusError, Reason: "建软链失败：" + err.Error(), ID: mf.ID, Dev: true}
+		}
+		// 软链是**活**的：从校验到建链之间源目录可能已经变了，落库的修订以此刻为准。
+		if h, err := surfaceContentHash(final, true); err == nil {
+			hash = h
+		}
+	} else if err := os.Rename(stage, final); err != nil {
 		restoreOld(prevTrash, final)
 		s.audit(mf.ID, "install", false, err.Error())
-		return surfaceReceipt{Status: surfaceStatusError, Reason: "落盘失败：" + err.Error(), ID: mf.ID}
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "落盘失败：" + err.Error(), ID: mf.ID, Dev: false}
 	}
 
 	// ⑦ 写 index（先 .bak）：失败则回滚目录，磁盘与本文件之外的世界保持一致。
@@ -471,6 +527,7 @@ func (s *surfaceStore) install(target string, enable bool) surfaceReceipt {
 		Version:     strings.TrimSpace(mf.Version),
 		Hash:        hash,
 		Source:      filepath.Clean(target),
+		Dev:         dev,
 		Enabled:     enable,
 		InstalledAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -483,12 +540,44 @@ func (s *surfaceStore) install(target string, enable bool) surfaceReceipt {
 		_ = os.RemoveAll(final)
 		restoreOld(prevTrash, final)
 		s.audit(mf.ID, "install", false, err.Error())
-		return surfaceReceipt{Status: surfaceStatusError, Reason: "写 index 失败：" + err.Error(), ID: mf.ID}
+		return surfaceReceipt{Status: surfaceStatusError, Reason: "写 index 失败：" + err.Error(), ID: mf.ID, Dev: dev}
 	}
 
 	s.audit(mf.ID, "install", true, "")
-	return surfaceReceipt{Status: surfaceApplied, ID: entry.ID, Version: entry.Version, Hash: entry.Hash}.
+	return surfaceReceipt{Status: surfaceApplied, ID: entry.ID, Version: entry.Version, Hash: entry.Hash, Dev: entry.Dev}.
 		withEntries(len(mf.Entries))
+}
+
+// refreshDevHash 热加载的落库一步：dev 插件的内容变了 → 更新 index 的 hash。
+//
+// 只改 hash（version/source/enabled/installedAt 全部原样）：它描述的是「现在这份内容」，
+// 而安装台账描述的是「什么时候装的、从哪装的」。返回 true = 真的改了（调用方据此推
+// surfaces_changed；没变就不该推，否则每次保存都白重挂一遍面板）。
+func (s *surfaceStore) refreshDevHash(id, hash string) bool {
+	if !surfaceIDPattern.MatchString(id) || hash == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, prev, lock, err := s.lockIndex()
+	if err != nil {
+		return false
+	}
+	defer closeLock(lock)
+	pos := idx.pos(id)
+	if pos < 0 {
+		return false
+	}
+	it := &idx.Items[pos]
+	if !it.Dev || it.Hash == hash {
+		return false
+	}
+	it.Hash = hash
+	if err := s.writeIndex(lock, idx, prev); err != nil {
+		log.Printf("surfaces: dev 插件 %s 更新 hash 失败：%v", id, err)
+		return false
+	}
+	return true
 }
 
 // ---- 卸载 ----
@@ -851,11 +940,11 @@ type surfaceSource struct {
 	hash      string
 }
 
-// validateSurfaceSource 校验源目录并算出入口文件的 sha256。
+// validateSurfaceSource 校验源目录并算出**内容修订**（拷贝安装 = 全部文件；dev = 受追踪文件）。
 //
 // 失败时也返回已解出的 manifest（能解多少算多少）：回执与 audit 里带上 id
 // 才能让人对上「哪个包被拒了」。
-func validateSurfaceSource(target string) (surfaceSource, error) {
+func validateSurfaceSource(target string, dev bool) (surfaceSource, error) {
 	mf := surfaceManifest{}
 	if strings.TrimSpace(target) == "" {
 		return surfaceSource{manifest: mf}, errors.New("target 不能为空")
@@ -922,17 +1011,30 @@ func validateSurfaceSource(target string) (surfaceSource, error) {
 		return surfaceSource{manifest: mf}, err
 	}
 
-	total, err := surfaceTreeSize(target)
-	if err != nil {
-		return surfaceSource{manifest: mf}, err
-	}
-	if total > maxSurfaceDirBytes {
-		return surfaceSource{manifest: mf}, fmt.Errorf("%s: 目录共 %s，超过 1 MiB 上限", mf.ID, humanKiB(total))
+	if dev {
+		total, files, err := surfaceTrackedSize(target)
+		if err != nil {
+			return surfaceSource{manifest: mf}, err
+		}
+		if total > maxSurfaceDevBytes {
+			return surfaceSource{manifest: mf}, fmt.Errorf("%s: 受追踪文件共 %s，超过 %s 上限（dev 安装只计 js/css/json/svg/图片）", mf.ID, humanKiB(total), humanKiB(maxSurfaceDevBytes))
+		}
+		if files > maxSurfaceDevFiles {
+			return surfaceSource{manifest: mf}, fmt.Errorf("%s: 受追踪文件 %d 个，超过 %d 个上限（dev 安装会跳过 .git / node_modules）", mf.ID, files, maxSurfaceDevFiles)
+		}
+	} else {
+		total, err := surfaceTreeSize(target)
+		if err != nil {
+			return surfaceSource{manifest: mf}, err
+		}
+		if total > maxSurfaceDirBytes {
+			return surfaceSource{manifest: mf}, fmt.Errorf("%s: 目录共 %s，超过 1 MiB 上限", mf.ID, humanKiB(total))
+		}
 	}
 
-	hash, err := sha256File(entryPath)
+	hash, err := surfaceContentHash(target, dev)
 	if err != nil {
-		return surfaceSource{manifest: mf}, fmt.Errorf("%s: 计算 sha256 失败：%v", mf.ID, err)
+		return surfaceSource{manifest: mf}, fmt.Errorf("%s: 计算内容修订失败：%v", mf.ID, err)
 	}
 	return surfaceSource{manifest: mf, entryPath: entryPath, entryRel: filepath.Clean(entry), hash: hash}, nil
 }
@@ -1231,6 +1333,7 @@ func validateSurfaceEntryIcon(target, icon string) error {
 
 // surfaceTreeSize 目录总大小（含 manifest / icon；不含符号链接指向的内容）。
 func surfaceTreeSize(dir string) (int64, error) {
+	dir = resolveWalkRoot(dir)
 	var total int64
 	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -1249,12 +1352,152 @@ func surfaceTreeSize(dir string) (int64, error) {
 	return total, err
 }
 
+// surfaceDigestExts dev 安装的「受追踪文件」：面板真正会加载的东西。
+//
+// 为什么 dev 不哈希整棵目录：CreateMode 的源目录是一个真实代码仓库（.git / README /
+// 截图 / node_modules 应有尽有），整棵目录既算不起也不该算 —— 一个 node_modules 变化
+// 会触发一次面板重载，而面板一个字节都没变。
+var surfaceDigestExts = map[string]bool{
+	".js": true, ".mjs": true, ".cjs": true, ".css": true, ".json": true,
+	".svg": true, ".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+	".html": true, ".md": true, ".txt": true,
+}
+
+// surfaceNoiseDir dev 口径要整棵跳过的目录（自身不在根上）。
+func surfaceNoiseDir(name string) bool {
+	return name == "node_modules" || name == ".git" || strings.HasPrefix(name, ".")
+}
+
+// resolveWalkRoot 解析为真实目录。
+//
+// **必须做**：`filepath.WalkDir` 对软链根按 Lstat 处理 —— 根是软链时它把根当作一个
+// 普通文件、一步都不下降，于是内容修订变成空串的 sha256（e3b0c442…），拷贝也一个文件
+// 都不拷。dev 安装的落盘物正是软链（<root>/<id>），不解析就是「装上了、hash 是空的、
+// watcher 永远看不出变化」—— 2026-11 实测到的热加载失效根因。
+func resolveWalkRoot(dir string) string {
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return real
+	}
+	return dir
+}
+
+// surfaceTrackedFiles dev 口径的文件清单（排序后的相对路径）。
+func surfaceTrackedFiles(root string) ([]string, int64, error) {
+	root = resolveWalkRoot(root)
+	var files []string
+	var total int64
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			return rerr
+		}
+		if d.IsDir() {
+			if rel != "." && surfaceNoiseDir(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() || !surfaceDigestExts[strings.ToLower(filepath.Ext(p))] {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		files = append(files, rel)
+		total += info.Size()
+		return nil
+	})
+	sort.Strings(files)
+	return files, total, err
+}
+
+// surfaceTrackedSize dev 安装的体积/数量校验（见 maxSurfaceDevBytes 的注释）。
+func surfaceTrackedSize(dir string) (int64, int, error) {
+	files, total, err := surfaceTrackedFiles(dir)
+	return total, len(files), err
+}
+
+// surfaceContentHash 内容修订（index.json 的 hash 字段）：copy = 全部常规文件；
+// dev = 受追踪文件（见 surfaceDigestExts）。
+//
+// 与旧的 sha256(入口文件) 的区别是**故意**的：只改 surface.json（entries/commands）或
+// icon.svg 时，入口文件一个字节没变，旧口径下 hash 不变 → 安装器判 already_installed、
+// 渲染层判 hash 未变而跳过，用户看到的是「改了清单/图标，重装没反应」。
+//
+// 流里带相对路径与长度分隔：只拼内容会让「a.js 里挪一段到 b.js」这种交换产生同一个摘要。
+func surfaceContentHash(root string, dev bool) (string, error) {
+	h := sha256.New()
+	root = resolveWalkRoot(root)
+	if dev {
+		files, _, err := surfaceTrackedFiles(root)
+		if err != nil {
+			return "", err
+		}
+		for _, rel := range files {
+			if err := hashSurfaceFileInto(h, filepath.Join(root, rel), rel); err != nil {
+				return "", err
+			}
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
+	}
+	var files []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil // 软链不算：copySurfaceTree 会拒绝它们，这里只对「会落盘的内容」负责
+		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			return rerr
+		}
+		files = append(files, rel)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(files)
+	for _, rel := range files {
+		if err := hashSurfaceFileInto(h, filepath.Join(root, rel), rel); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func hashSurfaceFileInto(h io.Writer, path, rel string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(h, "%s\x00%d\x00", filepath.ToSlash(rel), st.Size()); err != nil {
+		return err
+	}
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	_, err = io.WriteString(h, "\x00")
+	return err
+}
+
 // copySurfaceTree 拷到暂存目录：目录 0700、文件 0600，符号链接一律拒绝。
 //
 // 为什么拒绝软链而不是「解析后拷内容」：来源目录在拷完到 rename 之间还能被改，
 // 软链会让「校验过的内容」与「落盘的内容」变成两份不同的东西 —— 而这一轮的全部
 // 安全性就建立在「校验过的就是落盘的」上。
 func copySurfaceTree(src, dst string) error {
+	src = resolveWalkRoot(src)
 	var total int64
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -1392,30 +1635,17 @@ func (s *surfaceStore) writeAudit(rec map[string]any, reason string) {
 
 // ---- 小工具 ----
 
-func sha256File(p string) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return h
 }
 
 // surfaceStamp 时间戳（.trash/<id>-<ts> 与 index.json.corrupt-<ts> 共用）。
 // 文件名安全（无冒号）+ 纳秒级：同一秒内两次卸载也不会互相覆盖。
 func surfaceStamp() string {
 	return time.Now().UTC().Format("20060102T150405.000000000")
-}
-
-func shortHash(h string) string {
-	if len(h) > 12 {
-		return h[:12]
-	}
-	return h
 }
 
 func humanKiB(n int64) string {

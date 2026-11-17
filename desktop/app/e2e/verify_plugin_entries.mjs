@@ -10,7 +10,7 @@
 //
 // 覆盖（每条都能被实现打死）：
 //   T0 对照基线：四个内置 provider 与 ＋ 菜单的三个内置项都在；没插件时**没有**插件分组。
-//   T1 ＋ 菜单：真模板（templates/surface，3 个 entries）→ 分组「面板插件」+ 三个标题
+//   T1 ＋ 菜单：真模板（templates/surface，3 个 entries）→ 分组「面板」+ 三个标题
 //     取自 manifest（总览/课表/资源，**不是** id）+ data-entry 正确 + 多插件时插件名小标。
 //   T2 空态能力面板（tabs 为空时那块）：同一份入口也在；点「课表」→ 标签打开、aria-selected、
 //      标题=课表、params.entry=schedule、面板画的是课表页。
@@ -22,7 +22,7 @@
 //      标题仍是 manifest 的「课表」）。
 //   T7 重新启用：入口回来、同一入口能再打开并渲染。
 //   T8 设置页：「打开」按钮 → store.openTab({kind, params:{entry:'overview'}})（第一个 entry）；
-//      每行有「入口在右栏 ＋ → 面板插件」提示；停用后按钮置灰、提示换成启用说明。
+//      每行有「入口在右栏 ＋ → 面板」提示；停用后按钮置灰、提示换成启用说明。
 //   T8b 标签身份契约（PR-00 的 dedupeKey）：同 entry 同 params = 1 个标签；同 entry 不同 params
 //      = 2 个；键序不同 = 同一个（稳定序列化）；provider 声明 dedupeKey → 按它的键合并。
 //   T9 全程零 pageerror。
@@ -191,7 +191,7 @@ const { useAppStore } = await import('../../src/store/useAppStore')
 const WS = ${JSON.stringify(WS)}
 useAppStore.setState({ workspace: WS })
 // 右栏默认收着（生产里由用户点开）：本探针要看的正是右栏里的入口，先展开。
-useAppStore.setState({ rightLayout: { open: true, bias: 'even', ratio: 50 }, rightExpanded: true })
+useAppStore.setState({ rightLayout: { open: true, bias: 'right', ratio: 64 }, rightExpanded: true })
 
 const w = window as unknown as Record<string, unknown>
 const scope = () => {
@@ -237,7 +237,12 @@ w.__probe = {
 }
 
 void useAppStore.getState().start(WS)
-createRoot(document.getElementById('root')!).render(<RightPanel />)
+// 与 App.tsx 同一接线：最大化是 store 里的临时视图，RightPanel 靠 prop 渲染覆盖层形态。
+function RightHost() {
+  const max = useAppStore((s) => s.rightMaximized)
+  return <RightPanel maximized={max} />
+}
+createRoot(document.getElementById('root')!).render(<RightHost />)
 createRoot(document.getElementById('settings-root')!).render(<SurfacesPage />)
 `)
 
@@ -321,7 +326,7 @@ try {
   // 右栏展开：store.start() 会用 settings 里的布局覆盖模块初值（生产里这是用户的偏好），
   // 所以每次 boot/reload 之后都要显式展开一次 —— 收起态只有一条 rail，看不到任何入口。
   const expand = () => page.evaluate(() => window.__probe.store.setState({
-    rightLayout: { open: true, bias: 'even', ratio: 50 },
+    rightLayout: { open: true, bias: 'right', ratio: 64 },
     rightExpanded: true,
   }))
   const surfaces = () => page.evaluate(() => window.__probe.surfaces.list())
@@ -376,7 +381,7 @@ try {
   check('＋ 菜单内置项仍是 3 个（ADDABLE_KINDS 语义不变）',
     (await page.locator('.rtabs-menu.rtabs-menu-right > .rtabs-mi[data-kind]:not([data-plugin-entry])').count()) === 3,
     String(await page.locator('.rtabs-menu.rtabs-menu-right > .rtabs-mi[data-kind]:not([data-plugin-entry])').count()))
-  check('没装插件时没有「面板插件」分组', (await page.locator('[data-plugin-entries]').count()) === 0)
+  check('没装插件时没有「面板」分组', (await page.locator('[data-plugin-entries]').count()) === 0)
   await closeMenu()
 
   // ---- T1 ＋ 菜单：manifest.entries → 分组里的三条 ----
@@ -386,10 +391,10 @@ try {
   await page.waitForFunction((kinds) => kinds.every((k) => window.__probe.surfaces.has(k)), [TPL_KIND, 'plugin:plain', 'plugin:ctx'], { timeout: 8000 }).catch(() => {})
   check('三个插件都进了注册表', (await hasKind(TPL_KIND)) && (await hasKind('plugin:plain')) && (await hasKind('plugin:ctx')))
   await openMenu()
-  check('＋ 菜单出现「面板插件」分组',
+  check('＋ 菜单出现「面板」分组',
     (await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-entries]').count()) === 1)
-  check('分组名 = 面板插件',
-    (await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-entries]').innerText()).trim() === '面板插件',
+  check('分组名 = 面板',
+    (await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-entries]').innerText()).trim() === '面板',
     await page.locator('.rtabs-menu.rtabs-menu-right [data-plugin-entries]').innerText())
   const itemCount = await menuItems().count()
   check('入口 5 个（模板 3 + 两个零入口插件各 1）', itemCount === 5, String(itemCount))
@@ -410,6 +415,49 @@ try {
   check('小标 = 插件显示名（成本看板 / 零入口面板 / 上下文面板）',
     JSON.stringify(groupLabels.map((s) => s.trim())) === JSON.stringify(['成本看板', '零入口面板', '上下文面板']),
     JSON.stringify(groupLabels))
+
+  // ---- T1b 折叠态右侧 rail：每个插件入口一个 icon svg + 快捷键入口（⌥⌘N）----
+  console.log('\nT1b 折叠态 rail：插件图标 + ⌥⌘N')
+  await page.evaluate(() => window.__probe.store.setState({ rightLayout: { open: false }, rightExpanded: false }))
+  await page.waitForSelector('.right-rail .rbtn.plugin-entry')
+  const railEntries = await page.locator('.right-rail .rbtn.plugin-entry').evaluateAll((ns) => ns.map((n) => ({
+    entry: n.getAttribute('data-plugin-entry'),
+    kbd: n.getAttribute('aria-keyshortcuts'),
+    tip: n.getAttribute('data-tip'),
+    img: !!n.querySelector('img[data-plugin-icon]'),
+  })))
+  check('rail 里 5 个插件入口（模板 3 + 两个默认入口）', railEntries.length === 5, JSON.stringify(railEntries.map((e) => e.entry)))
+  check('第一个 = 模板/overview，⌥⌘1（tooltip + aria-keyshortcuts）',
+    railEntries[0]?.entry === `${tplManifest.id}/overview` && /⌥⌘1$/.test(railEntries[0]?.tip || '') && railEntries[0]?.kbd === 'Alt+Meta+1',
+    JSON.stringify(railEntries[0]))
+  check('第五个 = ctx/default，⌥⌘5', railEntries[4]?.entry === 'ctx/default' && /⌥⌘5$/.test(railEntries[4]?.tip || ''), JSON.stringify(railEntries[4]))
+  // 模板声明了 icon.svg：rail 必须画**图片**，不是 "icon.svg" 四个字。
+  const railTpl = railEntries[0]
+  check('插件图标走 <img data-plugin-icon>（不是文本）', railTpl?.img === true, JSON.stringify(railTpl))
+  check('rail 按钮上没有 "icon.svg" 文本', !(await page.locator('.right-rail .rbtn.plugin-entry').first().innerText()).includes('icon.svg'))
+  await page.locator('.right-rail .rbtn.plugin-entry').first().click()
+  await page.waitForSelector(`.rtab[data-kind="${TPL_KIND}"][data-entry="overview"]`)
+  check('点 rail 图标 → 展开右栏 + 打开对应入口', (await page.locator('.right.expanded').count()) === 1)
+
+  // 多标签 + 最大化：标签条保留、两个标签都在、restore 回原形态（用户 2026-11 的要求）
+  await page.evaluate((kind) => window.__probe.openSpec({ kind, params: { entry: 'schedule' } }), TPL_KIND)
+  await page.waitForSelector(`.rtab[data-kind="${TPL_KIND}"][data-entry="schedule"]`)
+  await page.locator('.rtabs-actions .tab-collapse').first().click()
+  await page.waitForSelector('.right.maximized')
+  const maxState = await page.evaluate((kind) => ({
+    tabs: document.querySelectorAll('.rtabs .rtab').length,
+    overview: !!document.querySelector(`.rtab[data-kind="${kind}"][data-entry="overview"]`),
+    schedule: !!document.querySelector(`.rtab[data-kind="${kind}"][data-entry="schedule"]`),
+    pos: getComputedStyle(document.querySelector('.right')).position,
+    btn: document.querySelector('.rtabs-actions .tab-collapse')?.getAttribute('aria-pressed'),
+  }), TPL_KIND)
+  check('最大化：多标签都还在（overview + schedule 不被覆盖层吞掉）',
+    maxState.tabs >= 2 && maxState.overview && maxState.schedule, JSON.stringify(maxState))
+  check('最大化：右栏是 absolute 覆盖层', maxState.pos === 'absolute', maxState.pos)
+  check('最大化：按钮切到「还原」态', maxState.btn === 'true', String(maxState.btn))
+  await page.locator('.rtabs-actions .tab-collapse').first().click()
+  await page.waitForSelector('.right.maximized', { state: 'detached' })
+  check('还原：回到正常展开态', (await page.locator('.right.maximized').count()) === 0)
 
   // ---- T2 空态能力面板：同一份入口 + 从这里点开「课表」 ----
   console.log('\nT2 空态能力面板：入口也在；点「课表」→ 标签打开、标题/entry/页面都对')
@@ -543,9 +591,9 @@ try {
   check('设置页列出三个插件', (await page.locator('[data-surface-id]').count()) === 3,
     String(await page.locator('[data-surface-id]').count()))
   check('每行都有「打开」按钮', (await page.locator('[data-surface-open]').count()) === 3)
-  check('行内提示 = 入口在右栏 ＋ → 面板插件',
+  check('行内提示 = 入口在右栏 ＋ → 面板',
     (await page.locator(`[data-surface-id="${tplManifest.id}"] [data-surface-open-hint]`).innerText())
-      .replace(/\s+/g, ' ').trim() === '入口在右栏 ＋ → 面板插件',
+      .replace(/\s+/g, ' ').trim() === '入口在右栏 ＋ → 面板',
     await page.locator(`[data-surface-id="${tplManifest.id}"] [data-surface-open-hint]`).innerText())
   await page.evaluate(() => window.__probe.resetOpenCalls())
   await page.evaluate(() => window.__probe.spyOpenTab())

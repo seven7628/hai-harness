@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Group, Panel, Separator, usePanelCallbackRef } from 'react-resizable-panels'
 import LeftPanel from './components/LeftPanel'
 import CenterPanel from './components/CenterPanel'
@@ -24,6 +25,9 @@ import { setHubOwnerContext } from './lib/activeOwner'
 import BridgeBanner from './components/BridgeBanner'
 import { useAppStore } from './store/useAppStore'
 import type { RightLayout } from './lib/layout'
+import { pluginEntrySpec } from './lib/rightPanel'
+import { listPluginEntries } from './surfaces/plugin/entries'
+import { pluginShortcutIndex } from './surfaces/plugin/shortcuts'
 import { getTransport } from './transport'
 import { applyTheme } from './lib/theme'
 import { applyNarrativeDensity } from './lib/narrativeSkin'
@@ -82,6 +86,32 @@ export default function App() {
   // 状态：class/内容按真实宽度渲染，store 同步跟随（供快捷键、持久化等其它消费者用）。
   const [leftCollapsed, setLeftCollapsed] = useState(() => !useAppStore.getState().leftExpanded)
   const [rightCollapsed, setRightCollapsed] = useState(() => !useAppStore.getState().rightExpanded)
+  // 右栏最大化（覆盖会话区、只留左栏）：临时视图状态。覆盖层用 absolute 相对 .main-group，
+  // 左边界 = 左栏实际宽度 + 4px 分隔条 —— 用 offsetWidth（布局 px）而不是
+  // getBoundingClientRect（受 #root 的 CSS zoom 影响），否则缩放档下左边界会偏。
+  const rightMaximized = useAppStore((s) => s.rightMaximized)
+  const [rightMaxLeft, setRightMaxLeft] = useState(240)
+  // useLayoutEffect：先量再画，避免最大化第一帧用 240px 兜底值闪一下（左栏收起时是 48px）。
+  useLayoutEffect(() => {
+    if (!rightMaximized) return
+    let raf = 0
+    const measure = (): void => {
+      raf = 0
+      const el = document.querySelector('.left') as HTMLElement | null
+      if (el) setRightMaxLeft(Math.round(el.offsetWidth) + 4)
+    }
+    const schedule = (): void => { if (!raf) raf = requestAnimationFrame(measure) }
+    measure()
+    const el = document.querySelector('.left')
+    const ro = new ResizeObserver(schedule)
+    if (el) ro.observe(el)
+    window.addEventListener('resize', schedule)
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+      ro.disconnect()
+      window.removeEventListener('resize', schedule)
+    }
+  }, [rightMaximized])
   const applyLeftPanelState = useCallback((collapsed: boolean): void => {
     setLeftCollapsed(collapsed)
     setLeftExpanded(!collapsed)
@@ -134,7 +164,8 @@ export default function App() {
     void bridge?.embedSetSession?.(activeSessionId ?? '')
   }, [activeSessionId])
 
-  // 全局快捷键：⌘B 左栏 / ⌘\ 右栏（对齐设置面板的宣告）；⌘1..5 切换最近打开的会话
+  // 全局快捷键：⌘B 左栏 / ⌘\ 右栏（对齐设置面板的宣告）；⌘1..5 切换最近打开的会话；
+  // ⌥⌘1..9 打开第 N 个插件入口（顺序与 ＋ 菜单/右侧 rail 一致，见 surfaces/plugin/shortcuts）。
   const toggleLeft = useAppStore((s) => s.toggleLeft)
   const toggleRight = useAppStore((s) => s.toggleRight)
   const recentSessions = useAppStore((s) => s.recentSessions)
@@ -142,6 +173,16 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return
+      // 插件入口优先于 ⌘1..9：带 Shift 的组合不该被当成「切最近会话」。
+      const pIdx = pluginShortcutIndex(e)
+      if (pIdx >= 0) {
+        const entry = listPluginEntries()[pIdx]
+        if (entry) {
+          e.preventDefault()
+          useAppStore.getState().openTab(pluginEntrySpec(entry))
+        }
+        return
+      }
       const k = e.key.toLowerCase()
       if (k === 'b') {
         e.preventDefault()
@@ -306,6 +347,8 @@ export default function App() {
   useEffect(() => {
     if (hubOpen && !wasHubOpen.current) {
       const st = useAppStore.getState()
+      // 最大化是工作区的临时视图；进 Hub 时先还原，否则右栏会盖住 Hub 自己的界面。
+      if (st.rightMaximized) st.setRightMaximized(false)
       rightExpandedBeforeHub.current = st.rightExpanded
       rightLayoutBeforeHub.current = st.rightLayout
       leftExpandedBeforeHub.current = null
@@ -465,6 +508,9 @@ export default function App() {
           <Group
             orientation="horizontal"
             className="main-group"
+            // 最大化覆盖层的左边界（左栏实际宽度 + 分隔条）。只在最大化时写入，
+            // CSS 侧 `.right.maximized { left: var(--right-max-left) }` 读它。
+            style={rightMaximized ? ({ '--right-max-left': `${rightMaxLeft}px` } as CSSProperties) : undefined}
             // 用户拖分隔条 → 记成布局比例（custom 或吸附到预设）；**不再自动收起左栏**
             //（三态布局里右栏 >50% 是合法状态，D-A 的自动展开只属于 openTab，不参与拖拽）
             onLayoutChanged={(layout, meta) => {
@@ -527,7 +573,7 @@ export default function App() {
             >
               <div className={`hub-host-stack ${hubOpen ? 'hub-on' : ''}`}>
                 <div className="hub-host-cell workspace-cell">
-                  <RightPanel />
+                  <RightPanel maximized={rightMaximized} />
                 </div>
                 {hubOpen ? (
                   <div className="hub-host-cell hub-cell">

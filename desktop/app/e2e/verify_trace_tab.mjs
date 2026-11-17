@@ -70,8 +70,11 @@ try {
     }
     for (let step = 0; step < 6; step++) {
       await page.evaluate(() => {
-        for (const q of document.querySelectorAll('.dock .q-item, .dock .ask')) {
-          const opt = q.querySelector('.q-option:not(.sel)')
+        for (const q of document.querySelectorAll('.dock .ask, .dock .q-item, .dock .ask-list')) {
+          // 两个世代的选项类名都要认：设计版是 button.ask-opt（选中态在 aria-checked），
+          // 旧版是 .q-option.sel。只认旧的 → 一次都没点中 → 提交按钮永远禁用 →
+          // mock 永远跑不到 edit_file（⑧ 干等 18s）。
+          const opt = q.querySelector('.ask-opt[aria-checked="false"], .q-option:not(.sel)')
           if (opt) opt.click()
         }
       })
@@ -397,7 +400,8 @@ try {
       swatch: swatches.map((s) => Math.round(s.getBoundingClientRect().width)),
     }
   })
-  assert(hd.meta.some((x) => /墙钟/.test(x)), `header 显示墙钟（实得 ${hd.meta.join(' | ')}）`)
+  // 标签 = i18n rp.trace.wall；2026-11 把「墙钟」改成「实际耗时」（用户不懂墙钟）。
+  assert(hd.meta.some((x) => /实际耗时/.test(x)), `header 显示实际耗时（实得 ${hd.meta.join(' | ')}）`)
   assert(hd.meta.some((x) => /累计/.test(x)), 'header 显示累计耗时（可与墙钟对比）')
   assert(hd.barCount > 0 && hd.barH.every((h) => h > 0), `时间占比条可见（${hd.barCount} 段，高 ${hd.barH.join('/')}px）`)
   assert(hd.barW.every((w) => w > 0), `占比条有正宽度（${hd.barW.join('/')}px）`)

@@ -411,6 +411,14 @@ func (m *manager) pluginProjectsData() []pluginProjectInfo {
 				}
 				info.Icon = mf.Icon
 			}
+			// 与主进程读索引同一条缺省（electron/surface-index.ts：manifest 没声明
+			// 但目录里有 icon.svg 就用它）。否则「模板自带的 icon.svg」在左栏永远不出现 ——
+			// 作者看到的是「我明明放了图标」。
+			if strings.TrimSpace(info.Icon) == "" {
+				if st, err := os.Stat(filepath.Join(m.surfaces.Dir(), it.ID, "icon.svg")); err == nil && st.Mode().IsRegular() {
+					info.Icon = "icon.svg"
+				}
+			}
 			byID[it.ID] = info
 		}
 	}

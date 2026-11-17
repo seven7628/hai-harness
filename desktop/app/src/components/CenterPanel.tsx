@@ -4,6 +4,7 @@ import Composer from './Composer'
 import ApprovalPanel from './ApprovalPanel'
 import AskUserQuestionPanel from './AskUserQuestionPanel'
 import { AgentSessionView } from './AgentSessionView'
+import TodoPanel from './TodoPanel'
 import { useAppStore, titleKey, skeletonFinishExit } from '../store/useAppStore'
 import { useT } from '../i18n'
 
@@ -288,6 +289,8 @@ export default function CenterPanel({ variant = 'desktop' }: { variant?: 'deskto
   return (
     <section className={mobile ? 'center center--mobile' : 'center'} data-variant={variant}>
       {mobile ? null : <RecentBar />}
+      {/* 待办 = 这一屏会话的计划：挂在会话框上方（不是右栏顶部），随 focusedAgent 换作用域 */}
+      <TodoPanel />
       <div className="narrative-wrap">
         {focused ? <AgentSessionView focus={focused} /> : <Narrative />}
         {showSkeleton && <SessionSkeleton label={t('common.loading')} leaving={skeletonPhase === 'exit'} />}

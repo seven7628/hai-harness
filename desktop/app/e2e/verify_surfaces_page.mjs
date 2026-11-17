@@ -212,7 +212,7 @@ try {
   await page.waitForFunction(() => window.__probe?.mounted, null, { timeout: 30000 })
   await page.waitForSelector('[data-surface-id="alpha"]')
 
-  check('标题 = 面板插件', (await textOf(page.locator('.settings-sec-title').first())) === '面板插件')
+  check('标题 = 面板', (await textOf(page.locator('.settings-sec-title').first())) === '面板')
   check('顶部说明非空', (await textOf(page.locator('.set-desc').first())).length > 20)
   check('列表 3 条', (await rows().count()) === 3, String(await rows().count()))
 
@@ -344,7 +344,7 @@ try {
     () => !document.querySelector('[data-surface-audit]'),
     null, { timeout: 8000 },
   )
-  check('空 audit 显示空态一句话', (await page.locator('.set-placeholder').last().innerText()).includes('还没有调用记录'))
+  check('空 audit 显示空态一句话', (await page.locator('.page-empty').last().innerText()).includes('还没有调用记录'))
 
   // ================= T5 失败：可读原因，不 alert =================
   console.log('\nT5 失败路径：ok:false 的 reason 贴在那一行上，不弹 alert')
@@ -353,7 +353,7 @@ try {
   await row('alpha').locator('.switch').click()
   await softSelector('[data-surface-row-error]', 2000)
   check('开关失败给出可读原因',
-    (await textOf(row('alpha').locator('[data-surface-row-error]'))) === '插件清单里没有这个 id（可能已被卸载）。',
+    (await textOf(row('alpha').locator('[data-surface-row-error]'))) === '面板清单里没有这个 id（可能已被卸载）。',
     await textOf(row('alpha').locator('[data-surface-row-error]')))
   check('开关失败没有推进 UI（仍是已停用）', (await stateOf('alpha')) === '已停用', await stateOf('alpha'))
   check('失败不弹 alert', (await page.evaluate(() => window.__probe.alerts())) === 0)

@@ -183,9 +183,12 @@ func TestSurfaceInstallWritesIndexHashAndPerms(t *testing.T) {
 	if rec.ID != "cost-board" || rec.Version != "0.1.0" {
 		t.Fatalf("回执 id/version = %q/%q", rec.ID, rec.Version)
 	}
-	wantHash := sha256Hex(panel)
+	wantHash, herr := surfaceContentHash(src, false)
+	if herr != nil {
+		t.Fatalf("算内容修订失败：%v", herr)
+	}
 	if rec.Hash != wantHash {
-		t.Fatalf("回执 hash = %q，want sha256(panel.js) = %q", rec.Hash, wantHash)
+		t.Fatalf("回执 hash = %q，want 内容修订 = %q", rec.Hash, wantHash)
 	}
 
 	raw, idx := readIndex(t, root)
@@ -273,7 +276,8 @@ func TestSurfaceInstallSameHashIsAlreadyInstalled(t *testing.T) {
 	if rec.Status != surfaceAlreadyInstalled {
 		t.Fatalf("第二次 status = %q，want %q（reason=%q）", rec.Status, surfaceAlreadyInstalled, rec.Reason)
 	}
-	if rec.ID != "cost-board" || rec.Hash != sha256Hex(panel) {
+	want, _ := surfaceContentHash(src, false)
+	if rec.ID != "cost-board" || rec.Hash != want {
 		t.Fatalf("already_installed 回执 = %+v（必须仍能拿到 id/hash）", rec)
 	}
 	after := readBytes(t, filepath.Join(root, "index.json"))
@@ -1004,11 +1008,10 @@ func TestSurfaceRejectedFirstRunLeavesSafePerms(t *testing.T) {
 	wantMode(t, filepath.Join(root, "audit.jsonl"), 0o600)
 }
 
-// entry 可以是子目录里的文件：hash 认 manifest.entry，不认「panel.js」这个名字。
+// entry 可以是子目录里的文件：内容修订覆盖 manifest.entry 指向的那份文件。
 //
-// 这条钉的是「hash = sha256(manifest.entry)」这个口径（01 §5.4 写的是 sha256(panel.js)）：
-// 认死文件名会让 `"entry":"dist/panel.js"` 这种合法 manifest 装不上，或者算出一个
-// 不属于任何文件的 hash。
+// 这条钉的是「hash = 内容修订（含 entry 的真实位置）」：认死 `panel.js` 这个名字会让
+// `"entry":"dist/panel.js"` 这种合法 manifest 算出一个不属于任何文件的 hash。
 func TestSurfaceInstallAcceptsNestedEntry(t *testing.T) {
 	st, root := testSurfaceStore(t)
 	panel := "export default () => 'nested'\n"
@@ -1027,8 +1030,12 @@ func TestSurfaceInstallAcceptsNestedEntry(t *testing.T) {
 	if rec.Status != surfaceApplied {
 		t.Fatalf("status = %q，want applied（reason=%q）", rec.Status, rec.Reason)
 	}
-	if want := sha256Hex(panel); rec.Hash != want {
-		t.Fatalf("hash = %q，want sha256(dist/panel.js) = %q", rec.Hash, want)
+	want, herr := surfaceContentHash(src, false)
+	if herr != nil {
+		t.Fatalf("算内容修订失败：%v", herr)
+	}
+	if rec.Hash != want {
+		t.Fatalf("hash = %q，want 内容修订 = %q", rec.Hash, want)
 	}
 	got := string(readBytes(t, filepath.Join(root, "nested-entry", "dist", "panel.js")))
 	if got != panel {

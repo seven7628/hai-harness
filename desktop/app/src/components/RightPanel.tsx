@@ -2,27 +2,26 @@ import { Fragment, useEffect, useReducer, useRef, useState, useCallback } from '
 import type { KeyboardEvent as ReactKeyboardEvent, ReactElement, ReactNode } from 'react'
 import { useAppStore, isPendingWebTab, rebuildWebTab, selectRightTab, TABS_MAX_VISIBLE } from '../store/useAppStore'
 import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '../store/useAppStore'
-import { Activity, GitBranch, FileIcon, CheckList, Globe, PanelRight, ChevronDown, Plus } from './icons'
+import { Activity, GitBranch, FileIcon, Globe, PanelRight, ChevronDown, Plus, MaximizeIcon, RestoreIcon } from './icons'
 import { ChangesTab } from './ChangesTab'
 import { WebTab } from './WebTab'
 import { ActivityTab } from './ActivityTab'
 import { FilePreviewTab } from './FilePreview'
 import { EditorConfirm } from './EditorConfirm'
 import { fileUrlToPath } from '../lib/filePaths'
-import { activeTabOf } from '../lib/rightPanel'
+import { activeTabOf, pluginEntrySpec } from '../lib/rightPanel'
 import { getSurface, subscribeSurfaces } from '../surfaces/registry'
 import { SurfaceBoundary, SurfaceTombstone } from '../surfaces/SurfaceBoundary'
 import type { UnavailableReason } from '../surfaces/SurfaceBoundary'
 import { getSurfaceHealth, isSurfaceDisabled } from '../surfaces/health'
 import { declaredEntryTitle, entryTitleText, groupEntryItems, listPluginEntries } from '../surfaces/plugin/entries'
 import type { PluginEntryItem } from '../surfaces/plugin/entries'
+import { PLUGIN_SHORTCUT_MAX, pluginEntryShortcut, pluginEntryShortcutAria } from '../surfaces/plugin/shortcuts'
 import PluginEntryIcon from '../surfaces/PluginEntryIcon'
 import type { SurfaceKind } from '../surfaces/types'
 import type {} from '../lib/fileStatus'
 import { copyText } from '../lib/clipboard'
 import { useLang, useT } from '../i18n'
-import TodoPanel from './TodoPanel'
-import { useFocusTodos } from './useFocusTodos'
 import { bridge } from '../lib/bridge'
 
 // Tab 分两段：主段 = 会话工作流核心（链路 · 变更）；辅段 = 预览工具（文件 · 网页）。
@@ -151,7 +150,7 @@ function panelFallback(tab: TabInstance, scope: string): ReactNode {
 // ref + state + panelMenuOpen 镜像，backdrop 与 Escape 也只写一份。
 type PanelMenu = 'add' | 'more' | 'overflow' | null
 
-export default function RightPanel() {
+export default function RightPanel({ maximized = false }: { maximized?: boolean }) {
   const t = useT()
   // R16b：入口标题可能是 `{ zh, en }`，语言在**渲染点**选（快照里留声明本身 ——
   // 见 surfaces/plugin/entries.ts 的 entryTitleText）。切语言时这里跟着重渲染。
@@ -164,8 +163,7 @@ export default function RightPanel() {
   const activeKind = useAppStore(selectRightTab)
   const setRightExpanded = useAppStore((s) => s.setRightExpanded)
   const toggleRight = useAppStore((s) => s.toggleRight)
-  const rightLayout = useAppStore((s) => s.rightLayout)
-  const applyBias = useAppStore((s) => s.applyBias)
+  const setRightMaximized = useAppStore((s) => s.setRightMaximized)
   const browserConfig = useAppStore((s) => s.browserConfig)
   // —— 标签模型（阶段 1）——
   const tabsByScope = useAppStore((s) => s.tabsByScope)
@@ -192,6 +190,12 @@ export default function RightPanel() {
   // 快照由加载器在每轮 sync 里更新（禁用 → 立刻为空），订阅走下面的 subscribeSurfaces，
   // 不另开 IPC。分组口径与设置页共用 groupEntryItems：一个插件一条「这几个入口」。
   const pluginEntryGroups = groupEntryItems(listPluginEntries())
+  // 快捷键提示：编号必须与 App 的全局 ⌥⌘N 同一份（都读 listPluginEntries() 的前 9 个）。
+  const pluginShortcutOf = new Map<string, string>()
+  listPluginEntries().slice(0, PLUGIN_SHORTCUT_MAX).forEach((e, i) => {
+    const kbd = pluginEntryShortcut(i)
+    if (kbd) pluginShortcutOf.set(`${e.pluginId}:${e.entryId}`, kbd)
+  })
   // 只有一个插件时不画插件名小标：那时「面板插件」这四个字已经说清来源，
   // 再加一行名字只是把 3 行菜单变成 4 行（多插件时才需要区分「谁的课表」）。
   const showPluginGroupNames = pluginEntryGroups.length > 1
@@ -242,7 +246,7 @@ export default function RightPanel() {
   // 不传它 = 三个入口共用一个标签，点第二个会「没反应」（store.tabKeyOf 按 (kind, entry) 认身份）。
   // 形状 cast 只此一处：TabInstance 联合里没有 plugin 成员（口径见 store 的 toPersistedTab）。
   const openPluginEntry = useCallback((entry: PluginEntryItem) => {
-    openTab({ kind: entry.kind, params: { entry: entry.entryId } } as unknown as TabSpec)
+    openTab(pluginEntrySpec(entry))
     setMenu(null)
   }, [openTab, setMenu])
   // 卸载时归零：panelMenuOpen 描述的是**本组件子树里**那个菜单，状态不该比它的所有者活得久。
@@ -435,13 +439,24 @@ export default function RightPanel() {
     if (tab && isPendingWebTab(tab)) rebuildWebTab(tab)
   }, [rightExpanded, activeTab?.kind, pendingWebTabId, scope])
 
-  const todos = useAppStore((s) => s.todos)
-  // M6 的「网页沉浸态」随 R06c 迁进 components/WebTab.tsx（它只有一个消费者，且 provider 的
-  // render 拿不到 props）：RightPanel 不再持有 immersive / toolbarHidden。
-  // 看的是哪个子智能体 → 待办面板/角标跟随它（判定在 useFocusTodos，与面板同一份）
-  const focusTodos = useFocusTodos()
-  // 活跃待办数（未完成）→ 折叠图标条角标（跟随焦点，与面板同源）
-  const activeTodos = (focusTodos?.todos ?? todos).filter((todo) => !todo.done).length
+  // 插件入口（快照在 entries.ts；subscribeSurfaces 的那次重渲染会带出新的一组）。
+  // rail 只放前 9 个：每个都带 ⌥⌘N，超过 9 个就没有快捷键可给，留在 ＋ 菜单里。
+  const pluginRailEntries = listPluginEntries().slice(0, PLUGIN_SHORTCUT_MAX)
+
+  // 最大化时 Esc = 还原（与系统面板的「Esc 退出全屏」同一心智）。
+  // 菜单开着时让菜单自己的 Esc 处理（它们在 window 上也各有一个监听）；弹窗同理。
+  useEffect(() => {
+    if (!maximized) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (menuRef.current || ctxRef.current) return
+      if (document.querySelector('[aria-modal="true"], .settings-overlay')) return
+      e.preventDefault()
+      setRightMaximized(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [maximized, setRightMaximized])
 
   // 标签显示名：file → 文件名；web → 当前页标题（退化到主机名）；其余 → kind 的 i18n 文案。
   const kindLabel = (k: TabKind) => t(`rp.tab.${k}`)
@@ -486,17 +501,6 @@ export default function RightPanel() {
           >
             <PanelRight size={15} />
           </button>
-          {todos.length > 0 && (
-            <button
-              className="rbtn"
-              data-tip={t('todo.title')}
-              aria-label={t('todo.title')}
-              onClick={() => setRightExpanded(true)}
-            >
-              <CheckList />
-              {activeTodos > 0 && <span className="todo-badge mono">{activeTodos}</span>}
-            </button>
-          )}
           {allTabs.map((tab) => {
             // 折叠态未读角标（阶段 4 的可见性兜底）：标签条只在展开态存在，而「AI/Agent 后台
             // 产出不抢视线」之后，用户唯一能知道「有东西在等我」的地方就是这条 rail。
@@ -525,17 +529,35 @@ export default function RightPanel() {
               </button>
             )
           })}
+          {pluginRailEntries.length > 0 && <div className="rail-sep" role="separator" aria-hidden="true" />}
+          {pluginRailEntries.map((entry, i) => {
+            const label = entryTitleText(entry.title, lang)
+            const kbd = pluginEntryShortcut(i)
+            return (
+              <button
+                key={`${entry.pluginId}:${entry.entryId}`}
+                className="rbtn plugin-entry"
+                data-plugin-entry={`${entry.pluginId}/${entry.entryId}`}
+                data-tip={kbd ? `${label} · ${kbd}` : label}
+                aria-label={kbd ? `${label} (${kbd})` : label}
+                aria-keyshortcuts={pluginEntryShortcutAria(i) || undefined}
+                onClick={() => {
+                  openPluginEntry(entry)
+                  setRightExpanded(true)
+                }}
+              >
+                <PluginEntryIcon entry={entry} size={16} fallback={kindIcon(entry.kind)} />
+              </button>
+            )
+          })}
         </div>
       </aside>
     )
   }
 
   return (
-    <aside className="right expanded" aria-label={t('rp.aria')}>
+    <aside className={`right expanded${maximized ? ' maximized' : ''}`} aria-label={t('rp.aria')} data-maximized={maximized ? '1' : undefined}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        {/* 待办面板跟随「你在看谁」（作用域判定在面板内部，见 TodoPanel）：看主会话 =
-            会话清单；看某个子智能体 = 它自己的清单（绝不回退到主会话清单）。 */}
-        <TodoPanel />
         <div className="rtabs" role="tablist" aria-label={t('rp.aria')}>
           <button
             className="rtabs-more"
@@ -720,6 +742,7 @@ export default function RightPanel() {
                           data-kind={e.kind}
                           data-entry={e.entryId}
                           data-plugin-entry={`${g.pluginId}/${e.entryId}`}
+                          data-kbd={pluginShortcutOf.get(`${g.pluginId}:${e.entryId}`) || undefined}
                           role="menuitem"
                           onClick={() => openPluginEntry(e)}
                         >
@@ -732,23 +755,40 @@ export default function RightPanel() {
               )}
             </div>}
           </div>
-          <div className="rp-bias" role="group" aria-label={t('rp.bias.label')}>
-            {(['even', 'center', 'right'] as const).map((b) => (
+          {/* 右栏自身动作：最大化（覆盖会话区，只留左栏）/ 关闭（回到会话）。
+              最大化仍保留整条标签栏 —— 多标签/多页面在两种形态下是同一套状态。 */}
+          <div className="rtabs-actions">
+            <button
+              className={`tab-collapse${maximized ? ' on' : ''}`}
+              onClick={() => setRightMaximized(!maximized)}
+              title={t(maximized ? 'rp.maximized.restore' : 'rp.maximized.enter')}
+              aria-label={t(maximized ? 'rp.maximized.restore' : 'rp.maximized.enter')}
+              aria-pressed={maximized}
+            >
+              {maximized ? <RestoreIcon size={15} /> : <MaximizeIcon size={15} />}
+            </button>
+            {/* 最大化时关闭 = 明确的 ✕（与截图里那个「关掉右侧页、回到会话」同一语义）；
+                平时仍是「收起右栏」的面板图标 —— 两个动作在多标签下是同一件事的两种说法。 */}
+            {maximized ? (
               <button
-                key={b}
-                className={'rp-bias-b' + (rightLayout.open && rightLayout.bias === b ? ' on' : '')}
-                onClick={() => applyBias(b)}
-                title={t('rp.bias.' + b)}
-                aria-label={t('rp.bias.' + b)}
-                aria-pressed={rightLayout.open && rightLayout.bias === b}
+                className="tab-collapse"
+                onClick={toggleRight}
+                title={t('rp.maximized.close')}
+                aria-label={t('rp.maximized.close')}
               >
-                {t('rp.bias.' + b)}
+                ✕
               </button>
-            ))}
+            ) : (
+              <button
+                className="tab-collapse"
+                onClick={toggleRight}
+                title={t('topbar.toggleRight')}
+                aria-label={t('topbar.toggleRight')}
+              >
+                <PanelRight size={15} />
+              </button>
+            )}
           </div>
-          <button className="tab-collapse" onClick={toggleRight} title={t('topbar.toggleRight')} aria-label={t('topbar.toggleRight')}>
-            <PanelRight size={15} />
-          </button>
           {ctx && ctxTab && (
             <div className="ctx-menu" style={{ left: ctx.x, top: ctx.y }} role="menu">
               <button className="ctx-item" role="menuitem" onClick={() => ctxClose(ctxTab.id)}>{t('browser.menu.close')}</button>

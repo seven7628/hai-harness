@@ -1632,6 +1632,9 @@ type manager struct {
 	// 零值可用（root 为空时按 appDataDir() 解析）：同上一条纪律 —— manager 由多处
 	// 字面量构造，要求显式初始化必然会漏一处，而那处会装到别的目录去。
 	surfaces surfaceStore
+	// surfaceWatch CreateMode dev 插件的热加载监听（fsnotify，见 surface_watch.go）。
+	// 懒启动（serve 里 startSurfaceWatch）；安装/卸载成功后 Sync 一次以对齐监听集合。
+	surfaceWatch *surfaceWatcher
 	// surfaceToolsForced 仅测试注入：非 nil 时覆盖 settings.features.surfaceTools
 	//（生产恒 nil）。做成字段而不是全局变量，是为了让并发跑的用例互不污染。
 	surfaceToolsForced *bool
@@ -4796,6 +4799,7 @@ func (m *manager) dispatch(c command) {
 		} else {
 			m.shutdownAll()     // 兜底：全部工作区
 			m.stopFileWatches() // 进程级：停编辑器目录监听（等 goroutine 退出）
+			m.stopSurfaceWatch()
 		}
 		m.resp(c, true, "", nil)
 
@@ -7433,6 +7437,10 @@ func serve() error {
 	cronStart := time.Now()
 	m.startCron()
 	startupLog("A3.startCron", cronStart)
+	// CreateMode 热加载：dev 安装的插件目录监听（没有 dev 插件时只挂一个 store 根，成本≈0）。
+	surfaceWatchStart := time.Now()
+	m.startSurfaceWatch()
+	startupLog("A3.startSurfaceWatch", surfaceWatchStart)
 	// Dream：记忆生命周期的定时巡检（与 cron 同一条触发链路，见 dream_scheduler.go）。
 	dreamStart := time.Now()
 	m.startDreamScheduler()

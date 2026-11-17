@@ -306,7 +306,10 @@ try {
 
   // ---- T4：打开插件面板（＋ 菜单 → 真 hai-surface:// 协议 import panel.js）----
   console.log('\nT4 ＋ 菜单 → 面板（真协议）')
-  const activityBtn = win.getByRole('button', { name: '链路', exact: true }).first()
+  // 按 data-kind 找，不按文案找：这个按钮的可读名 = tab 的 i18n 文案，2026-11 的
+  // 「链路 → 过程」更名把 `name: '链路'` 变成永不匹配（rail 在、探针却等 30s）。
+  // data-kind 是折叠 rail 与展开标签条**共用的**机器可读出口（R11b），两种状态都能点到。
+  const activityBtn = win.locator('[data-kind="activity"]').first()
   await waitFor(() => activityBtn.count().then((n) => n > 0), { label: '右栏图标条' })
   await activityBtn.click({ timeout: 5000 }).catch(() => {})
   await waitFor(() => win.locator('.rtabs-add').count().then((n) => n > 0), { label: '＋ 按钮' })

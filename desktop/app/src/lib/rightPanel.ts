@@ -9,7 +9,7 @@
 //
 // 依赖纪律：与 lib/webTab.ts 同一口径 —— 只允许 **type-only** 依赖 store
 //（`import type`，esbuild/tsc 整句擦除），否则 store → lib → store 的运行时环立刻回来。
-import type { ScopeKey, TabInstance, TabSet } from '../store/useAppStore'
+import type { ScopeKey, TabInstance, TabSet, TabSpec } from '../store/useAppStore'
 import type { SurfaceKind } from '../surfaces/types'
 
 /** 选择器需要的最小状态形状（AppState 结构上满足它；单测因此不必造整个 store）。 */
@@ -29,6 +29,12 @@ export interface TabsState {
  */
 export function tabScopeKey(s: { activeSessionId?: string; workspace?: string }): ScopeKey {
   return s.activeSessionId || s.workspace || ''
+}
+
+/** 插件入口 → openTab 的 spec：`params.entry` 必填（D-2：同一 kind 的多个标签靠它区分）。 */
+export function pluginEntrySpec(entry: { kind: SurfaceKind; entryId: string }): TabSpec {
+  // TabInstance 联合里没有 plugin 成员（口径见 store 的 toPersistedTab），形状 cast 只此一处。
+  return { kind: entry.kind, params: { entry: entry.entryId } } as unknown as TabSpec
 }
 
 /**

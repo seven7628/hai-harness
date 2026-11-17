@@ -179,9 +179,16 @@ strip), unless your provider declares `icon`. `entries[].icon` is also a path, u
 the menu. `provider.icon` is a function `(tab?) => ReactNode` rendered at ~12 px — return an element
 from it, not a path.
 
-**Lifecycle.** The host calls `apply` once per load. On reload (file changed, plugin re-enabled,
-app restart) it first unregisters your kind, disposes the subscriptions you registered through
-`host.onEvent`, then imports the file again and calls `apply` again. So do all `surfaces.register`
+**Lifecycle.** The host calls `apply` once per load. On reload (a tracked file changed in a `dev`
+install, plugin re-enabled, app restart) it first unregisters your kind, disposes the subscriptions
+you registered through `host.onEvent`, then imports the file again and calls `apply` again.
+A `dev` install (the default for `surface_install`) symlinks the installed id to your folder and
+watches the files the panel can load — `panel.js`, `surface.json`, `icon.svg`, and imported
+js/mjs/css/json/svg/png/jpg/gif/webp/html/md/txt. Saving one reloads the panel in ~250 ms; no
+reinstall and no app restart. `node_modules`, `.git` and dot-directories are skipped, so a big
+repo next to the plugin does not trigger reloads. `dev:false` installs a frozen copy instead.
+
+So do all `surfaces.register`
 calls **inside `apply`**, never at module top level (a top-level registration runs before the old
 provider is gone and leaves a stale one), and keep `apply` idempotent. `apply`'s **return value is
 ignored** — the host does not use it as a teardown. For everything the host does not track

@@ -164,7 +164,9 @@ let currentBase: SurfaceBaseUrl | undefined
  */
 export function pluginAssetUrl(id: string, rel: string): string {
   if (!id || !rel) return ''
-  const base = baseOf(currentBase ?? surfaceBaseUrl, id)
+  // 优先级与 applyManifest 同一条来源：最近一次 sync 的 base → 测试替身 → 生产协议。
+  // 少了中间那层，「只渲染左栏、不跑 loader」的探针/单测里图标永远是 hai-surface://（拉不到）。
+  const base = baseOf(currentBase ?? baseUrlOverride ?? surfaceBaseUrl, id)
   return base ? `${base}/${rel.replace(/^\/+/, '')}` : ''
 }
 

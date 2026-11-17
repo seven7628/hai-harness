@@ -496,7 +496,7 @@ async function main() {
     title: await page.locator('.narrative .as-crumb-cur').innerText(),
     // 转录现在就是主会话的渲染（不再有独立的 .agent-tr 外壳）
     transcript: await page.locator('.narrative .msg.assistant').count(),
-    // 待办只有右栏一份（跟随作用域）：子会话视图里**刻意没有**第二份
+    // 待办只有**会话框上方**一份（2026-11 从右栏搬走）：.narrative 内部不该再有第二份
     todoInSession: await page.locator('.narrative .todo-panel').count(),
     todoText: await page.locator('.narrative').innerText().catch(() => ''),
     backBtn: await page.locator('.narrative .as-back').count(),
@@ -698,7 +698,7 @@ async function main() {
   }))
   assert(scopeBar.scope === 'subagent', `运行条作用域 = subagent（实际 ${scopeBar.scope}）`)
   assert(scopeBar.task === 'task-1', `运行条锚定当前子智能体（实际 ${scopeBar.task}）`)
-  assert(/Agent 运行中/.test(scopeBar.text), '运行条文案仍在（不是把整条藏掉）')
+  assert(/智能体运行中/.test(scopeBar.text), '运行条文案仍在（不是把整条藏掉）')
   await page.evaluate(() => {
     const st = window.__store.getState()
     window.__stopCalls = { main: 0, tasks: [] }
@@ -879,36 +879,43 @@ async function main() {
   assert(act.rail === 1, `前置：链路面板渲染出 trace 选择器（渲染源 = ActivityTab，实际 ${act.rail}）`)
   assert(act.wf === 1, `前置：瀑布图在（实际 ${act.wf}）`)
 
-  // ---- ⑦ 待办面板跟随「你在看谁」（右栏是它的唯一宿主）----
+  // ---- ⑦ 待办面板跟随「你在看谁」（会话框上方是它的唯一宿主）----
   //
   // 三个作用域连成一个「同一块面板、三种输入」的对照：主会话 → 会话清单；子 agent →
   // 它自己的；孙 agent（没有清单）→ 整块不渲染。**第三条是关键**：回退主会话清单会让
   // 「它没有计划」显示成「它和主会话一样」，是用户 2026-10 报障的根因。
+  //
+  // 上一步的探针只挂了 RightPanel（?host=right），待办 2026-11 起住在 CenterPanel 里，
+  // 所以这里换到 ?host=center（探针每次加载都会重放同一串事件，数据不用手工搬）。
+  await page.goto(`${URL_BASE}?host=center`, { waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('.center', { timeout: 20000 })
   const todoOf = async (focus) => {
-    // 待办面板只在右栏**展开**形态里渲染（收起时右栏只剩一列图标）。右栏是它的唯一宿主，
-    // 故先把右栏展开 —— 这是量面板的前提，不是被测行为。
+    // 待办现在挂在**会话框上方**（.center > .todo-panel，2026-11 从右栏顶部搬来），
+    // 与右栏开合无关：这里只需切焦点。
     await page.evaluate((f) => {
-      const st = window.__store.getState()
-      st.setRightExpanded(true)
-      st.focusAgent(f)
+      window.__store.getState().focusAgent(f)
     }, focus)
     await page.waitForTimeout(250)
     return {
-      count: await page.locator('.right .todo-panel').count(),
-      text: await page.locator('.right .todo-panel').innerText().catch(() => ''),
+      count: await page.locator('.center > .todo-panel').count(),
+      text: await page.locator('.center > .todo-panel').innerText().catch(() => ''),
+      // 反向断言：叙述区内部没有第二份（搬家的判据，而不是「两边都画一份」）
+      inNarrative: await page.locator('.narrative .todo-panel').count(),
     }
   }
   // 主会话：清单显示（默认折叠，计数可见）
   const todoMain = await todoOf(undefined)
-  assert(todoMain.count === 1 && /0\/2|2\/2/.test(todoMain.text.replace(/\n/g, ' ')),
+  assert(todoMain.count === 1 && todoMain.inNarrative === 0,
+    `待办在会话框上方、不在叙述区内部（center=${todoMain.count} narrative=${todoMain.inNarrative}）`)
+  assert(/0\/2|2\/2/.test(todoMain.text.replace(/\n/g, ' ')),
     `看主会话 → 显示会话清单（2 条），实际 ${todoMain.text.replace(/\n/g, ' ')}`)
   await page.screenshot({ path: path.join(SHOTS, 'right-todo-main.png') })
   // 子 agent：显示它自己的（展开列表读条目文本）
   await page.evaluate(() => window.__store.getState().focusAgent({ nodeId: 'task-1', runId: 'sub-1', taskId: 'task-1' }))
   await page.waitForTimeout(200)
-  await page.locator('.right .todo-hd').first().click()
+  await page.locator('.center > .todo-panel .todo-hd').first().click()
   await page.waitForTimeout(150)
-  const subTodo = await page.locator('.right .todo-panel').innerText().catch(() => '')
+  const subTodo = await page.locator('.center > .todo-panel').innerText().catch(() => '')
   assert(subTodo.includes('子计划'), `看子 agent → 显示**它自己的**待办（实际：${subTodo.replace(/\n/g, ' ')}）`)
   assert(!subTodo.includes('主计划甲'), '子 agent 的清单里没有主会话的条目（互不串）')
   await page.screenshot({ path: path.join(SHOTS, 'right-todo-subagent.png') })
@@ -1094,7 +1101,7 @@ async function main() {
     bar: document.querySelector('.agent-running-bar')?.getAttribute('data-agent-task') || '',
     barText: document.querySelector('.agent-running-bar')?.textContent || '',
   }))
-  assert(/执行中|Running/.test(resumeUi.status),
+  assert(/运行中|执行中|Running/.test(resumeUi.status),
     `续跑后头部必须是运行中，不能停在上一轮（实际「${resumeUi.status}」）`)
   assert(resumeUi.dur !== '' && !/Worked/.test(resumeUi.dur),
     `续跑后显示实时计时，不是上一轮的 Worked（实际「${resumeUi.dur}」）`)

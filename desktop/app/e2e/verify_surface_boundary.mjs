@@ -645,8 +645,8 @@ try {
     await page.evaluate(() => window.__store.setState((s) => ({ settings: { ...s.settings, lang: 'en' } })))
     await settle()
     const en = await view()
-    check('T8 en 下崩溃卡按钮是英文（Retry / Disable this panel）',
-      en.crash?.texts.retry === 'Retry' && en.crash?.texts.disable === 'Disable this panel',
+    check('T8 en 下崩溃卡按钮是英文（Retry / Disable this surface）',
+      en.crash?.texts.retry === 'Retry' && en.crash?.texts.disable === 'Disable this surface',
       JSON.stringify(en.crash?.texts))
     // 只看**组件自己产生**的文案（按钮 + details 的 summary）：err.message 是夹具写的、
     // 面板名来自 provider.title，那两处本来就不该被 i18n 管。

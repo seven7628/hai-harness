@@ -8,6 +8,8 @@ import { ChevronDown, Plus, FolderPlus, FolderIcon, FolderOpenIcon, SessionPlus,
 // 虚拟 Project（插件）的判据/分组：与 store、插件分组渲染共用同一份纯函数
 // （virtual 标记 + 插件 home 路径特征），左栏不再各写一次 p.virtual。
 import { isVirtualProject, pluginProjectLabel, realProjects, splitPluginProjects } from '../lib/pluginProjects'
+import PluginAssetIcon from '../surfaces/PluginAssetIcon'
+import { isPluginAssetPath } from '../surfaces/pluginAsset'
 import { useT } from '../i18n'
 import { AgentTree } from './AgentTree'
 import { Bot } from './icons'
@@ -522,7 +524,14 @@ export default function LeftPanel({ collapsed }: { collapsed?: boolean }) {
                               <ChevronDown className="chev" />
                             </button>
                             <span className="ws-ic">
-                              {p.icon ? <span className="plugin-icon" aria-hidden="true">{p.icon}</span> : <PluginIcon size={13} />}
+                              {/* manifest 的 icon 是**目录内相对路径**（icon.svg），不是 emoji：
+                                  直接当文本画就是用户看到的「icon.svg」四个字。emoji（老回执）
+                                  仍走文本分支，读不到图时退回 PluginIcon。 */}
+                              {p.icon && !isPluginAssetPath(p.icon) ? (
+                                <span className="plugin-icon" aria-hidden="true">{p.icon}</span>
+                              ) : (
+                                <PluginAssetIcon pluginId={p.pluginId} icon={p.icon} fallback={<PluginIcon size={13} />} />
+                              )}
                             </span>
                             <span className="wname">{label}</span>
                             <span className="plugin-badge">{t('left.pluginBadge')}</span>

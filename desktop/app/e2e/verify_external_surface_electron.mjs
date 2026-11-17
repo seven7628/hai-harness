@@ -174,7 +174,9 @@ try {
   check('生产档没有 __haiTestBridge（探针口只在非生产构建）', boundary.testBridge === 'undefined', boundary.testBridge)
 
   // 展开右栏：折叠态下 ＋ 在图标条里看不到，点一个标签图标即可展开（与 ego 冒烟同一条路）。
-  const activityBtn = win.getByRole('button', { name: '链路', exact: true }).first()
+  // 按 data-kind 找，不按文案找：可读名 = tab 的 i18n 文案，2026-11「链路 → 过程」更名后
+  // `name: '链路'` 永不匹配。data-kind 是折叠 rail 与展开标签条共用的机器可读出口（R11b）。
+  const activityBtn = win.locator('[data-kind="activity"]').first()
   await waitFor(() => activityBtn.count().then((n) => n > 0), { label: '右栏图标条' })
   await activityBtn.click({ timeout: 5000 }).catch(() => {})
   await waitFor(() => win.locator('.rtabs-add').count().then((n) => n > 0), { label: '＋ 按钮' })

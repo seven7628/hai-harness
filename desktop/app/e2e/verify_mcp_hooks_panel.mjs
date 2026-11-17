@@ -114,7 +114,8 @@ try {
   const shot = (name) => page.screenshot({ path: path.join(SHOTS, name) })
 
   // —— ① MCP 一级列表：全局 + 仍存在的项目（已删除项目不出现）——
-  await nav('MCP').click()
+  // 导航项 2026-11 更名：settings.mcp 的显示值 'MCP' → '外部工具'（与 ctx 面板的 mcp 分区同词）。
+  await nav('外部工具').click()
   await page.waitForSelector('.src-card', { timeout: 5000 })
   const mcpCards = await page.locator('.src-card').allInnerTexts()
   assert(mcpCards.length === 2, `MCP 分组卡片 2 张（全局 + 1 个项目），实际 ${mcpCards.length}`)
@@ -138,7 +139,8 @@ try {
 
   // —— ③ MCP 项目级可编辑：启停写盘回拉 + 新增服务器 ——
   const scratchRow = page.locator('.mcp-server', { hasText: 'scratch-notes' })
-  assert((await scratchRow.innerText()).includes('本项目'), '.go-code/settings.json 的服务器标「本项目」')
+  // 徽标文案 = i18n mcp.badge.editable；2026-11 由「本项目」改成「当前工作区」。
+  assert((await scratchRow.innerText()).includes('当前工作区'), '.go-code/settings.json 的服务器标「当前工作区」')
   await scratchRow.locator('.switch').click()
   await page.waitForFunction(() => {
     const el = [...document.querySelectorAll('.mcp-server')].find((x) => x.textContent?.includes('scratch-notes'))
@@ -146,15 +148,17 @@ try {
   }, null, { timeout: 8000 })
   ok('项目级启停写盘并回拉（徽标变「已禁用」）')
 
-  await page.locator('button', { hasText: '添加 MCP Server' }).click()
-  const form = page.locator('.mcp-form-add', { hasText: '服务器名' })
+  // 按钮文案 = i18n mcp.add；2026-11 由「添加 MCP Server」改成「添加外部工具」。
+  await page.locator('button', { hasText: '添加外部工具' }).click()
+  // 不要按标签文案过滤（'服务器名' 2026-11 已改成 '名称'）：新增表单本身就是唯一的 .mcp-form-add。
+  const form = page.locator('.mcp-form-add').first()
   await form.locator('input[aria-label="mcp name"]').fill('proj-new')
   await form.locator('input[aria-label="mcp command"]').fill('npx')
   await form.locator('input[aria-label="mcp args"]').fill('-y @acme/new-mcp')
   await form.locator('button', { hasText: '保存' }).click()
   await page.waitForSelector('.mcp-server:has-text("proj-new")', { timeout: 8000 })
   ok('项目级新增服务器落进列表（写 {ws}/.go-code/settings.json）')
-  assert((await page.locator('.mcp-server:has-text("proj-new")').innerText()).includes('本项目'), '新增的服务器标「本项目」（可编辑那层）')
+  assert((await page.locator('.mcp-server:has-text("proj-new")').innerText()).includes('当前工作区'), '新增的服务器标「当前工作区」（可编辑那层）')
   await shot('03-mcp-project-edited.png')
 
   // —— ③b 用户配置详情：请求头（Headers）能力 ——
@@ -203,7 +207,8 @@ try {
   await memForm.locator('button', { hasText: '取消' }).click()
 
   // —— ④ 钩子页一级列表：三个来源 + 项目未信任徽标（已删除项目不出现）——
-  await nav('钩子').click()
+  // 导航项 == settings.hooks 的显示值；2026-11 由「钩子」改成「自动化」。
+  await nav('自动化').click()
   await page.waitForSelector('.src-card', { timeout: 5000 })
   const hookCards = await page.locator('.src-card').allInnerTexts()
   assert(hookCards.length === 3, `钩子分组卡片 3 张（用户 + Claude 兼容 + 1 个项目），实际 ${hookCards.length}`)
@@ -219,13 +224,15 @@ try {
   const flags = await page.locator('.flag-row').allInnerTexts()
   assert(flags.length === 4, `全局开关 4 行（总闸/允许项目/兼容层/强制信任），实际 ${flags.length}`)
   assert((await page.locator('.hook-item').first().innerText()).includes('works-task-start'), '用户配置里有已知钩子')
-  await page.locator('.flag-row', { hasText: '停用全部钩子' }).locator('.switch').click()
+  // 全部文案跟着 i18n 走：2026-11 把「钩子」统一成「自动化」、把「添加钩子」改成「添加规则」。
+  await page.locator('.flag-row', { hasText: '停用全部自动化' }).locator('.switch').click()
   await page.waitForFunction(() => {
     const el = [...document.querySelectorAll('.hook-item')].find((x) => x.textContent?.includes('works-task-start'))
     return !!el && el.textContent.includes('总闸已关')
   }, null, { timeout: 8000 })
   ok('总闸打开后每条钩子显式标注「总闸已关」（不静默隐藏）')
-  await page.locator('.flag-row', { hasText: '停用全部钩子' }).locator('.switch').click()
+  // 全部文案跟着 i18n 走：2026-11 把「钩子」统一成「自动化」、把「添加钩子」改成「添加规则」。
+  await page.locator('.flag-row', { hasText: '停用全部自动化' }).locator('.switch').click()
   await page.waitForFunction(() => {
     const el = [...document.querySelectorAll('.hook-item')].find((x) => x.textContent?.includes('works-task-start'))
     return !!el && !el.textContent.includes('总闸已关')
@@ -242,7 +249,7 @@ try {
   await shot('05-hooks-user-detail.png')
 
   // —— ⑦ 新增钩子：事件/匹配/命令/超时 → 保存后进对应事件分组 ——
-  await page.locator('button', { hasText: '添加钩子' }).click()
+  await page.locator('button', { hasText: '添加规则' }).click()
   const hform = page.locator('.mcp-form-add').first()
   await hform.locator('input[aria-label="hook matcher"]').fill('bash')
   await hform.locator('input[aria-label="hook command"]').fill('/tmp/new-hook.sh')
@@ -266,7 +273,7 @@ try {
   await page.locator('.src-card', { hasText: '/mock/workspace' }).click()
   await page.waitForSelector('.hook-note', { timeout: 5000 })
   assert((await page.locator('.hook-note').first().innerText()).includes('尚未信任'), '项目详情提示未信任')
-  await page.locator('button', { hasText: '信任此项目的钩子' }).click()
+  await page.locator('button', { hasText: '信任此工作区的自动化' }).click()
   await page.waitForFunction(() => !document.body.innerText.includes('尚未信任'), null, { timeout: 8000 })
   ok('信任后未信任提示消失（hooks_trust 前端链路）')
   assert((await page.locator('.hook-item').first().innerText()).includes('已停用') === false, '信任后钩子不再是「未信任」灰态')

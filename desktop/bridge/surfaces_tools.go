@@ -32,6 +32,8 @@ type surfaceInstallTool struct {
 	// onApplied 落盘成功后的宿主钩子（nil = 不关心）：插件虚拟 Project 用它做
 	// 「升级 → runtime 重启」（09 §4.2），路径与会话不变、只是重新装配。
 	onApplied func(id string)
+	// onSyncWatch 安装成功后对齐热加载监听（dev 软链是新建的，必须重新 Sync）。
+	onSyncWatch func()
 }
 
 func newSurfaceInstallTool(store *surfaceStore, push func()) *surfaceInstallTool {
@@ -39,14 +41,19 @@ func newSurfaceInstallTool(store *surfaceStore, push func()) *surfaceInstallTool
 		BaseTool: tools.BaseTool{
 			Name_: "surface_install",
 			// ≤120 字（常驻 schema 的成本约束，见 03-code-plan §5.1）。
-			Description_: "安装本地目录里的 Surface 面板插件：校验 manifest → 算 sha256 → 原子写 index → 通知界面。" +
-				"status=applied 才算生效；校验失败给 rejected+reason。需审批。",
+			Description_: "安装本地 Surface 面板插件：校验 manifest → 内容修订 → 原子写 index → 通知界面。" +
+				"dev=true（默认）软链源目录，保存即热加载；status=applied 才生效。需审批。",
 			Params_: tools.Obj(map[string]any{
 				"target": tools.Str("插件目录的绝对路径（必须含 surface.json）"),
 				"enable": tools.Map{
 					"type":        "boolean",
 					"default":     true,
 					"description": "装完是否启用（默认 true）",
+				},
+				"dev": tools.Map{
+					"type":        "boolean",
+					"default":     true,
+					"description": "开发模式：目录保持软链，改 panel.js / surface.json / icon.svg 保存即生效（默认 true；false = 拷贝快照）",
 				},
 			}, "target"),
 			CanParallel_: false, // 写类：与其它写工具串行，index 的顺序才可解释
@@ -80,6 +87,7 @@ func (t *surfaceInstallTool) Call(ctx context.Context, _ string, args string) (s
 	var a struct {
 		Target string `json:"target"`
 		Enable *bool  `json:"enable"`
+		Dev    *bool  `json:"dev"`
 	}
 	if err := json.Unmarshal([]byte(args), &a); err != nil {
 		return "", fmt.Errorf("surface_install: 参数不是合法 JSON: %v", err)
@@ -88,13 +96,24 @@ func (t *surfaceInstallTool) Call(ctx context.Context, _ string, args string) (s
 	if a.Enable != nil {
 		enable = *a.Enable
 	}
-	rec := t.store.Install(a.Target, enable)
+	// 缺省 dev=true：这个工具是 CreateMode 的开发入口（settings.features.surfaceTools 打开
+	// 后才存在），「改代码还要重装一次」正是用户 2026-11 报的问题。要稳定快照显式传 false。
+	dev := true
+	if a.Dev != nil {
+		dev = *a.Dev
+	}
+	rec := t.store.InstallDev(a.Target, enable, dev)
 	if rec.Status == surfaceApplied {
 		if t.push != nil {
 			t.push() // 只有真的落盘了才通知（rejected/error 改了什么的说法都不成立）
 		}
 		if t.onApplied != nil {
 			t.onApplied(rec.ID)
+		}
+	}
+	if rec.Status == surfaceApplied || rec.Status == surfaceAlreadyInstalled {
+		if t.onSyncWatch != nil {
+			t.onSyncWatch()
 		}
 	}
 	return surfaceJSON(ctx, rec)
@@ -256,7 +275,8 @@ func surfaceReceiptSchema() any {
 		"reason":  tools.Str("rejected/error 时的可读原因（指向具体问题）"),
 		"id":      tools.Str("插件 id"),
 		"version": tools.Str("manifest 里的版本"),
-		"hash":    tools.Str("sha256(入口文件) 的十六进制"),
+		"hash":    tools.Str("内容修订（sha256；dev 安装 = 受追踪文件，拷贝安装 = 全部文件）"),
+		"dev":     tools.Bool("是否开发模式（软链 + 热加载）"),
 		"entries": tools.Map{
 			"type":        "integer",
 			"description": "这次安装声明的入口条数（0 = manifest 没声明，宿主会合成一个默认入口）",
@@ -269,7 +289,8 @@ func surfaceEntrySchema() any {
 	return tools.Obj(map[string]any{
 		"id":             tools.Str("插件 id"),
 		"version":        tools.Str("manifest 版本"),
-		"hash":           tools.Str("sha256(入口文件)"),
+		"hash":           tools.Str("内容修订（sha256）"),
+		"dev":            tools.Bool("是否开发模式（软链 + 热加载）"),
 		"source":         tools.Str("安装来源目录的绝对路径"),
 		"enabled":        tools.Bool("是否启用"),
 		"installedAt":    tools.Str("这一版落盘的时刻（RFC3339）"),
@@ -299,9 +320,13 @@ func (m *manager) registerSurfaceTools(eng *tools.Engine) {
 	store := &m.surfaces
 	install := newSurfaceInstallTool(store, m.PushSurfacesChanged)
 	install.onApplied = m.closePluginRuntime // 升级/覆盖安装 → 下次打开按新版本重新装配
+	install.onSyncWatch = m.syncSurfaceWatch // dev 软链是新落的：watcher 对齐监听集合
 	eng.RegisterTool(context.Background(), install)
 	remove := newSurfaceRemoveTool(store, m.PushSurfacesChanged)
-	remove.onRemoved = m.closePluginRuntime // 卸载 → 先停运行时（会话与 home 保留）
+	remove.onRemoved = func(id string) {
+		m.closePluginRuntime(id) // 卸载 → 先停运行时（会话与 home 保留）
+		m.syncSurfaceWatch()     // 监听集合里去掉这个目录
+	}
 	eng.RegisterTool(context.Background(), remove)
 	eng.RegisterTool(context.Background(), newSurfaceListTool(store))
 }

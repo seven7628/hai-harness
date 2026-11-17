@@ -201,7 +201,7 @@ async function main() {
   // 脚本没跟上 → 进 MCP 页等 .mcp-layers 等到超时（F37 追补记录的 drift 之一）。
   await page.locator('.nav-item', { hasText: '设置' }).click()
   await page.waitForSelector('.settings-nav-item')
-  await page.locator('.settings-nav-item', { hasText: 'MCP' }).click()
+  await page.locator('.settings-nav-item', { hasText: '外部工具' }).click()
   await page.waitForSelector('.src-card')
 
   // 一级：全局 1 张 + 两个已绑定工作区各 1 张

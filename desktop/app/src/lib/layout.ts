@@ -1,8 +1,13 @@
-// 右栏三态布局换算（PR-01）。纯函数，不碰 store / DOM。
+// 右栏布局换算（PR-01；2026-11 收口成「右重 + 自定义」两态）。
+//
 // 口径：ratio = 右栏占「除左栏实际宽度之外」的百分比；bias 是预设，拖拽后变 custom。
 // 注意：左栏实际宽度由 leftExpanded 决定（rail 44 / 展开 236），**不是** leftPinned——
 // 2026-09 的修复明确「预览不收左栏」，所以这里只接受调用方传入的真实左栏像素。
-export type RightBias = 'even' | 'center' | 'right' | 'custom'
+//
+// 为什么删掉「平分 / 居中」两个预设：用户 2026-11 拍板右栏只有一种默认形态 ——
+// 展开就是右重（64%），要别的宽度自己拖。留着两个按不中的按钮只会让「默认是哪个」
+// 变成每次都要重新判断的问题。
+export type RightBias = 'right' | 'custom'
 export type RightLayout =
   | { open: false }
   | { open: true; bias: RightBias; ratio: number } // ratio = 右栏占「除左栏外」的百分比
@@ -15,14 +20,13 @@ export const PX = {
 } as const
 
 export const BIAS_RATIO: Record<Exclude<RightBias, 'custom'>, number> = {
-  even: 50,
-  center: 36,
   right: 64,
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
 
-export function expand(bias: Exclude<RightBias, 'custom'> = 'even'): RightLayout {
+/** 展开布局：默认（也是唯一预设）右重。 */
+export function expand(bias: Exclude<RightBias, 'custom'> = 'right'): RightLayout {
   return { open: true, bias, ratio: BIAS_RATIO[bias] }
 }
 
@@ -47,8 +51,17 @@ export function biasOfRatio(ratio: number): RightBias {
   return known?.[0] ?? 'custom'
 }
 
-/** 老数据没有 rightLayout 时用 rightExpanded 归一化（会话视图从磁盘恢复的路径） */
+/**
+ * 老数据归一化（会话视图从磁盘恢复的路径）。
+ *
+ * `even` / `center` 是已下线的预设：恢复成它们会让「打开就是右重」在**老会话**上悄悄失效
+ *（新会话对、老会话不对，是最难复现的那类 bug）。所以这里把两者都迁到 right；
+ * custom 原样保留 —— 用户亲手拖出来的宽度不该被一次改版抹掉。
+ */
 export function normalizeLayout(layout: RightLayout | undefined, rightExpanded: boolean): RightLayout {
-  if (layout) return layout
-  return rightExpanded ? expand('even') : collapse
+  if (layout) {
+    if (!layout.open) return layout
+    return layout.bias === 'custom' ? layout : expand('right')
+  }
+  return rightExpanded ? expand('right') : collapse
 }

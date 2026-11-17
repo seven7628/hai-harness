@@ -211,7 +211,9 @@ try {
     const set0 = s.tabsByScope[scope] || {}
     const tabs = set0.tabs || []
     const unreadViews = s.unreadViews || []
-    const railBtn = document.querySelector('.right-rail .rbtn[aria-label*="网页"]')
+    // 按 data-kind 找，不按文案：rail 按钮的 aria-label 就是 tab 的 i18n 文案，
+    // 2026-11 把 web 的显示名从「网页」改成「浏览器」后，`aria-label*="网页"` 永不匹配。
+    const railBtn = document.querySelector('.right-rail .rbtn[data-kind="web"]')
     return {
       // 面板 = 激活标签的 kind（R11b：状态里那个写穿副本已删）
       tab: ((tabs.find((x) => x.id === set0.activeId) || {}).kind) || '',
