@@ -3851,39 +3851,52 @@ body.is-electron .left.collapsed .rail .rbtn {
   position: relative;
   z-index: 1; /* composer 是 z-index:30，卡片在它下面那一层 */
   margin: 0 20px -14px;
-  /* 悬浮感靠的是**明度差**，不是阴影 —— 深色底上纯黑阴影本来就看不出（页底 #1a1614，
-     黑阴影压上去还是 #1a1614）。所以：
-       ① 卡面整张抬到 --elevated（#2e2622，比输入框的 #231d1a 亮一档），顶部再叠 6% 白
-          做「上面来光」，读起来是一张受光的纸；
-       ② 边框用 10% 白混，四边有一道很淡的亮边（深色 UI 里这条边才是「边缘」的证据）；
-       ③ 阴影只负责把**卡片周围**压暗一圈，让①的明度差更明显；
-       ④ 底边 ::after 渐深 —— 那 14px 钻进输入框背后，接缝处必须比卡面暗，否则读成「截断」。
-     composer 本身一个字节都没动（用户明确：不要改已存在的会话窗口）。 */
-  background: color-mix(in srgb, #fff 13%, var(--elevated));
-  border: 1px solid color-mix(in srgb, #fff 13%, var(--border-strong));
+  /* 深色底上「阴影」要落在**看得见的东西**上：
+       · 落在页底（#08080a）→ 黑压黑，等于没画，这就是前两版被否的原因；
+       · 落在卡面（比页底亮两档）→ 一眼就看见。
+     所以投影不是卡片投给页面的，而是**输入框投到卡片上的**（见下面 ::before）——
+     位置正好在接缝那条线上，向上散开。
+     卡面本身只做克制的一档抬升（--elevated 混 6% 白 ≈ #1e1e23），比主题里的 --paper-3
+     (#101015) 高一档、比输入框 (#0a0a0d) 高两档，不抢眼但确实在前面。
+     composer 一个字节都没动（用户明确：不要改已存在的会话窗口）。 */
+  background: color-mix(in srgb, #fff 6%, var(--elevated));
+  border: 1px solid var(--ink-line-2);
   border-radius: 12px;
-  /* 黑阴影在这一层是看不见的（页底 #08080a，阴影压上去还是 #08080a），
-     真正把卡片「抬起来」的是**卡片周围那一圈微光**：白 7% 的大模糊从卡片边缘渗出，
-     在纯黑底上就是一层很淡的光晕 —— 这是深色 UI 里唯一能读出「有东西浮在上面」的信号。
-     黑阴影仍然保留一份（浅色主题下它才是主导）。 */
   box-shadow:
-    0 -16px 46px -8px color-mix(in srgb, #fff 7%, transparent),
-    0 20px 54px color-mix(in srgb, #000 70%, transparent),
-    inset 0 1px 0 color-mix(in srgb, #fff 14%, transparent);
+    /* 卡片自己往外的一点点光：纯黑页底上唯一读得出「边缘在发光」的信号 */
+    0 0 0 1px color-mix(in srgb, #fff 4%, transparent),
+    0 -14px 40px -10px color-mix(in srgb, #fff 5%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #fff 9%, transparent);
   overflow: hidden;
 }
-/* 连接处的深色：卡片底边渐深 —— 「被输入框挡住的那一段」的阴影 */
+/* 交界处的投影：**输入框把影子投在卡片上**（用户 2026-11 第三次报障：缺 shadow 感）。
+   卡片底边有 14px 钻在输入框背后，所以接缝 = 卡片 bottom - 14px，投影就钉在这条线上：
+   ::before 是一条 1px 的「线」，靠 box-shadow 向上散开三层（近处硬、远处软），
+   ::after 是同一段上的渐深，让最后两行真的沉下去 —— 合起来才是「上面压着一层东西」。 */
+.todo-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 14px;
+  height: 1px;
+  pointer-events: none;
+  z-index: 2;
+  box-shadow:
+    0 -2px 6px color-mix(in srgb, #000 90%, transparent),
+    0 -8px 20px 2px color-mix(in srgb, #000 62%, transparent),
+    0 -18px 38px 6px color-mix(in srgb, #000 34%, transparent);
+}
 .todo-card::after {
   content: '';
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 0;
-  /* 变高变深：最后两行是**钻进输入框背后**的那一段，接缝处必须明显比卡面暗，
-     否则读起来是「卡片被截断」而不是「卡片在输入框后面」。 */
-  height: 32px;
+  bottom: 14px;
+  height: 26px;
   pointer-events: none;
-  background: linear-gradient(to bottom, transparent, color-mix(in srgb, #000 66%, transparent));
+  z-index: 1;
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, #000 58%, transparent));
 }
 .todo-card .todo-hd {
   position: sticky; /* 列表再长也钉在卡片顶上（右上的进度线与按钮不随内容走） */
@@ -3896,7 +3909,7 @@ body.is-electron .left.collapsed .rail .rbtn {
   border: 0;
   border-radius: 0;
   /* sticky 头必须不透光，否则列表滚上来会透在标题底下；色值 = 卡面最顶上那一档 */
-  background: color-mix(in srgb, #fff 13%, var(--elevated));
+  background: color-mix(in srgb, #fff 6%, var(--elevated));
 }
 /* 右上角那一组：进度线 + 折叠按钮，宽度固定，不参与标题的伸缩 */
 .todo-card .todo-line {

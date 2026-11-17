@@ -977,11 +977,19 @@ async function main() {
       comp: lum(getComputedStyle(comp).backgroundColor),
       page: lum(getComputedStyle(document.body).backgroundColor || 'rgb(0,0,0)'),
       fade: after.backgroundImage.includes('gradient'),
+      // 交界处的投影：**输入框投到卡片上**的那一段（深色底上唯一看得见的阴影）
+      shade: getComputedStyle(card, '::before').boxShadow,
+      shadeBottom: getComputedStyle(card, '::before').bottom,
       radius: cs.borderTopLeftRadius,
     }
   })
-  assert(elev.card - elev.comp >= 20 && elev.card - elev.page >= 20,
-    `悬浮感靠明度差：卡面 ${elev.card} vs 输入框 ${elev.comp} / 页底 ${elev.page}（要求差 ≥ 20）`)
+  assert(elev.card - elev.comp >= 15 && elev.card - elev.page >= 15,
+    `卡面比输入框/页底亮一档：${elev.card} vs ${elev.comp} / ${elev.page}（要求差 ≥ 15）`)
+  // 用户 2026-11 三次报障「还是缺 shadow」：关键是阴影落在**卡面**上（页底黑压黑看不见）。
+  // 计算值两种写法都要认：`rgb(0, 0, 0)` 与 color-mix 出来的 `color(srgb 0 0 0 / .9)`
+  assert(elev.shade !== 'none' && /(rgba?\(0,\s*0,\s*0|color\(srgb 0 0 0)/.test(String(elev.shade)),
+    `交界处有投影（输入框把影子投到卡片上，实际 ${elev.shade}）`)
+  assert(elev.shadeBottom === '14px', `投影钉在接缝那条线上（卡片 bottom - 14px，实际 ${elev.shadeBottom}）`)
   assert(elev.fade, '卡片底边有渐变（那一截钻进输入框背后，接缝必须比卡面暗）')
   assert(openGeo.comp.radius === tabGeo.compRadius,
     `会话框圆角没被改（展开前 ${tabGeo.compRadius} / 展开后 ${openGeo.comp.radius}）`)
