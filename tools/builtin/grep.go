@@ -31,13 +31,15 @@ func newGrepTool(f *FileTools) *grepTool {
 			Name_: "grep",
 			Description_: "Recursively search the content of text files in the workspace (Go regular expression), outputting path:line:content matches (with line numbers, ready to read context via read_file). " +
 				"Optional context shows N lines before/after each match (context lines marked path-LINE-content, match groups separated by --); include filters files by glob (e.g. *.go searches only Go files). " +
-				"Skips .git and binary files by default; when more than 200 matches, prompts narrowing. " +
+				"Skips .git, .gitignore'd paths, dependency/build directories (node_modules etc.) and binary files by default — that is what keeps a repo-wide search fast; pass no_ignore=true to search them anyway. " +
+				"When more than 200 matches, prompts narrowing. " +
 				"Use glob to find files by name, this tool to search by content.",
 			Params_: tools.Obj(map[string]any{
-				"pattern": tools.Str("Regular expression (Go regexp syntax, required)"),
-				"path":    tools.Str("Start directory/file (relative to workspace root; default '.')"),
-				"context": tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Context lines to show before/after each match (default 0; must be >= 0)"},
-				"include": tools.Str("File filter glob (e.g. '*.go', '**/*_test.go'; optional, only searches matching files)"),
+				"pattern":   tools.Str("Regular expression (Go regexp syntax, required)"),
+				"path":      tools.Str("Start directory/file (relative to workspace root; default '.')"),
+				"context":   tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Context lines to show before/after each match (default 0; must be >= 0)"},
+				"include":   tools.Str("File filter glob (e.g. '*.go', '**/*_test.go'; optional, only searches matching files)"),
+				"no_ignore": tools.Map{"type": "boolean", "default": false, "description": "Also search ignored paths (node_modules/, .gitignore'd paths, build output). Default false — ignored directories are skipped entirely, which is what makes a repo-wide search fast."},
 			}, "pattern"),
 			CanParallel_: true,
 			ReadOnly_:    true,
@@ -48,10 +50,11 @@ func newGrepTool(f *FileTools) *grepTool {
 }
 
 type grepArgs struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
-	Context int    `json:"context"`
-	Include string `json:"include"`
+	Pattern  string `json:"pattern"`
+	Path     string `json:"path"`
+	Context  int    `json:"context"`
+	Include  string `json:"include"`
+	NoIgnore bool   `json:"no_ignore"`
 }
 
 func (t *grepTool) ValidParams(_ context.Context, _, arguments string) error {
@@ -93,14 +96,21 @@ func (t *grepTool) Call(_ context.Context, _, arguments string) (string, error) 
 
 	var results []grepFileResult
 	total := 0
+	// 忽略规则：内置黑名单 + 逐目录增量读 .gitignore。被忽略的目录整棵子树
+	// 零 I/O（SkipDir ⇒ 连 read_dir 都不做）。显式给出的 path 不受规则约束
+	// （与 rg 一致：命令行路径覆盖 ignore 规则）。
+	ign := newIgnoreMatcher(t.root, !a.NoIgnore)
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // 单个文件不可读（权限等）：跳过，不中断搜索
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
-				return fs.SkipDir // 仓库元数据不参与搜索
+			if path != root && ign.ignoredDir(path) {
+				return fs.SkipDir // 整棵子树剪掉：不遍历、不打开
 			}
+			return nil
+		}
+		if path != root && ign.ignoredFile(path) {
 			return nil
 		}
 		if !d.Type().IsRegular() {

@@ -28,11 +28,13 @@ func newGlobTool(f *FileTools) *globTool {
 			Name_: "glob",
 			Description_: "Find files in the workspace by name/path pattern (glob) — the preferred tool for locating files by name (far more efficient than recursive directory traversal). " +
 				"Supports ** for recursive matching across levels: **/*.test.go finds all tests, src/**/*.go finds all Go files under src, *.md finds only md files at the root (use **/*.md for recursive). " +
+				"Skips .git, .gitignore'd paths and dependency/build directories (node_modules etc.) by default — pass no_ignore=true to list them anyway. " +
 				"Returns a list of matching relative paths (in traversal order). Use grep to search file contents.",
 			Params_: tools.Obj(map[string]any{
 				"pattern":     tools.Str("glob pattern (required; ** matches any depth, * matches any characters within one level, ? one char)"),
 				"path":        tools.Str("Start directory (relative to workspace root; default '.')"),
 				"max_results": tools.Map{"type": "integer", "minimum": 1, "default": defaultGlobMaxResults, "description": "Result cap (default 200; must be >= 1; narrow the pattern when exceeded)"},
+				"no_ignore":   tools.Map{"type": "boolean", "default": false, "description": "Also list ignored paths (node_modules/, .gitignore'd paths, build output). Default false — ignored directories are skipped entirely, which is what makes a repo-wide search fast."},
 			}, "pattern"),
 			CanParallel_: true,
 			ReadOnly_:    true,
@@ -46,6 +48,7 @@ type globArgs struct {
 	Pattern    string `json:"pattern"`
 	Path       string `json:"path"`
 	MaxResults int    `json:"max_results"`
+	NoIgnore   bool   `json:"no_ignore"`
 }
 
 func (t *globTool) ValidParams(_ context.Context, _, arguments string) error {
@@ -82,14 +85,20 @@ func (t *globTool) Call(_ context.Context, _, arguments string) (string, error) 
 
 	var files []string
 	total := 0
+	// 忽略规则：内置黑名单 + 逐目录增量读 .gitignore。被忽略的目录整棵子树
+	// 零 I/O（SkipDir ⇒ 连 read_dir 都不做）。显式给出的 path 不受规则约束。
+	ign := newIgnoreMatcher(t.root, !a.NoIgnore)
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // 不可读目录/文件：跳过，不中断
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			if p != root && ign.ignoredDir(p) {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if p != root && ign.ignoredFile(p) {
 			return nil
 		}
 		if !d.Type().IsRegular() {

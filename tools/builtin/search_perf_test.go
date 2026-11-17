@@ -8,11 +8,14 @@ package builtin
 //
 //	真实仓库（go-code，2026-11-17 实测）      合成树
 //	─────────────────────────────            ─────────────────────
-//	node_modules  72,829 文件 / 2.06 GB       dep/    1,000 文件 / 8 MB
-//	.go-code      7,929 文件 / 2.65 GB        .state/   150 文件 / 1.2 MB
-//	.gocache      5,080 文件 / 1.01 GB        vendor/   300 文件 / 2.4 MB
-//	源码          43,602 文件 / ~3.6 GB        src/      500 文件 / 1.2 MB
-//	合计         116,431 文件 / 9.3 GB        合计     ~2,000 文件 / 13 MB
+//	node_modules  72,829 文件 / 2.06 GB       node_modules/ 1,000 文件 / 8 MB
+//	.go-code      7,929 文件 / 2.65 GB        .state/       150 文件 / 1.2 MB
+//	.gocache      5,080 文件 / 1.01 GB        vendor/       300 文件 / 2.4 MB
+//	源码          43,602 文件 / ~3.6 GB        src/          500 文件 / 1.2 MB
+//	合计         116,431 文件 / 9.3 GB        合计         ~2,000 文件 / 13 MB
+//
+// 合成树的 .gitignore 覆盖 .state/ 与 vendor/（与真实仓库一致：依赖目录进
+// 内置黑名单，本机状态目录与 vendor 靠仓库自己的 .gitignore）。
 //
 // 判据以 **allocs/op 与 B/op** 为主（与机器负载无关，逐字节可复现），
 // ns/op 只作参考 —— 这台机器常年 load 13–47，墙钟数字噪声可达 3×。
@@ -73,7 +76,7 @@ func buildSyntheticWorkspaceInto(tb testing.TB, dir string) {
 	// 依赖树（node_modules 形状：文件多、内容小）
 	for p := 0; p < benchDepPkgs; p++ {
 		for i := 0; i < benchDepPerPkg; i++ {
-			write(fmt.Sprintf("dep/pkg%02d/node%03d/index.js", p, i), strings.Repeat("var x=1;\n", 220))
+			write(fmt.Sprintf("node_modules/pkg%02d/node%03d/index.js", p, i), strings.Repeat("var x=1;\n", 220))
 		}
 	}
 	// vendor
@@ -91,7 +94,7 @@ func buildSyntheticWorkspaceInto(tb testing.TB, dir string) {
 	}
 	write("logs/big.txt", big.String())
 	// .gitignore：声明两个忽略规则
-	write(".gitignore", "ignored/\n*.log\n")
+	write(".gitignore", "ignored/\n*.log\n.state/\nvendor/\n")
 	write("ignored/a.txt", "needle in an ignored file\n")
 	write("debug.log", "needle in an ignored log\n")
 }
@@ -167,6 +170,21 @@ func BenchmarkGlobAll(b *testing.B) {
 	root := benchWorkspace(b)
 	g := benchGlobTool(b, root)
 	args := `{"pattern":"**/*.nomatch"}`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := g.Call(context.Background(), "", args); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkGrepNoMatchNoIgnore 对照组：no_ignore=true（不跳过任何目录）。
+// 与 BenchmarkGrepNoMatch 的差值 = 忽略规则（内置黑名单 + .gitignore）的净收益。
+func BenchmarkGrepNoMatchNoIgnore(b *testing.B) {
+	root := benchWorkspace(b)
+	g := benchGrepTool(b, root)
+	args := `{"pattern":"zzz_no_such_token_zzz","no_ignore":true}`
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
