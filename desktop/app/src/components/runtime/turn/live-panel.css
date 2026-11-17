@@ -150,3 +150,29 @@ html[data-skin='runtime'] .rt-workbox .rt-work-body {
 
 /* 盒子里第一行不该再顶一段距离 */
 html[data-skin='runtime'] .cy-live .rt-turn-in > .rt-grp:first-child { margin-top: 0; }
+
+/* 「加载更早」：live 盒只渲染尾部一页（见 liveWindow.ts），更早的按页补。
+   它是盒内**顶部**的一行，不是转录里的记录 —— 用 mono 小字、无边框，
+   与 Working 头的语气一致；点一下扩大渲染窗口，块本身早就在内存里。 */
+html[data-skin='runtime'] .rt-work-more {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 4px 0 8px;
+  font: 400 11.5px/1.6 var(--mono);
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+html[data-skin='runtime'] .rt-work-more:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* 首块是按钮时，盒内第一行不该再顶一段距离（与 .rt-grp:first-child 同一条）。 */
+html[data-skin='runtime'] .cy-live .rt-turn-in > .rt-work-more:first-child {
+  margin-top: 0;
+}

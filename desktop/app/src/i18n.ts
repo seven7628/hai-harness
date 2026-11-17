@@ -2401,6 +2401,7 @@ const zh: Record<string, string> = {
   'agentTree.noTranscript': '这个任务还没有可读的转录。',
   'agentTree.unknown': '未知状态',
   'agent.loadOlderN': '加载更早的记录（还有 {n} 条）',
+  'agent.liveOlderN': '本次运行更早的记录（还有 {n} 条）',
   'agent.loading': '正在加载更早的记录…',
   'agent.loadOlderFailed': '加载失败，点击重试',
 
@@ -4727,6 +4728,7 @@ const en: Record<string, string> = {
   'agentTree.noTranscript': 'No readable transcript for this task yet.',
   'agentTree.unknown': 'Unknown',
   'agent.loadOlderN': 'Load earlier records ({n} more)',
+  'agent.liveOlderN': 'Earlier records in this run ({n} more)',
   'agent.loading': 'Loading earlier records…',
   'agent.loadOlderFailed': 'Failed to load — click to retry',
 

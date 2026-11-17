@@ -198,3 +198,31 @@ export function revealWindow(
 export function stepReveal(start: number, perFrame = REVEAL_PER_FRAME): number {
   return Math.max(0, start - perFrame)
 }
+
+/**
+ * 把铺开起点对齐到 turn 起点：返回 ≤ start 的最后一个 turn 起点；没有则 0。
+ *
+ * 为什么需要（2026-11 用户报障）：切片切在 turn 中间时，selectTurns 找不到
+ * user 块，就用「切片首块 id」合成 turn key。每铺一批首块都变 → key 变 →
+ * 整个 .rt-turn（含 LivePanel）卸载重挂；重挂后盒内 scrollTop=0，再被钉回底部。
+ * 长时运行的会话尾部全在同一个 live turn 里，于是每次切换都把这一个小时
+ * 的 Working 内容重挂几十遍（800 块实测 27~29 次，4.8s）。
+ *
+ * 起点落在 turn 边界上，切片的第一个 turn 就是完整 turn → key 稳定，
+ * React 更新而不是重挂；首屏也自然把尾部 live turn 整个纳入。
+ */
+export function snapToTurnStart(start: number, turnStarts: readonly number[]): number {
+  let lo = 0
+  let hi = turnStarts.length - 1
+  let best = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (turnStarts[mid] <= start) {
+      best = turnStarts[mid]
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  return best
+}

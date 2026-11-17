@@ -5,7 +5,7 @@ import { useAppStore, mainRunEnded } from '../store/useAppStore'
 import { resolveRunState, turnLive } from '../lib/turnSettle'
 import { signalText } from '../lib/signalFacts'
 import type { RevealWindow } from '../lib/scrollFollow'
-import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, stepReveal, wheelConsumedByScroller } from '../lib/scrollFollow'
+import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, snapToTurnStart, stepReveal, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
@@ -18,6 +18,7 @@ import { UserBlock } from './runtime/blocks/UserBlock'
 import { Lane } from './runtime/lane/Lane'
 import { nestCards } from '../lib/nestedCards'
 import { LivePanel } from './runtime/turn/LivePanel'
+import { liveWindow } from './runtime/turn/liveWindow'
 import { WorkBox } from './runtime/turn/WorkBox'
 import { FilesLine } from './runtime/turn/FilesLine'
 import { Signal } from './runtime/signals/Signal'
@@ -37,6 +38,9 @@ import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { UsageActivityMini } from './UsageStats'
 import { useLang, useT } from '../i18n'
 import { bridge } from '../lib/bridge'
+
+// 空页表：切转录时先用它渲染，避免把上一段转录的展开状态带进来。
+const EMPTY_LIVE_PAGES: Record<string, number> = {}
 
 
 // 压缩结果：和工具调用一样保留在对话流中，默认展示结果概要，展开后给出完整用量与上下文变化。
@@ -190,6 +194,8 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const workspace = useAppStore((s) => s.workspace)
   // 简洁档下点开过的轮：展开是这一轮自己的状态，不是全局设置
   const [openTurns, setOpenTurns] = useState<Record<string, boolean>>({})
+  // live 盒「加载更早」的展开页数：按 turn/run 键记，切转录时清零（见下）。
+  const [liveMore, setLiveMore] = useState<{ key: string; pages: Record<string, number> }>({ key: '', pages: {} })
   /* 已结算的轮：**元素复用**缓存。
      流式时每个 chunk 都会重渲染整条转录，而历史轮的输入一个都没变 —— 重算的还是同一棵树。
      实测（lab/bench-concurrent.mjs 的 C 段）：423 块时每 chunk 9.5ms 里有 7.4ms 花在
@@ -212,6 +218,17 @@ export default function Narrative({ viewSid, source, header, footer, density: de
      viewSid = 独立 view（cron / 恢复页）；sourceKey = 子会话页（子 agent 的 run_id）；
      都没有 = 当前主会话。三者同义：「这是哪一段转录」。 */
   const transcriptKey = viewSid ?? sourceKey ?? activeSessionId ?? 'none'
+  /* live 盒的「加载更早」是**这一段转录**的 UI 状态：换会话/换子 agent 就回到首屏一页。
+     渲染期派生（同组件内 setState）：不能等 effect，否则第一帧还带着上一段的展开页数
+     → 那一次切换又要把几百块全渲染一遍。 */
+  const livePages = liveMore.key === transcriptKey ? liveMore.pages : EMPTY_LIVE_PAGES
+  if (liveMore.key !== transcriptKey) setLiveMore({ key: transcriptKey, pages: livePages })
+  const livePageOf = (key: string) => livePages[key] ?? 0
+  const bumpLivePage = (key: string) =>
+    setLiveMore((m) => {
+      const base = m.key === transcriptKey ? m.pages : EMPTY_LIVE_PAGES
+      return { key: transcriptKey, pages: { ...base, [key]: (base[key] ?? 0) + 1 } }
+    })
   const ref = useRef<HTMLDivElement | null>(null)
   // nodeGen：滚动容器的「节点世代」。
   //
@@ -349,9 +366,23 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 表现就是「有子智能体/后台任务在跑的时候，主会话页面自己上下抖」。同一次
   // 进入只铺一遍；换会话（key 变）才重新决定。
   const enterKey = transcriptKey
+  // turn 边界（非 injected 的 user 块下标，升序）：铺开只能从 turn 开头切。
+  // 切在 turn 中间会换掉合成 turn key（selectTurns 的 't0-<首块id>'），
+  // 每批重挂整个 Working 盒 —— 见 snapToTurnStart 的注释。
+  const turnStarts = useMemo(() => {
+    const out: number[] = []
+    blocks.forEach((b, i) => {
+      if (b.kind === 'user' && !b.injected) out.push(i)
+    })
+    return out
+  }, [blocks])
+  const turnStartsRef = useRef(turnStarts)
+  turnStartsRef.current = turnStarts
   const [reveal, setReveal] = useState<RevealWindow>({ key: '', start: 0 })
   // 渲染期派生（同组件内 setState：React 会立刻重渲染，中间那一帧不会提交）：
-  const decided = revealWindow(reveal, enterKey, blocks.length, Boolean(enterAnimAt))
+  const decidedRaw = revealWindow(reveal, enterKey, blocks.length, Boolean(enterAnimAt))
+  const snapped = decidedRaw.start > 0 ? snapToTurnStart(decidedRaw.start, turnStarts) : decidedRaw.start
+  const decided = snapped === decidedRaw.start ? decidedRaw : { ...decidedRaw, start: snapped }
   if (decided !== reveal) setReveal(decided)
   // 只渲染 blocks.slice(revealStart)；0 = 全部显示。铺开进度单调朝 0 走，
   // 流式追加新块不会让它后移（绝对下标语义，见上）。
@@ -363,7 +394,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     if (!revealing) return
     let raf = 0
     const step = () => {
-      const next = stepReveal(revealStartRef.current)
+      const next = snapToTurnStart(stepReveal(revealStartRef.current), turnStartsRef.current)
       revealStartRef.current = next
       setReveal((r) => (r.key === reveal.key ? { ...r, start: next } : r))
       if (next > 0) raf = requestAnimationFrame(step)
@@ -1182,7 +1213,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
      它每个 chunk 都会变，逐轮比块引用就够了）。 */
   const turnGlobals: readonly unknown[] = [
     lang, density, runEnded, waiting, workspace, openFile,
-    turnMetrics, openTurns, animOn, runStartedAt, mainStartedAt, mainRunId, mainEnded, transcriptKey,
+    turnMetrics, openTurns, livePages, animOn, runStartedAt, mainStartedAt, mainRunId, mainEnded, transcriptKey,
   ]
   const sameList = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((v, i) => v === b[i])
   const turnCache = turnCacheRef.current
@@ -1260,6 +1291,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     }
     const runs = concise ? turnRuns(turn, settleAt) : []
     const multiRun = runs.length > 1
+    /* live 盒只渲染尾部一页；更早的由盒内顶部「加载更早」按页补（见 liveWindow）。
+       这是**渲染窗口**，不是信息边界：块都在内存里，点一下只是把窗口往前扩一页。 */
+    const liveWin = !multiRun && concise && work && live ? liveWindow(liveBox, livePageOf(turn.key)) : null
     /* 输入全都没变 → 直接交回上一次的那几个元素（React 看到同一个元素对象、props 同一个，
        整棵子树 bailout，连 beginWork 都不进）。 */
     const turnState: readonly unknown[] = [open, live, multiRun, ti, turns.length]
@@ -1455,19 +1489,27 @@ export default function Narrative({ viewSid, source, header, footer, density: de
               const seg = segs[p.box]
               if (!seg) return null
               const segLive = seg.live
-              const rows = groupRounds(seg.items)
               if (segLive) {
                 // 这一段自己的起点（首块的时间戳）—— 不是整轮的起点，否则第二个盒子的钟从 0 起涨
                 const first = seg.run.items[0]
                 const startedAt = first && 'startedAt' in first && typeof first.startedAt === 'number'
                   ? first.startedAt
                   : first && 'ts' in first && typeof first.ts === 'number' ? first.ts : turnStart
+                const segWin = liveWindow(seg.items, livePageOf(seg.run.runId ?? seg.run.key))
                 return (
-                  <LivePanel key={seg.run.key} items={seg.items} startedAt={startedAt ?? runStartedAt} waiting={waiting}>
-                    <div className="rt-turn-in">{rows}</div>
+                  <LivePanel key={seg.run.key} items={seg.items} tail={segWin.shown[segWin.shown.length - 1]} startedAt={startedAt ?? runStartedAt} waiting={waiting}>
+                    <div className="rt-turn-in">
+                      {segWin.hidden > 0 ? (
+                        <button type="button" className="rt-work-more" onClick={() => bumpLivePage(seg.run.runId ?? seg.run.key)}>
+                          {t('agent.liveOlderN').replace('{n}', String(segWin.hidden))}
+                        </button>
+                      ) : null}
+                      {groupRounds(segWin.shown)}
+                    </div>
                   </LivePanel>
                 )
               }
+              const rows = groupRounds(seg.items)
               const segKey = `${turn.key}#${p.box}`
               const segOpen = openTurns[segKey] ?? false
               return (
@@ -1485,13 +1527,21 @@ export default function Narrative({ viewSid, source, header, footer, density: de
           : null}
         {/* 「Worked for 8.2 s」是**结算**，不是进度：运行中这一行只该是「正在做什么」，
             汇总的时长与批次要到 AgentEnd 才成立 —— 与轮尾账同一时刻出现。 */}
-        {!multiRun && concise && work && live ? (
+        {liveWin ? (
           /* Working = 整次运行（AgentStart → AgentEnd）：标题行 + 这一轮的全部内容
              （思考、中间的旁白、工具行、子 agent），可滚动、有高度上限。
              内容取 liveBox（工作行 + 正在写的正文），不是 turn.items —— 记录（信号/回执）
-             属于时间线，已经在外面渲染过，再塞进面板就是同一行画两遍。 */
-          <LivePanel items={liveBox} startedAt={runStartedAt ?? turnStart} waiting={waiting}>
-            <div className="rt-turn-in">{groupRounds(liveBox)}</div>
+             属于时间线，已经在外面渲染过，再塞进面板就是同一行画两遍。
+             只渲染尾部一页，更早的按页补：盒子只有 46vh，几百行离屏内容没有收益。 */
+          <LivePanel items={liveBox} tail={liveWin.shown[liveWin.shown.length - 1]} startedAt={runStartedAt ?? turnStart} waiting={waiting}>
+            <div className="rt-turn-in">
+              {liveWin.hidden > 0 ? (
+                <button type="button" className="rt-work-more" onClick={() => bumpLivePage(turn.key)}>
+                  {t('agent.liveOlderN').replace('{n}', String(liveWin.hidden))}
+                </button>
+              ) : null}
+              {groupRounds(liveWin.shown)}
+            </div>
           </LivePanel>
         ) : null}
         {/* 结算后：收起是一行 Worked for，展开还是**同一个盒子**（头 + 内容，46vh 封顶）。

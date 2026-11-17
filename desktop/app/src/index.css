@@ -1679,6 +1679,13 @@ body.is-electron .left.collapsed .rail .rbtn {
     transform: none;
   }
 }
+/* live 盒内部的逐行入场不做：正在跑的那一段可能有几百行，一次会话进入
+   给它们全部挂 460ms 动画只是白烧合成（实测 800 块：longtask 0.9s → 0.55s）。
+   历史轮 / 展开的 Worked 盒仍保留逐块渐入。 */
+.narrative-enter .cy-live .rt-turn-in > * {
+  animation: none;
+}
+
 /* 轮盒（.rt-turn）把块包了一层，所以逐条渐入要同时命中盒内那一层 —— 否则流式
    追加的新块不再渐入，只有整个轮盒会动。 */
 .narrative-enter > *,

@@ -74,6 +74,7 @@
     "test:tok-speed": "node scripts/test-token-speed.mjs",
     "test:scroll-follow": "esbuild src/lib/scrollFollow-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/scroll-follow.test.cjs && node --test /tmp/scroll-follow.test.cjs",
     "probe:switch-scroll": "node lab/probe-session-switch-scroll.mjs",
+    "probe:working-replay": "node lab/probe-working-replay.mjs",
     "probe:input-history": "node lab/probe-input-history.mjs",
     "probe:scroll-invariants": "node lab/probe-scroll-invariants.mjs",
     "probe:narrative-jitter": "node lab/probe-narrative-jitter.mjs",

@@ -8,6 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ALWAYS_SHOWN, FOLDED_KINDS, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, rememberSettleMark, runningBody, runWorkBody, segmentUsage, selectTurns, settleMarkValid, statsOfItems, turnRuns, turnUsage, workBody } from './selectTurns'
+import { LIVE_BOX_PAGE, liveWindow } from './liveWindow'
 import type { MsgBlock, TurnMetric } from '../../../store/useAppStore'
 
 const user = (id: number, text = 'go'): MsgBlock => ({ kind: 'user', id, text })
@@ -579,4 +580,44 @@ test('运行中的自动压缩仍属于过程：留在盒子里，不算通知',
   const turn = selectTurns(blocks)[0]
   assert.equal(noticeBlocks(turn).size, 0)
   assert.deepEqual(workBody(turn).map((b) => b.id), [2, 3], '过程里的压缩留在盒子里')
+})
+
+
+// —— live 盒的渲染窗口（2026-11「在可视范围内展示 + 加载更早」）——
+// 锁三件事：首屏只有一页、窗口永远贴尾部、点「加载更早」只按页扩大不丢尾部。
+test('liveWindow：不足一页 = 全量，没有「加载更早」', () => {
+  const all = Array.from({ length: LIVE_BOX_PAGE - 1 }, (_, i) => i)
+  const w = liveWindow(all)
+  assert.equal(w.shown.length, all.length)
+  assert.equal(w.hidden, 0)
+})
+
+test('liveWindow：超过一页 = 只给尾部一页，hidden 是前面的块数', () => {
+  const all = Array.from({ length: LIVE_BOX_PAGE + 37 }, (_, i) => i)
+  const w = liveWindow(all)
+  assert.equal(w.shown.length, LIVE_BOX_PAGE)
+  assert.equal(w.shown[0], 37)
+  assert.equal(w.shown[w.shown.length - 1], all[all.length - 1], '窗口必须贴尾部')
+  assert.equal(w.hidden, 37)
+})
+
+test('liveWindow：加载更早按页扩大，最后一页不超过总长', () => {
+  const all = Array.from({ length: LIVE_BOX_PAGE * 3 + 5 }, (_, i) => i)
+  assert.equal(liveWindow(all, 0).hidden, all.length - LIVE_BOX_PAGE)
+  assert.equal(liveWindow(all, 1).hidden, all.length - LIVE_BOX_PAGE * 2)
+  assert.equal(liveWindow(all, 2).hidden, 5)
+  const last = liveWindow(all, 3)
+  assert.equal(last.hidden, 0)
+  assert.equal(last.shown.length, all.length)
+  assert.equal(liveWindow(all, 99).hidden, 0, '点过头也只到全量')
+})
+
+test('liveWindow：新块追加时窗口跟着尾部走，不会把最新块挤出去', () => {
+  const all = Array.from({ length: LIVE_BOX_PAGE * 2 }, (_, i) => i)
+  const before = liveWindow(all, 0)
+  const grown = [...all, 999]
+  const after = liveWindow(grown, 0)
+  assert.equal(before.shown[before.shown.length - 1], all[all.length - 1])
+  assert.equal(after.shown[after.shown.length - 1], 999)
+  assert.equal(after.shown.length, LIVE_BOX_PAGE)
 })

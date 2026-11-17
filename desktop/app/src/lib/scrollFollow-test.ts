@@ -10,7 +10,7 @@
 // 下面的断言就是这三条的可执行规格。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { REVEAL_PER_FRAME, decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, stepReveal, wheelConsumedByScroller, FOLLOW_THRESHOLD } from './scrollFollow'
+import { REVEAL_PER_FRAME, decideFollow, isExternalMoveUp, isNearBottom, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, snapToTurnStart, stepReveal, wheelConsumedByScroller, FOLLOW_THRESHOLD } from './scrollFollow'
 
 // 便捷构造：容器高 500、内容高 3000 → max = 2500
 const MAX = 2500
@@ -236,4 +236,33 @@ test('铺开：铺开推进单调朝 0，不会后移', () => {
   assert.equal(stepReveal(60, 25), 35)
   assert.equal(stepReveal(10, 25), 0)
   assert.equal(stepReveal(0, 25), 0)
+})
+
+
+// —— 铺开只能从 turn 边界切（2026-11「Working 盒回放」的回归规格）——
+// 切在 turn 中间 → selectTurns 的合成 key 换成切片首块 id → 整个 Working 盒重挂。
+test('snapToTurnStart：空边界 = 0（没有 user 块就整段一次渲染）', () => {
+  assert.equal(snapToTurnStart(775, []), 0)
+})
+
+test('snapToTurnStart：落在两个 turn 之间取较小的起点', () => {
+  assert.equal(snapToTurnStart(775, [0, 498, 508]), 508, '尾部 turn 从 508 开始')
+  assert.equal(snapToTurnStart(507, [0, 498, 508]), 498, '不能取到 508（越界）')
+  assert.equal(snapToTurnStart(0, [0, 498, 508]), 0)
+  assert.equal(snapToTurnStart(10, [7, 20]), 7)
+  assert.equal(snapToTurnStart(6, [7, 20]), 0, '小于第一个边界 → 0')
+  assert.equal(snapToTurnStart(999, [7, 20]), 20)
+})
+
+test('snapToTurnStart：铺开每一步都落在 turn 边界（多轮）', () => {
+  const starts = [0, 120, 260, 300]
+  let s = snapToTurnStart(380, starts) // 首屏：尾部 turn
+  assert.equal(s, 300)
+  s = snapToTurnStart(stepReveal(s), starts)
+  assert.equal(s, 260)
+  s = snapToTurnStart(stepReveal(s), starts)
+  assert.equal(s, 120)
+  s = snapToTurnStart(stepReveal(s), starts)
+  assert.equal(s, 0)
+  assert.equal(stepReveal(0), 0, '到底后单调停在 0')
 })
