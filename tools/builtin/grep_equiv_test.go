@@ -11,6 +11,7 @@ package builtin
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -143,7 +144,7 @@ func TestGrepOutputEquivalence(t *testing.T) {
 				abs := filepath.Join(dir, name)
 
 				// 新实现
-				nfr, ntrunc, nerr := grepFile(re, sc, abs, name, ctx, &totalNew, 1000)
+				nfr, ntrunc, nerr := grepFile(context.Background(), re, sc, abs, name, ctx, &totalNew, 1000)
 				var nb strings.Builder
 				if nerr == nil && len(nfr.matches) > 0 {
 					renderGrepResult(nfr, ctx, &nb)
@@ -193,7 +194,7 @@ func TestGrepLongLineBeyondCap(t *testing.T) {
 
 	var totalNew, totalOld int
 	sc := newGrepScanner()
-	nfr, _, nerr := grepFile(re, sc, p, "huge.txt", 0, &totalNew, 1000)
+	nfr, _, nerr := grepFile(context.Background(), re, sc, p, "huge.txt", 0, &totalNew, 1000)
 	if nerr != nil {
 		t.Fatalf("新实现不该报错: %v", nerr)
 	}
