@@ -3,12 +3,14 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/seven7628/hai-harness/tools"
 	"io/fs"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const defaultGlobMaxResults = 200
@@ -62,7 +64,11 @@ func (t *globTool) ValidParams(_ context.Context, _, arguments string) error {
 	return nil
 }
 
-func (t *globTool) Call(_ context.Context, _, arguments string) (string, error) {
+// ToolTimeout 实现 tools.ToolTimeoutProvider：声明 glob 的工具级时限。
+// 语义与 grep 一致（见 search_timeout.go）。
+func (t *globTool) ToolTimeout() time.Duration { return searchToolTimeout }
+
+func (t *globTool) Call(ctx context.Context, _, arguments string) (string, error) {
 	var a globArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
@@ -88,7 +94,10 @@ func (t *globTool) Call(_ context.Context, _, arguments string) (string, error) 
 	// 忽略规则：内置黑名单 + 逐目录增量读 .gitignore。被忽略的目录整棵子树
 	// 零 I/O（SkipDir ⇒ 连 read_dir 都不做）。显式给出的 path 不受规则约束。
 	ign := newIgnoreMatcher(t.root, !a.NoIgnore)
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr // 被取消/超时：立刻停止遍历
+		}
 		if err != nil {
 			return nil // 不可读目录/文件：跳过，不中断
 		}
@@ -120,6 +129,12 @@ func (t *globTool) Call(_ context.Context, _, arguments string) (string, error) 
 		files = append(files, rel)
 		return nil
 	})
+	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
+		if ctx.Err() != nil {
+			return "", searchCancelledError(ctx, "glob")
+		}
+		return "", walkErr
+	}
 	if total > max {
 		total = max
 	}
@@ -196,3 +211,4 @@ func matchSegments(pat, segs []string) (bool, error) {
 }
 
 var _ tools.Tool = (*globTool)(nil)
+var _ tools.ToolTimeoutProvider = (*globTool)(nil)

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -87,7 +88,16 @@ func (t *grepTool) ValidParams(_ context.Context, _, arguments string) error {
 	return nil
 }
 
-func (t *grepTool) Call(_ context.Context, _, arguments string) (string, error) {
+// ToolTimeout 实现 tools.ToolTimeoutProvider：声明 grep 的工具级时限。
+//
+// 引擎默认的 5 分钟兜底对 grep **不够用**：改造前 grep 不看 ctx，那 5 分钟
+// 形同虚设（一次全仓 grep 实测 4 分钟起步）；现在 grep 会真的响应取消，
+// 于是可以给它一个更紧的、模型可理解的时限（超时错误里写明「收窄搜索」）。
+//
+// 该时限落在可摘离的 liftableTimeout 上：任务 promote 成后台时自动解除。
+func (t *grepTool) ToolTimeout() time.Duration { return searchToolTimeout }
+
+func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error) {
 	var a grepArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
@@ -114,6 +124,9 @@ func (t *grepTool) Call(_ context.Context, _, arguments string) (string, error) 
 	// （与 rg 一致：命令行路径覆盖 ignore 规则）。
 	ign := newIgnoreMatcher(t.root, !a.NoIgnore)
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr // 被取消/超时：立刻停止遍历（不再读任何文件）
+		}
 		if err != nil {
 			return nil // 单个文件不可读（权限等）：跳过，不中断搜索
 		}
@@ -142,8 +155,11 @@ func (t *grepTool) Call(_ context.Context, _, arguments string) (string, error) 
 				return nil
 			}
 		}
-		fr, truncated, err := grepFile(re, sc, path, rel, a.Context, &total, t.maxResults)
+		fr, truncated, err := grepFile(ctx, re, sc, path, rel, a.Context, &total, t.maxResults)
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err // 取消/超时：中断整个搜索（不是「跳过该文件」）
+			}
 			return nil // 二进制/读失败：跳过该文件
 		}
 		if len(fr.matches) > 0 {
@@ -155,6 +171,9 @@ func (t *grepTool) Call(_ context.Context, _, arguments string) (string, error) 
 		return nil
 	})
 	if err != nil && !errors.Is(err, fs.SkipAll) {
+		if ctx.Err() != nil {
+			return "", searchCancelledError(ctx, "grep")
+		}
 		return "", err
 	}
 
@@ -315,7 +334,7 @@ func trimEOL(b []byte) []byte {
 //	② 仅当有命中时才再读一遍，把「命中行 ± context」的并集取出来。
 //
 // 零命中文件因此不留任何行内容（改造前会留整个文件的所有行）。
-func grepFile(re *regexp.Regexp, sc *grepScanner, abs, rel string, ctx int, total *int, max int) (grepFileResult, bool, error) {
+func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel string, ctxLines int, total *int, max int) (grepFileResult, bool, error) {
 	var fr grepFileResult
 	fr.rel = rel
 	f, err := os.Open(abs)
@@ -344,6 +363,13 @@ func grepFile(re *regexp.Regexp, sc *grepScanner, abs, rel string, ctx int, tota
 			break
 		}
 		ln++
+		// 取消/超时检查（按行数抽样：ctx.Err() 不是免费的 —— 引擎的
+		// liftableTimeout.Err() 要加锁）。单个超大文件也得能被中断。
+		if ln%searchCtxCheckEvery == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return fr, false, cerr
+			}
+		}
 		if !re.Match(line) {
 			continue
 		}
@@ -366,8 +392,8 @@ func grepFile(re *regexp.Regexp, sc *grepScanner, abs, rel string, ctx int, tota
 		return fr, false, err
 	}
 	sc.reset(f)
-	groups := computeGrepGroups(matches, ctx, ln)
-	fr.lines = make(map[int]string, len(matches)*(2*ctx+1))
+	groups := computeGrepGroups(matches, ctxLines, ln)
+	fr.lines = make(map[int]string, len(matches)*(2*ctxLines+1))
 	gi := 0
 	ln = 0
 	for {
@@ -376,6 +402,11 @@ func grepFile(re *regexp.Regexp, sc *grepScanner, abs, rel string, ctx int, tota
 			break
 		}
 		ln++
+		if ln%searchCtxCheckEvery == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return fr, false, cerr
+			}
+		}
 		for gi < len(groups) && ln > groups[gi].end {
 			gi++
 		}
@@ -455,3 +486,4 @@ func bytesContainsZero(b []byte) bool {
 }
 
 var _ tools.Tool = (*grepTool)(nil)
+var _ tools.ToolTimeoutProvider = (*grepTool)(nil)
