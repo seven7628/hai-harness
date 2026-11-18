@@ -31,11 +31,14 @@ func newGlobTool(f *FileTools) *globTool {
 			Description_: "Find files in the workspace by name/path pattern (glob) — the preferred tool for locating files by name (far more efficient than recursive directory traversal). " +
 				"Supports ** for recursive matching across levels: **/*.test.go finds all tests, src/**/*.go finds all Go files under src, *.md finds only md files at the root (use **/*.md for recursive). " +
 				"Skips .git, .gitignore'd paths and dependency/build directories (node_modules etc.) by default — pass no_ignore=true to list them anyway. " +
-				"Returns a list of matching relative paths (in traversal order). Use grep to search file contents.",
+				"Returns a list of matching relative paths (in traversal order). " +
+				"At most max_results (default 200) files are returned per call: when there are more, the result header says so and tells you the offset to pass back for the next page (or to narrow the pattern). " +
+				"Use grep to search file contents.",
 			Params_: tools.Obj(map[string]any{
 				"pattern":     tools.Str("glob pattern (required; ** matches any depth, * matches any characters within one level, ? one char)"),
 				"path":        tools.Str("Start directory (relative to workspace root; default '.')"),
-				"max_results": tools.Map{"type": "integer", "minimum": 1, "default": defaultGlobMaxResults, "description": "Result cap (default 200; must be >= 1; narrow the pattern when exceeded)"},
+				"max_results": tools.Map{"type": "integer", "minimum": 1, "default": defaultGlobMaxResults, "description": "Result cap **per page** (default 200; must be >= 1; narrow the pattern when exceeded)"},
+				"offset":      tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Skip the first N matching files and return the next page (default 0 = from the start). Use it when the result says there are more matches — pass back the offset it reports."},
 				"no_ignore":   tools.Map{"type": "boolean", "default": false, "description": "Also list ignored paths (node_modules/, .gitignore'd paths, build output). Default false — ignored directories are skipped entirely, which is what makes a repo-wide search fast."},
 			}, "pattern"),
 			CanParallel_: true,
@@ -50,6 +53,7 @@ type globArgs struct {
 	Pattern    string `json:"pattern"`
 	Path       string `json:"path"`
 	MaxResults int    `json:"max_results"`
+	Offset     int    `json:"offset"`
 	NoIgnore   bool   `json:"no_ignore"`
 }
 
@@ -60,6 +64,9 @@ func (t *globTool) ValidParams(_ context.Context, _, arguments string) error {
 	}
 	if a.Pattern == "" {
 		return requiredArgument("glob", "pattern")
+	}
+	if a.Offset < 0 {
+		return recoveryError("invalid_offset", "correct_arguments", fmt.Sprintf("offset=%d", a.Offset), "Set offset to an integer >= 0, then retry glob.")
 	}
 	return nil
 }
@@ -90,7 +97,8 @@ func (t *globTool) Call(ctx context.Context, _, arguments string) (string, error
 	}
 
 	var files []string
-	total := 0
+	total := 0 // 已见命中数（含被 offset 跳过的）
+	offset := a.Offset
 	// 忽略规则：内置黑名单 + 逐目录增量读 .gitignore。被忽略的目录整棵子树
 	// 零 I/O（SkipDir ⇒ 连 read_dir 都不做）。显式给出的 path 不受规则约束。
 	ign := newIgnoreMatcher(t.root, !a.NoIgnore)
@@ -122,11 +130,15 @@ func (t *globTool) Call(ctx context.Context, _, arguments string) (string, error
 		if err != nil || !ok {
 			return nil
 		}
+		// 分页语义（与 grep 一致）：全局第 k 个命中落在 [offset+1, offset+max] 收进本页；
+		// k ≤ offset 跳过但继续扫；k > offset+max 停止遍历（后面还有）。
 		total++
-		if total > max {
-			return fs.SkipAll // 已收集满：立即停止
+		if total > offset+max {
+			return fs.SkipAll // 本页已满且还有更多：立即停止
 		}
-		files = append(files, rel)
+		if total > offset {
+			files = append(files, rel)
+		}
 		return nil
 	})
 	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
@@ -135,14 +147,24 @@ func (t *globTool) Call(ctx context.Context, _, arguments string) (string, error
 		}
 		return "", walkErr
 	}
-	if total > max {
-		total = max
-	}
 
+	taken := len(files)
+	truncated := total > offset+max
 	var b strings.Builder
-	if total >= max && total > 0 {
-		fmt.Fprintf(&b, "[glob: %s, showing %d file(s); narrow the pattern]\n", a.Pattern, total)
-	} else {
+	switch {
+	case taken == 0 && offset > 0:
+		// offset 越过总数：明确告诉模型「没有更多了」，别再空转
+		fmt.Fprintf(&b, "[glob: %s, no files at offset %d (%d file(s) in total); lower the offset or narrow the pattern]\n",
+			a.Pattern, offset, total)
+	case truncated && offset > 0:
+		fmt.Fprintf(&b, "[glob: %s, showing files %d-%d (offset %d); use offset=%d for the next page, or narrow the pattern]\n",
+			a.Pattern, offset+1, offset+taken, offset, offset+taken)
+	case truncated:
+		fmt.Fprintf(&b, "[glob: %s, showing first %d file(s); use offset=%d for the next page, or narrow the pattern]\n",
+			a.Pattern, max, max)
+	case offset > 0:
+		fmt.Fprintf(&b, "[glob: %s, files %d-%d (offset %d)]\n", a.Pattern, offset+1, offset+taken, offset)
+	default:
 		fmt.Fprintf(&b, "[glob: %s, %d file(s)]\n", a.Pattern, total)
 	}
 	for _, f := range files {
