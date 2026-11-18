@@ -215,21 +215,31 @@ func TestBashStructuredNilWhenCommandNotExecuted(t *testing.T) {
 	}
 }
 
-// TestBashModelPathIsProjectionOfStructuredOutput 同一次调用的文本是结构化的投影：
-// 脚本路径不砍（60 KB 全给），模型路径仍被引擎砍到 20 KB（头尾都在、中段省略）。
 // TestBashModelPathProducesNoStructuredContent 模型路径（无脚本标记）**不产出**结构化
-// 结果、也不落盘：设计文档 §15.4 要求完整输出只服务编排路径，模型看到的是引擎 20 KB
-// 截断后的文本；在这里多产一份 1 MiB 的暂存 + 一个没人引用、永不删除的文件是纯成本。
+// 结果：设计文档 §15.4 要求完整输出只服务编排路径。
+//
+// 2026-11-17 变更：模型路径**现在会落盘**（但落盘的是**完整输出**，且路径报给模型）。
+// 改造前模型路径不落盘、不给路径 —— 那是因为工具把**完整输出原样返回**给引擎，
+// 由引擎截断并落盘（引擎那句「full output is written to <path>」指的是它截断前
+// 的全文）。改造后工具把内存窗口压到引擎阈值（20 KB）以下，引擎不再介入 ⇒
+// **落盘责任转到工具**：文件里是完整输出，路径在结果首行，模型可分段读。
+//
+// 不变的是：模型路径仍然**不产出结构化结果**（那是脚本路径的契约）。
 func TestBashModelPathProducesNoStructuredContent(t *testing.T) {
-	const total = 60 * 1024 // > 引擎 20 KB 上限、< 1 MiB 脚本上限
+	const total = 60 * 1024 // > 工具窗口（16 KB）、< 1 MiB 脚本上限
 	cmd := fmt.Sprintf("head -c %d /dev/zero | tr '\\0' b", total)
 	r := runBashEngine(t, 0, context.Background(), cmd)
 
 	if r.Structured != nil {
 		t.Fatalf("模型路径不该产出结构化结果: %s", r.Structured)
 	}
-	if !strings.Contains(r.Result, "bytes omitted from the middle") {
-		t.Fatalf("模型路径必须仍被引擎 20 KB 截断（行为不变）：len=%d", len(r.Result))
+	if !strings.Contains(r.Result, "full output saved to") {
+		t.Fatalf("模型路径应报出完整输出的落盘路径：len=%d", len(r.Result))
+	}
+	// 结果本身有界：压在引擎阈值内 ⇒ 引擎不二次截断、也不二次落盘
+	// （引擎若再落一次，它那句「full output」指的是已被窗口截过的文本 —— 对模型是假话）。
+	if len(r.Result) > 20000 {
+		t.Fatalf("结果应压在引擎阈值内（避免引擎二次截断/二次落盘）：len=%d", len(r.Result))
 	}
 }
 

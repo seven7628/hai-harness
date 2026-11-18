@@ -84,6 +84,28 @@ const (
 // 超上限的部分不丢：全文落盘并把路径写进 full_output_path（见 spillFile）。
 const maxBashStructuredOutput = 1 << 20
 
+// bashModelOutputLimit 模型路径的输出**内存窗口**（头 + 尾合计）。
+//
+// 改造前命令输出走无界缓冲（sandbox 的 bytes.Buffer）：实测 32 MB 的输出要
+// 96 MB 分配（扩容 ~2× + String() 拷贝 1×），一条 1 GB 的命令能把 bridge 撑爆。
+// 而模型侧真正能看到的只有引擎截断后的 20 KB —— 中间那一大段从来没人看。
+//
+// 16 KB = 头 8 KB + 尾 8 KB。**为什么不是 64 KB**：引擎的截断阈值是 20 KB
+// （tools/engine.go:22 defaultMaxResponseSize），返回文本一旦超过它，引擎会
+// **再截一次并再落一次盘**，且它那句「full output is written to <path>」指的
+// 是**已经被窗口截过的文本**——对模型就是假话。
+// 压在阈值以下 ⇒ 引擎不介入 ⇒ 只有我们这一份落盘路径（指向**完整**输出），
+// 且模型看到的是「开头 8 KB + 结尾 8 KB」——**错误信息通常在结尾**
+// （"error: cannot find package X"），只留头会把最关键的信息丢掉。
+const bashModelOutputLimit = 16 << 10
+
+// bashModelSpillThreshold 超过这个量就把**完整**输出落盘，模型拿路径分段读。
+//
+// 取值 = 模型路径的窗口上限：**凡是模型看不到全貌的输出都落盘** ⇒
+// 模型永远拿得到全文（对齐 Claude Code 的 <persisted-output> / OpenCode /
+// goose 的做法：落盘 + 预览，而不是硬砍）。
+const bashModelSpillThreshold = bashModelOutputLimit
+
 // bashSpillDirPrefix 落盘目录前缀（os.MkdirTemp 在系统临时目录下建，见 ensureSpillDir）。
 const bashSpillDirPrefix = "hai-harness-bash-spill-"
 
@@ -238,14 +260,37 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	// tailer == nil，OnOutput 保持 nil → 执行层走历史路径，逐字节不变。
 	tailer := newOutputTailer(ctx)
 	onOutput := spec0OnOutput(tailer)
+	// 输出有界化 + 落盘（2026-11-17）：
+	//   - 模型路径：内存窗口 64 KB（头 32 + 尾 32），超过 32 KB 把**完整**输出
+	//     落盘并在结果里报出路径 ⇒ 模型可分段读（不再只能看被硬砍的 20 KB）。
+	//   - 脚本路径：窗口 = 结构化输出上限（1 MiB），超过同样的量落盘。
+	// 内存占用与输出大小**无关**（改造前：32 MB 输出 = 96 MB 分配，1 GB 输出能撑爆 bridge）。
+	isScript := tools.IsScriptCall(ctx)
+	outLimit, spillAfter := bashModelOutputLimit, bashModelSpillThreshold
+	headOnly := false
+	if isScript {
+		// 脚本路径：结构化 output 必须是**逐字节前缀**（脚本按顺序读）⇒ 只留头。
+		outLimit, spillAfter = maxBashStructuredOutput, maxBashStructuredOutput
+		headOnly = true
+	}
+	spillPath := t.reserveSpillPath(ctx)
+	var spilled bool
+	var omitted, totalOut int64
 	out, err := sbx.Run(ctx, sandbox.ExecSpec{
-		Command:  cmd,
-		Cwd:      cwd,
-		Timeout:  toolTimeout,
-		ExitCode: &exitCode,
-		TimedOut: &timedOut,
-		Canceled: &canceled,
-		OnOutput: onOutput,
+		Command:          cmd,
+		Cwd:              cwd,
+		Timeout:          toolTimeout,
+		ExitCode:         &exitCode,
+		TimedOut:         &timedOut,
+		Canceled:         &canceled,
+		OnOutput:         onOutput,
+		OutputLimit:      outLimit,
+		OutputHeadOnly:   headOnly,
+		OutputFile:       spillPath,
+		OutputFileAfter:  spillAfter,
+		Spilled:          &spilled,
+		OmittedBytes:     &omitted,
+		TotalOutputBytes: &totalOut,
 	})
 	wall := time.Since(started)
 	// 上报结构化结局（旁路：Call 必须返回 nil error，否则引擎会丢弃 out，见非目标 1）
@@ -273,6 +318,18 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 		}
 		out = fmt.Sprintf("[TIMEOUT after %s — the command was killed and the output below is PARTIAL]\n%s", limit, out)
 	}
+	// 落盘提示（**只加在模型路径的文本上**）：
+	//   - 模型拿到路径就能分段读完整输出，而不是只拿到被引擎硬砍的 20 KB；
+	//   - **不进结构化 output** —— 那是脚本按顺序读的**逐字节前缀**，
+	//     插任何提示行都会污染数据（bash_structured_test.go 钉住）。
+	//
+	// 位置：在超时/取消声明**之后**加 —— 那两条声明必须留在首行。
+	modelOut := out
+	if spilled && spillPath != "" {
+		modelOut = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s\n"+
+			"Read it with read_file (start_line/end_line) or bash (head/grep/sed) to get the parts you need.]\n%s",
+			humanBytes(totalOut), spillPath, out)
+	}
 	// 结构化结果（**仅脚本路径**）：与文本同源（同一份 out，含超时/取消首行声明），
 	// 只是上限放宽到 1 MiB 且带真实结局。引擎在 Call 成功后读走它 → 脚本里
 	// tools.bash(...) 拿到对象而不是被 20 KB 砍过的文本（设计文档 §15.4 的单点改造）。
@@ -286,12 +343,16 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	// 写进**本次调用**的结构化槽（引擎注入；直接调用本工具时可能为 nil —— 那就没人收）。
 	// 槽随调用生命周期回收，故不需要（也不能）用实例字段：主 agent 与后台子 agent 共享
 	// 同一个 ToolEngine，同一实例会被并发调用，实例字段会互相清空/串味（评审实测复现）。
-	if tools.IsScriptCall(ctx) {
+	if isScript {
 		if sink := tools.StructuredSinkFrom(ctx); sink != nil {
-			sink.Set(t.buildStructured(ctx, out, exitCode, wall))
+			spill := ""
+			if spilled {
+				spill = spillPath
+			}
+			sink.Set(t.buildStructured(ctx, out, exitCode, wall, spill))
 		}
 	}
-	return out, nil
+	return modelOut, nil
 }
 
 // OutputSchema 实现 tools.OutputSchemaProvider：bash 结构化返回契约（脚本路径）。
@@ -325,12 +386,17 @@ type bashStructuredOutput struct {
 //
 // 落盘失败（磁盘满 / 目录不可写）不改变文本路径：truncated=true 但 full_output_path 为空
 // —— spill 是优化不是正确性（同 agents/slim.go 的取舍）。
-func (t *BashTool) buildStructured(ctx context.Context, out string, exitCode int, wall time.Duration) []byte {
+func (t *BashTool) buildStructured(ctx context.Context, out string, exitCode int, wall time.Duration, spillPath string) []byte {
 	so := bashStructuredOutput{Output: out, ExitCode: exitCode, WallTimeSec: wall.Seconds()}
-	if len(out) > maxBashStructuredOutput {
+	if len(out) > maxBashStructuredOutput || spillPath != "" {
 		so.Truncated = true
 		so.Output = truncateUTF8(out, maxBashStructuredOutput) // 不劈裂多字节字符
-		so.FullOutputPath = t.spillFile(ctx, out)
+		// 全文路径优先用**执行层**已经落盘的那个（它拿到的是命令的完整输出，
+		// 不是被内存窗口截过的文本）；没有才自己再落一份（兜底）。
+		so.FullOutputPath = spillPath
+		if so.FullOutputPath == "" {
+			so.FullOutputPath = t.spillFile(ctx, out)
+		}
 	}
 	raw, err := json.Marshal(so)
 	if err != nil {
@@ -380,6 +446,37 @@ func (t *BashTool) ensureSpillDir() (string, error) {
 	}
 	t.spillDir = dir
 	return dir, nil
+}
+
+// reserveSpillPath 预留一个落盘路径（**文件由执行层按需创建** —— 输出没超阈值
+// 就不会有文件，也就没有磁盘开销）。返回空串 = 拿不到路径（只能靠内存窗口截断）。
+//
+// 与 spillFile 的分工：spillFile 是「拿到完整文本后再写一遍」；本函数是**提前
+// 给出路径**，让执行层边跑边写 ⇒ 命令输出 1 GB 也不会在内存里堆 1 GB。
+func (t *BashTool) reserveSpillPath(ctx context.Context) string {
+	dir, err := t.ensureSpillDir()
+	if err != nil {
+		return ""
+	}
+	runID := ""
+	if tc := events.ToolContextFrom(ctx); tc != nil {
+		runID = tc.RunId
+	}
+	return filepath.Join(dir, t.nextSpillName(runID))
+}
+
+// humanBytes 把字节数格式化成人类可读的量（用于结果里的落盘提示）。
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // nextSpillName 生成落盘文件名（spill-<runId>-<n>.txt；无 runId 时省略该段）。

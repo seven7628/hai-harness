@@ -2,21 +2,32 @@ package builtin
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/seven7628/hai-harness/tools"
-	"io/fs"
+	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 const (
 	defaultGrepMaxResults = 200 // 单次搜索的匹配条数上限（超限提示缩小范围）
 	maxGrepLineLength     = 200 // 单行内容输出截断（防长行撑爆结果）
+	// maxGrepLineBytes 单行的字节上限（超出的行被截断后继续扫）。
+	// 与改造前 bufio.Scanner 的 maxTokenSize 同量级 —— 唯一的行为差异是
+	// 改造前超长行会让**整个文件**被丢弃（连已找到的命中一起丢），
+	// 改造后只是那一行被截断（见 grepScanner.nextLine）。
+	maxGrepLineBytes = 4 << 20
+	// grepReadBufferSize 行读取器的缓冲大小（跨文件复用，见 grepScanner）。
+	grepReadBufferSize = 64 << 10
+	// grepHeadProbeSize 二进制探测读取的头部字节数（跨文件复用）。
+	grepHeadProbeSize = 8192
 )
 
 type grepTool struct {
@@ -31,13 +42,16 @@ func newGrepTool(f *FileTools) *grepTool {
 			Name_: "grep",
 			Description_: "Recursively search the content of text files in the workspace (Go regular expression), outputting path:line:content matches (with line numbers, ready to read context via read_file). " +
 				"Optional context shows N lines before/after each match (context lines marked path-LINE-content, match groups separated by --); include filters files by glob (e.g. *.go searches only Go files). " +
-				"Skips .git and binary files by default; when more than 200 matches, prompts narrowing. " +
+				"Skips .git, .gitignore'd paths, dependency/build directories (node_modules etc.) and binary files by default — that is what keeps a repo-wide search fast; pass no_ignore=true to search them anyway. " +
+				"At most 200 matches are returned per call: when there are more, the result header says so and tells you the offset to pass back for the next page (or to narrow the pattern). " +
 				"Use glob to find files by name, this tool to search by content.",
 			Params_: tools.Obj(map[string]any{
-				"pattern": tools.Str("Regular expression (Go regexp syntax, required)"),
-				"path":    tools.Str("Start directory/file (relative to workspace root; default '.')"),
-				"context": tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Context lines to show before/after each match (default 0; must be >= 0)"},
-				"include": tools.Str("File filter glob (e.g. '*.go', '**/*_test.go'; optional, only searches matching files)"),
+				"pattern":   tools.Str("Regular expression (Go regexp syntax, required)"),
+				"path":      tools.Str("Start directory/file (relative to workspace root; default '.')"),
+				"context":   tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Context lines to show before/after each match (default 0; must be >= 0)"},
+				"include":   tools.Str("File filter glob (e.g. '*.go', '**/*_test.go'; optional, only searches matching files)"),
+				"offset":    tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Skip the first N matches and return the next page (default 0 = from the start). Use it when the result says there are more matches — pass back the offset it reports."},
+				"no_ignore": tools.Map{"type": "boolean", "default": false, "description": "Also search ignored paths (node_modules/, .gitignore'd paths, build output). Default false — ignored directories are skipped entirely, which is what makes a repo-wide search fast."},
 			}, "pattern"),
 			CanParallel_: true,
 			ReadOnly_:    true,
@@ -48,10 +62,12 @@ func newGrepTool(f *FileTools) *grepTool {
 }
 
 type grepArgs struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
-	Context int    `json:"context"`
-	Include string `json:"include"`
+	Pattern  string `json:"pattern"`
+	Path     string `json:"path"`
+	Context  int    `json:"context"`
+	Include  string `json:"include"`
+	Offset   int    `json:"offset"`
+	NoIgnore bool   `json:"no_ignore"`
 }
 
 func (t *grepTool) ValidParams(_ context.Context, _, arguments string) error {
@@ -65,6 +81,9 @@ func (t *grepTool) ValidParams(_ context.Context, _, arguments string) error {
 	if a.Context < 0 {
 		return recoveryError("invalid_context", "correct_arguments", fmt.Sprintf("context=%d", a.Context), "Set context to an integer >= 0, then retry grep.")
 	}
+	if a.Offset < 0 {
+		return recoveryError("invalid_offset", "correct_arguments", fmt.Sprintf("offset=%d", a.Offset), "Set offset to an integer >= 0, then retry grep.")
+	}
 	if a.Include != "" {
 		if _, err := compileGlob(a.Include); err != nil {
 			return fmt.Errorf("grep: invalid include glob %q: %w", a.Include, err)
@@ -73,7 +92,16 @@ func (t *grepTool) ValidParams(_ context.Context, _, arguments string) error {
 	return nil
 }
 
-func (t *grepTool) Call(_ context.Context, _, arguments string) (string, error) {
+// ToolTimeout 实现 tools.ToolTimeoutProvider：声明 grep 的工具级时限。
+//
+// 引擎默认的 5 分钟兜底对 grep **不够用**：改造前 grep 不看 ctx，那 5 分钟
+// 形同虚设（一次全仓 grep 实测 4 分钟起步）；现在 grep 会真的响应取消，
+// 于是可以给它一个更紧的、模型可理解的时限（超时错误里写明「收窄搜索」）。
+//
+// 该时限落在可摘离的 liftableTimeout 上：任务 promote 成后台时自动解除。
+func (t *grepTool) ToolTimeout() time.Duration { return searchToolTimeout }
+
+func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error) {
 	var a grepArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
@@ -91,109 +119,362 @@ func (t *grepTool) Call(_ context.Context, _, arguments string) (string, error) 
 		return "", err
 	}
 
-	var results []grepFileResult
-	total := 0
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // 单个文件不可读（权限等）：跳过，不中断搜索
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" {
-				return fs.SkipDir // 仓库元数据不参与搜索
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(t.root, path)
-		if err != nil {
-			rel = path
-		}
-		rel = filepath.ToSlash(rel)
-		// include 过滤：glob 匹配文件名（*.go）或完整相对路径（**/test/*.go）任一命中即可
-		if a.Include != "" {
-			baseMatch, _ := matchGlob(a.Include, filepath.Base(rel))
-			pathMatch, _ := matchGlob(a.Include, rel)
-			if !baseMatch && !pathMatch {
-				return nil
-			}
-		}
-		fr, truncated, err := grepFile(re, path, rel, a.Context, &total, t.maxResults)
-		if err != nil {
-			return nil // 二进制/读失败：跳过该文件
-		}
-		if len(fr.matches) > 0 {
-			results = append(results, fr)
-		}
-		if truncated {
-			return fs.SkipAll // 命中预算已满：立即停止遍历
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, fs.SkipAll) {
+	// 忽略规则：内置黑名单 + 逐目录增量读 .gitignore。被忽略的目录整棵子树
+	// 零 I/O（SkipDir ⇒ 连 read_dir 都不做）。显式给出的 path 不受规则约束
+	// （与 rg 一致：命令行路径覆盖 ignore 规则）。
+	ign := newIgnoreMatcher(t.root, !a.NoIgnore)
+
+	col := &grepCollector{offset: a.Offset, max: t.maxResults}
+	if err := t.search(ctx, re, root, a, ign, col); err != nil {
 		return "", err
 	}
 
 	var b strings.Builder
-	if total > t.maxResults {
-		fmt.Fprintf(&b, "[grep: more than %d matches, showing first %d; narrow the pattern]\n", t.maxResults, t.maxResults)
-	} else {
-		fmt.Fprintf(&b, "[grep: %d match(es) in %d file(s)]\n", total, len(results))
+	switch {
+	case col.taken == 0 && col.offset > 0:
+		// offset 越过总数：明确告诉模型「没有更多了」，别再空转
+		fmt.Fprintf(&b, "[grep: no matches at offset %d (%d match(es) in %d file(s) in total); lower the offset or narrow the pattern]\n",
+			col.offset, col.total, col.files)
+	case col.truncated && col.offset > 0:
+		fmt.Fprintf(&b, "[grep: more than %d matches, showing matches %d-%d (offset %d); use offset=%d to see the next page, or narrow the pattern]\n",
+			col.end(), col.offset+1, col.offset+col.taken, col.offset, col.offset+col.taken)
+	case col.truncated:
+		fmt.Fprintf(&b, "[grep: more than %d matches, showing first %d; narrow the pattern]\n", col.max, col.max)
+	case col.offset > 0:
+		fmt.Fprintf(&b, "[grep: matches %d-%d (offset %d) in %d file(s)]\n",
+			col.offset+1, col.offset+col.taken, col.offset, len(col.results))
+	default:
+		fmt.Fprintf(&b, "[grep: %d match(es) in %d file(s)]\n", col.total, len(col.results))
 	}
-	for _, fr := range results {
+	for _, fr := range col.results {
 		renderGrepResult(fr, a.Context, &b)
 	}
 	return b.String(), nil
 }
 
-// grepFileResult 单个文件的一次搜索：命中行号（1 基）+ 全部行内容（已按输出长度截断）。
+// grepFileResult 单个文件的一次搜索：命中行号（1 基）+ **需要输出**的行内容。
+//
+// lines 是稀疏的（map[行号]内容）：只存命中行及其上下文档位。
+// 改造前这里是稠密的 []string（整个文件的每一行都留着）—— 一个零命中的
+// 50 万行文件会白占 73.6 MB / 50 万次分配（2026-11-17 实测）。
 type grepFileResult struct {
 	rel     string
-	lines   []string // 1 索引：lines[ln-1] = 第 ln 行
-	matches []int    // 命中的行号（升序）
+	total   int            // 文件总行数
+	lines   map[int]string // 行号 → 该行内容（只存需要输出的行）
+	matches []int          // 命中的行号（升序）
 }
 
-// grepFile 扫描单个文本文件：收集命中行号与行内容，返回是否提前截断（命中预算耗尽）。
+// grepGroup 一段连续输出的行区间（命中行 ± context 合并后）。
+type grepGroup struct{ start, end int }
+
+// grepScanner 一次 grep 调用内的行读取器。
+//
+// 为什么用 bufio.Reader 而不是 bufio.Scanner：
+//
+//   - Scanner **没有 Reset**（Go 1.25 src/bufio/scan.go 只有
+//     Err/Bytes/Text/Scan/Buffer/Split）⇒ 每个文件都得 new 一个 Scanner，
+//     连带 new 一个 64 KB buffer。实测真实源码上 **97 KB/文件**的分配
+//     （源文件平均才 14 KB），全仓 grep 分配 11 GB。
+//   - Reader **有 Reset(r) 且复用同一个 buffer**
+//     （src/bufio/bufio.go: `b.reset(b.buf, r)`）⇒ 缓冲跨文件复用。
+//
+// 为什么用 ReadSlice('\n') 而不是 Scan：
+// ReadSlice 返回**内部缓冲的切片**（零拷贝）⇒ 匹配阶段完全不分配；
+// Scan 每次都要拷一份字符串（sc.Text()）。
+//
+// 代价：ReadSlice 返回的切片**在下一次调用后失效** ⇒ 需要留存时必须拷贝。
+type grepScanner struct {
+	br      *bufio.Reader
+	head    []byte // 二进制探测用的头部缓冲（跨文件复用）
+	long    []byte // 超长行的累积缓冲（按上限一次性分配，见 appendLong）
+	longLen int    // long 已用字节数
+	drop    bool   // 正在丢弃一个超长行的剩余部分
+}
+
+func newGrepScanner() *grepScanner {
+	return &grepScanner{
+		br:   bufio.NewReaderSize(nil, grepReadBufferSize),
+		head: make([]byte, grepHeadProbeSize),
+	}
+}
+
+// reset 切到下一个文件（复用同一个缓冲）。
+func (s *grepScanner) reset(r io.Reader) {
+	s.br.Reset(r)
+	s.longLen = 0
+	s.drop = false
+}
+
+// nextLine 读下一行（去掉行尾换行）。
+//
+// 返回的切片指向内部缓冲，**下一次调用后失效** —— 调用方要留存必须拷贝。
+// ok=false 表示 EOF。
+func (s *grepScanner) nextLine() ([]byte, bool) {
+	for {
+		chunk, err := s.br.ReadSlice('\n')
+		if s.drop {
+			// 正在丢弃一个超长行的剩余部分：找到换行才算这一行结束。
+			if bytes.IndexByte(chunk, '\n') >= 0 {
+				s.drop = false
+				s.longLen = 0
+				if err == io.EOF {
+					return nil, false
+				}
+				continue // 下一行
+			}
+			if err == io.EOF {
+				s.drop = false
+				s.longLen = 0
+				return nil, false
+			}
+			continue
+		}
+		if err == bufio.ErrBufferFull {
+			// 行超过缓冲：累积（上限 maxGrepLineBytes）。
+			s.appendLong(chunk)
+			if s.longLen >= maxGrepLineBytes {
+				s.drop = true // 剩余部分丢弃
+			}
+			continue
+		}
+		if s.longLen > 0 {
+			// 超长行：累积到 s.long。此处一定是一行（可能内容为空）。
+			s.appendLong(chunk)
+			content := s.long[:s.longLen]
+			s.longLen = 0
+			// 超长行可能被**截断**在字符中间 ⇒ 去掉尾部残缺的 UTF-8 序列。
+			return trimEOL(trimIncompleteRune(content)), true
+		}
+		if err == io.EOF {
+			if len(chunk) == 0 {
+				return nil, false // 真的读完了，且没有残余内容
+			}
+			return trimEOL(chunk), true // 最后一行（可能没有换行符结尾）
+		}
+		if len(chunk) == 0 {
+			continue // 读到 0 字节且无错 → 再试一次
+		}
+		// 注意：**空行也是一行**（bufio.ScanLines 同样返回空行）——
+		// 这里不能因为 trimEOL 后为空就跳过。
+		return trimEOL(chunk), true
+	}
+}
+
+// appendLong 把 chunk 追加到超长行缓冲。
+//
+// 缓冲**按上限一次性分配**（首次遇到超长行时才分配，之后一直复用），
+// 之后只用 copy 填充 —— 不用 append：append 扩容会把已累积的内容**整体拷贝**
+// 一遍（4 MB 的单行 ⇒ 十几次扩容、累计拷贝 ~8 MB，且每次都是一次新分配）。
+// 这里的长度由 longLen 单独跟踪，缓冲本身永不增长。
+func (s *grepScanner) appendLong(chunk []byte) {
+	if s.long == nil {
+		s.long = make([]byte, maxGrepLineBytes)
+	}
+	n := copy(s.long[s.longLen:], chunk)
+	s.longLen += n
+}
+
+// trimEOL 去掉行尾换行符。
+//
+// 连行尾 \r 一起去掉 —— 与 bufio.ScanLines 的 dropCR 语义一致（改造前用
+// Scanner，CRLF 文件的行内容不含 \r；只去 \n 会让 CRLF 文件的匹配结果与
+// 输出都多出一个 \r）。
+func trimEOL(b []byte) []byte {
+	if n := len(b); n > 0 && b[n-1] == '\n' {
+		b = b[:n-1]
+	}
+	if n := len(b); n > 0 && b[n-1] == '\r' {
+		b = b[:n-1]
+	}
+	return b
+}
+
+// trimIncompleteRune 去掉尾部**不完整**的 UTF-8 序列。
+//
+// 场景：超长行被截断（上限 maxGrepLineBytes）时，切口可能落在多字节字符中间
+// ⇒ 该字符的残缺字节序列进了输出。它在 JSON 里会被替换成 U+FFFD，
+// 相当于凭空多出一个乱码字符。
+//
+// 只处理「不完整」的情况：源码本来就是非法 UTF-8 的字节**原样保留**
+// （那是文件本身的问题，不该由截断再改一次语义）。
+func trimIncompleteRune(b []byte) []byte {
+	n := len(b)
+	// UTF-8 最长 4 字节 ⇒ 从尾部最多回退 3 字节就能找到那个字符的首字节。
+	for i := 1; i < utf8.UTFMax && i <= n; i++ {
+		c := b[n-i]
+		if !utf8.RuneStart(c) {
+			continue // 续字节：继续往前找
+		}
+		want := utf8SeqLen(c)
+		switch {
+		case want == 0:
+			return b // 非法首字节：源码本身有问题，原样保留
+		case i < want:
+			return b[:n-i] // 不完整 ⇒ 去掉这个残缺字符
+		default:
+			return b // 完整
+		}
+	}
+	return b
+}
+
+// utf8SeqLen 按首字节算出该字符应有的字节数（0 = 非法首字节）。
+//
+// 为什么不用 utf8.DecodeRune：它对「非法编码」和「不完整序列」都返回
+// (RuneError, 1) —— 两者分不开，而我们要区分（前者是源码的问题，原样保留；
+// 后者是**我们截断造成的**，必须去掉）。
+func utf8SeqLen(c byte) int {
+	switch {
+	case c < 0x80:
+		return 1
+	case c < 0xC2:
+		return 0 // 续字节 / 过长编码（C0、C1 非法）
+	case c < 0xE0:
+		return 2
+	case c < 0xF0:
+		return 3
+	case c < 0xF4:
+		return 4
+	default:
+		return 0 // 超出 U+10FFFF
+	}
+}
+
+// grepCountFile 扫描单个文本文件的**第一遍**：数命中、记命中行号，**不留行内容**。
+//
+// 返回：
+//   - lines：命中的行号（升序，最多 budget 个）；
+//   - count：命中总数（达到 budget 时停读，capped=true 表示后面还有）；
+//   - total：已读到的行数；
+//   - capped：命中数达到 budget ⇒ 已停止读该文件。
+//
 // 二进制文件（头 8KB 含 \x00）返回 error（调用方跳过）。
-func grepFile(re *regexp.Regexp, abs, rel string, ctx int, total *int, max int) (grepFileResult, bool, error) {
-	var fr grepFileResult
-	fr.rel = rel
+func grepCountFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel string, budget int) (lines []int, count, total int, capped bool, err error) {
 	f, err := os.Open(abs)
 	if err != nil {
-		return fr, false, err
+		return nil, 0, 0, false, err
 	}
 	defer f.Close()
 
-	head := make([]byte, 8192)
-	n, _ := f.Read(head)
-	if bytesContainsZero(head[:n]) {
-		return fr, false, errors.New("binary file") // 跳过
+	// 二进制探测：读头 8KB。用 ReadAt（pread）—— **不移动文件偏移** ⇒
+	// 后面可以直接从头扫，省掉改造前那次 Seek(0,0)（每文件少 2 次系统调用），
+	// 也不需要 MultiReader 把头拼回去（少两次分配）。
+	// 头缓冲跨文件复用（sc.head）⇒ 每文件不再分配 8 KB。
+	n, _ := f.ReadAt(sc.head, 0)
+	if bytesContainsZero(sc.head[:n]) {
+		return nil, 0, 0, false, errors.New("binary file") // 跳过
 	}
-	if _, err := f.Seek(0, 0); err != nil {
-		return fr, false, err
-	}
+	sc.reset(f)
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	ln := 0
-	for sc.Scan() {
-		ln++
-		content := sc.Text()
-		if len(content) > maxGrepLineLength {
-			content = content[:maxGrepLineLength] + "..."
+	for {
+		line, ok := sc.nextLine()
+		if !ok {
+			break
 		}
-		fr.lines = append(fr.lines, content)
-		if !re.Match(sc.Bytes()) {
+		total++
+		// 取消/超时检查（按行数抽样：ctx.Err() 不是免费的 —— 引擎的
+		// liftableTimeout.Err() 要加锁）。单个超大文件也得能被中断。
+		if total%searchCtxCheckEvery == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return lines, count, total, capped, cerr
+			}
+		}
+		if !re.Match(line) {
 			continue
 		}
-		*total++ // 真实匹配计数（无上限，供「more than N」提示）
-		if *total > max {
-			return fr, true, nil // 命中预算已满：本文件截断，调用方停止遍历
+		count++
+		if count <= budget {
+			lines = append(lines, total)
 		}
-		fr.matches = append(fr.matches, ln)
+		if count >= budget {
+			// 命中数够了：不再读这个文件（后面的命中对窗口没影响，
+			// 但足以判定「还有更多」）。
+			capped = true
+			break
+		}
 	}
-	return fr, false, sc.Err()
+	return lines, count, total, capped, nil
+}
+
+// grepCollectFile 扫描单个文本文件的**第二遍**：取「命中行 ± context」的并集内容。
+//
+// 已知命中行号（matchLines，第一遍算出来的），只需再读一遍文件把要输出的行取出来。
+// 改造前也是这么做的（两遍扫描），区别是第一遍现在跑在并行 worker 里。
+func grepCollectFile(ctx context.Context, sc *grepScanner, abs, rel string, matchLines []int, ctxLines, totalLines int) (grepFileResult, error) {
+	fr := grepFileResult{rel: rel, total: totalLines, matches: matchLines}
+	f, err := os.Open(abs)
+	if err != nil {
+		return fr, err
+	}
+	defer f.Close()
+	sc.reset(f)
+
+	groups := computeGrepGroups(matchLines, ctxLines, totalLines)
+	fr.lines = make(map[int]string, len(matchLines)*(2*ctxLines+1))
+	gi := 0
+	ln := 0
+	for {
+		line, ok := sc.nextLine()
+		if !ok {
+			break
+		}
+		ln++
+		if ln%searchCtxCheckEvery == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return fr, cerr
+			}
+		}
+		for gi < len(groups) && ln > groups[gi].end {
+			gi++
+		}
+		if gi >= len(groups) {
+			break // 后面的行都不需要
+		}
+		if ln < groups[gi].start {
+			continue
+		}
+		fr.lines[ln] = truncateGrepLine(string(line))
+	}
+	return fr, nil
+}
+
+// truncateGrepLine 把行内容截到输出上限（防长行撑爆结果）。
+//
+// 截断点必须落在 **UTF-8 字符边界**上：按字节切（`s[:200]`）可能把一个多字节
+// 字符切成两半，残缺的字节序列在 JSON 里会被替换成 U+FFFD（?）——
+// 等于凭空多出一个乱码字符，也会让「按字符数读结果」的模型看到错的东西。
+func truncateGrepLine(s string) string {
+	if len(s) <= maxGrepLineLength {
+		return s
+	}
+	end := maxGrepLineLength
+	// s[end] 是续字节 ⇒ 切口落在字符中间 ⇒ 往前退到该字符的首字节。
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "..."
+}
+
+// computeGrepGroups 把命中行合并为上下文区间组（相邻/重叠合并）。
+func computeGrepGroups(matches []int, ctx, totalLines int) []grepGroup {
+	var groups []grepGroup
+	for _, m := range matches {
+		s, e := m-ctx, m+ctx
+		if s < 1 {
+			s = 1
+		}
+		if e > totalLines {
+			e = totalLines
+		}
+		if n := len(groups); n > 0 && s <= groups[n-1].end+1 {
+			if e > groups[n-1].end {
+				groups[n-1].end = e
+			}
+		} else {
+			groups = append(groups, grepGroup{s, e})
+		}
+	}
+	return groups
 }
 
 // renderGrepResult 渲染一个文件的命中结果：命中行 path:line:content，上下文行 path-LINE-content，
@@ -202,25 +483,7 @@ func renderGrepResult(fr grepFileResult, ctx int, b *strings.Builder) {
 	if len(fr.matches) == 0 {
 		return
 	}
-	// 命中行合并为上下文区间组（相邻/重叠合并）
-	type group struct{ start, end int }
-	var groups []group
-	for _, m := range fr.matches {
-		s, e := m-ctx, m+ctx
-		if s < 1 {
-			s = 1
-		}
-		if e > len(fr.lines) {
-			e = len(fr.lines)
-		}
-		if n := len(groups); n > 0 && s <= groups[n-1].end+1 {
-			if e > groups[n-1].end {
-				groups[n-1].end = e
-			}
-		} else {
-			groups = append(groups, group{s, e})
-		}
-	}
+	groups := computeGrepGroups(fr.matches, ctx, fr.total)
 	matchSet := make(map[int]bool, len(fr.matches))
 	for _, m := range fr.matches {
 		matchSet[m] = true
@@ -231,9 +494,9 @@ func renderGrepResult(fr grepFileResult, ctx int, b *strings.Builder) {
 		}
 		for ln := g.start; ln <= g.end; ln++ {
 			if matchSet[ln] {
-				fmt.Fprintf(b, "%s:%d:%s\n", fr.rel, ln, fr.lines[ln-1])
+				fmt.Fprintf(b, "%s:%d:%s\n", fr.rel, ln, fr.lines[ln])
 			} else {
-				fmt.Fprintf(b, "%s-%d-%s\n", fr.rel, ln, fr.lines[ln-1])
+				fmt.Fprintf(b, "%s-%d-%s\n", fr.rel, ln, fr.lines[ln])
 			}
 		}
 	}
@@ -249,3 +512,4 @@ func bytesContainsZero(b []byte) bool {
 }
 
 var _ tools.Tool = (*grepTool)(nil)
+var _ tools.ToolTimeoutProvider = (*grepTool)(nil)
