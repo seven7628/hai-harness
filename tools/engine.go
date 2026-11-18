@@ -43,8 +43,10 @@ type Engine struct {
 	// 与 maxResponse 是两套口径：脚本要能零损耗读到完整结果，见 scriptTruncate。
 	maxScriptResponse int
 	// spillDir 截断落盘目录（"" = 不落盘）。见 WithSpillDir。
-	spillDir    string
-	toolTimeout time.Duration // 单次工具执行兜底超时（工具可经 ToolTimeoutProvider 覆盖）
+	spillDir       string
+	spillMu        sync.Mutex    // 保护 spillLastSweep（清扫节流）
+	spillLastSweep time.Time     // 上次清扫时间
+	toolTimeout    time.Duration // 单次工具执行兜底超时（工具可经 ToolTimeoutProvider 覆盖）
 
 	// 图片闸门（ToolImageProvider 产出经此过滤；0 = 不限）。
 	maxImageBytes int // 单张图片 data URL 上限（默认 3MB ≈ 2.2MB 原始字节，视觉模型足够）
@@ -1268,7 +1270,11 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 	// （bash 等）在 Call 内上报退出码/超时，引擎据此把「失败/超时」升级为结构化信号，
 	// 而 **Call 仍返回 nil error**（否则下面 err != nil 分支会丢弃整个 out，非目标 1）。
 	execSink := &ExecSink{}
-	out, err := callTool(tool, WithExecSink(WithImageSink(WithStructuredSink(ctx, structuredSink), sink), execSink), call)
+	// 变更 diff 收集槽：同为「每次调用独立放 ctx」范式（DiffSink）——write/edit/
+	// run_python 在 Call 内上报本次调用对文件的变更。改造前它们把 diff 存在**工具实例
+	// 字段**上 ⇒ 主 agent 与后台子 agent 并发时互相清空/串味（产出卡挂错文件）。
+	diffSink := &DiffSink{}
+	out, err := callTool(tool, WithDiffSink(WithExecSink(WithImageSink(WithStructuredSink(ctx, structuredSink), sink), execSink), diffSink), call)
 	if err != nil {
 		return e.finish(ctx, handler, call, finishInput{result: err.Error(), isErr: true})
 	}
@@ -1284,8 +1290,10 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 		usage = up.Usage() // 子 agent 类工具回传本次执行用量
 	}
 	var diff *core.FileDiff
-	if dp, ok := tool.(ToolDiffProvider); ok {
-		diff = dp.Diff() // write/edit 类工具回传本次调用对文件的变更（事件层，宿主渲染）
+	if d, ok := diffSink.Diff(); ok {
+		diff = d // ctx 槽优先（write/edit/run_python 已迁移到这里）
+	} else if dp, ok := tool.(ToolDiffProvider); ok {
+		diff = dp.Diff() // 兼容：仍在用实例字段的旧工具
 	}
 	// 执行结局（命令类工具经 ExecSink 上报；非命令类 ok=false → 结构体 nil，行为不变）。
 	// 判定规则：超时/取消（输出为部分）必判失败；非零退出且非「良性非零退出」命令判失败
@@ -1611,6 +1619,25 @@ func (e *Engine) scriptTruncate(s, callID string) string {
 // 超限 = 不落盘（退回历史文案），不报错：截断本来就是兜底路径，落盘是它的增强。
 const maxSpillBytes = 256 << 20
 
+// 落盘目录的**回收**策略（2026-11-17，第 5 步）。
+//
+// 问题：spillText 每次截断写一个文件（0600），但**没有任何清理器** ——
+// 目录只增不减（引擎注释自陈「实测本机历史里 680 条结果被截断、累计丢掉 1.17 GB」）。
+// macOS 的 $TMPDIR 会被系统回收（几天），但 Linux 的 /tmp 可能长期不清 ⇒ 无界增长。
+//
+// 两条规则：
+//   - **TTL**：超过 spillTTLHours 的文件删掉（路径早已交给模型读过，没人再回头）；
+//   - **总量**：超过 spillMaxTotalBytes 就按「最旧先删」回收（单条截断最多 256 MiB，
+//     几次大输出就能顶到几 GB）。
+//
+// 清扫是**低频**的（两次之间至少 spillSweepIntervalMinutes）且**异步**跑
+// （目录多时是上千次 readdir，不能挂在工具调用的关键路径上）。
+const (
+	spillTTLHours             = 24
+	spillMaxTotalBytes        = 2 << 30 // 2 GiB
+	spillSweepIntervalMinutes = 5
+)
+
 // spillText 把**未截断**的全文写进 spillDir，返回绝对路径；失败/未配置返回 ""。
 //
 // 纪律：
@@ -1639,7 +1666,75 @@ func (e *Engine) spillText(callID, s string) string {
 		os.Remove(path)
 		return ""
 	}
+	// 回收：异步 + 低频（不能挂在工具调用的关键路径上）。
+	e.maybeSweepSpill()
 	return path
+}
+
+// maybeSweepSpill 按节流触发落盘目录的回收清扫（异步）。
+//
+// 节流：两次清扫之间至少间隔 spillSweepIntervalMinutes —— 清扫要遍历整个目录
+// （每个文件一次 stat），而截断并不频繁。
+func (e *Engine) maybeSweepSpill() {
+	if e.spillDir == "" {
+		return
+	}
+	now := time.Now()
+	e.spillMu.Lock()
+	if !e.spillLastSweep.IsZero() && now.Sub(e.spillLastSweep) < spillSweepIntervalMinutes*time.Minute {
+		e.spillMu.Unlock()
+		return
+	}
+	e.spillLastSweep = now
+	dir := e.spillDir
+	e.spillMu.Unlock()
+	go sweepSpillDir(dir, now, spillMaxTotalBytes)
+}
+
+// sweepSpillDir 清扫落盘目录：先删过期文件，再按「最旧先删」把总量压回上限。
+//
+// 失败一律忽略（回收是尽力而为，绝不能影响工具调用）。
+func sweepSpillDir(dir string, now time.Time, maxTotalBytes int64) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type item struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	var items []item
+	var total int64
+	cutoff := now.Add(-spillTTLHours * time.Hour)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, e.Name())) // 过期：直接删
+			continue
+		}
+		items = append(items, item{path: filepath.Join(dir, e.Name()), size: info.Size(), mod: info.ModTime()})
+		total += info.Size()
+	}
+	if total <= maxTotalBytes {
+		return
+	}
+	// 超总量：按最旧先删。
+	sort.Slice(items, func(i, j int) bool { return items[i].mod.Before(items[j].mod) })
+	for _, it := range items {
+		if total <= maxTotalBytes {
+			break
+		}
+		if err := os.Remove(it.path); err == nil {
+			total -= it.size
+		}
+	}
 }
 
 // safeFileToken 把调用 id 变成文件名安全片段（调用 id 来自 provider，可能是任意字符串）。

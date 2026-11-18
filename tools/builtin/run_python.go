@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -61,11 +62,31 @@ type RunPythonTool struct {
 	// spill 落盘仓库（完整输出落盘；见 spill.go）。
 	spill *spillStore
 
-	// diff 本次调用对**声明的产物**的变更（engine 经 ToolDiffProvider 读走，见 Diff）。
-	// 暂存字段的并发前提：本工具 CanParallel=false（执行类工具，同 bash），同一实例不会
-	// 被并行批共享 —— 与 writeFileTool.diff 同一先例；若将来放开并行，必须改成 ctx 槽
-	// （见 tools.ImageSink 注释里那个张冠李戴的窗口）。
+	// diff 本次调用对**声明的产物**的变更。
+	//
+	// ⚠️ 引擎读的是 **ctx 槽**（tools.DiffSink），不是这里 —— 工具实例在注册表里共享，
+	// 主 agent 与后台子 agent（以及 codemode 的嵌套调用）会并发调同一实例：
+	// 「CanParallel=false ⇒ 同一实例不会被并行批共享」这个前提**只覆盖单批内**，
+	// 覆盖不了那三条并发路径 ⇒ 实例字段会互相清空/串味（产出卡挂到别的文件上）。
+	// 这里保留一份镜像，只为直调与旧宿主（见 Diff）。
+	dmu  sync.Mutex
 	diff *core.FileDiff
+}
+
+// Diff 实现 tools.ToolDiffProvider：本次调用声明的产物里**第一个存在**的文件
+// 的变更事实。⚠️ 引擎读的是 ctx 槽（tools.DiffSink）；这里只留给直调与旧宿主。
+func (t *RunPythonTool) Diff() *core.FileDiff {
+	t.dmu.Lock()
+	defer t.dmu.Unlock()
+	return t.diff
+}
+
+// setDiff 同时写镜像与 ctx 槽（引擎读后者 ⇒ 并发下不会串味）。
+func (t *RunPythonTool) setDiff(ctx context.Context, d *core.FileDiff) {
+	t.dmu.Lock()
+	t.diff = d
+	t.dmu.Unlock()
+	tools.SetFileDiff(ctx, d)
 }
 
 // PythonRuntime run_python 需要的受管运行时能力面（*runtime.Runtime 实现；测试注入假实现）。
@@ -156,11 +177,6 @@ func (t *RunPythonTool) ToolTimeout() time.Duration {
 	}
 	return def + runPythonBootstrapHeadroom
 }
-
-// Diff 实现 tools.ToolDiffProvider：本次调用声明的产物里**第一个存在**的文件
-// （engine 在 Call 成功后读走 → ToolResponse.Diff → 产出卡；见 summarizeOutputs）。
-// 无 outputs 声明 / 声明的路径都没落盘 → nil（不产生产出，绝不猜）。
-func (t *RunPythonTool) Diff() *core.FileDiff { return t.diff }
 
 // TimeoutForArgs 实现 tools.PerCallTimeout：模型经 timeout 参数（秒）自设脚本时限；
 // 缺省/非法 → 0（用工具级默认）。返回给引擎的时限额外加 bootstrap 余量（spec 时限不含余量）。
@@ -255,7 +271,8 @@ func (t *RunPythonTool) ValidParams(_ context.Context, _, arguments string) erro
 }
 
 func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, error) {
-	t.diff = nil // 上次调用的产物不得泄漏到本次（engine 只在 Call 成功后读取）
+	// 上次调用的产物不得泄漏到本次（engine 只在 Call 成功后读取）。
+	t.setDiff(ctx, nil)
 	var a runPythonArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
@@ -397,7 +414,7 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 			humanBytes(totalOut), spillPath, out)
 	}
 	// ⑦ 补齐产物事实（存在性/尺寸/指纹 → FileDiff）+ 结果文本里的显式告知。
-	return t.summarizeOutputs(out, outs), nil
+	return t.summarizeOutputs(ctx, out, outs), nil
 }
 
 // ---------- 产物声明（outputs → ToolDiffProvider → 产出卡） ----------
@@ -454,7 +471,7 @@ func (t *RunPythonTool) declaredOutputs(outputs []string) []runPythonOutput {
 //
 // 告知放在**首行而非尾部**：引擎截断只保留头部（tools/engine.go truncate 取前 20000 字节），
 // 长输出的尾部追加会被静默吃掉 —— 而那正是最需要「声明的产物没落盘」提示的场景。
-func (t *RunPythonTool) summarizeOutputs(out string, outs []runPythonOutput) string {
+func (t *RunPythonTool) summarizeOutputs(ctx context.Context, out string, outs []runPythonOutput) string {
 	if len(outs) == 0 {
 		return out // 未声明产物：结果文本原样（含空声明，零额外 IO、零额外文本）
 	}
@@ -466,10 +483,10 @@ func (t *RunPythonTool) summarizeOutputs(out string, outs []runPythonOutput) str
 			continue
 		}
 		found++
-		if t.diff == nil {
+		if t.Diff() == nil {
 			// 只给**主产物**（第一个存在的声明）读文件算事实：一次调用只有一份 diff 会被采集
-			// （engine 只读一次 Diff()），其余声明判存在即可 —— 10 条声明最多读 1 个文件。
-			t.diff = t.outputDiff(o)
+			// （engine 只读一次），其余声明判存在即可 —— 10 条声明最多读 1 个文件。
+			t.setDiff(ctx, t.outputDiff(o))
 		}
 	}
 	if len(missing) == 0 {

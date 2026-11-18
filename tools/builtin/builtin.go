@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -866,11 +867,28 @@ func readLinesRange(ctx context.Context, f *os.File, start, end int) ([]string, 
 type writeFileTool struct {
 	tools.BaseTool
 	*FileTools
-	diff *core.FileDiff // 本次调用对文件的变更（engine 经 ToolDiffProvider 读取）
+	// diff 镜像（**直调/旧宿主兼容**）：引擎读的是 ctx 槽（tools.DiffSink），
+	// 因为工具实例在注册表里共享 —— 主 agent 与后台子 agent 并发调用同一实例时，
+	// 实例字段会互相清空/串味（产出卡挂到别的文件上）。
+	dmu  sync.Mutex
+	diff *core.FileDiff
 }
 
 // Diff 实现 tools.ToolDiffProvider：返回最近一次成功调用的变更 diff。
-func (t *writeFileTool) Diff() *core.FileDiff { return t.diff }
+// ⚠️ 引擎**不再**读它（读 ctx 槽，见 tools.DiffSink 的注释）；它只留给直调与旧宿主。
+func (t *writeFileTool) Diff() *core.FileDiff {
+	t.dmu.Lock()
+	defer t.dmu.Unlock()
+	return t.diff
+}
+
+// setDiff 同时写镜像与 ctx 槽（引擎读后者 ⇒ 并发下不会串味）。
+func (t *writeFileTool) setDiff(ctx context.Context, d *core.FileDiff) {
+	t.dmu.Lock()
+	t.diff = d
+	t.dmu.Unlock()
+	tools.SetFileDiff(ctx, d)
+}
 
 func newWriteFileTool(f *FileTools) *writeFileTool {
 	return &writeFileTool{
@@ -916,7 +934,8 @@ func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, 
 	if err := ctx.Err(); err != nil {
 		return "", toolCancelledError(ctx, "write_file")
 	}
-	t.diff = nil
+	// 清空本次调用的 diff（ctx 槽 + 镜像）：上次调用的变更不得泄漏到本次。
+	t.setDiff(ctx, nil)
 	var a writeArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
@@ -940,25 +959,28 @@ func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, 
 			return "", err
 		}
 		created := errors.Is(statErr, os.ErrNotExist)
+		var d *core.FileDiff
 		if created {
 			// 新建文件：追加内容即全文 → size/lines/指纹均为精确事实
-			t.diff = finalizeDiff(&core.FileDiff{Path: a.Path, Added: strings.Count(a.Content, "\n")}, a.Content)
+			d = finalizeDiff(&core.FileDiff{Path: a.Path, Added: strings.Count(a.Content, "\n")}, a.Content)
 		} else {
 			// 既有文件：content 是纯增量 → Added 是增量语义；
 			// 全量 size/lines 需读整个文件（与「工具侧零额外 IO」冲突）→ 留空，
 			// 宿主对空值不展示该维度（诚实优于错数）。指纹为增量指纹（变更判定有效）。
-			t.diff = &core.FileDiff{
+			d = &core.FileDiff{
 				Path:   a.Path,
 				Added:  strings.Count(a.Content, "\n"),
 				SHA256: contentFingerprint(a.Content),
 			}
 		}
-		t.diff.Created = created
+		d.Created = created
+		t.setDiff(ctx, d)
+		added := d.Added
 		notice, err := t.notifyPostWrite(ctx, p)
 		if err != nil {
 			return "", err
 		}
-		return withNotice(fmt.Sprintf("appended (+%d)", t.diff.Added), notice), nil
+		return withNotice(fmt.Sprintf("appended (+%d)", added), notice), nil
 	}
 	// 覆盖：锁内读旧内容（若存在）→ 替换 → 算 diff。旧内容须在替换前读取，
 	// 与 edit_file 同款锁内读改写全程无竞态；替换后旧内容不可再得（信息源头在工具）。
@@ -978,13 +1000,15 @@ func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, 
 	}
 	// Created：lock==nil ⇔ 文件此前不存在（lockPath 对不存在的文件返回 nil 锁）。
 	// 不能用 Removed==0 推断（纯插入内容同样是 +N -0）。
-	t.diff = finalizeDiff(computeFileDiff(a.Path, old, a.Content), a.Content)
-	t.diff.Created = lock == nil
+	d := finalizeDiff(computeFileDiff(a.Path, old, a.Content), a.Content)
+	d.Created = lock == nil
+	t.setDiff(ctx, d)
+	added, removed := d.Added, d.Removed
 	notice, err := t.notifyPostWrite(ctx, p)
 	if err != nil {
 		return "", err
 	}
-	return withNotice(fmt.Sprintf("written (+%d -%d)", t.diff.Added, t.diff.Removed), notice), nil
+	return withNotice(fmt.Sprintf("written (+%d -%d)", added, removed), notice), nil
 }
 
 // withNotice 把宿主钩子给的提醒拼在成功结果之后（空提醒 = 结果逐字节不变）。
@@ -1011,11 +1035,25 @@ func (t *writeFileTool) notifyPostWrite(ctx context.Context, absPath string) (st
 type editFileTool struct {
 	tools.BaseTool
 	*FileTools
-	diff *core.FileDiff // 本次调用对文件的变更（engine 经 ToolDiffProvider 读取）
+	// diff 镜像（**直调/旧宿主兼容**）—— 引擎读的是 ctx 槽，见 writeFileTool 的注释。
+	dmu  sync.Mutex
+	diff *core.FileDiff
 }
 
-// Diff 实现 tools.ToolDiffProvider：返回最近一次成功调用的变更 diff。
-func (t *editFileTool) Diff() *core.FileDiff { return t.diff }
+// Diff 实现 tools.ToolDiffProvider：返回最近一次成功调用的变更 diff（直调/旧宿主用）。
+func (t *editFileTool) Diff() *core.FileDiff {
+	t.dmu.Lock()
+	defer t.dmu.Unlock()
+	return t.diff
+}
+
+// setDiff 同时写镜像与 ctx 槽（引擎读后者 ⇒ 并发下不会串味）。
+func (t *editFileTool) setDiff(ctx context.Context, d *core.FileDiff) {
+	t.dmu.Lock()
+	t.diff = d
+	t.dmu.Unlock()
+	tools.SetFileDiff(ctx, d)
+}
 
 func newEditFileTool(f *FileTools) *editFileTool {
 	return &editFileTool{
@@ -1058,7 +1096,8 @@ func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	if err := ctx.Err(); err != nil {
 		return "", toolCancelledError(ctx, "edit_file")
 	}
-	t.diff = nil
+	// 清空本次调用的 diff（ctx 槽 + 镜像）：上次调用的变更不得泄漏到本次。
+	t.setDiff(ctx, nil)
 	var a editArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
@@ -1093,12 +1132,14 @@ func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	}
 	// 旧全文 s 与 replaced 均在手，免费产 diff（信息源头在工具）。
 	// edit_file 入口已 statPath 要求文件存在 → Created 恒 false（modified）。
-	t.diff = finalizeDiff(computeFileDiff(a.Path, s, replaced), replaced)
+	d := finalizeDiff(computeFileDiff(a.Path, s, replaced), replaced)
+	t.setDiff(ctx, d)
+	added, removed := d.Added, d.Removed
 	notice, err := t.notifyPostWrite(ctx, p)
 	if err != nil {
 		return "", err
 	}
-	return withNotice(fmt.Sprintf("[edit_file: replaced 1 occurrence in %s (+%d -%d)]", a.Path, t.diff.Added, t.diff.Removed), notice), nil
+	return withNotice(fmt.Sprintf("[edit_file: replaced 1 occurrence in %s (+%d -%d)]", a.Path, added, removed), notice), nil
 }
 
 // notifyPostWrite 触发宿主"写/改成功后"钩子；未注入钩子时是零成本空操作。

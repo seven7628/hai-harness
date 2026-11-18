@@ -117,7 +117,10 @@ func TestSearchToolsCancelDuringScan(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(30 * time.Millisecond)
+		// 10ms：这棵树（37.5 MB）在并行扫描下约 84ms ⇒ 取消稳稳落在扫描**进行中**。
+		// （改造前是单线程、要几秒，所以是 30ms；并行化后余量必须收窄，
+		//  否则扫描可能在取消生效前就跑完了 ⇒ 测试偶发失败。）
+		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
 	start := time.Now()
