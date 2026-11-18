@@ -265,8 +265,9 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	defer tailer.close()
 	onOutput := spec0OnOutput(tailer)
 	// 输出有界化 + 落盘（2026-11-17）：
-	//   - 模型路径：内存窗口 64 KB（头 32 + 尾 32），超过 32 KB 把**完整**输出
-	//     落盘并在结果里报出路径 ⇒ 模型可分段读（不再只能看被硬砍的 20 KB）。
+	//   - 模型路径：内存窗口 16 KB（头 8 + 尾 8，见 bashModelOutputLimit 的注释），
+	//     超过 16 KB 把**完整**输出落盘并在结果里报出路径 ⇒ 模型可分段读
+	//     （不再只能看被硬砍的 20 KB）。
 	//   - 脚本路径：窗口 = 结构化输出上限（1 MiB），超过同样的量落盘。
 	// 内存占用与输出大小**无关**（改造前：32 MB 输出 = 96 MB 分配，1 GB 输出能撑爆 bridge）。
 	isScript := tools.IsScriptCall(ctx)
