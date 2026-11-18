@@ -8,7 +8,6 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -65,6 +63,46 @@ type ExecSpec struct {
 	//     阻塞它会直接反压子进程输出，把「看日志」变成「拖慢命令」；
 	//   - p 只在调用期间有效（底层缓冲会被复用）→ 需要留存就拷贝一份。
 	OnOutput func(p []byte)
+
+	// ---- 输出有界化 + 落盘（2026-11-17 新增；默认值 = 改造前行为）----
+
+	// OutputLimit 内存里保留的字节上限（头 + 尾窗口合计）。
+	// 0 = 不限（完整缓冲全部输出 = 改造前行为）。
+	//
+	// 为什么要有：一条输出 1 GB 的命令会把 bridge 的内存吃穿（实测 32 MB 输出
+	// 要 96 MB 分配：bytes.Buffer 扩容 ~2× + String() 拷贝 1×）。而模型侧真正
+	// 能看到的只有引擎截断后的 20 KB，中间那一大段从来没人看。
+	// 设了上限后：内存里只留「头 + 尾」（错误信息通常在尾），中间的进落盘文件
+	// 或被丢弃。
+	OutputLimit int
+
+	// OutputFile 可选：输出超过 OutputFileAfter 字节时，把**完整**输出流式写到
+	// 这个文件（先写已缓冲的部分，再边跑边写）。空 = 不落盘（超窗口的中间部分丢弃）。
+	//
+	// 宿主用这个机制把完整输出交给模型分段读（对齐 Claude Code 的
+	// <persisted-output> / OpenCode / goose 的做法）。
+	OutputFile string
+
+	// OutputHeadOnly 只要头（不要尾、不要省略标记）。
+	// 脚本路径用：它的结构化 output 必须是**逐字节前缀**（脚本按顺序读），
+	// 插任何标记都会污染数据。
+	OutputHeadOnly bool
+
+	// OutputFileAfter 超过多少字节才开始写 OutputFile（0 = 立即写）。
+	// 低于阈值不落盘 ⇒ 避免每次命令调用都产生临时文件。
+	OutputFileAfter int
+
+	// Spilled 出参：是否真的落盘了（OutputFile 非空且输出超过 OutputFileAfter）。
+	// nil = 不采集。
+	Spilled *bool
+
+	// OmittedBytes 出参：返回文本里被省略掉的字节数（中间部分）。
+	// nil = 不采集。
+	OmittedBytes *int64
+
+	// TotalOutputBytes 出参：命令输出的**总**字节数（不管有没有被窗口/落盘处理）。
+	// nil = 不采集。
+	TotalOutputBytes *int64
 }
 
 // Sandbox 沙箱执行后端。
@@ -198,15 +236,28 @@ func runExec(ctx context.Context, cmd *exec.Cmd, spec ExecSpec) (string, error) 
 		defer cancel()
 	}
 
-	// 输出走 lockedBuffer 而不是裸 bytes.Buffer：极端分支会在 cmd.Wait 的拷贝协程仍
-	// 在往管道读/写时取部分输出，无锁会构成数据竞争（见 lockedBuffer 注释）。
-	var out lockedBuffer
+	// 输出走有界缓冲：极端分支会在 cmd.Wait 的拷贝协程仍在往管道读/写时取部分
+	// 输出，无锁会构成数据竞争（见 outputBuffer 注释）。
+	out := newOutputBuffer(spec.OutputLimit, spec.OutputFile, spec.OutputFileAfter, spec.OutputHeadOnly)
+	defer func() {
+		// 收尾顺序：先关落盘文件（调用方随后可安全读它），再回填出参。
+		out.finish()
+		if spec.Spilled != nil {
+			*spec.Spilled = out.didSpill()
+		}
+		if spec.OmittedBytes != nil {
+			*spec.OmittedBytes = out.omittedBytes()
+		}
+		if spec.TotalOutputBytes != nil {
+			*spec.TotalOutputBytes = out.totalBytes()
+		}
+	}()
 	// 输出接线：默认（OnOutput == nil）就是历史行为 —— 两条流直接写同一个缓冲区。
 	// 有 OnOutput 时先落缓冲（最终结果仍以缓冲区为准），再把**同一批字节**喂给回调。
 	// 为什么用 writerFunc 而不是包一层 TeeWriter：TeeWriter 会引入第二条写路径的锁序
 	// 问题，而这里只需要「写完之后顺带通知一下」。
-	writeStdout := io.Writer(&out)
-	writeStderr := io.Writer(&out)
+	writeStdout := io.Writer(out)
+	writeStderr := io.Writer(out)
 	if spec.OnOutput != nil {
 		hook := writerFunc(func(p []byte) (int, error) {
 			n, err := out.Write(p)
@@ -390,32 +441,12 @@ func killErrNote(errs ...error) string {
 	return "(" + strings.Join(msgs, "; ") + ")"
 }
 
-// lockedBuffer 并发安全的输出缓冲。为什么需要锁：极端分支（升级后命令仍未结束）会在
-// cmd.Wait 的拷贝协程**仍在读写输出管道**的同时取部分输出 —— 裸 bytes.Buffer 与那个
-// 协程构成数据竞争（-race 会报，而"返回部分输出"是本包承诺的契约）。
 // writerFunc 把函数当 io.Writer 用（os/exec 输出接线需要）。
+// 并发安全的输出缓冲见 output.go 的 outputBuffer（极端分支会在 cmd.Wait 的
+// 拷贝协程**仍在读写输出管道**的同时取部分输出 —— 无锁会构成数据竞争）。
 type writerFunc func(p []byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-// Write 实现 io.Writer（os/exec 的拷贝协程调用）。
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-// String 取当前已收集的输出（可能是部分输出）。
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
 
 // isolatedEnv 最小环境白名单：PATH/HOME/LANG/TERM/TMPDIR + 代理变量。
 // agent 进程的全部其他环境变量（可能含密钥/token）不传给命令。
