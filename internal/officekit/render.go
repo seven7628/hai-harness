@@ -115,7 +115,10 @@ func RenderImages(ctx context.Context, py PythonRuntime, pdfPath, outDir string,
 	out, runErr := sandbox.RunArgs(ctx, rt.VenvPython,
 		[]string{scriptPath, pdfPath, outDir, strconv.Itoa(dpi), string(pagesJSON), strconv.Itoa(limit)},
 		sandbox.ExecSpec{Command: rt.VenvPython, Cwd: outDir, Timeout: timeout,
-			ExitCode: &exitCode, TimedOut: &timedOut, Canceled: &canceled})
+			ExitCode: &exitCode, TimedOut: &timedOut, Canceled: &canceled,
+			// 输出封顶（第 5 轮爬山第 5 步）：改造前无界缓冲。栅格化脚本的 stdout
+			// 只用于错误文案（firstLine 取前 400 字节）⇒ 64KB 足够。
+			OutputLimit: officekitOutputLimit})
 	if runErr != nil {
 		return RenderResult{}, fmt.Errorf("%w: 启动栅格化脚本: %v", ErrConvertFailed, runErr)
 	}

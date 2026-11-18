@@ -182,6 +182,16 @@ func initPayload(init json.RawMessage, script, scaffold string) (json.RawMessage
 // scaffold 都随 init 走 stdin，永不落盘（Phase 1 用 stdin 换来的这条性质，Phase 2
 // 把 stdin 让给桥接通道之后由 init.script 继续承担）；正常/超时/取消/error 四类退出
 // 路径都会删掉整个目录（defer）。
+// scriptOutputLimit 脚本 stdout 的**内存窗口**（头 + 尾合计）。
+//
+// 为什么（第 5 轮爬山第 5 步）：改造前 ExecSpec **没设 OutputLimit** ⇒ 走 sandbox
+// 的无界缓冲 ⇒ 一个跑飞的脚本（死循环 print）能把 bridge 的堆顶穿。
+//
+// 8MB 依据：脚本 stdout 承载的是「脚本自己的打印」—— **协议帧不走 stdout**（走
+// spool 文件，见 newBridgeHost）⇒ 正常输出远小于此；8MB 是安全网，不是性能目标。
+// 封顶留头尾 ⇒ 结尾（脚本最后的输出/报错）一定在。
+const scriptOutputLimit = 8 << 20
+
 func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResult, error) {
 	if strings.TrimSpace(opts.Script) == "" {
 		return RunResult{}, errors.New("codemode: script is empty (nothing to execute)")
@@ -245,6 +255,9 @@ func (e *Executor) ExecuteScript(ctx context.Context, opts ScriptOpts) (RunResul
 		ExitCode: &exitCode,
 		TimedOut: &timedOut,
 		Canceled: &canceled,
+		// 输出封顶（第 5 轮爬山第 5 步）：改造前无界缓冲 ⇒ 一个跑飞的脚本
+		// （死循环 print）能把 bridge 的堆顶穿。
+		OutputLimit: scriptOutputLimit,
 	})
 
 	res := RunResult{ExitCode: exitCode, TimedOut: timedOut, Canceled: canceled, Timeout: to}

@@ -197,6 +197,8 @@ func (e *Executor) Execute(ctx context.Context, script string) (RunResult, error
 		ExitCode: &exitCode,
 		TimedOut: &timedOut,
 		Canceled: &canceled,
+		// 输出封顶（第 5 轮爬山第 5 步）：与 ExecuteScript 同口径（见 scriptOutputLimit）。
+		OutputLimit: scriptOutputLimit,
 	})
 	res := RunResult{ExitCode: exitCode, TimedOut: timedOut, Canceled: canceled, Timeout: to}
 	if runErr != nil {

@@ -301,12 +301,27 @@ func newPDFExtractor(py *goruntime.Runtime, sbxFor func(ws string) sandbox.Sandb
 				sbx = s
 			}
 		}
-		out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: filepath.Dir(scriptPath), Timeout: pdfExtractTimeout})
+		var omitted, totalOut int64
+		out, err := sbx.Run(ctx, sandbox.ExecSpec{
+			Command:          cmdline,
+			Cwd:              filepath.Dir(scriptPath),
+			Timeout:          pdfExtractTimeout,
+			OutputLimit:      pdfExtractOutputLimit,
+			OmittedBytes:     &omitted,
+			TotalOutputBytes: &totalOut,
+		})
 		if err != nil {
 			return "", false, fmt.Errorf("执行 PDF 抽取脚本失败: %w", err)
 		}
 		content, ok, perr := parsePDFExtractOutput(out)
 		if perr != nil || ok {
+			if ok && omitted > 0 {
+				// 被封顶了：**说清楚**，别让模型以为这就是全文（对齐 bash 的
+				// "[OUTPUT TOO LARGE ...]" 口径 —— 宁可多一句提示，不许让模型
+				// 拿残缺的正文当完整正文去推理）。
+				content += fmt.Sprintf("\n\n[注：PDF 文本层共 %d 字节，超过 %d 字节上限，中间 %d 字节未保留]",
+					totalOut, pdfExtractOutputLimit, omitted)
+			}
 			return content, ok, perr
 		}
 		// 无文本层（扫描件/整页图片）：今天到此为止只会给模型一句「抽不到」，它拿不到
@@ -361,7 +376,12 @@ func renderScannedPDF(ctx context.Context, pyh goruntime.Python, abs string, sbx
 	}()
 
 	cmdline := builtin.ShQuote(pyh.VenvPython) + " " + builtin.ShQuote(scriptPath) + " " + builtin.ShQuote(abs) + " " + builtin.ShQuote(imgDir)
-	out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: filepath.Dir(scriptPath), Timeout: pdfRenderTimeout})
+	out, err := sbx.Run(ctx, sandbox.ExecSpec{
+		Command:     cmdline,
+		Cwd:         filepath.Dir(scriptPath),
+		Timeout:     pdfRenderTimeout,
+		OutputLimit: pdfExtractOutputLimit, // 输出只是图片路径清单（几行）⇒ 1MB 绰绰有余
+	})
 	if err != nil {
 		return "", false
 	}
@@ -570,6 +590,17 @@ func parsePDFRenderOutputDetailed(out string) ([]string, []float64, int) {
 //
 // 注意 [exit: ...] 尾巴：sandbox 约定非零退出不返回 error，而是把原因并进输出文本
 // （见 sandbox.Sandbox 文档）—— 故不能「看到子串就判失败」，只看协议标记行在不在。
+// pdfExtractOutputLimit PDF 文本抽取输出的**内存窗口**（头 + 尾合计）。
+//
+// 为什么（第 5 轮爬山第 5 步）：改造前这处 ExecSpec **没设 OutputLimit** ⇒ 走
+// sandbox 的无界缓冲 ⇒ 一份文本层 50MB 的 PDF 就能把 bridge 的堆顶起来
+// （而模型侧最终只看得到 20KB —— 中间那一大段从来没人看）。
+//
+// 1MB 依据：模型侧引擎再截到 20KB（头尾各 10KB）⇒ 1MB 的窗口足够让模型拿到
+// 「真正的开头 + 真正的结尾」；超过 1MB 的文本层是病态输入，代价（中间被省略，
+// 且**明说**被省略了）可以接受。
+const pdfExtractOutputLimit = 1 << 20
+
 func parsePDFExtractOutput(out string) (string, bool, error) {
 	pages, body := -1, ""
 	lines := strings.Split(out, "\n")

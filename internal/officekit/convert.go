@@ -27,6 +27,17 @@ var (
 	ErrConvertFailed = errors.New("officekit: 转换失败")
 )
 
+// officekitOutputLimit 子进程输出的**内存窗口**（头 + 尾合计）。
+//
+// 为什么（第 5 轮爬山第 5 步）：改造前 convert/render 这两处 ExecSpec **没设
+// OutputLimit** ⇒ 走 sandbox 的无界缓冲（扩容 ~2× + String() 再拷 1×）⇒ 一条
+// 输出很大的命令能把 bridge 的堆顶穿。bash / run_python 早就封顶了 —— 这两处是
+// **漏网的兄弟**。
+//
+// 64KB 依据：soffice 与栅格化脚本的 stdout **只用于错误文案**（firstLine 取前
+// 200~400 字节）⇒ 封顶留头尾 ⇒ 首行一定在里面 ⇒ 行为不变。
+const officekitOutputLimit = 64 << 10
+
 // ConvertOptions 一次转换的可调项（零值 = 生产口径）。
 type ConvertOptions struct {
 	// Timeout 单次时限；<= 0 → DefaultTimeout。
@@ -102,6 +113,10 @@ func (k *Kit) Convert(ctx context.Context, src, outDir string, opt ConvertOption
 		ExitCode: &exitCode,
 		TimedOut: &timedOut,
 		Canceled: &canceled,
+		// 输出封顶（第 5 轮爬山第 5 步）：改造前是**无界**缓冲 ⇒ 一条输出很大的
+		// 命令能把 bridge 的堆顶穿。soffice 的 stdout 只用于错误文案（firstLine 取
+		// 前 200/400 字节）⇒ 64KB 绰绰有余，**首行一定在里面**（封顶留头尾）。
+		OutputLimit: officekitOutputLimit,
 	})
 	wall := time.Since(start)
 	if runErr != nil {
