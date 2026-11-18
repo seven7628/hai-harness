@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // FileTools 绑定工作区根目录的文件工具集。
@@ -417,6 +418,14 @@ func resolveRealTarget(abs string) string {
 
 const defaultReadMaxLines = 200
 
+// maxFileToolReadBytes write_file/edit_file 的**整文件读**上限（字节）。
+//
+// 改造前 io.ReadAll 无上限 ⇒ 一个 100 MB 文件：读 100 MB + string() 拷一份
+// + strings.Replace 拷一份 + diff 的 splitLines ×2 ⇒ 峰值 **4–6× 文件大小**
+// （100 MB ⇒ 400–600 MB RSS）。模型能改的文件都是文本文件，16 MiB 足够；
+// 更大的文件请走 bash/python（错误文案会指路）。
+const maxFileToolReadBytes = 16 << 20
+
 const (
 	// readFileLineCap 单行保留上限（字节）。超长行（minified bundle / base64 blob /
 	// 单行大 JSON）只保留前 64 KB —— 引擎的响应闸门是 20 KB，64 KB 已远超模型能看到的量。
@@ -424,6 +433,8 @@ const (
 	// readFileBytesCap 单次返回的内容总上限（字节）。
 	// 行数有上限（200）但**每行没有** ⇒ 200 行 × 4 MB 的超长行 = 800 MB。
 	readFileBytesCap = 256 << 10
+	// readFileCtxCheckEvery read_file 扫描循环里查 ctx 的间隔（行数）。
+	readFileCtxCheckEvery = 64
 )
 
 type readFileTool struct {
@@ -477,6 +488,13 @@ func readHead(p string, n int) ([]byte, error) {
 	return head[:read], nil
 }
 
+// ToolTimeout 实现 tools.ToolTimeoutProvider：声明 read_file 的工具级时限。
+//
+// 改造前 read_file **不看 ctx** ⇒ 引擎的 5 分钟工具超时对它完全无效
+// （超时是靠取消 ctx 实现的，工具不看就收不到）；用户 abort 后 goroutine
+// 还在后台把文件读完。现在扫描循环按行抽样查 ctx.Err()（见 readLinesRange）。
+func (t *readFileTool) ToolTimeout() time.Duration { return fileToolTimeout }
+
 func (t *readFileTool) ValidParams(_ context.Context, _, arguments string) error {
 	var a readArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
@@ -502,6 +520,10 @@ func (t *readFileTool) ValidParams(_ context.Context, _, arguments string) error
 }
 
 func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, error) {
+	// ctx 已取消/已超时 ⇒ 立刻返回，不做任何 I/O（改造前工具完全不看 ctx）。
+	if err := ctx.Err(); err != nil {
+		return "", toolCancelledError(ctx, "read_file")
+	}
 	var a readArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
@@ -798,8 +820,10 @@ func readLinesRange(ctx context.Context, f *os.File, start, end int) ([]string, 
 			break // EOF
 		}
 		ln++
-		// 取消/超时检查（按行数抽样：ctx.Err() 不是免费的）。
-		if ln%searchCtxCheckEvery == 0 {
+		// 取消/超时检查（按行数抽样：ctx.Err() 不是免费的 —— 引擎的
+		// liftableTimeout.Err() 要加锁）。read_file 的窗口 ≤ 200 行 ⇒ 间隔取
+		// searchCtxCheckEvery/64（每 64 行查一次）—— 够密又不至于把开销变成大头。
+		if ln%readFileCtxCheckEvery == 0 {
 			if cerr := ctx.Err(); cerr != nil {
 				return nil, false, false, cerr
 			}
@@ -855,6 +879,10 @@ func newWriteFileTool(f *FileTools) *writeFileTool {
 	}
 }
 
+// ToolTimeout 实现 tools.ToolTimeoutProvider：声明 write_file 的工具级时限。
+// 语义与 read_file 一致（引擎的 5 分钟兜底对不看 ctx 的工具无效）。
+func (t *writeFileTool) ToolTimeout() time.Duration { return fileToolTimeout }
+
 type writeArgs struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
@@ -873,6 +901,10 @@ func (t *writeFileTool) ValidParams(_ context.Context, _, arguments string) erro
 }
 
 func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, error) {
+	// ctx 已取消/已超时 ⇒ 立刻返回（改造前工具完全不看 ctx）。
+	if err := ctx.Err(); err != nil {
+		return "", toolCancelledError(ctx, "write_file")
+	}
 	t.diff = nil
 	var a writeArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
@@ -926,7 +958,7 @@ func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, 
 	var old string
 	if lock != nil {
 		defer lock.Close()
-		if old, err = readAllLocked(lock, p); err != nil {
+		if old, err = readAllLocked(ctx, lock, p); err != nil {
 			return "", err
 		}
 	}
@@ -990,6 +1022,9 @@ func newEditFileTool(f *FileTools) *editFileTool {
 	}
 }
 
+// ToolTimeout 实现 tools.ToolTimeoutProvider：声明 edit_file 的工具级时限。
+func (t *editFileTool) ToolTimeout() time.Duration { return fileToolTimeout }
+
 type editArgs struct {
 	Path      string `json:"path"`
 	OldString string `json:"old_string"`
@@ -1008,6 +1043,10 @@ func (t *editFileTool) ValidParams(_ context.Context, _, arguments string) error
 }
 
 func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, error) {
+	// ctx 已取消/已超时 ⇒ 立刻返回（改造前工具完全不看 ctx）。
+	if err := ctx.Err(); err != nil {
+		return "", toolCancelledError(ctx, "edit_file")
+	}
 	t.diff = nil
 	var a editArgs
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
@@ -1028,7 +1067,7 @@ func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	if lock != nil {
 		defer lock.Close() // Close 即释放 flock（rename 之后）
 	}
-	s, err := readAllLocked(lock, p)
+	s, err := readAllLocked(ctx, lock, p)
 	if err != nil {
 		return "", err
 	}
@@ -1061,11 +1100,68 @@ func (t *editFileTool) notifyPostWrite(ctx context.Context, absPath string) (str
 }
 
 // readAllLocked 读取目标文件全文（持锁时直接复用锁定 fd，避免再次 open 竞态）。
-func readAllLocked(lock *os.File, p string) (string, error) {
+//
+// 带**上限**与**可中断**（2026-11-17，第 3 步）：
+//   - 上限 16 MiB：改造前 io.ReadAll 无上限 ⇒ 100 MB 文件 ⇒ 峰值 4–6× 文件大小；
+//   - 可中断：分块读，每块查一次 ctx.Err()（io.ReadAll 不可中断 —— 用户 abort
+//     后它还会把整个文件读进内存）。
+func readAllLocked(ctx context.Context, lock *os.File, p string) (string, error) {
+	var r io.Reader
+	var size int64 = -1
 	if lock != nil {
-		b, err := io.ReadAll(lock)
-		return string(b), err
+		r = lock
+		if st, err := lock.Stat(); err == nil {
+			size = st.Size()
+		}
+	} else {
+		f, err := os.Open(p)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		r = f
+		if st, err := f.Stat(); err == nil {
+			size = st.Size()
+		}
 	}
-	b, err := os.ReadFile(p)
-	return string(b), err
+	if size > maxFileToolReadBytes {
+		return "", fileTooLargeError(p, size)
+	}
+	// 预分配：大小已知（Stat）⇒ 不靠 append 扩容（扩容会把已读内容整体拷贝一遍）。
+	capacity := int(size)
+	if capacity < 0 {
+		capacity = 64 << 10
+	}
+	if capacity > maxFileToolReadBytes {
+		capacity = maxFileToolReadBytes
+	}
+	buf := make([]byte, 0, capacity)
+	tmp := make([]byte, 64<<10)
+	for {
+		if cerr := ctx.Err(); cerr != nil {
+			return "", cerr
+		}
+		n, err := r.Read(tmp)
+		if n > 0 {
+			if len(buf)+n > maxFileToolReadBytes {
+				return "", fileTooLargeError(p, int64(len(buf)+n))
+			}
+			buf = append(buf, tmp[:n]...)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return string(buf), nil
+}
+
+// fileTooLargeError 构造「文件太大，整文件读改写不做」的可恢复错误（指路 bash/python）。
+func fileTooLargeError(p string, size int64) error {
+	return recoveryError("file_too_large", "use_shell_or_split",
+		fmt.Sprintf("%s is %s, larger than the %s limit for whole-file read-modify-write",
+			p, humanSize(int(size)), humanSize(maxFileToolReadBytes)),
+		"Edit big files with bash (sed/python) or split them into parts; do not repeat the same call.")
 }

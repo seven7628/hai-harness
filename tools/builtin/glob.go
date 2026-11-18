@@ -143,7 +143,7 @@ func (t *globTool) Call(ctx context.Context, _, arguments string) (string, error
 	})
 	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
 		if ctx.Err() != nil {
-			return "", searchCancelledError(ctx, "glob")
+			return "", toolCancelledError(ctx, "glob")
 		}
 		return "", walkErr
 	}

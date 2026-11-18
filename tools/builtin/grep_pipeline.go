@@ -260,7 +260,7 @@ func (t *grepTool) search(ctx context.Context, re *regexp.Regexp, root string, a
 			next++
 			if p.err != nil {
 				if ctx.Err() != nil {
-					fatal = searchCancelledError(ctx, "grep")
+					fatal = toolCancelledError(ctx, "grep")
 					stop.Store(true)
 				}
 				continue
@@ -278,7 +278,7 @@ func (t *grepTool) search(ctx context.Context, re *regexp.Regexp, root string, a
 			fr, err := grepCollectFile(ctx, csc, req.abs, req.rel, req.lines, a.Context, req.total)
 			if err != nil {
 				if ctx.Err() != nil {
-					fatal = searchCancelledError(ctx, "grep")
+					fatal = toolCancelledError(ctx, "grep")
 					stop.Store(true)
 				}
 				continue
@@ -288,7 +288,7 @@ func (t *grepTool) search(ctx context.Context, re *regexp.Regexp, root string, a
 	}
 	if fatal == nil && ctx.Err() != nil {
 		// 遍历/worker 都没来得及报取消（例如恰好在最后一个任务完成时被取消）
-		fatal = searchCancelledError(ctx, "grep")
+		fatal = toolCancelledError(ctx, "grep")
 	}
 	return fatal
 }

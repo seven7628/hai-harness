@@ -35,14 +35,28 @@ const (
 	// ctx.Err() 不是免费的（引擎的 liftableTimeout.Err() 要加锁），
 	// 所以按行数抽样检查而不是每行都查。
 	searchCtxCheckEvery = 4096
+
+	// fileToolTimeout read_file / write_file / edit_file 的工具级时限。
+	//
+	// 为什么需要（2026-11-17，第 3 步）：这三个工具改造前**不看 ctx** ⇒
+	// 引擎的 5 分钟工具超时（tools/engine.go defaultToolTimeout）对它们**完全无效**
+	// —— 超时是靠取消 ctx 实现的，工具不看就收不到；用户 abort 后 goroutine
+	// 还在后台把文件读完（编辑一个大文件 = 几百 MB 的读 + 拷贝）。
+	//
+	// 60s 的依据：文件工具的正常耗时是毫秒级（读一个源文件 ~1ms），
+	// 60s 是四个数量级的余量；而 5 分钟在「模型误传了一个 2 GB 的路径」时白等 5 分钟。
+	fileToolTimeout = 60 * time.Second
 )
 
-// searchCancelledError 把 ctx 的取消/超时翻译成模型可恢复的错误。
+// toolCancelledError 把 ctx 的取消/超时翻译成模型可恢复的错误。
+//
+// 用它的地方：grep / glob（搜索类）+ read_file / write_file / edit_file（文件类）——
+// 凡是「长循环里按行抽样查 ctx.Err()」的工具。
 //
 // 区分两件事（模型的下一步动作不同）：
 //   - DeadlineExceeded = 搜太宽了 → 让模型**收窄**；
 //   - Canceled         = 被用户/会话中断 → 让模型**换个更小的范围重来**。
-func searchCancelledError(ctx context.Context, tool string) error {
+func toolCancelledError(ctx context.Context, tool string) error {
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return recoveryError("search_timeout", "narrow_search",

@@ -22,7 +22,7 @@ import (
 func TestGrepLongLineKeepsLineNumbers(t *testing.T) {
 	dir := t.TempDir()
 	var b strings.Builder
-	b.WriteString("head MATCH\n")            // 行 1
+	b.WriteString("head MATCH\n")             // 行 1
 	b.WriteString(strings.Repeat("z", 5<<20)) // 行 2：5 MB 单行
 	b.WriteString("\n")
 	b.WriteString("tail MATCH\n") // 行 3
