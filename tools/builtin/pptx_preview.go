@@ -897,9 +897,12 @@ def main():
     src, dst = sys.argv[1], sys.argv[2]
     try:
         check_unzipped_budget(src)
-    except (zipfile.BadZipFile, ValueError) as exc:
+    except ValueError as exc:
+        # 超预算：只有这一种我们自己判的情况 ⇒ 直说中文原因
         sys.stderr.write("%s\n" % exc)
         sys.exit(2)
+    except (zipfile.BadZipFile, OSError):
+        pass  # 不是 zip / 文件不存在 ⇒ 交给下面的正式处理器（友好文案）
     try:
         prs = Presentation(src)
     except PackageNotFoundError as exc:
