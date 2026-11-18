@@ -988,15 +988,29 @@ func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, 
 	if err != nil {
 		return "", err
 	}
+	locked := lock != nil
+	if locked {
+		defer func() {
+			if locked {
+				lock.Close()
+			}
+		}()
+	}
 	var old string
 	if lock != nil {
-		defer lock.Close()
 		if old, err = readAllLocked(ctx, lock, p); err != nil {
 			return "", err
 		}
 	}
 	if err := replaceLocked(lock, p, a.Content); err != nil {
 		return "", err
+	}
+	// 替换完成 ⇒ **先释放锁再算 diff**：diff 是 O(N²) 量级（50k 行 ≈ 300 ms，
+	// 改造前全程持锁 ⇒ 别的写者被挡这么久）。write 的 rename 已换 inode，
+	// 这把锁此后也不再守护新路径 ⇒ 提前释放不改变语义。
+	if locked {
+		lock.Close()
+		locked = false
 	}
 	// Created：lock==nil ⇔ 文件此前不存在（lockPath 对不存在的文件返回 nil 锁）。
 	// 不能用 Removed==0 推断（纯插入内容同样是 +N -0）。
@@ -1114,8 +1128,13 @@ func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	if err != nil {
 		return "", err
 	}
-	if lock != nil {
-		defer lock.Close() // Close 即释放 flock（rename 之后）
+	locked := lock != nil
+	if locked {
+		defer func() {
+			if locked {
+				lock.Close() // Close 即释放 flock
+			}
+		}()
 	}
 	s, err := readAllLocked(ctx, lock, p)
 	if err != nil {
@@ -1129,6 +1148,12 @@ func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	replaced := strings.Replace(s, a.OldString, a.NewString, 1)
 	if err := replaceLocked(lock, p, replaced); err != nil {
 		return "", err
+	}
+	// 改写完成 ⇒ **先释放锁再算 diff**：diff 是 O(N²) 量级（改造前全程持锁 ⇒
+	// 大文件时同一文件的其它写者被挡几百毫秒到几秒）。
+	if locked {
+		lock.Close()
+		locked = false
 	}
 	// 旧全文 s 与 replaced 均在手，免费产 diff（信息源头在工具）。
 	// edit_file 入口已 statPath 要求文件存在 → Created 恒 false（modified）。

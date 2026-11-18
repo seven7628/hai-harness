@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -30,8 +31,26 @@ func computeFileDiff(path, old, new string) *core.FileDiff {
 	}
 	al := splitLines(old)
 	bl := splitLines(new)
-	d.Added, d.Removed = diffStats(al, bl)
 
+	// 大文件保护（2026-11-17，第 9 步）：go-difflib 的匹配是 **O(N²) 量级**
+	// （实测：1k 行 0.4 ms、5k 行 3.4 ms、20k 行 35 ms、50k 行 309 ms；
+	// 而一次编辑的文件可以到 16 MiB ≈ 50 万行 ⇒ 单次调用要跑几十秒）。
+	//
+	// 判据用「掐掉公共头尾后的中间段」：小改动落在中间 ⇒ 中间很小 ⇒ 照常算；
+	// 整文件重写 ⇒ 中间就是全文 ⇒ 直接报粗粒度事实，不跑匹配器。
+	prefix := commonPrefixLines(al, bl)
+	suffix := commonSuffixLines(al[prefix:], bl[prefix:])
+	middleOld := len(al) - prefix - suffix
+	middleNew := len(bl) - prefix - suffix
+	if middleOld+middleNew > maxDiffMiddleLines {
+		d.Added, d.Removed = middleNew, middleOld
+		d.Truncated = true
+		d.Unified = fmt.Sprintf("[diff too large to compute: %d line(s) replaced]", middleOld)
+		return d
+	}
+
+	// **只匹配一次**：unified 文本本身包含全部增删行 ⇒ 统计直接从文本数，
+	// 不再单独跑一遍 GetGroupedOpCodes（改造前是两次 O(N²) 匹配 = 纯浪费 2×）。
 	unified, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
 		A:        al,
 		B:        bl,
@@ -40,9 +59,10 @@ func computeFileDiff(path, old, new string) *core.FileDiff {
 		Context:  3,
 	})
 	if err != nil {
-		d.Truncated = true // 算法失败：保留统计，unified 为空
+		d.Truncated = true // 算法失败：无统计、无 unified
 		return d
 	}
+	d.Added, d.Removed = statsFromUnified(unified)
 	if len(unified) > maxUnifiedDiffBytes {
 		d.Truncated = true
 		d.Unified = truncateUTF8(unified, maxUnifiedDiffBytes) +
@@ -51,6 +71,58 @@ func computeFileDiff(path, old, new string) *core.FileDiff {
 	}
 	d.Unified = unified
 	return d
+}
+
+// maxDiffMiddleLines 参与 diff 匹配的行数上限（掐掉公共头尾后的中间段，两边合计）。
+//
+// 取值依据：20k 行 ≈ 35 ms 一次匹配（实测）⇒ 上限处的单次调用约 35 ms，
+// 对工具调用完全可接受；再大就退化成「整块替换」的粗粒度事实。
+const maxDiffMiddleLines = 20000
+
+// commonPrefixLines 两边公共前缀的行数。
+func commonPrefixLines(a, b []string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
+}
+
+// commonSuffixLines 两边公共后缀的行数（**不与前缀重叠**）。
+func commonSuffixLines(a, b []string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[len(a)-1-i] == b[len(b)-1-i] {
+		i++
+	}
+	return i
+}
+
+// statsFromUnified 从 unified diff 文本数出新增/删除行数。
+//
+// 为什么可以：从文本数与从 opcodes 数**等价** —— unified 文本的每个 hunk 都
+// 覆盖了全部增删行（context=3 只影响未改动行的上下文，不影响增删行本身）。
+// 文件头（"--- path" / "+++ path"）带空格，按「--- 」「+++ 」前缀排除，
+// 不会与内容行（"-"+内容，无空格）混淆。
+func statsFromUnified(unified string) (added, removed int) {
+	for _, line := range strings.Split(unified, "\n") {
+		switch {
+		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			continue // 文件头
+		case strings.HasPrefix(line, "+"):
+			added++
+		case strings.HasPrefix(line, "-"):
+			removed++
+		}
+	}
+	return added, removed
 }
 
 // maxArtifactHashBytes 计算内容指纹的字节上限：超过则不哈希（大文件哈希收益低、
@@ -70,19 +142,23 @@ func finalizeDiff(d *core.FileDiff, content string) *core.FileDiff {
 	d.Size = int64(len(content))
 	d.Lines = int64(strings.Count(content, "\n"))
 	if len(content) <= maxArtifactHashBytes {
-		sum := sha256.Sum256([]byte(content))
-		d.SHA256 = hex.EncodeToString(sum[:16]) // 128 bit：去重/变更判定足够
+		d.SHA256 = contentFingerprint(content)
 	}
 	return d
 }
 
 // contentFingerprint 内容指纹（前 16 字节 hex）；超上限返回空。
 // append 场景单独用（content 为增量，不能走 finalizeDiff）。
+//
+// 用 sha256.New() + io.WriteString 而不是 sha256.Sum256([]byte(content))：
+// 后者会把**整个字符串拷一份**进 []byte（8 MiB 上限 ⇒ 每次写文件多拷 8 MiB）。
 func contentFingerprint(content string) string {
 	if len(content) > maxArtifactHashBytes {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(content))
+	h := sha256.New()
+	_, _ = io.WriteString(h, content)
+	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:16])
 }
 

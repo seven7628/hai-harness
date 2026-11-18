@@ -926,6 +926,12 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 			// 硬上限等待（V2 P1-RUNTIME-03）：工具可能忽略 ctx 取消（第三方/插件工具
 			// 不响应）——每个任务最多等 toolStuckTimeout（从取消起算），超时返回
 			// tool_stuck 错误结果，绝不让 RunBatch 无限阻塞拖住 Session Shutdown / 进程退出。
+			//
+			// **共享一个 deadline**（改造前是「每个任务各等一次 toolStuckTimeout」
+			// ⇒ 8 个不响应取消的工具 ⇒ 关停多等 8×5 = 40 s；而常量的注释读起来像
+			// 「取消后等待工具退出的硬上限」= 5 s —— 读代码的人会以为 5 s，实际 40 s）。
+			// 现在：所有任务共用一个 5 s 预算 ⇒ 最坏 5 s（与注释一致）。
+			stuckDeadline := time.Now().Add(toolStuckTimeout)
 			for i, t := range tasks {
 				if t == nil {
 					continue
@@ -934,15 +940,17 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 					finishPromote(t) // 占位补写（promote 信号可能未及处理；phOnce 幂等）
 					continue
 				}
+				remaining := time.Until(stuckDeadline)
+				if remaining <= 0 {
+					// 共享预算已用尽 ⇒ 后面的任务直接判卡住（不再各自等一轮）
+					results[i] = toolStuckResult(t.call.Id)
+					continue
+				}
 				select {
 				case <-t.done:
 					results[i] = t.result // 取消结果文本（execute 产出）
-				case <-time.After(toolStuckTimeout):
-					results[i] = core.ToolResult{
-						Id:      t.call.Id,
-						IsError: true,
-						Result:  "TOOL_ERROR\ncode: tool_stuck\nnext_action: review\ndetail: tool did not respond to cancellation within timeout\nfix: avoid this tool or run it in background",
-					}
+				case <-time.After(remaining):
+					results[i] = toolStuckResult(t.call.Id)
 					// 超时后不再等（goroutine 仍会结束，结果丢弃；进程不被拖住）
 				}
 			}
@@ -1734,6 +1742,15 @@ func sweepSpillDir(dir string, now time.Time, maxTotalBytes int64) {
 		if err := os.Remove(it.path); err == nil {
 			total -= it.size
 		}
+	}
+}
+
+// toolStuckResult 构造「工具不响应取消」的结果（共享超时预算用尽时也用它）。
+func toolStuckResult(callID string) core.ToolResult {
+	return core.ToolResult{
+		Id:      callID,
+		IsError: true,
+		Result:  "TOOL_ERROR\ncode: tool_stuck\nnext_action: review\ndetail: tool did not respond to cancellation within timeout\nfix: avoid this tool or run it in background",
 	}
 }
 
