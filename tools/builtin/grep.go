@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -242,7 +243,7 @@ func (s *grepScanner) nextLine() ([]byte, bool) {
 			content := s.long[:s.longLen]
 			s.longLen = 0
 			// 超长行可能被**截断**在字符中间 ⇒ 去掉尾部残缺的 UTF-8 序列。
-			return trimEOL(content), true
+			return trimEOL(trimIncompleteRune(content)), true
 		}
 		if err == io.EOF {
 			if len(chunk) == 0 {
@@ -286,6 +287,57 @@ func trimEOL(b []byte) []byte {
 		b = b[:n-1]
 	}
 	return b
+}
+
+// trimIncompleteRune 去掉尾部**不完整**的 UTF-8 序列。
+//
+// 场景：超长行被截断（上限 maxGrepLineBytes）时，切口可能落在多字节字符中间
+// ⇒ 该字符的残缺字节序列进了输出。它在 JSON 里会被替换成 U+FFFD，
+// 相当于凭空多出一个乱码字符。
+//
+// 只处理「不完整」的情况：源码本来就是非法 UTF-8 的字节**原样保留**
+// （那是文件本身的问题，不该由截断再改一次语义）。
+func trimIncompleteRune(b []byte) []byte {
+	n := len(b)
+	// UTF-8 最长 4 字节 ⇒ 从尾部最多回退 3 字节就能找到那个字符的首字节。
+	for i := 1; i < utf8.UTFMax && i <= n; i++ {
+		c := b[n-i]
+		if !utf8.RuneStart(c) {
+			continue // 续字节：继续往前找
+		}
+		want := utf8SeqLen(c)
+		switch {
+		case want == 0:
+			return b // 非法首字节：源码本身有问题，原样保留
+		case i < want:
+			return b[:n-i] // 不完整 ⇒ 去掉这个残缺字符
+		default:
+			return b // 完整
+		}
+	}
+	return b
+}
+
+// utf8SeqLen 按首字节算出该字符应有的字节数（0 = 非法首字节）。
+//
+// 为什么不用 utf8.DecodeRune：它对「非法编码」和「不完整序列」都返回
+// (RuneError, 1) —— 两者分不开，而我们要区分（前者是源码的问题，原样保留；
+// 后者是**我们截断造成的**，必须去掉）。
+func utf8SeqLen(c byte) int {
+	switch {
+	case c < 0x80:
+		return 1
+	case c < 0xC2:
+		return 0 // 续字节 / 过长编码（C0、C1 非法）
+	case c < 0xE0:
+		return 2
+	case c < 0xF0:
+		return 3
+	case c < 0xF4:
+		return 4
+	default:
+		return 0 // 超出 U+10FFFF
+	}
 }
 
 // grepCountFile 扫描单个文本文件的**第一遍**：数命中、记命中行号，**不留行内容**。
@@ -387,11 +439,20 @@ func grepCollectFile(ctx context.Context, sc *grepScanner, abs, rel string, matc
 }
 
 // truncateGrepLine 把行内容截到输出上限（防长行撑爆结果）。
+//
+// 截断点必须落在 **UTF-8 字符边界**上：按字节切（`s[:200]`）可能把一个多字节
+// 字符切成两半，残缺的字节序列在 JSON 里会被替换成 U+FFFD（?）——
+// 等于凭空多出一个乱码字符，也会让「按字符数读结果」的模型看到错的东西。
 func truncateGrepLine(s string) string {
-	if len(s) > maxGrepLineLength {
-		return s[:maxGrepLineLength] + "..."
+	if len(s) <= maxGrepLineLength {
+		return s
 	}
-	return s
+	end := maxGrepLineLength
+	// s[end] 是续字节 ⇒ 切口落在字符中间 ⇒ 往前退到该字符的首字节。
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "..."
 }
 
 // computeGrepGroups 把命中行合并为上下文区间组（相邻/重叠合并）。
