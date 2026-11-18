@@ -44,13 +44,14 @@ func newGrepTool(f *FileTools) *grepTool {
 			Description_: "Recursively search the content of text files in the workspace (Go regular expression), outputting path:line:content matches (with line numbers, ready to read context via read_file). " +
 				"Optional context shows N lines before/after each match (context lines marked path-LINE-content, match groups separated by --); include filters files by glob (e.g. *.go searches only Go files). " +
 				"Skips .git, .gitignore'd paths, dependency/build directories (node_modules etc.) and binary files by default — that is what keeps a repo-wide search fast; pass no_ignore=true to search them anyway. " +
-				"When more than 200 matches, prompts narrowing. " +
+				"At most 200 matches are returned per call: when there are more, the result header says so and tells you the offset to pass back for the next page (or to narrow the pattern). " +
 				"Use glob to find files by name, this tool to search by content.",
 			Params_: tools.Obj(map[string]any{
 				"pattern":   tools.Str("Regular expression (Go regexp syntax, required)"),
 				"path":      tools.Str("Start directory/file (relative to workspace root; default '.')"),
 				"context":   tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Context lines to show before/after each match (default 0; must be >= 0)"},
 				"include":   tools.Str("File filter glob (e.g. '*.go', '**/*_test.go'; optional, only searches matching files)"),
+				"offset":    tools.Map{"type": "integer", "minimum": 0, "default": 0, "description": "Skip the first N matches and return the next page (default 0 = from the start). Use it when the result says there are more matches — pass back the offset it reports."},
 				"no_ignore": tools.Map{"type": "boolean", "default": false, "description": "Also search ignored paths (node_modules/, .gitignore'd paths, build output). Default false — ignored directories are skipped entirely, which is what makes a repo-wide search fast."},
 			}, "pattern"),
 			CanParallel_: true,
@@ -66,6 +67,7 @@ type grepArgs struct {
 	Path     string `json:"path"`
 	Context  int    `json:"context"`
 	Include  string `json:"include"`
+	Offset   int    `json:"offset"`
 	NoIgnore bool   `json:"no_ignore"`
 }
 
@@ -80,12 +82,50 @@ func (t *grepTool) ValidParams(_ context.Context, _, arguments string) error {
 	if a.Context < 0 {
 		return recoveryError("invalid_context", "correct_arguments", fmt.Sprintf("context=%d", a.Context), "Set context to an integer >= 0, then retry grep.")
 	}
+	if a.Offset < 0 {
+		return recoveryError("invalid_offset", "correct_arguments", fmt.Sprintf("offset=%d", a.Offset), "Set offset to an integer >= 0, then retry grep.")
+	}
 	if a.Include != "" {
 		if _, err := compileGlob(a.Include); err != nil {
 			return fmt.Errorf("grep: invalid include glob %q: %w", a.Include, err)
 		}
 	}
 	return nil
+}
+
+// grepMatchWindow 命中窗口：把「全局命中序号」映射到「本页要返回的命中」。
+//
+// 分页语义（对齐 Claude Code 的 head_limit + offset、OpenCode/Roo 的条数上限）：
+//   - 全局第 k 个命中（1 基）落在 [offset+1, offset+max] ⇒ 收进本页；
+//   - k ≤ offset ⇒ 跳过（但**继续扫**，后面可能还有）；
+//   - k > offset+max ⇒ 停止扫描：本页到此为止（后面还有，表头会报出来）。
+//
+// 为什么需要分页：改造前有 200 条硬上限且**没有翻页口**—— 模型看到
+// 「more than 200 matches」后只能改 pattern 再搜一遍，或者放弃。
+// 有了 offset，模型可以把 offset 传回来拿下一页。
+type grepMatchWindow struct {
+	offset int
+	max    int
+	total  int // 已见命中总数（含被 offset 跳过的）
+	taken  int // 本页收下的命中数
+	files  int // 有命中的文件数（含命中全被 offset 跳过的文件）
+}
+
+// end 本页窗口的上界（全局命中序号，闭区间）。
+func (w *grepMatchWindow) end() int { return w.offset + w.max }
+
+// accept 判断第 k 个命中（1 基）是否收进本页；收下返回 true。
+// 越过窗口上界时返回 ok=false（调用方应停止扫描）。
+func (w *grepMatchWindow) accept(k int) (take bool, ok bool) {
+	switch {
+	case k > w.end():
+		return false, false // 越过上界：本页结束
+	case k > w.offset:
+		w.taken++
+		return true, true
+	default:
+		return false, true // 被 offset 跳过：继续扫
+	}
 }
 
 // ToolTimeout 实现 tools.ToolTimeoutProvider：声明 grep 的工具级时限。
@@ -116,7 +156,7 @@ func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error
 	}
 
 	var results []grepFileResult
-	total := 0
+	win := &grepMatchWindow{offset: a.Offset, max: t.maxResults}
 	// 行读取器：整个搜索共用一个（缓冲跨文件复用 ⇒ 每文件不再分配 64 KB）。
 	sc := newGrepScanner()
 	// 忽略规则：内置黑名单 + 逐目录增量读 .gitignore。被忽略的目录整棵子树
@@ -155,7 +195,7 @@ func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error
 				return nil
 			}
 		}
-		fr, truncated, err := grepFile(ctx, re, sc, path, rel, a.Context, &total, t.maxResults)
+		fr, truncated, err := grepFile(ctx, re, sc, path, rel, a.Context, win)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err // 取消/超时：中断整个搜索（不是「跳过该文件」）
@@ -166,7 +206,7 @@ func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error
 			results = append(results, fr)
 		}
 		if truncated {
-			return fs.SkipAll // 命中预算已满：立即停止遍历
+			return fs.SkipAll // 本页窗口已满：立即停止遍历
 		}
 		return nil
 	})
@@ -178,10 +218,22 @@ func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error
 	}
 
 	var b strings.Builder
-	if total > t.maxResults {
-		fmt.Fprintf(&b, "[grep: more than %d matches, showing first %d; narrow the pattern]\n", t.maxResults, t.maxResults)
-	} else {
-		fmt.Fprintf(&b, "[grep: %d match(es) in %d file(s)]\n", total, len(results))
+	truncated := win.total > win.end()
+	switch {
+	case win.taken == 0 && win.offset > 0:
+		// offset 越过总数：明确告诉模型「没有更多了」，别再空转
+		fmt.Fprintf(&b, "[grep: no matches at offset %d (%d match(es) in %d file(s) in total); lower the offset or narrow the pattern]\n",
+			win.offset, win.total, win.files)
+	case truncated && win.offset > 0:
+		fmt.Fprintf(&b, "[grep: more than %d matches, showing matches %d-%d (offset %d); use offset=%d to see the next page, or narrow the pattern]\n",
+			win.end(), win.offset+1, win.offset+win.taken, win.offset, win.offset+win.taken)
+	case truncated:
+		fmt.Fprintf(&b, "[grep: more than %d matches, showing first %d; narrow the pattern]\n", win.max, win.max)
+	case win.offset > 0:
+		fmt.Fprintf(&b, "[grep: matches %d-%d (offset %d) in %d file(s)]\n",
+			win.offset+1, win.offset+win.taken, win.offset, len(results))
+	default:
+		fmt.Fprintf(&b, "[grep: %d match(es) in %d file(s)]\n", win.total, len(results))
 	}
 	for _, fr := range results {
 		renderGrepResult(fr, a.Context, &b)
@@ -334,7 +386,7 @@ func trimEOL(b []byte) []byte {
 //	② 仅当有命中时才再读一遍，把「命中行 ± context」的并集取出来。
 //
 // 零命中文件因此不留任何行内容（改造前会留整个文件的所有行）。
-func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel string, ctxLines int, total *int, max int) (grepFileResult, bool, error) {
+func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel string, ctxLines int, win *grepMatchWindow) (grepFileResult, bool, error) {
 	var fr grepFileResult
 	fr.rel = rel
 	f, err := os.Open(abs)
@@ -357,6 +409,7 @@ func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel 
 	var matches []int
 	ln := 0
 	truncated := false
+	sawMatch := false
 	for {
 		line, ok := sc.nextLine()
 		if !ok {
@@ -373,12 +426,19 @@ func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel 
 		if !re.Match(line) {
 			continue
 		}
-		*total++ // 真实匹配计数（无上限，供「more than N」提示）
-		if *total > max {
-			truncated = true // 命中预算已满：本文件截断，调用方停止遍历
+		win.total++ // 全局命中序号（1 基）
+		sawMatch = true
+		take, ok := win.accept(win.total)
+		if !ok {
+			truncated = true // 越过本页窗口上界：本文件截断，调用方停止遍历
 			break
 		}
-		matches = append(matches, ln)
+		if take {
+			matches = append(matches, ln)
+		}
+	}
+	if sawMatch {
+		win.files++ // 有命中的文件数（含命中全被 offset 跳过的）
 	}
 	fr.matches = matches
 	fr.total = ln

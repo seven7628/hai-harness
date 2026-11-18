@@ -138,13 +138,14 @@ func TestGrepOutputEquivalence(t *testing.T) {
 	for _, ctx := range []int{0, 1, 3} {
 		for _, pat := range []string{"MATCH", "a", "^$", "x{100}"} {
 			re := regexp.MustCompile(pat)
-			var totalNew, totalOld int
+			var totalOld int
 			sc := newGrepScanner()
+			win := &grepMatchWindow{max: 1000} // 跨文件共用（全局命中序号）
 			for _, name := range names {
 				abs := filepath.Join(dir, name)
 
 				// 新实现
-				nfr, ntrunc, nerr := grepFile(context.Background(), re, sc, abs, name, ctx, &totalNew, 1000)
+				nfr, ntrunc, nerr := grepFile(context.Background(), re, sc, abs, name, ctx, win)
 				var nb strings.Builder
 				if nerr == nil && len(nfr.matches) > 0 {
 					renderGrepResult(nfr, ctx, &nb)
@@ -169,8 +170,8 @@ func TestGrepOutputEquivalence(t *testing.T) {
 						name, pat, ctx, nb.String(), ob.String())
 				}
 			}
-			if totalNew != totalOld {
-				t.Errorf("pat=%q ctx=%d: 命中计数不一致 new=%d old=%d", pat, ctx, totalNew, totalOld)
+			if win.total != totalOld {
+				t.Errorf("pat=%q ctx=%d: 命中计数不一致 new=%d old=%d", pat, ctx, win.total, totalOld)
 			}
 		}
 	}
@@ -192,9 +193,10 @@ func TestGrepLongLineBeyondCap(t *testing.T) {
 	}
 	re := regexp.MustCompile("MATCH")
 
-	var totalNew, totalOld int
+	var totalOld int
 	sc := newGrepScanner()
-	nfr, _, nerr := grepFile(context.Background(), re, sc, p, "huge.txt", 0, &totalNew, 1000)
+	win := &grepMatchWindow{max: 1000}
+	nfr, _, nerr := grepFile(context.Background(), re, sc, p, "huge.txt", 0, win)
 	if nerr != nil {
 		t.Fatalf("新实现不该报错: %v", nerr)
 	}
