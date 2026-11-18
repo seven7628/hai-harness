@@ -150,6 +150,7 @@ import os
 import re
 import sys
 import zipfile
+import itertools
 
 from lxml import etree
 from pptx import Presentation
@@ -163,6 +164,16 @@ RT_THEME = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/
 
 MAX_SLIDES = 60
 MAX_SHAPES_PER_SLIDE = 200
+# 整个 deck 的**形状渲染总预算**（第 4 轮爬山新增）。
+#
+# 为什么需要它：MAX_SHAPES_PER_SLIDE 是「每页」预算，而组合形状的子形状又各自
+# 套一层同样的预算 ⇒ 嵌套 3 层就是 200³ = 800 万个形状（病态文件可达）。
+# 而且旧写法（先 list() 全量物化、再切片 [:N]）是**先物化后取用** ⇒ 预算只挡渲染、
+# 不挡解析：声明 100 万 shape 的文件仍会建出 100 万个 shape 代理对象。
+#
+# 现在：① 用 itertools.islice **惰性**取用（前 N 个不再物化其余）；
+#      ② 一个 **deck 级**共享计数器兜住嵌套乘法 ⇒ 总量封顶。
+MAX_SHAPES_TOTAL = 6000
 MAX_IMAGE_BYTES = 24 * 1024 * 1024
 MAX_NOTES_CHARS = 4000
 
@@ -711,7 +722,16 @@ def render_shape(shape, slide_info, box, stats, budget, depth=0):
 
     不支持的类型给**可见**占位而不是静默丢弃：用户对照原稿时能立刻看出「这里少了一个
     智能图形」，而不是以为是自己记错了。
+
+    形状总数受 budget["shapes"]（**deck 级**共享计数器）约束：超预算返回空串
+    （调用方跳过）。顶层形状与组合里的子形状占同一个池子 ⇒ 嵌套组合不再「每层各算
+    一份预算」（那是 200³ 的来源）。
     """
+    if budget["shapes"] >= MAX_SHAPES_TOTAL:
+        budget["shapes_capped"] = 1
+        return ""
+    budget["shapes"] += 1
+
     rot = ""
     try:
         if shape.rotation:
@@ -758,8 +778,14 @@ def render_shape(shape, slide_info, box, stats, budget, depth=0):
         except Exception:
             pass
         inner = []
-        for child in list(shape.shapes)[:MAX_SHAPES_PER_SLIDE]:
-            inner.append(render_shape(child, slide_info, box.child(child, xf), stats, budget, depth + 1))
+        # itertools.islice：**惰性**取用前 N 个（旧的 list(...)[:N] 会先把整组
+        # shape 全量物化 ⇒ 声明 100 万 shape 的文件照样建出 100 万个代理对象）。
+        for child in itertools.islice(shape.shapes, MAX_SHAPES_PER_SLIDE):
+            frag = render_shape(child, slide_info, box.child(child, xf), stats, budget, depth + 1)
+            if frag:
+                inner.append(frag)
+            if budget["shapes"] >= MAX_SHAPES_TOTAL:
+                break
         return '<div class="sh" style="%s">%s</div>' % (shape_box(box.l, box.t, box.w, box.h, rot), "".join(inner))
 
     stats["other"] += 1
@@ -864,8 +890,12 @@ def render_slide(slide, index, prs, stats, budget):
         "（只显示前 %d 个）" % MAX_SHAPES_PER_SLIDE if total_shapes > MAX_SHAPES_PER_SLIDE else ""))
     out.append('<div class="slide-scroll"><div class="slide" style="width:%s;height:%s;background:%s">' % (
         emu_px(prs.slide_width), emu_px(prs.slide_height), clean(slide_bg(slide, palette) or "#FFFFFF")))
-    for shape in list(slide.shapes)[:MAX_SHAPES_PER_SLIDE]:
-        out.append(render_shape(shape, info, Box(shape.left, shape.top, shape.width, shape.height), stats, budget))
+    for shape in itertools.islice(slide.shapes, MAX_SHAPES_PER_SLIDE):
+        frag = render_shape(shape, info, Box(shape.left, shape.top, shape.width, shape.height), stats, budget)
+        if frag:
+            out.append(frag)
+        if budget["shapes"] >= MAX_SHAPES_TOTAL:
+            break
     if slide.has_notes_slide:
         notes = (slide.notes_slide.notes_text_frame.text or "").strip()
         if notes:
@@ -915,7 +945,7 @@ def main():
     total = len(prs.slides)
     stats = {"charts": 0, "other": 0, "groups": 0, "img_skipped": 0,
              "theme_fill": 0, "theme_fill_unknown": 0}
-    budget = {"bytes": 0}
+    budget = {"bytes": 0, "shapes": 0, "shapes_capped": 0}
     out = ["<!doctype html>"]
     out.append('<html lang="zh"><head><meta charset="utf-8">')
     out.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
@@ -940,6 +970,9 @@ def main():
                        % (total - MAX_SLIDES, MAX_SLIDES))
             break
         out.append(render_slide(slide, i, prs, stats, budget))
+        if budget["shapes_capped"]:
+            # 形状预算耗尽 ⇒ 后面的页再渲染也没有形状可画，直接停（省掉每页的解析）。
+            break
     out.append("</div>")
 
     tail = []
@@ -951,6 +984,8 @@ def main():
         tail.append("%d 个组合形状已按坐标展开" % stats["groups"])
     if stats["img_skipped"]:
         tail.append("%d 张图片超出预算未显示" % stats["img_skipped"])
+    if budget["shapes_capped"]:
+        tail.append("已达全篇形状上限（%d 个），部分形状未显示" % MAX_SHAPES_TOTAL)
     if stats["theme_fill"]:
         tail.append("%d 个形状的填充继承自主题样式，取主题色近似（虚线框标记）" % stats["theme_fill"])
     if stats["theme_fill_unknown"]:
