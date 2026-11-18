@@ -435,6 +435,10 @@ const (
 	readFileBytesCap = 256 << 10
 	// readFileCtxCheckEvery read_file 扫描循环里查 ctx 的间隔（行数）。
 	readFileCtxCheckEvery = 64
+	// maxImageRawBytes 图片**原始文件**的体积上限（字节）。
+	// 编码体积闸（3 MiB base64）是在读完之后才判的 ⇒ 读的时候需要另一道闸。
+	// 64 MiB：真实照片/截图远小于此（17 MB 的 PNG 有测试覆盖）。
+	maxImageRawBytes = 64 << 20
 )
 
 type readFileTool struct {
@@ -591,6 +595,13 @@ func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, e
 		if a.StartLine != nil || a.EndLine != nil {
 			return "", fmt.Errorf("read_file: %s is an image (%s); line ranges do not apply to images — call read_file with just the path to view it", a.Path, format.mime)
 		}
+		// 原始体积上限（2026-11-17，第 4 步）：改造前 `os.ReadFile` **无上限** ——
+		// 一个 2 GB 的 PNG ⇒ 2 GB 常驻 + 之后 image.Decode 再 3.6 GB。
+		// 编码体积闸（3 MiB）在**读完之后**才判 ⇒ 读的时候没有任何保护。
+		if st, serr := f.Stat(); serr == nil && st.Size() > maxImageRawBytes {
+			return "", fmt.Errorf("read_file: %s is %s — too large to read inline (limit %s); shrink or convert it first (e.g. `sips -Z 4000 %s`)",
+				a.Path, humanSize(int(st.Size())), humanSize(maxImageRawBytes), a.Path)
+		}
 		if _, serr := f.Seek(0, io.SeekStart); serr != nil {
 			return "", serr
 		}
@@ -598,7 +609,7 @@ func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, e
 		if rerr != nil {
 			return "", rerr
 		}
-		res, ierr := loadImageForModel(p, data, t.maxImageBytes)
+		res, ierr := loadImageForModel(ctx, p, data, t.maxImageBytes)
 		if ierr != nil {
 			return "", ierr
 		}

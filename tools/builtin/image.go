@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"image"
@@ -119,7 +120,7 @@ type imageContentResult struct {
 //   - 体积超限 → 降采样 + JPEG 重编码（长边 ≤ maxImageDim，必要时逐级缩小）。
 //
 // maxBytes = 单张 data URL 的体积上限（0 = 用 maxInlineImageBytes）。
-func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResult, error) {
+func loadImageForModel(ctx context.Context, path string, data []byte, maxBytes int) (imageContentResult, error) {
 	if maxBytes <= 0 {
 		maxBytes = maxInlineImageBytes
 	}
@@ -129,6 +130,16 @@ func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResu
 	}
 	name := filepath.Base(path)
 	w, h, sizeErr := decodeImageSize(data)
+	// 像素预算：**在解码之前**判（解码才是花钱的那一步：整图按原分辨率展开）。
+	// 头部就能拿到尺寸（decodeImageSize 只读头，不解像素）⇒ 拒绝是零成本的。
+	if sizeErr == nil && int64(w)*int64(h) > maxImagePixels {
+		return imageContentResult{}, fmt.Errorf(
+			"%s is %dx%d (%d megapixels), too large to decode here (limit %d megapixels); shrink it first (e.g. `sips -Z 4000 %s`) and read the smaller file",
+			name, w, h, (int64(w)*int64(h))/(1<<20), maxImagePixels>>20, path)
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return imageContentResult{}, cerr
+	}
 	sizeOK := encodedLen(len(data)) <= maxBytes
 	// 单边闸门的三态：
 	//   - 读得出尺寸 → 按 8192 判；
@@ -174,14 +185,14 @@ func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResu
 
 	// 体积达标、只是单边超限 → 切片（保住原生分辨率），不缩成一条看不懂的细线。
 	if sizeOK {
-		return sliceTallImage(name, format, src, data, maxBytes)
+		return sliceTallImage(ctx, name, format, src, data, maxBytes)
 	}
 
 	// 体积超限 → 降采样重编码（原行为）。
 	bounds := src.Bounds()
 	origW, origH := bounds.Dx(), bounds.Dy()
 
-	encoded, outW, outH, err := shrinkToLimit(src, maxBytes)
+	encoded, outW, outH, err := shrinkToLimit(ctx, src, maxBytes)
 	if err != nil {
 		return imageContentResult{}, fmt.Errorf("%s: cannot shrink %dx%d %s image under %s: %w",
 			name, origW, origH, format.mime, humanSize(maxBytes), err)
@@ -197,6 +208,18 @@ func loadImageForModel(path string, data []byte, maxBytes int) (imageContentResu
 	}, nil
 }
 
+// maxImagePixels 图片解码的**像素预算**（像素数；解码后的 RGBA 字节 = 像素数 × 4）。
+//
+// 为什么需要（2026-11-17，第 4 步）：改造前的闸门只有两道 ——「编码后体积 ≤ 3 MiB」
+// 与「单边 ≤ 8192 px」—— **没有像素预算**。而解码是按**原图分辨率**整张展开的：
+// 30000×30000 的纯色 PNG（deflate 对纯色压缩比 ~1000:1 ⇒ 编码后 < 2 MB，
+// 两道闸门都过）⇒ RGBA = **3.6 GB**；再加 cropImage 的整块拷贝与 6 轮全分辨率
+// box filter（每轮 900M 次 src.At() 接口调用）⇒ 分钟级 CPU、GB 级内存。
+//
+// 32 MPix = 128 MB RGBA：够覆盖真实截图（3000×2000 = 6 MPix）与长图
+// （4000×8000 = 32 MPix），而 900 MPix 那种一眼就是攻击的尺寸被直接拒掉。
+const maxImagePixels = 32 << 20
+
 // maxInt 两个 int 取大（Go 1.21 的 max 只对同类型内置，这里保持显式）。
 func maxInt(a, b int) int {
 	if a > b {
@@ -211,7 +234,7 @@ func maxInt(a, b int) int {
 // 63x1568 —— 边长「达标」了，但正文字号被压成 1px 宽的竖条，模型什么都读不出来；
 // 而原生分辨率的一刀切（390x4849）在视觉模型里是清晰的。所以先切，切不下才缩
 // （片数上限 4 与引擎的结果图片上限同口径）。
-func sliceTallImage(name string, format imageFormat, src image.Image, data []byte, maxBytes int) (imageContentResult, error) {
+func sliceTallImage(ctx context.Context, name string, format imageFormat, src image.Image, data []byte, maxBytes int) (imageContentResult, error) {
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()
 	rects := tileRects(w, h, maxImageSidePx, maxImageTiles)
@@ -221,7 +244,7 @@ func sliceTallImage(name string, format imageFormat, src image.Image, data []byt
 	native := true // 是否保持了原生分辨率（片数封顶时会降采样，文案不能说谎）
 	for n, r := range rects {
 		tile := cropImage(src, r)
-		raw, mime, tw, th, err := encodeTile(tile, maxBytes)
+		raw, mime, tw, th, err := encodeTile(ctx, tile, maxBytes)
 		if err != nil {
 			return imageContentResult{}, fmt.Errorf("%s: cannot slice %dx%d %s image (tile %d/%d): %w",
 				name, w, h, format.mime, n+1, len(rects), err)
@@ -287,7 +310,7 @@ func cropImage(src image.Image, r image.Rectangle) image.Image {
 // encodeTile 把一片图编码成能过闸门的 data URL 主体：
 // 片内单边仍超限（片数封顶时）→ 先缩到 maxSide；PNG 优先（无损，截图文字最怕 JPEG），
 // PNG 体积过不了闸门才退 JPEG q85，再不行交给 shrinkToLimit。
-func encodeTile(img image.Image, maxBytes int) (data []byte, mime string, w, h int, err error) {
+func encodeTile(ctx context.Context, img image.Image, maxBytes int) (data []byte, mime string, w, h int, err error) {
 	bb := img.Bounds()
 	if maxInt(bb.Dx(), bb.Dy()) > maxImageSidePx {
 		img = scaleToFit(img, maxImageSidePx)
@@ -302,7 +325,7 @@ func encodeTile(img image.Image, maxBytes int) (data []byte, mime string, w, h i
 		b := img.Bounds()
 		return buf.Bytes(), "image/jpeg", b.Dx(), b.Dy(), nil
 	}
-	raw, ow, oh, err := shrinkToLimit(img, maxBytes)
+	raw, ow, oh, err := shrinkToLimit(ctx, img, maxBytes)
 	if err != nil {
 		return nil, "", 0, 0, err
 	}
@@ -313,7 +336,7 @@ func encodeTile(img image.Image, maxBytes int) (data []byte, mime string, w, h i
 // 首轮把长边钳到 maxImageDim（视觉模型有效分辨率），之后每次减半，最多 6 轮
 // （1568 → 784 → 392 …；配合 JPEG q85 足以把任意合理截图压到 3MiB 以内）。
 // 每轮先试质量，再试尺寸 —— 避免为了达标把本该清晰的图压成糊图。
-func shrinkToLimit(src image.Image, maxBytes int) ([]byte, int, int, error) {
+func shrinkToLimit(ctx context.Context, src image.Image, maxBytes int) ([]byte, int, int, error) {
 	longest := src.Bounds().Dx()
 	if src.Bounds().Dy() > longest {
 		longest = src.Bounds().Dy()
@@ -322,9 +345,19 @@ func shrinkToLimit(src image.Image, maxBytes int) ([]byte, int, int, error) {
 	if longest < dim {
 		dim = longest
 	}
+	// 逐级降采样：从**上一级**的结果继续缩，而不是每一轮都从原图重算。
+	//
+	// 改造前每轮都是 `scaleToFit(src, dim)`（src 恒为原图）⇒ 6 轮 × 全分辨率
+	// box filter = 6 × O(W×H) 次 src.At() 接口调用（16000×16000 ⇒ 6 × 2.6 亿次）。
+	// 现在 current 每轮减半 ⇒ 总代价 ≈ 首轮的 1.33 倍（面积等比数列收敛）。
+	current := src
 	var lastLen int
 	for attempt := 0; attempt < 6; attempt++ {
-		scaled := scaleToFit(src, dim)
+		// 可中断：降采样是最长的 CPU 段（改造前用户 abort 后它还在跑）。
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, 0, 0, cerr
+		}
+		scaled := scaleToFit(current, dim)
 		// 先按固定质量编一次；仍超限则降到 q60（文字截图降质量比降尺寸更保可读性）。
 		for _, q := range []int{reencodeQuality, 60, 45} {
 			var buf bytes.Buffer
@@ -336,6 +369,7 @@ func shrinkToLimit(src image.Image, maxBytes int) ([]byte, int, int, error) {
 				return buf.Bytes(), scaled.Bounds().Dx(), scaled.Bounds().Dy(), nil
 			}
 		}
+		current = scaled // 下一轮从这一级继续
 		dim /= 2
 		if dim < 64 {
 			break
