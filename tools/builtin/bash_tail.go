@@ -20,6 +20,7 @@ package builtin
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -41,13 +42,13 @@ const (
 // 并发：stdout / stderr 两个拷贝协程会同时调 write → 全程持锁。
 // emit 在锁内调用（顺序 = 帧号顺序），实现必须是快速、非阻塞的（发事件 + 序列化）。
 type outputTailer struct {
-	mu        sync.Mutex
-	window    []byte // 最近 maxTailBytes 字节（尾部窗口）
-	total     int64  // 累计字节数（真值，不受窗口裁剪影响）
-	seq       int64  // 已发帧数
-	lastFlush time.Time
+	mu    sync.Mutex
+	ring  tailRing // 最近 maxTailBytes 字节（尾部窗口，环形缓冲 ⇒ 写入零分配）
+	total int64    // 累计字节数（真值，不受窗口裁剪影响）
+	seq   int64    // 已发帧数
 	// flushedTotal 上次发帧时的累计字节数（用来判断「自上次发帧以来有没有新输出」）。
 	flushedTotal int64
+	lastFlush    time.Time
 	emit         func(seq int64, tail string, total int64, truncated bool)
 	// sink 异步投递口（nil = 同步直发；直调工具/测试用）。
 	sink *tailSink
@@ -107,6 +108,89 @@ func (t *outputTailer) close() {
 	t.sink.close(tailCloseBudget)
 }
 
+// tailRing 尾巴窗口的环形缓冲（第 5 轮爬山第 3 步）。
+//
+// **为什么**：原来的窗口是 `append` + 前移切片（`w = w[len-4096:]`）。前移切片
+// **不吃容量**（cap 跟着左边界一起缩）⇒ 每来一块（os/exec 的拷贝块 32KB）就得
+// 重新分配一块 ~40KB 并拷贝一遍 ⇒ 实测 16 MB 输出 = **21 MB 垃圾**（1.3× 输出量），
+// 1 GB 输出 = 1.3 GB churn（都进 GC，纯浪费）。
+//
+// 环形缓冲：固定 maxTailBytes 的数组 + 写指针 ⇒ **写入零分配**；只有发帧那一刻
+// 才把窗口拷成字符串（≤ 4 次/秒）。
+//
+// 不变式（**逐字节与改造前一致**）：
+//   - 窗口内容 = 输出的最后 min(total, maxTailBytes) 字节（最旧 → 最新）；
+//   - 总量超过窗口上限时，左边界可能落在多字节字符中间 ⇒ 往前挪到 rune 边界
+//     （否则前端显示一串替换字符 —— 日志里的中文错误信息会当场变乱码）。
+type tailRing struct {
+	buf   []byte // 固定容量 maxTailBytes（惰性分配：还没输出过就不占这 4KB）
+	head  int    // 下一个写入位置
+	n     int    // 当前有效字节数（≤ len(buf)）
+	total int64  // 累计写入字节数（判断「窗口是否溢出过」⇒ 要不要做 rune 边界修剪）
+}
+
+// write 写一块输出（**零分配**；覆盖最旧的内容）。
+func (r *tailRing) write(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	if r.buf == nil {
+		r.buf = make([]byte, maxTailBytes)
+	}
+	capacity := len(r.buf)
+	r.total += int64(len(p))
+	if len(p) >= capacity {
+		// 一块就能填满/超出窗口 ⇒ 只留最后 capacity 字节。
+		copy(r.buf, p[len(p)-capacity:])
+		r.head = 0
+		r.n = capacity
+		return
+	}
+	// 第一段：head..末尾；第二段（绕回）：0..
+	first := copy(r.buf[r.head:], p)
+	if first < len(p) {
+		copy(r.buf, p[first:])
+	}
+	r.head = (r.head + len(p)) % capacity
+	if r.n+len(p) <= capacity {
+		r.n += len(p)
+	} else {
+		r.n = capacity
+	}
+}
+
+// window 取当前窗口内容（最旧 → 最新）并拷成字符串。
+//
+// 一次分配（strings.Builder）：调用频率 ≤ 4 次/秒（节流），不是热路径。
+func (r *tailRing) window() string {
+	if r.n == 0 {
+		return ""
+	}
+	start := (r.head - r.n + len(r.buf)) % len(r.buf)
+	// 有效字节 = 从 start 开始的 n 个（可能绕回）—— **不能**直接把 buf[start:] 全写出去
+	// （那会带上未写入的零字节：差分测试抓到过这个坑）。
+	first := len(r.buf) - start
+	if first > r.n {
+		first = r.n
+	}
+	var sb strings.Builder
+	sb.Grow(r.n)
+	sb.Write(r.buf[start : start+first])
+	if first < r.n {
+		sb.Write(r.buf[:r.n-first])
+	}
+	// 窗口溢出过 ⇒ 左边界可能落在多字节字符中间 ⇒ 往前挪到最近的 rune 边界。
+	// （与改造前逐字节一致：改造前是在写入时修剪窗口左边界。）
+	if r.total > int64(len(r.buf)) {
+		s := sb.String()
+		for len(s) > 0 && !utf8.RuneStart(s[0]) {
+			s = s[1:]
+		}
+		return s
+	}
+	return sb.String()
+}
+
 // write 接在 sandbox.ExecSpec.OnOutput 上（p 仅在调用期间有效，这里只做拷贝）。
 func (t *outputTailer) write(p []byte) {
 	if t == nil || t.emit == nil || len(p) == 0 {
@@ -115,15 +199,7 @@ func (t *outputTailer) write(p []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.total += int64(len(p))
-	t.window = append(t.window, p...)
-	if len(t.window) > maxTailBytes {
-		t.window = t.window[len(t.window)-maxTailBytes:]
-		// 窗口左边界可能落在多字节字符中间：往后挪到最近的 rune 边界，
-		// 否则前端会显示一串替换字符（日志里的中文错误信息会当场变乱码）。
-		for len(t.window) > 0 && !utf8.RuneStart(t.window[0]) {
-			t.window = t.window[1:]
-		}
-	}
+	t.ring.write(p)
 	// 节流：不到时间片不发射（但窗口与总量照常累积，下一帧自然带上最新的尾巴）。
 	if time.Since(t.lastFlush) < tailMinInterval {
 		return
@@ -136,7 +212,8 @@ func (t *outputTailer) flushLocked() {
 	t.seq++
 	t.lastFlush = time.Now()
 	t.flushedTotal = t.total
-	t.emit(t.seq, string(t.window), t.total, t.total > int64(len(t.window)))
+	win := t.ring.window()
+	t.emit(t.seq, win, t.total, t.total > int64(len(win)))
 }
 
 // flushFinal 收尾补帧：命令结束时把**最后一段输出**补发出去。
