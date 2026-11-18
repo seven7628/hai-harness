@@ -250,6 +250,18 @@ MAX_SCAN_ROWS = 5000
 MAX_COLS = 40
 MAX_CELLS = 8000
 
+# 合并区域（mergeCell）**条数**上限（第 4 轮爬山新增）。
+#
+# 为什么：<mergeCell> 是 worksheet XML 里的一个元素，**文件里可控** —— 30 MB 的
+# sheet XML 就能声明 100 万个合并区域（每个约 30 字节）。而 parse_meta 会把它们
+# **逐条**收进 meta["merges"] ⇒ 内存随条数线性增长（100 万条约 100 MB+），
+# 随后 merge_spans 再逐条展开成 (行,列) 集合。
+#
+# 注意：**跨度**（每条合并覆盖多少行/列）已经被列闸（MAX_COLS=40）钳住，
+# 没上限的是**条数**。
+# 超额的部分不解析（连正则都不跑）并**如实标注**。
+MAX_MERGES = 2000
+
 # 冻结窗格上限：Excel 可以冻 20 行，但预览里粘住半个屏幕比不冻更糟。
 # 钳制必须**如实告知**（render_sheet 的说明条会写「原文件冻结了 N 行 × M 列，预览只保留
 # 前 3 行 × 3 列」）—— 静默少冻几行等于骗人：用户会以为文件本身没冻。
@@ -632,7 +644,8 @@ def attr_clean(value):
 def empty_meta():
     """空元数据。**每次新建**：把它写成模块级常量再 dict(...) 只拷一层，merges/widths 会
     被所有 sheet 共享（一个 sheet 解出来的合并信息串到另一个 sheet 上）。"""
-    return {"frozen_rows": 0, "frozen_cols": 0, "merges": [], "widths": {}, "default_width": None}
+    return {"frozen_rows": 0, "frozen_cols": 0, "merges": [], "merges_dropped": 0,
+            "widths": {}, "default_width": None}
 
 
 def _int_attr(el, name):
@@ -705,10 +718,15 @@ def parse_meta(zf, path):
                         for col in range(max(_int_attr(el, "min"), 1), hi + 1):
                             meta["widths"][col] = float(width)
                 elif tag == "mergeCell":
-                    m = re.match(r"([A-Z]+)(\d+):([A-Z]+)(\d+)$", el.get("ref") or "")
-                    if m:
-                        meta["merges"].append((int(m.group(2)), top_left_col(m.group(1)),
-                                               int(m.group(4)), top_left_col(m.group(3))))
+                    # 条数上限（见 MAX_MERGES）：超额的**连正则都不跑**（省掉每条一次
+                    # 正则匹配的 CPU），只计数并如实标注。
+                    if len(meta["merges"]) >= MAX_MERGES:
+                        meta["merges_dropped"] += 1
+                    else:
+                        m = re.match(r"([A-Z]+)(\d+):([A-Z]+)(\d+)$", el.get("ref") or "")
+                        if m:
+                            meta["merges"].append((int(m.group(2)), top_left_col(m.group(1)),
+                                                   int(m.group(4)), top_left_col(m.group(3))))
                 elif tag == "sheetFormatPr":
                     dw = el.get("defaultColWidth")
                     if dw:
@@ -897,6 +915,9 @@ def render_sheet(idx, name, state, ws_form, ws_val, meta, out):
         notes.append('<span class="warn">还有 %d 行未显示（单表上限 %d 行）</span>' % (hidden_rows, rows_cap))
     if wide:
         notes.append('<span class="warn">只显示前 %d 列（共 %d 列）</span>' % (MAX_COLS, declared_cols))
+    if meta["merges_dropped"]:
+        notes.append('<span class="warn">合并区域超过 %d 处，有 %d 处未处理</span>'
+                     % (MAX_MERGES, meta["merges_dropped"]))
     if formula_missing > 0:
         notes.append("%d 个公式单元格没有缓存值，已显示为公式文本（用 Excel/WPS 打开并另存即可生成缓存值）" % formula_missing)
     if frozen_rows or frozen_cols:

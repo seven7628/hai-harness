@@ -284,6 +284,46 @@ wb.save("merge.xlsx")
 	}
 }
 
+// TestXlsxPreviewCapsMergeCount：合并区域的**条数**必须有上限（第 4 轮爬山）。
+//
+// 为什么单独测条数：<mergeCell> 是 worksheet XML 里的元素，**文件里可控** ⇒ 一份
+// 构造过的文件可以声明几十万条（旧实现逐条收进 meta["merges"]，内存随之线性增长）。
+// 而**跨度**（每条覆盖多少行/列）早被列闸钳住，不是这里的问题。
+//
+// 判据：条数封顶 + **如实标注**丢弃了多少（不静默丢弃）。
+func TestXlsxPreviewCapsMergeCount(t *testing.T) {
+	pv, py := realXlsxPreviewer(t)
+	ws := xlsxFixture(t, py, `
+import zipfile
+import openpyxl
+wb = openpyxl.Workbook(); s = wb.active; s.title = "多合并"
+s.append(["a", "b"])
+s.append(["c", "d"])
+wb.save("m.xlsx")
+# 直接改 sheet XML：造 3000 条合并区域（openpyxl 的 merge_cells 一次一个，慢）
+items = {}
+with zipfile.ZipFile("m.xlsx") as z:
+    for i in z.infolist():
+        items[i.filename] = z.read(i.filename)
+sheet = "xl/worksheets/sheet1.xml"
+xml = items[sheet].decode("utf-8")
+block = "<mergeCells>" + "".join('<mergeCell ref="A%d:B%d"/>' % (i + 1, i + 1) for i in range(3000)) + "</mergeCells>"
+xml = xml.replace("</worksheet>", block + "</worksheet>")
+items[sheet] = xml.encode("utf-8")
+with zipfile.ZipFile("m.xlsx", "w", zipfile.ZIP_DEFLATED) as z:
+    for name, data in items.items():
+        z.writestr(name, data)
+print("MK_OK")
+`)
+	raw := convertXlsx(t, pv, ws, "m.xlsx")
+	if !strings.Contains(raw, "合并区域超过 2000 处") {
+		t.Fatalf("合并区域条数上限未生效或未标注")
+	}
+	if !strings.Contains(raw, "有 1000 处未处理") {
+		t.Fatalf("未如实标注丢弃的合并区域数（应为 3000-2000=1000）")
+	}
+}
+
 // TestXlsxPreviewTruncationToldAtTop：大表被截断时，**页面顶部**要如实写「已显示 N/M 行」，
 // 逐 sheet 的「还有 N 行未显示」也不能丢（那是明细）。
 func TestXlsxPreviewTruncationToldAtTop(t *testing.T) {
