@@ -28,19 +28,34 @@ import (
 //     + 真 Seatbelt —— 覆盖「run_python 在真实生产链路下跑通办公依赖」这一前提。
 
 // rpFakeRuntime 假受管运行时：只实现 Ensure（run_python 依赖的唯一能力面）。
+//
+// calls 有锁：这个假实现会被**并发**的预览测试共用（多个 Convert 同时 Ensure）
+// ⇒ 裸自增是数据竞争（-race 会报）。2026-11-18 由第 5 轮爬山的 -race 全包跑发现
+// （**既有缺陷，不是本轮引入的** —— 基线 974a9ca 上同样复现）。
 type rpFakeRuntime struct {
-	py     goruntime.Python
-	err    error
+	py  goruntime.Python
+	err error
+	mu  sync.Mutex
+	// calls 受 mu 保护（读走 callCount()）。
 	calls  int
 	before func()
 }
 
 func (f *rpFakeRuntime) Ensure(context.Context) (goruntime.Python, error) {
+	f.mu.Lock()
 	f.calls++
+	f.mu.Unlock()
 	if f.before != nil {
 		f.before()
 	}
 	return f.py, f.err
+}
+
+// callCount 读调用次数（并发安全）。
+func (f *rpFakeRuntime) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 // rpRecordingSandbox 记录 ExecSpec 且不真执行命令的沙箱（检查工具产出的命令行/时限）。
@@ -240,8 +255,8 @@ func TestRunPythonScriptTransportViaTempFile(t *testing.T) {
 	if p, _ := rpScriptPathOf(sbx.spec.Command); rpExists(p) {
 		t.Fatalf("临时脚本应在执行后清理: %s", p)
 	}
-	if rt.calls != 1 {
-		t.Fatalf("Ensure 应恰好调用一次: %d", rt.calls)
+	if rt.callCount() != 1 {
+		t.Fatalf("Ensure 应恰好调用一次: %d", rt.callCount())
 	}
 }
 
