@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/seven7628/hai-harness/core"
+	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/tools"
 	"os"
@@ -48,7 +49,7 @@ type BashTool struct {
 	// 无需重复 cd。实例 per-session（newSessionEngine 每会话新建 FileTools），
 	// 不跨会话串扰；子 agent 共享主 loop engine 的 bash → cd 也共享（同 shell 语义）。
 	mu     sync.Mutex
-	curCwd string // 当前工作目录（初始 = Cwd；cd 命令成功后更新）
+	curCwd map[string]string // 当前工作目录，**按调用方分区**（见 cwdKey）；cd 命令成功后更新
 
 	// spill 落盘目录与序号（惰性建目录，见 ensureSpillDir）。
 	//
@@ -130,7 +131,7 @@ func NewBashTool(cwd string, timeout time.Duration, sbx sandbox.Sandbox, appAllo
 		Timeout:  timeout,
 		sbx:      sbx,
 		appAllow: appAllow,
-		curCwd:   cwd,
+		curCwd:   map[string]string{},
 		spill:    newSpillStore(bashSpillDirPrefix),
 	}
 	return t
@@ -238,10 +239,10 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	//     纯 `cd X`（无剩余）→ 执行原命令（shell 里 cd 成功无输出，语义正确）。
 	//   - 目标不存在/非目录 → 不更新记忆，原样执行让 shell 报错（模型可见后修正）。
 	cmd := a.Command
-	cwd := t.currentCwd()
+	cwd := t.currentCwd(ctx)
 	if target, rest, ok := t.splitCd(a.Command, cwd); ok {
 		if info, err := os.Stat(target); err == nil && info.IsDir() {
-			t.setCurrentCwd(target)
+			t.setCurrentCwd(ctx, target)
 			cwd = target
 			if rest != "" {
 				cmd = rest // cd 前缀已由 spec.Cwd 兑现，只跑剩余命令
@@ -435,21 +436,36 @@ func (t *BashTool) reserveSpillPath(ctx context.Context) string {
 	return t.spill.reserve(ctx)
 }
 
-// currentCwd 返回当前工作目录（会话内跨调用；初始 = 构造 cwd）。
-func (t *BashTool) currentCwd() string {
+// cwdKey 调用方的 cwd 记忆分区键。
+//
+// **为什么分区**：工具实例在注册表里共享 —— 主 agent 与后台子 agent 共用同一个
+// ToolEngine（desktop/bridge）⇒ 改造前 cwd 存在实例字段上 ⇒
+// **子 agent 的 `cd` 会改掉主 agent 后续命令的工作目录**（两个 agent 互相踩）。
+//
+// 键取 TaskId（后台任务 id）：子 agent = 它的任务 id（跨轮稳定 ✓），
+// 主 agent 直调 = ""（跨轮稳定 ✓ ⇒ 「cd 跨调用记忆」这个特性对主 agent 照常工作 ✓）。
+func cwdKey(ctx context.Context) string {
+	if tc := events.ToolContextFrom(ctx); tc != nil {
+		return tc.TaskId
+	}
+	return ""
+}
+
+// currentCwd 返回当前工作目录（本调用方分区内跨调用记忆；初始 = 构造 cwd）。
+func (t *BashTool) currentCwd(ctx context.Context) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.curCwd != "" {
-		return t.curCwd
+	if dir := t.curCwd[cwdKey(ctx)]; dir != "" {
+		return dir
 	}
 	return t.Cwd
 }
 
-// setCurrentCwd 更新会话 cwd（cd 目标存在且为目录时调用）。
-func (t *BashTool) setCurrentCwd(dir string) {
+// setCurrentCwd 更新本调用方分区的 cwd（cd 目标存在且为目录时调用）。
+func (t *BashTool) setCurrentCwd(ctx context.Context, dir string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.curCwd = dir
+	t.curCwd[cwdKey(ctx)] = dir
 }
 
 // cdPrefixRe 匹配命令开头的 cd：`cd <target>`（target 可带引号/空格）。
