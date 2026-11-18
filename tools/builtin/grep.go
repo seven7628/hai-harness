@@ -189,12 +189,29 @@ type grepScanner struct {
 	long    []byte // 超长行的累积缓冲（按上限一次性分配，见 appendLong）
 	longLen int    // long 已用字节数
 	drop    bool   // 正在丢弃一个超长行的剩余部分
+	cap     int    // 单行保留上限（字节）；超出的部分丢弃，该行仍被返回（见 nextLine）
+	cut     bool   // 上一行返回的是**被截断**的内容（超出行上限）
 }
 
 func newGrepScanner() *grepScanner {
+	return newGrepScannerWithCap(maxGrepLineBytes)
+}
+
+// newGrepScannerWithCap 建一个**单行上限**为 cap 字节的扫描器。
+//
+// cap 的意义：一行超过 cap 时，前 cap 字节保留、其余丢弃，**这一行仍会被返回**
+// （内容是截断后的前缀）——
+//   - 返回（而不是整行丢弃）⇒ 调用方的行号计数不错位（整行丢弃会让后面所有行号
+//     往前挪，grep 报出来的行号就是错的）；
+//   - read_file 用小 cap（64 KB）⇒ 单行超长时不会把 4 MB 塞进结果。
+func newGrepScannerWithCap(cap int) *grepScanner {
+	if cap <= 0 {
+		cap = maxGrepLineBytes
+	}
 	return &grepScanner{
 		br:   bufio.NewReaderSize(nil, grepReadBufferSize),
 		head: make([]byte, grepHeadProbeSize),
+		cap:  cap,
 	}
 }
 
@@ -203,6 +220,7 @@ func (s *grepScanner) reset(r io.Reader) {
 	s.br.Reset(r)
 	s.longLen = 0
 	s.drop = false
+	s.cut = false
 }
 
 // nextLine 读下一行（去掉行尾换行）。
@@ -210,30 +228,37 @@ func (s *grepScanner) reset(r io.Reader) {
 // 返回的切片指向内部缓冲，**下一次调用后失效** —— 调用方要留存必须拷贝。
 // ok=false 表示 EOF。
 func (s *grepScanner) nextLine() ([]byte, bool) {
+	s.cut = false
 	for {
 		chunk, err := s.br.ReadSlice('\n')
 		if s.drop {
 			// 正在丢弃一个超长行的剩余部分：找到换行才算这一行结束。
+			//
+			// ⚠️ 这一行**必须被返回**（内容 = 已累积的前 cap 字节）：调用方靠
+			// nextLine 的返回值计行号 —— 整行丢弃（不返回）会让后面所有行号往前挪，
+			// grep 报出来的行号就全是错的（2026-11-17 实测：文件里有一行 > 4 MB 时，
+			// 它之后每一行的行号都少 1）。
 			if bytes.IndexByte(chunk, '\n') >= 0 {
 				s.drop = false
+				content := s.long[:s.longLen]
 				s.longLen = 0
-				if err == io.EOF {
-					return nil, false
-				}
-				continue // 下一行
+				s.cut = true // 这一行超了上限：返回的是截断后的前缀
+				return trimEOL(trimIncompleteRune(content)), true
 			}
 			if err == io.EOF {
 				s.drop = false
+				content := s.long[:s.longLen]
 				s.longLen = 0
-				return nil, false
+				s.cut = true
+				return trimEOL(trimIncompleteRune(content)), true
 			}
 			continue
 		}
 		if err == bufio.ErrBufferFull {
-			// 行超过缓冲：累积（上限 maxGrepLineBytes）。
+			// 行超过缓冲：累积（上限 = cap）。
 			s.appendLong(chunk)
-			if s.longLen >= maxGrepLineBytes {
-				s.drop = true // 剩余部分丢弃
+			if s.longLen >= s.cap {
+				s.drop = true // 剩余部分丢弃（这一行仍会被返回，见 drop 分支的注释）
 			}
 			continue
 		}
@@ -268,7 +293,7 @@ func (s *grepScanner) nextLine() ([]byte, bool) {
 // 这里的长度由 longLen 单独跟踪，缓冲本身永不增长。
 func (s *grepScanner) appendLong(chunk []byte) {
 	if s.long == nil {
-		s.long = make([]byte, maxGrepLineBytes)
+		s.long = make([]byte, s.cap)
 	}
 	n := copy(s.long[s.longLen:], chunk)
 	s.longLen += n

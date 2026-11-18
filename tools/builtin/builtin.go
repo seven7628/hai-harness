@@ -7,7 +7,6 @@
 package builtin
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -418,6 +417,15 @@ func resolveRealTarget(abs string) string {
 
 const defaultReadMaxLines = 200
 
+const (
+	// readFileLineCap 单行保留上限（字节）。超长行（minified bundle / base64 blob /
+	// 单行大 JSON）只保留前 64 KB —— 引擎的响应闸门是 20 KB，64 KB 已远超模型能看到的量。
+	readFileLineCap = 64 << 10
+	// readFileBytesCap 单次返回的内容总上限（字节）。
+	// 行数有上限（200）但**每行没有** ⇒ 200 行 × 4 MB 的超长行 = 800 MB。
+	readFileBytesCap = 256 << 10
+)
+
 type readFileTool struct {
 	tools.BaseTool
 	*FileTools
@@ -518,70 +526,120 @@ func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, e
 		start, end = end, start
 		normalizedRange = true
 	}
-	if end < start {
+	// 窗口硬钳（2026-11-17，第 2 步）：**模型显式给了 end_line 也只给 maxLines 行**。
+	//
+	// 改造前只在 end_line **缺失**时兜底成 maxLines 行；模型同时给 start_line/end_line
+	// 时**没有任何上限** ⇒ 一次调用把整个文件收进内存（100 MB 文件 ⇒ 峰值 200 MB
+	// —— lines 切片 + 行号前缀的 Builder 拷贝），而模型侧真正能看到的只有引擎
+	// 截断后的 20 KB（99.9% 的产出被扔掉，模型拿到的是**残缺**上下文）。
+	// 现在：超出的部分用 start_line 续读（表头明说下一段从哪一行开始）。
+	clamped := false
+	if end <= 0 {
 		end = start + t.maxLines - 1
+	} else if end > start+t.maxLines-1 {
+		end = start + t.maxLines - 1
+		clamped = true
 	}
-	if err := statPathHint(p, "read_file"); err != nil {
+
+	// 一次打开，全流程复用（2026-11-17，第 2 步）：
+	// 改造前是**3 次文件系统往返** —— statPathHint(Stat) + readHead(Open+read 512B)
+	// + readLines(Open+read 全文)。网络盘（NFS/sshfs）上每次触碰一个 RTT。
+	// 现在：Open 一次 → 读头 512 B（魔数判别）→ 需要时 seek(0) 复用同一个 fd。
+	f, err := os.Open(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", notFoundError(p, "read_file", similarPathHint(p))
+		}
 		return "", err
 	}
+	defer f.Close()
+
+	// 头 512 B（魔数判别）：同一个 fd，不另开一次。
+	head := make([]byte, 512)
+	hn, herr := io.ReadFull(f, head)
+	if herr != nil && herr != io.ErrUnexpectedEOF && herr != io.EOF {
+		return "", herr
+	}
+	head = head[:hn]
 
 	// 图片分支：魔数识别 → 内嵌为 image 内容块（模型直接看图）。行区间参数对
 	// 图片无意义（不按行切图），故只要指定了行区间即明确拒绝而不是静默忽略——
 	// 让模型知道「这里读到了图，range 没生效」，避免它以为读的是文本片段。
-	if head, ferr := readHead(p, 512); ferr == nil {
-		if format, isImg := detectImageFormat(head); isImg {
-			if a.StartLine != nil || a.EndLine != nil {
-				return "", fmt.Errorf("read_file: %s is an image (%s); line ranges do not apply to images — call read_file with just the path to view it", a.Path, format.mime)
-			}
-			data, rerr := os.ReadFile(p)
-			if rerr != nil {
-				return "", rerr
-			}
-			res, ierr := loadImageForModel(p, data, t.maxImageBytes)
-			if ierr != nil {
-				return "", ierr
-			}
-			tools.ImageSinkFrom(ctx).Add(res.blocks...)
-			return res.text, nil
+	if format, isImg := detectImageFormat(head); isImg {
+		if a.StartLine != nil || a.EndLine != nil {
+			return "", fmt.Errorf("read_file: %s is an image (%s); line ranges do not apply to images — call read_file with just the path to view it", a.Path, format.mime)
 		}
-		// 非图片的二进制（可执行文件/压缩包/媒体容器）：明确拒绝而不是倒乱码。
-		if looksBinary(head) {
-			kind := "binary"
-			if imageExtHint(p) {
-				kind = "binary (image-like extension, but the content is not a decodable image)"
-			}
-			size := ""
-			if st, serr := os.Stat(p); serr == nil {
-				size = ", " + humanSize(int(st.Size()))
-			}
-			// 事实部分（文件名/形态/体积 + read_file 的能力边界）由本层拼；尾句「下一步
-			// 怎么办」交给宿主注入的 hint —— 默认指 bash 的现成工具链，未注册 bash 的产品
-			// 形态（桌面 Work persona）换成本会话真有的路径。空串 = 宿主明确不给建议（不回退
-			// 默认：注入方已表明自己能力面里没有 bash，再提示它只会让模型调不存在的工具）。
-			hint := defaultBinaryHint
-			if t.binaryHint != nil {
-				hint = t.binaryHint(a.Path)
-			}
-			tail := "" // 连前导空格一起省，空提示不留尾空格
-			if hint != "" {
-				tail = " " + hint
-			}
-			return "", fmt.Errorf("read_file: %s looks like a %s file%s; read_file only returns text or decodable images (png/jpeg/gif).%s", a.Path, kind, size, tail)
+		if _, serr := f.Seek(0, io.SeekStart); serr != nil {
+			return "", serr
 		}
+		data, rerr := io.ReadAll(f)
+		if rerr != nil {
+			return "", rerr
+		}
+		res, ierr := loadImageForModel(p, data, t.maxImageBytes)
+		if ierr != nil {
+			return "", ierr
+		}
+		tools.ImageSinkFrom(ctx).Add(res.blocks...)
+		return res.text, nil
+	}
+	// 非图片的二进制（可执行文件/压缩包/媒体容器）：明确拒绝而不是倒乱码。
+	if looksBinary(head) {
+		kind := "binary"
+		if imageExtHint(p) {
+			kind = "binary (image-like extension, but the content is not a decodable image)"
+		}
+		size := ""
+		if st, serr := f.Stat(); serr == nil {
+			size = ", " + humanSize(int(st.Size()))
+		}
+		// 事实部分（文件名/形态/体积 + read_file 的能力边界）由本层拼；尾句「下一步
+		// 怎么办」交给宿主注入的 hint —— 默认指 bash 的现成工具链，未注册 bash 的产品
+		// 形态（桌面 Work persona）换成本会话真有的路径。空串 = 宿主明确不给建议（不回退
+		// 默认：注入方已表明自己能力面里没有 bash，再提示它只会让模型调不存在的工具）。
+		hint := defaultBinaryHint
+		if t.binaryHint != nil {
+			hint = t.binaryHint(a.Path)
+		}
+		tail := "" // 连前导空格一起省，空提示不留尾空格
+		if hint != "" {
+			tail = " " + hint
+		}
+		return "", fmt.Errorf("read_file: %s looks like a %s file%s; read_file only returns text or decodable images (png/jpeg/gif).%s", a.Path, kind, size, tail)
 	}
 
-	total, lines, err := readLines(p, start, end)
+	// 文本：回到文件头扫（同一个 fd ⇒ 只多一次 seek，不再开第二次）。
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	lines, more, byteCut, err := readLinesRange(ctx, f, start, end)
 	if err != nil {
 		return "", err
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "[read_file: %s, %d lines total, showing %d-%d]\n", a.Path, total, start, start+len(lines)-1)
+	last := start + len(lines) - 1
+	switch {
+	case len(lines) == 0:
+		fmt.Fprintf(&b, "[read_file: %s, no lines in range %d-%d (end of file)]\n", a.Path, start, end)
+	case byteCut:
+		fmt.Fprintf(&b, "[read_file: %s, lines %d-%d (content truncated at %d bytes; use start_line=%d to continue)]\n",
+			a.Path, start, last, readFileBytesCap, last+1)
+	case len(lines) < end-start+1:
+		// 文件在请求区间结束前就没了（模型要么越界，要么文件就这么长）。
+		fmt.Fprintf(&b, "[read_file: %s, lines %d-%d (end of file)]\n", a.Path, start, last)
+	case clamped:
+		// 窗口被硬钳 ⇒ 明说下一段从哪开始（模型能续读，而不是拿到残缺上下文）。
+		fmt.Fprintf(&b, "[read_file: %s, lines %d-%d (at most %d lines per call; use start_line=%d to continue)]\n",
+			a.Path, start, last, t.maxLines, last+1)
+	case more:
+		fmt.Fprintf(&b, "[read_file: %s, lines %d-%d (more lines; use start_line=%d to continue)]\n",
+			a.Path, start, last, last+1)
+	default:
+		fmt.Fprintf(&b, "[read_file: %s, lines %d-%d]\n", a.Path, start, last)
+	}
 	if normalizedRange {
 		fmt.Fprintf(&b, "[line range normalized from %d-%d to %d-%d]\n", *a.StartLine, *a.EndLine, start, end)
-	}
-	if a.EndLine == nil && start+len(lines) <= total {
-		b.WriteString("[file has more lines; use start_line/end_line to read further]\n")
 	}
 	for i, l := range lines {
 		fmt.Fprintf(&b, "%d: %s\n", start+i, l)
@@ -717,27 +775,55 @@ func quoteCandidates(names []string) string {
 	return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
 }
 
-// readLines 单遍扫描文件：统计总行数并收集 [start, end] 闭区间（含）的行。
-// end 超出文件末尾时自然截断；超长行（> 4MB）按行截断处理（scanner 报错即失败）。
-func readLines(p string, start, end int) (total int, lines []string, err error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		total++
-		if total >= start && total <= end {
-			lines = append(lines, sc.Text())
+// readLinesRange 读 [start, end] 闭区间的行；返回（行内容, 文件在 end 之后是否还有行）。
+//
+// **扫描到 end 就停**（再多读一行只为判断「还有更多」）——
+// 改造前为了在表头报一句「N lines total」把**整个文件**读完：读 200 行 = O(N) 磁盘读
+// （100 MB 日志 ⇒ 每次 read_file 读 100 MB 只回 8 KB，**12500× 放大**）。
+// 「总行数」不是模型能用的信息（它要的是内容），而「还有更多、从第几行续读」是。
+//
+// 用 grepScanner（bufio.Reader）而不是 bufio.Scanner，两条都解决：
+//   - Scanner 遇到 > 4 MB 的单行报 ErrTooLong ⇒ **整个 read_file 失败**
+//     （minified bundle / base64 blob / 单行大 JSON 一律读不了，连前 200 行都看不到）；
+//   - Scanner 没有 Reset ⇒ 每文件一份 64 KB 缓冲；Reader 有且能复用。
+func readLinesRange(ctx context.Context, f *os.File, start, end int) ([]string, bool, bool, error) {
+	sc := newGrepScannerWithCap(readFileLineCap)
+	sc.reset(f)
+	var lines []string
+	ln := 0
+	total := 0 // 已收集的内容字节数
+	for {
+		line, ok := sc.nextLine()
+		if !ok {
+			break // EOF
+		}
+		ln++
+		// 取消/超时检查（按行数抽样：ctx.Err() 不是免费的）。
+		if ln%searchCtxCheckEvery == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, false, false, cerr
+			}
+		}
+		if ln >= start && ln <= end {
+			// 字节闸：行数有上限（200）但**每行没有** ⇒ 200 行 × 4 MB 的超长行
+			// = 800 MB。引擎的响应闸门只有 20 KB ⇒ 256 KB 已远超模型能看到的量。
+			if total+len(line) > readFileBytesCap {
+				return lines, true, true, nil // 内容已到上限：后面还有
+			}
+			total += len(line)
+			text := string(line) // 必须拷贝：nextLine 的切片下次调用即失效
+			if sc.cut {
+				text += fmt.Sprintf(" …[truncated at %d bytes]", readFileLineCap)
+			}
+			lines = append(lines, text)
+		}
+		if ln >= end {
+			// 再读一行只为判断「文件还有更多」（不保留内容）。
+			_, more := sc.nextLine()
+			return lines, more, false, nil
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return 0, nil, err
-	}
-	return total, lines, nil
+	return lines, false, false, nil
 }
 
 // ---------- write_file ----------
