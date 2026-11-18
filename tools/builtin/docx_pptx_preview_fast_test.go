@@ -24,6 +24,7 @@ import (
 
 // opvFakeSandbox 记录 ExecSpec 的假沙箱：按脚本需要「产出」HTML（模拟解释器行为）。
 type opvFakeSandbox struct {
+	mu      sync.Mutex // 并发 Convert 共用同一个假沙箱 ⇒ 字段受锁保护（-race）
 	spec    sandbox.ExecSpec
 	script  string // Run 时读到的脚本原文（验证传给解释器的是固定脚本）
 	out     string
@@ -33,6 +34,8 @@ type opvFakeSandbox struct {
 }
 
 func (f *opvFakeSandbox) Run(_ context.Context, spec sandbox.ExecSpec) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.spec = spec
 	args := strings.Split(spec.Command, " '")
 	if len(args) >= 2 {
