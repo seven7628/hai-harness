@@ -136,3 +136,36 @@ func TestCancelledTaskReclaimsTimeoutBox(t *testing.T) {
 		t.Fatalf("时限盒没回收干净：在飞 %d 个（基线 %d）", got, base)
 	}
 }
+
+// TestMixedBatchSerialWaitsPreviousSerial：混批语义钉死（第 4 轮爬山第 7 步）。
+//
+// 契约（见 engine.go runBatch 的注释）：
+//   - 串行工具等**前一个串行工具**（不等并行工具 —— 因为并行工具可能被 promote 摘离成
+//     后台任务，严格互斥会被它无限拖住）；
+//   - 并行工具立即启动。
+//
+// 这条测试的作用是「把语义钉住」：将来谁想改成严格互斥，会先看到它与 promote 的冲突。
+func TestMixedBatchSerialWaitsPreviousSerial(t *testing.T) {
+	e := NewToolEngine(WithMaxParallel(4))
+	serial := &mockTool{name: "serial", canParallel: false, delay: 80 * time.Millisecond}
+	par := &mockTool{name: "par", canParallel: true, delay: 80 * time.Millisecond}
+	e.RegisterTool(context.Background(), serial)
+	e.RegisterTool(context.Background(), par)
+
+	before := serial.calls.Load()
+	calls := []core.ToolCall{
+		{Id: "p1", Name: "par", Arguments: "{}"},
+		{Id: "s1", Name: "serial", Arguments: "{}"},
+		{Id: "s2", Name: "serial", Arguments: "{}"},
+	}
+	if _, err := e.Parallel(context.Background(), calls, nil); err != nil {
+		t.Fatalf("Parallel 失败: %v", err)
+	}
+	if got := serial.calls.Load() - before; got != 2 {
+		t.Fatalf("串行工具应被调用 2 次，got %d", got)
+	}
+	// 两个串行调用**不得重叠**（串行语义的核心）：maxInflight 必须是 1。
+	if got := serial.maxInflight.Load(); got != 1 {
+		t.Fatalf("两个串行调用重叠了（maxInflight=%d）—— 串行语义被破坏", got)
+	}
+}

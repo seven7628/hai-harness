@@ -713,6 +713,23 @@ func (e *Engine) RunBatch(ctx context.Context, calls []core.ToolCall, handler ev
 //
 // 启动语义由工具自声明驱动：非并行工具（CanParallel=false）按序启动（前一个完成后一个
 // 才开始——原 Sequence 语义）；并行工具立即启动，受 maxParallel 信号量约束（原 Parallel 语义）。
+//
+// **混批（同一批里既有串行又有并行工具）的确切语义**（这一段以前没写清，导致「串行工具
+// 到底会不会和并行工具同时跑」只能靠读实现猜）：
+//
+//   - 串行工具只等**前一个串行工具**（同批里更早的并行工具**不等**）；
+//   - 并行工具立即启动，彼此之间只受 maxParallel 信号量约束；
+//   - ⇒ 同一批里，一个串行工具**可能与并行工具同时在跑**。
+//
+// 为什么不等并行工具（而不是做成严格互斥）：**promote 会把工具摘离成后台任务**。
+// 严格互斥要求「串行工具开跑前，批里所有更早的任务都已结束」—— 而被摘离的并行工具
+// 按设计要活到自然结束（可长达数分钟）⇒ 串行工具会被一个**已经摘离的后台任务**无限
+// 拖住。现在的语义（只等前一个串行工具）与 promote 相容。
+//
+// 生产路径**根本不会混批**：agents.runTools 自己分桶 —— 先跑完串行桶（seq），再跑并行桶
+// （par）（见 agents/agent_loop.go）。混批只在直接调 RunBatch 的第三方代码里出现。
+// 想拿到「严格互斥」的语义，调用方自己分两批调即可（agents 就是这么做的）。
+//
 // promoteAfter > 0 时：运行超过阈值（工具可 DisableAutoPromote / AsyncPromoteAfter 覆盖）的
 // 任务自动摘离（决策 #5）。batch nil = 不支持 promote（Sequence/Parallel 直跑语义）。
 func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler events.EventHandler,
