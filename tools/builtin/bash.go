@@ -260,6 +260,9 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	// 运行中的输出尾巴（tail -f，**只给人看**）：没有事件出口（嵌套调用/直调）时
 	// tailer == nil，OnOutput 保持 nil → 执行层走历史路径，逐字节不变。
 	tailer := newOutputTailer(ctx)
+	// 收尾：排空最后一帧 + 停发射协程（第 5 轮爬山第 2 步）。defer 挂在创建点 ⇒
+	// 任何早退路径（命令出错、上下文取消）都会收。
+	defer tailer.close()
 	onOutput := spec0OnOutput(tailer)
 	// 输出有界化 + 落盘（2026-11-17）：
 	//   - 模型路径：内存窗口 64 KB（头 32 + 尾 32），超过 32 KB 把**完整**输出

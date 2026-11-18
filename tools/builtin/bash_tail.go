@@ -49,6 +49,8 @@ type outputTailer struct {
 	// flushedTotal 上次发帧时的累计字节数（用来判断「自上次发帧以来有没有新输出」）。
 	flushedTotal int64
 	emit         func(seq int64, tail string, total int64, truncated bool)
+	// sink 异步投递口（nil = 同步直发；直调工具/测试用）。
+	sink *tailSink
 }
 
 // newOutputTailer 从工具 ctx 里取事件出口，装一个尾巴发射器；没有出口时返回 nil。
@@ -73,7 +75,11 @@ func newOutputTailer(ctx context.Context) *outputTailer {
 	// 尾巴（0.1s 的 `ls` 也一样），前端就是「出现又消失」的抖动 —— 这正是执行中条加
 	// 400ms 延迟要避免的观感。节流从 t0 起算，250ms 内跑完的命令一帧都不发。
 	t := &outputTailer{lastFlush: time.Now()}
-	t.emit = func(seq int64, tail string, total int64, truncated bool) {
+	// 事件出口是**异步**的（第 5 轮爬山第 2 步）：emit 一路走到宿主（bridge 写 stdout
+	// → 前端），可能阻塞；而它原本跑在**子进程的拷贝协程**里 ⇒ 宿主一卡，子进程的
+	// stdout 管道就堵 ⇒ 命令被拖慢（实测：回调每块睡 100ms ⇒ 命令 173ms → 2.14s）。
+	// 搬进独立协程后，拷贝协程只做「存最新一帧 + 敲铃」，恒为 O(1)、永不阻塞。
+	sink := newTailSink(func(seq int64, tail string, total int64, truncated bool) {
 		h(ctx, &events.ToolOutput{
 			RunId:      runID,
 			Id:         callID,
@@ -84,8 +90,21 @@ func newOutputTailer(ctx context.Context) *outputTailer {
 			Timestamp:  time.Now(),
 			EventType:  events.ToolOutputType,
 		})
-	}
+	})
+	t.sink = sink
+	t.emit = sink.push
 	return t
+}
+
+// close 收尾：排空最后一帧并等发射协程退出（命令结束时调用）。
+//
+// 预算（tailCloseBudget）：发射协程可能卡在宿主上（前端卡 ⇒ bridge 写 stdout 阻塞）
+// ⇒ 不能无限等。超预算就放弃等待（协程会在宿主恢复后自行退出，不泄漏）。
+func (t *outputTailer) close() {
+	if t == nil || t.sink == nil {
+		return
+	}
+	t.sink.close(tailCloseBudget)
 }
 
 // write 接在 sandbox.ExecSpec.OnOutput 上（p 仅在调用期间有效，这里只做拷贝）。
@@ -158,4 +177,119 @@ func spec0OnOutput(t *outputTailer) func([]byte) {
 		return nil
 	}
 	return t.write
+}
+
+// ---------------------------------------------------------------------------
+// tailSink：尾巴帧的异步投递口（第 5 轮爬山第 2 步）
+// ---------------------------------------------------------------------------
+
+// tailCloseBudget 收尾时等发射协程退出的预算。
+//
+// 为什么要有预算：发射协程可能卡在宿主上（前端卡 ⇒ bridge 写 stdout 阻塞）⇒
+// 无界等待会把「前端卡」变成「工具调用卡」。超预算就放弃等（协程在宿主恢复后
+// 自行退出 ⇒ 不泄漏）。
+const tailCloseBudget = 200 * time.Millisecond
+
+// tailSink 尾巴帧的异步投递口。
+//
+// **为什么要它**：尾巴帧的 emit 会一路走到宿主（bridge 写 stdout → 前端）⇒ 可能阻塞。
+// 而 emit 原本跑在**子进程的拷贝协程**里（sandbox 的 OnOutput 回调）⇒ 宿主一卡，
+// 子进程的 stdout 管道就堵 ⇒ **命令本身被拖慢**（实测：回调每块睡 100ms ⇒ 命令
+// 173ms → 2.14s，12×；而这条回调的终点就是 bridge 的一次 stdout 写）。
+//
+// 搬到这里之后：拷贝协程只做「把最新一帧放进槽位 + 敲一下铃」，**恒为 O(1)、
+// 永不阻塞**；真正发事件的是独立协程，宿主卡多久都只影响它自己。
+//
+// **为什么只留最新一帧**（而不是排队）：一帧携带的是**整个窗口**（不是增量）⇒
+// 新帧的内容**包含**旧帧的内容 ⇒ 覆盖旧帧不丢信息（最坏是少看几行，与尾巴
+// 「整段替换」的语义一致）。排队反而会让 UI 落后于真实输出。
+type tailSink struct {
+	mu      sync.Mutex
+	pending *tailFrame // 最新一帧（旧的被覆盖）
+	closed  bool
+
+	sig  chan struct{} // 有新帧 ⇒ 敲一下铃
+	quit chan struct{} // 收尾 ⇒ 停
+	done chan struct{} // 发射协程退出
+
+	emit func(seq int64, tail string, total int64, truncated bool)
+}
+
+// tailFrame 一帧尾巴（整窗替换语义）。
+type tailFrame struct {
+	seq       int64
+	tail      string
+	total     int64
+	truncated bool
+}
+
+// newTailSink 造投递口并起发射协程。
+func newTailSink(emit func(seq int64, tail string, total int64, truncated bool)) *tailSink {
+	s := &tailSink{
+		sig:  make(chan struct{}, 1),
+		quit: make(chan struct{}),
+		done: make(chan struct{}),
+		emit: emit,
+	}
+	go s.loop()
+	return s
+}
+
+// loop 发射协程：等铃 ⇒ 取最新一帧 ⇒ 发出去。
+func (s *tailSink) loop() {
+	defer close(s.done)
+	for {
+		select {
+		case <-s.sig:
+			s.drainAndEmit()
+		case <-s.quit:
+			// 收尾：**最后一帧不能丢**（命令的最后一段输出就在里面）。
+			s.drainAndEmit()
+			return
+		}
+	}
+}
+
+// drainAndEmit 取走最新一帧并发出去（没有待发帧就什么都不做）。
+func (s *tailSink) drainAndEmit() {
+	s.mu.Lock()
+	f := s.pending
+	s.pending = nil
+	s.mu.Unlock()
+	if f != nil {
+		s.emit(f.seq, f.tail, f.total, f.truncated)
+	}
+}
+
+// push 存下最新一帧并敲铃（**恒不阻塞**）。这是拷贝协程唯一会碰的路径。
+func (s *tailSink) push(seq int64, tail string, total int64, truncated bool) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return // 已收尾 ⇒ 不再收帧
+	}
+	s.pending = &tailFrame{seq: seq, tail: tail, total: total, truncated: truncated}
+	s.mu.Unlock()
+	select {
+	case s.sig <- struct{}{}:
+	default:
+		// 铃已经响着（发射协程还没醒）⇒ 不用再敲；它醒来时会取走**最新**那一帧。
+	}
+}
+
+// close 收尾：停发射协程，等它把最后一帧发出去（有预算）。
+func (s *tailSink) close(budget time.Duration) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.mu.Unlock()
+	close(s.quit)
+	select {
+	case <-s.done:
+	case <-time.After(budget):
+		// 发射协程卡在宿主上 ⇒ 放弃等待（它会在宿主恢复后自行退出）。
+	}
 }
