@@ -324,6 +324,64 @@ print("MK_OK")
 	}
 }
 
+// TestXlsxPreviewFormulaCells：公式单元格的两条路径（第 4 轮爬山：单书/双书）。
+//
+// ① 无缓存值（openpyxl 写出的文件就是这样）⇒ 显示**公式文本**并如实标注；
+// ② 有缓存值（Excel/WPS 存过的文件）⇒ 显示**值**，且不出现公式那条说明。
+//
+// ② 走的是「单书快路径」（整本工作簿没有未计算公式 ⇒ 不加载第二本书、只扫一遍表），
+// ① 走双书路径 —— 两条都断言，是防止「优化把公式显示弄没了」的那张网。
+func TestXlsxPreviewFormulaCells(t *testing.T) {
+	pv, py := realXlsxPreviewer(t)
+	ws := xlsxFixture(t, py, `
+import openpyxl
+wb = openpyxl.Workbook(); s = wb.active; s.title = "公式"
+s.append(["名称", "金额"])
+s.append(["甲", 10])
+s.append(["乙", "=SUM(B2:B2)"])
+wb.save("f.xlsx")
+`)
+	raw := convertXlsx(t, pv, ws, "f.xlsx")
+	if !strings.Contains(raw, "=SUM(B2:B2)") {
+		t.Fatalf("无缓存值的公式应显示为公式文本")
+	}
+	if !strings.Contains(raw, "个公式单元格没有缓存值") {
+		t.Fatalf("应如实标注公式单元格没有缓存值")
+	}
+
+	// ② 给公式补上缓存值（模拟 Excel/WPS 另存过的文件）⇒ 应显示值、不显示公式。
+	ws2 := xlsxFixture(t, py, `
+import re, zipfile
+import openpyxl
+wb = openpyxl.Workbook(); s = wb.active; s.title = "公式"
+s.append(["名称", "金额"])
+s.append(["甲", 10])
+s.append(["乙", "=SUM(B2:B2)"])
+wb.save("f2.xlsx")
+items = {}
+with zipfile.ZipFile("f2.xlsx") as z:
+    for i in z.infolist():
+        items[i.filename] = z.read(i.filename)
+sheet = "xl/worksheets/sheet1.xml"
+xml = items[sheet].decode()
+xml = re.sub(r"(<f>[^<]*</f>)<v></v>", r"\1<v>42</v>", xml)
+items[sheet] = xml.encode()
+with zipfile.ZipFile("f2.xlsx", "w", zipfile.ZIP_DEFLATED) as z:
+    for name, data in items.items():
+        z.writestr(name, data)
+`)
+	raw2 := convertXlsx(t, pv, ws2, "f2.xlsx")
+	if strings.Contains(raw2, "=SUM(B2:B2)") {
+		t.Fatalf("有缓存值的公式应显示值，不该显示公式文本")
+	}
+	if strings.Contains(raw2, "个公式单元格没有缓存值") {
+		t.Fatalf("有缓存值时不该出现「公式没有缓存值」那条说明")
+	}
+	if !strings.Contains(raw2, "42") {
+		t.Fatalf("有缓存值的公式单元格应显示缓存值 42")
+	}
+}
+
 // TestXlsxPreviewTruncationToldAtTop：大表被截断时，**页面顶部**要如实写「已显示 N/M 行」，
 // 逐 sheet 的「还有 N 行未显示」也不能丢（那是明细）。
 func TestXlsxPreviewTruncationToldAtTop(t *testing.T) {
