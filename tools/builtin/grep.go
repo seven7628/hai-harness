@@ -9,9 +9,7 @@ import (
 	"fmt"
 	"github.com/seven7628/hai-harness/tools"
 	"io"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -93,41 +91,6 @@ func (t *grepTool) ValidParams(_ context.Context, _, arguments string) error {
 	return nil
 }
 
-// grepMatchWindow 命中窗口：把「全局命中序号」映射到「本页要返回的命中」。
-//
-// 分页语义（对齐 Claude Code 的 head_limit + offset、OpenCode/Roo 的条数上限）：
-//   - 全局第 k 个命中（1 基）落在 [offset+1, offset+max] ⇒ 收进本页；
-//   - k ≤ offset ⇒ 跳过（但**继续扫**，后面可能还有）；
-//   - k > offset+max ⇒ 停止扫描：本页到此为止（后面还有，表头会报出来）。
-//
-// 为什么需要分页：改造前有 200 条硬上限且**没有翻页口**—— 模型看到
-// 「more than 200 matches」后只能改 pattern 再搜一遍，或者放弃。
-// 有了 offset，模型可以把 offset 传回来拿下一页。
-type grepMatchWindow struct {
-	offset int
-	max    int
-	total  int // 已见命中总数（含被 offset 跳过的）
-	taken  int // 本页收下的命中数
-	files  int // 有命中的文件数（含命中全被 offset 跳过的文件）
-}
-
-// end 本页窗口的上界（全局命中序号，闭区间）。
-func (w *grepMatchWindow) end() int { return w.offset + w.max }
-
-// accept 判断第 k 个命中（1 基）是否收进本页；收下返回 true。
-// 越过窗口上界时返回 ok=false（调用方应停止扫描）。
-func (w *grepMatchWindow) accept(k int) (take bool, ok bool) {
-	switch {
-	case k > w.end():
-		return false, false // 越过上界：本页结束
-	case k > w.offset:
-		w.taken++
-		return true, true
-	default:
-		return false, true // 被 offset 跳过：继续扫
-	}
-}
-
 // ToolTimeout 实现 tools.ToolTimeoutProvider：声明 grep 的工具级时限。
 //
 // 引擎默认的 5 分钟兜底对 grep **不够用**：改造前 grep 不看 ctx，那 5 分钟
@@ -155,87 +118,34 @@ func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error
 		return "", err
 	}
 
-	var results []grepFileResult
-	win := &grepMatchWindow{offset: a.Offset, max: t.maxResults}
-	// 行读取器：整个搜索共用一个（缓冲跨文件复用 ⇒ 每文件不再分配 64 KB）。
-	sc := newGrepScanner()
 	// 忽略规则：内置黑名单 + 逐目录增量读 .gitignore。被忽略的目录整棵子树
 	// 零 I/O（SkipDir ⇒ 连 read_dir 都不做）。显式给出的 path 不受规则约束
 	// （与 rg 一致：命令行路径覆盖 ignore 规则）。
 	ign := newIgnoreMatcher(t.root, !a.NoIgnore)
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr // 被取消/超时：立刻停止遍历（不再读任何文件）
-		}
-		if err != nil {
-			return nil // 单个文件不可读（权限等）：跳过，不中断搜索
-		}
-		if d.IsDir() {
-			if path != root && ign.ignoredDir(path) {
-				return fs.SkipDir // 整棵子树剪掉：不遍历、不打开
-			}
-			return nil
-		}
-		if path != root && ign.ignoredFile(path) {
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(t.root, path)
-		if err != nil {
-			rel = path
-		}
-		rel = filepath.ToSlash(rel)
-		// include 过滤：glob 匹配文件名（*.go）或完整相对路径（**/test/*.go）任一命中即可
-		if a.Include != "" {
-			baseMatch, _ := matchGlob(a.Include, filepath.Base(rel))
-			pathMatch, _ := matchGlob(a.Include, rel)
-			if !baseMatch && !pathMatch {
-				return nil
-			}
-		}
-		fr, truncated, err := grepFile(ctx, re, sc, path, rel, a.Context, win)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err // 取消/超时：中断整个搜索（不是「跳过该文件」）
-			}
-			return nil // 二进制/读失败：跳过该文件
-		}
-		if len(fr.matches) > 0 {
-			results = append(results, fr)
-		}
-		if truncated {
-			return fs.SkipAll // 本页窗口已满：立即停止遍历
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, fs.SkipAll) {
-		if ctx.Err() != nil {
-			return "", searchCancelledError(ctx, "grep")
-		}
+
+	col := &grepCollector{offset: a.Offset, max: t.maxResults}
+	if err := t.search(ctx, re, root, a, ign, col); err != nil {
 		return "", err
 	}
 
 	var b strings.Builder
-	truncated := win.total > win.end()
 	switch {
-	case win.taken == 0 && win.offset > 0:
+	case col.taken == 0 && col.offset > 0:
 		// offset 越过总数：明确告诉模型「没有更多了」，别再空转
 		fmt.Fprintf(&b, "[grep: no matches at offset %d (%d match(es) in %d file(s) in total); lower the offset or narrow the pattern]\n",
-			win.offset, win.total, win.files)
-	case truncated && win.offset > 0:
+			col.offset, col.total, col.files)
+	case col.truncated && col.offset > 0:
 		fmt.Fprintf(&b, "[grep: more than %d matches, showing matches %d-%d (offset %d); use offset=%d to see the next page, or narrow the pattern]\n",
-			win.end(), win.offset+1, win.offset+win.taken, win.offset, win.offset+win.taken)
-	case truncated:
-		fmt.Fprintf(&b, "[grep: more than %d matches, showing first %d; narrow the pattern]\n", win.max, win.max)
-	case win.offset > 0:
+			col.end(), col.offset+1, col.offset+col.taken, col.offset, col.offset+col.taken)
+	case col.truncated:
+		fmt.Fprintf(&b, "[grep: more than %d matches, showing first %d; narrow the pattern]\n", col.max, col.max)
+	case col.offset > 0:
 		fmt.Fprintf(&b, "[grep: matches %d-%d (offset %d) in %d file(s)]\n",
-			win.offset+1, win.offset+win.taken, win.offset, len(results))
+			col.offset+1, col.offset+col.taken, col.offset, len(col.results))
 	default:
-		fmt.Fprintf(&b, "[grep: %d match(es) in %d file(s)]\n", win.total, len(results))
+		fmt.Fprintf(&b, "[grep: %d match(es) in %d file(s)]\n", col.total, len(col.results))
 	}
-	for _, fr := range results {
+	for _, fr := range col.results {
 		renderGrepResult(fr, a.Context, &b)
 	}
 	return b.String(), nil
@@ -331,6 +241,7 @@ func (s *grepScanner) nextLine() ([]byte, bool) {
 			s.appendLong(chunk)
 			content := s.long[:s.longLen]
 			s.longLen = 0
+			// 超长行可能被**截断**在字符中间 ⇒ 去掉尾部残缺的 UTF-8 序列。
 			return trimEOL(content), true
 		}
 		if err == io.EOF {
@@ -377,21 +288,19 @@ func trimEOL(b []byte) []byte {
 	return b
 }
 
-// grepFile 扫描单个文本文件：收集命中行号与需要输出的行内容，返回是否提前截断
-// （命中预算耗尽）。二进制文件（头 8KB 含 \x00）返回 error（调用方跳过）。
+// grepCountFile 扫描单个文本文件的**第一遍**：数命中、记命中行号，**不留行内容**。
 //
-// 两遍扫描：
+// 返回：
+//   - lines：命中的行号（升序，最多 budget 个）；
+//   - count：命中总数（达到 budget 时停读，capped=true 表示后面还有）；
+//   - total：已读到的行数；
+//   - capped：命中数达到 budget ⇒ 已停止读该文件。
 //
-//	① 流式扫一遍，**只记命中行号**（零留存）；
-//	② 仅当有命中时才再读一遍，把「命中行 ± context」的并集取出来。
-//
-// 零命中文件因此不留任何行内容（改造前会留整个文件的所有行）。
-func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel string, ctxLines int, win *grepMatchWindow) (grepFileResult, bool, error) {
-	var fr grepFileResult
-	fr.rel = rel
+// 二进制文件（头 8KB 含 \x00）返回 error（调用方跳过）。
+func grepCountFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel string, budget int) (lines []int, count, total int, capped bool, err error) {
 	f, err := os.Open(abs)
 	if err != nil {
-		return fr, false, err
+		return nil, 0, 0, false, err
 	}
 	defer f.Close()
 
@@ -401,61 +310,57 @@ func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel 
 	// 头缓冲跨文件复用（sc.head）⇒ 每文件不再分配 8 KB。
 	n, _ := f.ReadAt(sc.head, 0)
 	if bytesContainsZero(sc.head[:n]) {
-		return fr, false, errors.New("binary file") // 跳过
+		return nil, 0, 0, false, errors.New("binary file") // 跳过
 	}
 	sc.reset(f)
 
-	// ① 第一遍：只记命中行号。
-	var matches []int
-	ln := 0
-	truncated := false
-	sawMatch := false
 	for {
 		line, ok := sc.nextLine()
 		if !ok {
 			break
 		}
-		ln++
+		total++
 		// 取消/超时检查（按行数抽样：ctx.Err() 不是免费的 —— 引擎的
 		// liftableTimeout.Err() 要加锁）。单个超大文件也得能被中断。
-		if ln%searchCtxCheckEvery == 0 {
+		if total%searchCtxCheckEvery == 0 {
 			if cerr := ctx.Err(); cerr != nil {
-				return fr, false, cerr
+				return lines, count, total, capped, cerr
 			}
 		}
 		if !re.Match(line) {
 			continue
 		}
-		win.total++ // 全局命中序号（1 基）
-		sawMatch = true
-		take, ok := win.accept(win.total)
-		if !ok {
-			truncated = true // 越过本页窗口上界：本文件截断，调用方停止遍历
+		count++
+		if count <= budget {
+			lines = append(lines, total)
+		}
+		if count >= budget {
+			// 命中数够了：不再读这个文件（后面的命中对窗口没影响，
+			// 但足以判定「还有更多」）。
+			capped = true
 			break
 		}
-		if take {
-			matches = append(matches, ln)
-		}
 	}
-	if sawMatch {
-		win.files++ // 有命中的文件数（含命中全被 offset 跳过的）
-	}
-	fr.matches = matches
-	fr.total = ln
-	if len(matches) == 0 {
-		return fr, truncated, nil // 零命中：不留任何内容
-	}
+	return lines, count, total, capped, nil
+}
 
-	// ② 第二遍：只取需要输出的行（命中行 ± context 的并集）。
-	//    回到文件头重来一遍（页缓存命中，代价≈一次 seek + 一次读）。
-	if _, err := f.Seek(0, 0); err != nil {
-		return fr, false, err
+// grepCollectFile 扫描单个文本文件的**第二遍**：取「命中行 ± context」的并集内容。
+//
+// 已知命中行号（matchLines，第一遍算出来的），只需再读一遍文件把要输出的行取出来。
+// 改造前也是这么做的（两遍扫描），区别是第一遍现在跑在并行 worker 里。
+func grepCollectFile(ctx context.Context, sc *grepScanner, abs, rel string, matchLines []int, ctxLines, totalLines int) (grepFileResult, error) {
+	fr := grepFileResult{rel: rel, total: totalLines, matches: matchLines}
+	f, err := os.Open(abs)
+	if err != nil {
+		return fr, err
 	}
+	defer f.Close()
 	sc.reset(f)
-	groups := computeGrepGroups(matches, ctxLines, ln)
-	fr.lines = make(map[int]string, len(matches)*(2*ctxLines+1))
+
+	groups := computeGrepGroups(matchLines, ctxLines, totalLines)
+	fr.lines = make(map[int]string, len(matchLines)*(2*ctxLines+1))
 	gi := 0
-	ln = 0
+	ln := 0
 	for {
 		line, ok := sc.nextLine()
 		if !ok {
@@ -464,7 +369,7 @@ func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel 
 		ln++
 		if ln%searchCtxCheckEvery == 0 {
 			if cerr := ctx.Err(); cerr != nil {
-				return fr, false, cerr
+				return fr, cerr
 			}
 		}
 		for gi < len(groups) && ln > groups[gi].end {
@@ -478,7 +383,7 @@ func grepFile(ctx context.Context, re *regexp.Regexp, sc *grepScanner, abs, rel 
 		}
 		fr.lines[ln] = truncateGrepLine(string(line))
 	}
-	return fr, truncated, nil
+	return fr, nil
 }
 
 // truncateGrepLine 把行内容截到输出上限（防长行撑爆结果）。

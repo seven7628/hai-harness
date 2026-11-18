@@ -179,13 +179,14 @@ func TestGrepOffsetDoesNotChangeMatchSemantics(t *testing.T) {
 	dir := buildPagedWorkspace(t, 250)
 	re := regexp.MustCompile("match")
 
-	win := &grepMatchWindow{max: 1000}
+	col := &grepCollector{max: 1000}
 	sc := newGrepScanner()
-	if _, _, err := grepFile(t.Context(), re, sc, filepath.Join(dir, "many.txt"), "many.txt", 0, win); err != nil {
+	lines, count, total, capped, err := grepCountFile(t.Context(), re, sc, filepath.Join(dir, "many.txt"), "many.txt", 1000)
+	if err != nil {
 		t.Fatal(err)
 	}
-	total := win.total
-	if total != 250 {
-		t.Errorf("命中总数应为 250，实际 %d", total)
+	col.addFile(grepCountResult{rel: "many.txt", lines: lines, count: count, total: total, capped: capped})
+	if col.total != 250 {
+		t.Errorf("命中总数应为 250，实际 %d", col.total)
 	}
 }
