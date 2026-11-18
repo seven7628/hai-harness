@@ -293,6 +293,9 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 		OmittedBytes:     &omitted,
 		TotalOutputBytes: &totalOut,
 	})
+	// 末帧补发：命令结束 ⇒ 把最后 ≤250ms 的输出补出去（节流窗口内的那段没人看得到，
+	// 而错误信息通常就在结尾）。短命令不补（防抖，见 flushFinal 的注释）。
+	tailer.flushFinal()
 	wall := time.Since(started)
 	// 上报结构化结局（旁路：Call 必须返回 nil error，否则引擎会丢弃 out，见非目标 1）
 	if sink := tools.ExecSinkFrom(ctx); sink != nil {

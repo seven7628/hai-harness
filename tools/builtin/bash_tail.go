@@ -46,7 +46,9 @@ type outputTailer struct {
 	total     int64  // 累计字节数（真值，不受窗口裁剪影响）
 	seq       int64  // 已发帧数
 	lastFlush time.Time
-	emit      func(seq int64, tail string, total int64, truncated bool)
+	// flushedTotal 上次发帧时的累计字节数（用来判断「自上次发帧以来有没有新输出」）。
+	flushedTotal int64
+	emit         func(seq int64, tail string, total int64, truncated bool)
 }
 
 // newOutputTailer 从工具 ctx 里取事件出口，装一个尾巴发射器；没有出口时返回 nil。
@@ -114,7 +116,37 @@ func (t *outputTailer) write(p []byte) {
 func (t *outputTailer) flushLocked() {
 	t.seq++
 	t.lastFlush = time.Now()
+	t.flushedTotal = t.total
 	t.emit(t.seq, string(t.window), t.total, t.total > int64(len(t.window)))
+}
+
+// flushFinal 收尾补帧：命令结束时把**最后一段输出**补发出去。
+//
+// 为什么需要（第 5 轮爬山第 1 步，实测）：节流窗口 250ms ⇒ 命令**最后 250ms 内**
+// 的输出永远发不出去（实测 `echo FIRST; sleep 0.1; echo LAST` ⇒ 一帧都没有）。
+// 而**错误信息通常在结尾**（"error: cannot find package X"）⇒ 用户在界面上看到的是
+// 「命令还在跑、最后一条日志是好的」，实际上一条命令早就失败了。
+//
+// 为什么短命令不补：**防抖**是有意的（0.1s 的命令不该「出现又消失」地闪一帧，
+// 见 newOutputTailer 的注释）。所以判据是「**已经发过帧**」：
+//   - 一帧都没发过 ⇒ 短命令 ⇒ 不补（保持不闪）；
+//   - 发过帧 ⇒ 长命令 ⇒ 补结尾（窗口里的内容比上一帧更新才有意义）。
+//
+// 为什么还要看 flushedTotal：命令在最后一次发帧之后**没有新输出**时，补一帧是
+// 白白发一个内容完全相同的事件（前端会替换成同样的窗口 = 无意义的抖动）。
+func (t *outputTailer) flushFinal() {
+	if t == nil || t.emit == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.seq == 0 {
+		return // 一帧都没发过 ⇒ 短命令 ⇒ 不补（防抖优先）
+	}
+	if t.total == t.flushedTotal {
+		return // 自上次发帧以来没有新输出 ⇒ 补了也是重复内容
+	}
+	t.flushLocked()
 }
 
 // spec0OnOutput 把 tailer 转成 ExecSpec.OnOutput；nil tailer → nil（执行层走历史路径）。
