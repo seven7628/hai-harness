@@ -15,6 +15,13 @@ import (
 
 const defaultGlobMaxResults = 200
 
+// maxGlobMaxResults max_results 的**硬上限**（模型传再大也按这个算）。
+//
+// 为什么（第 5 轮爬山第 6 步）：max_results 是模型可控的，而 schema 只声明了
+// minimum 没声明 maximum ⇒ 一次调用就能把整个工作区的文件名收进内存（内存放大
+// 的口子）。2000 条 ≈ 10 页默认值，够模型用；想看更多就翻页（offset）。
+const maxGlobMaxResults = 2000
+
 // globTool 按文件名/路径模式（glob）查找工作区内的文件。
 // 对标 Claude Code Glob / Codex glob：模型「按名找文件」的高频原语，
 // 与 grep（按内容搜）互补 —— 定位用 glob，内容匹配用 grep。
@@ -86,6 +93,13 @@ func (t *globTool) Call(ctx context.Context, _, arguments string) (string, error
 	max := t.maxResults
 	if a.MaxResults > 0 {
 		max = a.MaxResults
+	}
+	// 硬上限（第 5 轮爬山第 6 步）：max_results 是**模型可控**的，而 schema 只写了
+	// minimum 没写 maximum ⇒ 模型传 10000000 时，工具会把整个工作区的文件名收进
+	// 内存（一次调用就是一次内存放大）。grep 用的是固定 200（不可调）⇒ 这里给一个
+	// 够用但有界的上限：想看更多就翻页（offset），别一次拉一大把。
+	if max > maxGlobMaxResults {
+		max = maxGlobMaxResults
 	}
 	start := a.Path
 	if start == "" {
