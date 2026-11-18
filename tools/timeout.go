@@ -20,6 +20,14 @@ func IsUnlimited(ctx context.Context) bool {
 	return v
 }
 
+// activeTimeoutBoxes 在飞的时限盒计数（诊断 + 回归网）。
+//
+// 为什么要这个计数：时限盒 = 1 个 time.AfterFunc（timer）+ 1 个 watcher goroutine。
+// 任务**正常结束**时会 stop（回收两者）；但「取消早退」与「判卡死放弃」这两条路径
+// 原来不回收 ⇒ 每次漏一个还武装着的 timer（到点才自己散掉）。
+// 有了这个计数，「取消后有没有回收干净」就是可断言的，而不是靠读代码。
+var activeTimeoutBoxes atomic.Int64
+
 // liftableTimeout 可摘离时限上下文：给单次工具执行一个可选时限，promote（转后台）可 Lift 解除。
 //   - 未 Lift：到点或父取消 → Done 关闭（Err = deadline/父原因），工具照常受时限；
 //   - Lift 后：时限解除——Deadline() 无值、时限计时器停止、Done 不再因时限关闭、
@@ -54,6 +62,7 @@ func newLiftableTimeout(parent context.Context, timeout time.Duration) *liftable
 		stopCh:   make(chan struct{}),
 		done:     make(chan struct{}),
 	}
+	activeTimeoutBoxes.Add(1)
 	lb.timer = time.AfterFunc(timeout, func() {
 		if lb.lifted.Load() {
 			return // 已摘离（promote）：不再限时
@@ -90,6 +99,9 @@ func (lb *liftableTimeout) lift() {
 }
 
 // stop 任务正常结束后回收（停表 + 退 watcher）；幂等。
+//
+// 幂等里的「只回收一次」很关键：回收可能从两条路发生（goroutine 的 defer +
+// 引擎判卡死时的 abandon）⇒ 计数只能减一次。
 func (lb *liftableTimeout) stop() {
 	lb.timerOnce.Do(func() {
 		if lb.timer != nil {
@@ -98,6 +110,7 @@ func (lb *liftableTimeout) stop() {
 	})
 	lb.stopOnce.Do(func() {
 		close(lb.stopCh)
+		activeTimeoutBoxes.Add(-1)
 	})
 }
 

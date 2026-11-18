@@ -21,9 +21,6 @@ import (
 const (
 	defaultMaxResponseSize = 20000
 	defaultToolTimeout     = 5 * time.Minute
-	// toolStuckTimeout 取消后等待工具退出的硬上限：工具忽略 ctx 时不再无限等待
-	//（V2 P1-RUNTIME-03：防 Session Shutdown / 进程退出被第三方工具拖住）。
-	toolStuckTimeout = 5 * time.Second
 
 	// defaultMaxImageBytes 单张工具结果图片的 data URL 上限（3 MiB ≈ 2.2MB 原始字节）。
 	// 取值依据：视觉模型的有效输入分辨率有限（长边 ~1568px 后收益骤减），
@@ -33,6 +30,13 @@ const (
 	// defaultMaxResultImages 单次工具结果携带图片数量上限（防一屏截图/整目录读图刷爆上下文）。
 	defaultMaxResultImages = 4
 )
+
+// toolStuckTimeout 取消后等待工具退出的硬上限：工具忽略 ctx 时不再无限等待
+//（V2 P1-RUNTIME-03：防 Session Shutdown / 进程退出被第三方工具拖住）。
+//
+// **是 var 不是 const**：回归网要跑「判卡死」这条路径（见 TestStuckToolReclaimsTimeoutBox），
+// 按真实值 5 s 跑会把测试套件拖慢 5 秒；测试里临时改小、跑完还原。
+var toolStuckTimeout = 5 * time.Second
 
 // Engine 是 ToolEngine 的默认实现：注册、并发受限的顺序/并行执行、事件上报。
 type Engine struct {
@@ -768,6 +772,13 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 			batch.mu.Unlock()
 		}
 		go func(i int, t *toolTask) {
+			// 收尾统一走 defer：**取消早退路径**（下面两处「等串行前驱 / 等信号量槽位」
+			// 时被取消）原来直接 return，漏掉停表与退 watcher ⇒ 每次泄漏 1 个 timer
+			// + 1 个 goroutine（rctx 的 watcher 最贵：长会话里能堆到几十万个，
+			// 见 task.go release() 注释里的实测）。
+			// 声明顺序 = 执行顺序的逆序（defer 是 LIFO）：先停表，再退 watcher。
+			defer t.release()
+			defer t.stopTimeout()
 			// 串行批：等上一个串行任务完成（保持 Sequence 语义）；并行工具跳过。
 			// 等待中取消 → 取消结果（防等待循环 deadlock）。
 			if isSerial[i] && serialPrev[i] >= 0 {
@@ -793,8 +804,6 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 				}
 			}
 			t.result = e.execute(t.taskCtx, t.call, handler, decisions, t.taskID)
-			t.stopTimeout() // 收尾：停时限盒（防 timer/watcher 泄漏）
-			t.release()     // 收尾：释放 rctx 的 watcher goroutine（防每次工具调用漏一个 goroutine）
 			close(t.done)
 			// promote 后完成：结果自动回传（close 之后保证结果已写；未摘离则不推、走收集）。
 			// deliverOnce 与等待循环的 done-check 补发竞态安全（只交付一次）。
@@ -932,6 +941,20 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 			// 「取消后等待工具退出的硬上限」= 5 s —— 读代码的人会以为 5 s，实际 40 s）。
 			// 现在：所有任务共用一个 5 s 预算 ⇒ 最坏 5 s（与注释一致）。
 			stuckDeadline := time.Now().Add(toolStuckTimeout)
+			// abandon 判卡死后回收该任务的时限盒与 rctx watcher。
+			//
+			// 为什么：判卡死 = 这个任务被**放弃**（结果丢弃、工具 goroutine 仍挂着），
+			// 而它的时限盒（timer + watcher）与 rctx 的 watcher goroutine 都会一直
+			// 留着 ⇒ 每卡死一次漏一份。只对**未摘离**的任务做：摘离的是后台任务，
+			// 它的 watcher 负责把「父取消」继续级联进去（停了就断链）。
+			// 幂等：工具稍后返回时 goroutine 里的 defer 会再调一次（无害）。
+			abandon := func(t *toolTask) {
+				if t == nil {
+					return
+				}
+				t.stopTimeout()
+				t.release()
+			}
 			for i, t := range tasks {
 				if t == nil {
 					continue
@@ -944,6 +967,7 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 				if remaining <= 0 {
 					// 共享预算已用尽 ⇒ 后面的任务直接判卡住（不再各自等一轮）
 					results[i] = toolStuckResult(t.call.Id)
+					abandon(t)
 					continue
 				}
 				select {
@@ -952,6 +976,7 @@ func (e *Engine) runBatch(ctx context.Context, calls []core.ToolCall, handler ev
 				case <-time.After(remaining):
 					results[i] = toolStuckResult(t.call.Id)
 					// 超时后不再等（goroutine 仍会结束，结果丢弃；进程不被拖住）
+					abandon(t)
 				}
 			}
 			if batch != nil {
