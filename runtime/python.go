@@ -161,6 +161,7 @@ type Python struct {
 type Status struct {
 	Ready      bool   // venv 可执行 + 就绪标记与当前依赖清单一致
 	VenvPython string // 探测到的 venv 解释器（未就绪时可能为空）
+	Base       string // 基座解释器（从标记带回；省掉调用方再读一遍标记）
 	Reason     string // 未就绪原因（供日志/诊断，就绪时为空）
 	// Stale 运行时**已存在**，但就绪标记记的依赖清单与当前源码不一致（需重装才能用）。
 	//
@@ -171,6 +172,10 @@ type Status struct {
 	// （2026-09 实测踩过两次：16:32 与 18:29，都是旧构建的进程调 Ensure 把共享运行时写回旧指纹）。
 	// 有了这个字段，测试就能把「静默跳过」升级为「响亮失败」，不再假绿。
 	Stale bool
+	// RefreshMarker 真为 true：就绪标记里的 **venv 指纹/自检时间**已过期
+	//（venv 被动过、或距上次自检超过 probeInterval）⇒ 调用方（Ensure）应把
+	// 新指纹与自检时间写回标记，让下一次调用直接走零进程启动的快路径。
+	RefreshMarker bool
 }
 
 // New 构造运行时（仅解析配置，不做任何 I/O —— 建 venv 是 Ensure 的职责）。
@@ -246,11 +251,18 @@ func (r *Runtime) Ensure(ctx context.Context) (Python, error) {
 
 	// ① 就绪快路径
 	if st, err := r.Status(ctx); err == nil && st.Ready {
+		// 标记需要刷新（venv 被动过 / 自检时间过旧）⇒ 顺手续一次自检并把新指纹
+		// 写回标记，让**下一次**调用直接走零进程启动的快路径。
+		if st.RefreshMarker {
+			r.refreshMarker(root, st.VenvPython)
+		}
 		return Python{
 			Root:       root,
 			VenvDir:    filepath.Join(root, "venv"),
 			VenvPython: st.VenvPython,
-			Base:       baseFromMarker(root),
+			// Base 走 Status 带回的（标记已读过 ⇒ 不必再读一遍磁盘：
+			// 读标记是这条快路径上最贵的一步，实测 ~0.6 ms）。
+			Base: st.Base,
 		}, nil
 	}
 
@@ -295,17 +307,40 @@ func (r *Runtime) Ensure(ctx context.Context) (Python, error) {
 
 	// ⑦ 原子写就绪标记
 	m := readyInfo{
-		Version:      1,
+		Version:      readyMarkerVersion,
 		Requirements: fingerprint(requirementsLock),
 		Base:         base,
 		VenvPython:   venvPython,
 		CreatedAt:    time.Now().UTC().Format(time.RFC3339),
+		VenvStamp:    venvStamp(venvPython, base, venvCfgPath(venvDir)),
+		ProbedAt:     time.Now().Unix(),
 	}
 	if err := writeMarker(filepath.Join(root, readyMarker), m); err != nil {
 		return Python{}, fmt.Errorf("写就绪标记失败: %w", err)
 	}
 
 	return Python{Root: root, VenvDir: venvDir, VenvPython: venvPython, Base: base, Created: true}, nil
+}
+
+// refreshMarker 自检通过后刷新就绪标记里的 venv 指纹与自检时间。
+//
+// 只在「标记需要刷新」时调用（venv 被动过、或距上次自检超过 probeInterval），
+// 所以频率极低（默认 10 分钟一次）⇒ 写盘成本可以忽略。
+// 写失败**不致命**：标记只是快路径的凭据，坏了最多退回「每次都自检」的旧行为。
+func (r *Runtime) refreshMarker(root, venvPython string) {
+	path := filepath.Join(root, readyMarker)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var m readyInfo
+	if json.Unmarshal(raw, &m) != nil {
+		return
+	}
+	m.Version = readyMarkerVersion
+	m.VenvStamp = venvStamp(venvPython, m.Base, venvCfgPath(filepath.Join(root, "venv")))
+	m.ProbedAt = time.Now().Unix()
+	_ = writeMarker(path, m)
 }
 
 // Status 探查运行时是否就绪（不产生副作用、不装依赖）。
@@ -330,15 +365,29 @@ func (r *Runtime) Status(ctx context.Context) (Status, error) {
 		return Status{Reason: "就绪标记损坏，需重建"}, nil
 	}
 	if m.Requirements != fingerprint(requirementsLock) {
-		return Status{Reason: "依赖清单已变更，需重新安装", Stale: true}, nil
+		return Status{Reason: "依赖清单已变更，需重新安装", Stale: true, Base: m.Base}, nil
 	}
 	if m.VenvPython == "" || !isExecutable(m.VenvPython) {
-		return Status{VenvPython: m.VenvPython, Reason: "venv 解释器缺失或不可执行"}, nil
+		return Status{VenvPython: m.VenvPython, Base: m.Base, Reason: "venv 解释器缺失或不可执行"}, nil
 	}
-	if _, err := r.run(ctx, m.VenvPython, "-c", "import sys"); err != nil {
-		return Status{VenvPython: m.VenvPython, Reason: "venv 解释器无法运行"}, nil
+	// ③ 自检（`import sys`）是**一次进程 spawn**（实测 ~20 ms）。而 Ensure 在**每次**
+	//    工具调用里都会走一遍 Status ⇒ 每次白付一次进程启动（run_python、三个预览器
+	//    都走这条路径）。现在用 venv 指纹（几次 stat，~20 µs）替代：
+	//    指纹一致 ⇒ 解释器与依赖自上次验证以来没被动过 ⇒ 不必再起进程；
+	//    不一致（venv 被装过包/换过解释器）或标记是老格式（没指纹）才自检。
+	//    周期性自检（probeInterval）兜住「二进制没动、但它依赖的 dylib 被删了」
+	//    这种指纹看不见的坏。
+	stamp := venvStamp(m.VenvPython, m.Base, venvCfgPath(filepath.Join(root, "venv")))
+	fresh := m.VenvStamp != "" && m.VenvStamp == stamp &&
+		m.ProbedAt > 0 && time.Since(time.Unix(m.ProbedAt, 0)) < probeInterval
+	if !fresh {
+		if _, err := r.run(ctx, m.VenvPython, "-c", "import sys"); err != nil {
+			return Status{VenvPython: m.VenvPython, Base: m.Base, Reason: "venv 解释器无法运行"}, nil
+		}
+		// 自检过了，但标记里的指纹/时间需要刷新（Ensure 会顺手写回）。
+		return Status{Ready: true, VenvPython: m.VenvPython, Base: m.Base, RefreshMarker: true}, nil
 	}
-	return Status{Ready: true, VenvPython: m.VenvPython}, nil
+	return Status{Ready: true, VenvPython: m.VenvPython, Base: m.Base}, nil
 }
 
 // HasModule 探测某模块在该运行时中能否 import（后续技能据此判断 pandas 之类
@@ -531,7 +580,25 @@ type readyInfo struct {
 	Base         string `json:"base"`         // 基座解释器（排查用）
 	VenvPython   string `json:"venv_python"`  // venv 解释器
 	CreatedAt    string `json:"created_at"`
+	// VenvStamp venv 的轻量指纹（见 venvStamp）：解释器/基座/pyvenv.cfg/site-packages
+	// 四处 stat 的摘要。指纹一致 ⇒ 自上次验证以来 venv 没被动过 ⇒ 免掉一次
+	// 进程启动的自检。**老标记没有这个字段**（空）⇒ 视作「需要自检」（自检一次
+	// 后由 Ensure 刷新标记，行为与改造前一致，只是第一次多花一次 spawn）。
+	VenvStamp string `json:"venv_stamp,omitempty"`
+	// ProbedAt 上次自检通过的时刻（unix 秒）：超过 probeInterval 就再自检一次。
+	ProbedAt int64 `json:"probed_at,omitempty"`
 }
+
+// readyMarkerVersion 就绪标记格式版本。v1 = 只有依赖指纹（每次 Status 都要起进程
+// 自检）；v2 = 增 venv 指纹与自检时间（Status 可走零进程启动的快路径）。
+const readyMarkerVersion = 2
+
+// probeInterval 周期性自检的间隔：超过这么久就再跑一次 `import sys`。
+//
+// 为什么要有周期性：venv 指纹覆盖的是「文件变没变」，覆盖不到「二进制没动、但它
+// 依赖的 dylib 被删了」这种坏（罕见，但要能自愈）。10 分钟一次 = 每小时 6 次
+// 进程启动（摊薄到每次工具调用 < 0.01 ms），代价可忽略。
+const probeInterval = 10 * time.Minute
 
 // writeMarker 原子写就绪标记（temp + rename）：并发读者永远看到完整 JSON，
 // 也不会出现「写到一半被读到 → 标记损坏 → 判定未就绪 → 重复安装」。
@@ -589,6 +656,61 @@ func fingerprint(s string) string {
 func isExecutable(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+}
+
+// venvCfgPath venv 的 pyvenv.cfg 路径（重建 venv 会改它 ⇒ 它是「venv 换过」的信号）。
+func venvCfgPath(venvDir string) string {
+	return filepath.Join(venvDir, "pyvenv.cfg")
+}
+
+// venvStamp venv 的**轻量指纹**：若干个 stat 的摘要（sha256 前 16 字节 hex）。
+//
+// 为什么需要它：Status 的自检（`python -c "import sys"`）是**一次进程启动**
+// （实测 ~20 ms），而 Ensure 在**每次**工具调用里都会走一遍 Status ⇒ 白付一次
+// 进程启动。把「解释器/依赖自上次验证以来有没有被动过」变成几次 stat（~20 µs）。
+//
+// 覆盖四样东西（都是「变了就可能坏」的）：
+//
+//	① venv 解释器本体（stat 跟随符号链接 ⇒ 换 base 也看得见）
+//	② 基座解释器（venv/pyvenv.cfg 里的 home 指的那个；它没了 venv 就起不来）
+//	③ venv/pyvenv.cfg（重建/改配置 venv 会动它）
+//	④ site-packages 目录（装/卸包会改它的 mtime）
+//
+// 覆盖不到的：解释器二进制没动、但它依赖的 dylib 被删了 —— 由 probeInterval 的
+// 周期性自检兜底。
+//
+// 指纹里**不含** requirements 指纹（那是另一个字段、另一套失效语义）。
+func venvStamp(venvPython, base, venvCfg string) string {
+	h := sha256.New()
+	addStat := func(path string) {
+		if path == "" {
+			return
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			fmt.Fprintf(h, "%s|missing\n", path)
+			return
+		}
+		fmt.Fprintf(h, "%s|%d|%d|%d\n", path, fi.Size(), fi.ModTime().UnixNano(), fi.Mode())
+	}
+	addStat(venvPython)
+	addStat(base)
+	addStat(venvCfg)
+	// site-packages 目录（装/卸包会改它的 mtime）。布局按平台试两种。
+	venvDir := filepath.Dir(filepath.Dir(venvPython))
+	for _, pat := range []string{
+		filepath.Join(venvDir, "lib", "python*", "site-packages"),
+		filepath.Join(venvDir, "Lib", "site-packages"),
+	} {
+		matches, err := filepath.Glob(pat)
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			addStat(m)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // truncate 截断长输出（pip 日志摘要）。按 UTF-8 边界回退，不劈裂多字节字符。
