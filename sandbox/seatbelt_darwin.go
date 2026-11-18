@@ -264,6 +264,16 @@ func filterExplicitDenied(open, sensitive []string) []string {
 // （含 ExecSpec.ExitCode/TimedOut/Canceled 结局回填）。
 // 策略与命令是独立 argv（Go exec 直传，无中间 shell 引号注入面）；沿用独立进程组
 // + 超时杀整组 + 最小环境白名单（isolatedEnv 不泄漏 agent 密钥/token）。
+// Start 起一个**长期存活**的进程（协议由调用方定；见 Process）。
+//
+// 与 Run 同一套策略与隔离：sandbox-exec 拉起 ⇒ 进程（及其子进程）在 Seatbelt 策略里
+// 活着；独立进程组；最小环境白名单。stderr 继承父进程（不接管道）⇒ 子进程诊断照常
+// 进日志，且不污染协议流。
+func (s *Seatbelt) Start(ctx context.Context, spec ExecSpec) (Process, error) {
+	argv := []string{seatbeltBin, "-p", s.Policy, "sh", "-c", spec.Command}
+	return startProcProcess(ctx, argv, spec.Cwd, isolatedEnv())
+}
+
 func (s *Seatbelt) Run(ctx context.Context, spec ExecSpec) (string, error) {
 	cmd := exec.Command(seatbeltBin, "-p", s.Policy, "sh", "-c", spec.Command)
 	cmd.Dir = spec.Cwd

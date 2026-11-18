@@ -132,6 +132,16 @@ func (NoSandbox) Run(ctx context.Context, spec ExecSpec) (string, error) {
 	return runExec(ctx, cmd, spec)
 }
 
+// Start 起一个**长期存活**的进程（协议由调用方定；见 Process）。
+//
+// 与 Run 的差别：Run 等进程结束并返回合并输出；Start 只负责把进程拉起来并把管道
+// 交给调用方 ⇒ 常驻转换器（省掉每次重新 import 依赖）这类用法才成立。
+//
+// 与 Run 一样的隔离：独立进程组 + 最小环境白名单（密钥/token 不泄漏给子进程）。
+func (NoSandbox) Start(ctx context.Context, spec ExecSpec) (Process, error) {
+	return startProcProcess(ctx, []string{"sh", "-c", spec.Command}, spec.Cwd, isolatedEnv())
+}
+
 // RunArgs 以 argv 形式执行外部命令（不经 sh -c），复用 runExec 的既有语义：
 // 独立进程组 + 超时/取消杀整组（含孙进程）+ 输出合并 + 结局回填。
 //

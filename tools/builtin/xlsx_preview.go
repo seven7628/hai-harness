@@ -49,12 +49,19 @@ type SandboxFor func(workspace string) sandbox.Sandbox
 type XlsxPreviewer struct {
 	py     PythonRuntime // 受管运行时（nil = 未装配 → 明确报错，不 panic）
 	sbxFor SandboxFor    // 沙箱工厂（nil = 恒用 NoSandbox 直通）
+	// worker 常驻转换进程池（按工作区复用；起不来 ⇒ 自动退回一次性执行）。
+	// 见 preview_worker.go 的取舍说明。
+	worker *previewWorkerPool
 }
 
 // NewXlsxPreviewer 创建工作簿预览转换器。
 // py = 受管运行时（与 run_python 同一个实例）；sbxFor = 按工作区构造沙箱（nil = NoSandbox）。
 func NewXlsxPreviewer(py PythonRuntime, sbxFor SandboxFor) *XlsxPreviewer {
-	return &XlsxPreviewer{py: py, sbxFor: sbxFor}
+	return &XlsxPreviewer{
+		py:     py,
+		sbxFor: sbxFor,
+		worker: newPreviewWorkerPool(py, sbxFor, xlsxToHTMLScript),
+	}
 }
 
 // XlsxPreviewTimeout 单次转换时限（含 openpyxl 解析 + 渲染；大工作簿数秒级，
@@ -94,11 +101,11 @@ func (p *XlsxPreviewer) Convert(ctx context.Context, xlsxPath, workspace string)
 	if err != nil {
 		return XlsxConvertResult{}, fmt.Errorf("managed Python runtime unavailable: %w", err)
 	}
-	scriptPath, cleanup, err := writeTempFile(py, "xlsx-preview-", "convert_xlsx.py", []byte(xlsxToHTMLScript))
+	// 产物目录（两条执行路径共用）：常驻 worker 与一次性执行都往这里写 HTML。
+	dir, cleanup, err := makeTempDir(py, "xlsx-preview-")
 	if err != nil {
 		return XlsxConvertResult{}, err
 	}
-	dir := filepath.Dir(scriptPath)
 	done := false
 	defer func() {
 		// 只有失败路径才清理（成功路径要留着给浏览器读，见函数注释的清理策略）。
@@ -108,8 +115,29 @@ func (p *XlsxPreviewer) Convert(ctx context.Context, xlsxPath, workspace string)
 	}()
 	htmlPath := filepath.Join(dir, "preview.html")
 
+	// ① **常驻 worker**（省掉每次重新起 python + import 依赖：实测解释器启动 ~20ms +
+	//    import openpyxl ~80ms CPU，连续预览多份文档时这笔钱重复付）。
+	//    任何失败（起不来/进程死了/协议错位）都**静默退回**②一次性执行 ——
+	//    预览是用户可见功能，绝不能因为优化而不能用。
+	if out, werr := p.worker.convert(ctx, workspace, xlsxPath, htmlPath); werr == nil {
+		if !strings.Contains(out, xlsxOKMarker) {
+			return XlsxConvertResult{}, fmt.Errorf("转换失败: %s", singleLine(out))
+		}
+		if _, err := os.Stat(htmlPath); err != nil {
+			return XlsxConvertResult{}, fmt.Errorf("转换脚本未产出 HTML: %w", err)
+		}
+		sweepStaleTempDirs(py, dir)
+		done = true
+		return XlsxConvertResult{HTMLPath: htmlPath, Dir: dir}, nil
+	}
+
 	// 固定解释器 + 三个路径参数（单引号转义：路径可含空格/引号/中文）。命令行里没有
 	// 任何来自模型/前端的自由文本，故不存在「把用户输入拼进 shell」的面。
+	// ② 一次性执行（老路径）：脚本写进本次目录再跑。
+	scriptPath := filepath.Join(dir, "convert_xlsx.py")
+	if err := os.WriteFile(scriptPath, []byte(xlsxToHTMLScript), 0o600); err != nil {
+		return XlsxConvertResult{}, err
+	}
 	cmdline := shQuote(py.VenvPython) + " " + shQuote(scriptPath) + " " + shQuote(xlsxPath) + " " + shQuote(htmlPath)
 	var sbx sandbox.Sandbox = sandbox.NoSandbox{}
 	if p.sbxFor != nil {
@@ -1083,8 +1111,9 @@ def short_name(name):
     return name if len(name) <= 24 else name[:24] + "…"
 
 
-def main():
-    src, dst = sys.argv[1], sys.argv[2]
+def main(argv=None):
+    # argv 可显式传入（常驻 worker 调用）；None = 从命令行取（一次性执行）。
+    src, dst = (argv if argv is not None else sys.argv[1:3])
     # 值书（缓存值，用户看到的数字）。data_only 取舍见脚本头注释。
     try:
         wb_val = openpyxl.load_workbook(src, data_only=True, read_only=True)
@@ -1165,5 +1194,6 @@ def main():
     print("GOCODE_XLSX_OK", dst)
 
 
-main()
+if __name__ == "__main__":
+    main()
 `

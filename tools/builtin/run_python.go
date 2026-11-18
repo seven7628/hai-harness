@@ -616,6 +616,23 @@ func WriteTempFile(py runtime.Python, prefix, name string, data []byte) (string,
 }
 
 func writeTempFile(py runtime.Python, prefix, name string, data []byte) (string, func(), error) {
+	dir, cleanup, err := makeTempDir(py, prefix)
+	if err != nil {
+		return "", nil, err
+	}
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	return p, cleanup, nil
+}
+
+// makeTempDir 在受管临时目录下建一个目录（产物放里面；脚本另写）。
+//
+// 为什么单独拆出来：预览转换有两条执行路径 —— 常驻 worker（脚本只写一次，在池里）
+// 与一次性执行（脚本写进本次目录）。后者只要**目录**，不要「目录 + 文件」。
+func makeTempDir(py runtime.Python, prefix string) (string, func(), error) {
 	var lastErr error
 	for _, base := range tempDirBases(py) {
 		if base == "" {
@@ -631,15 +648,9 @@ func writeTempFile(py runtime.Python, prefix, name string, data []byte) (string,
 			lastErr = err
 			continue
 		}
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, data, 0o600); err != nil {
-			_ = os.RemoveAll(dir)
-			lastErr = err
-			continue
-		}
-		return p, func() { _ = os.RemoveAll(dir) }, nil
+		return dir, func() { _ = os.RemoveAll(dir) }, nil
 	}
-	return "", nil, fmt.Errorf("创建临时文件失败: %w", lastErr)
+	return "", nil, fmt.Errorf("创建临时目录失败: %w", lastErr)
 }
 
 // writeTempScript 把源码写到临时文件（位置选择见 tempDirBases）。

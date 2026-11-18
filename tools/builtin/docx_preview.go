@@ -30,12 +30,19 @@ import (
 type DocxPreviewer struct {
 	py     PythonRuntime // 受管运行时（nil = 未装配 → 明确报错，不 panic）
 	sbxFor SandboxFor    // 沙箱工厂（nil = 恒用 NoSandbox 直通）
+	// worker 常驻转换进程池（按工作区复用；起不来 ⇒ 自动退回一次性执行）。
+	// 见 preview_worker.go 的取舍说明。
+	worker *previewWorkerPool
 }
 
 // NewDocxPreviewer 创建文档预览转换器。
 // py = 受管运行时（与 run_python 同一个实例）；sbxFor = 按工作区构造沙箱（nil = NoSandbox）。
 func NewDocxPreviewer(py PythonRuntime, sbxFor SandboxFor) *DocxPreviewer {
-	return &DocxPreviewer{py: py, sbxFor: sbxFor}
+	return &DocxPreviewer{
+		py:     py,
+		sbxFor: sbxFor,
+		worker: newPreviewWorkerPool(py, sbxFor, docxToHTMLScript),
+	}
 }
 
 // DocxPreviewTimeout 单次转换时限（含 mammoth 解析 + 渲染）。与 XlsxPreviewTimeout 同口径：
@@ -61,11 +68,11 @@ func (p *DocxPreviewer) Convert(ctx context.Context, docxPath, workspace string)
 	if err != nil {
 		return DocxConvertResult{}, fmt.Errorf("managed Python runtime unavailable: %w", err)
 	}
-	scriptPath, cleanup, err := writeTempFile(py, "docx-preview-", "convert_docx.py", []byte(docxToHTMLScript))
+	// 产物目录（两条执行路径共用）：常驻 worker 与一次性执行都往这里写 HTML。
+	dir, cleanup, err := makeTempDir(py, "docx-preview-")
 	if err != nil {
 		return DocxConvertResult{}, err
 	}
-	dir := filepath.Dir(scriptPath)
 	done := false
 	defer func() {
 		if !done {
@@ -74,8 +81,29 @@ func (p *DocxPreviewer) Convert(ctx context.Context, docxPath, workspace string)
 	}()
 	htmlPath := filepath.Join(dir, "preview.html")
 
+	// ① **常驻 worker**（省掉每次重新起 python + import 依赖：实测解释器启动 ~20ms +
+	//    import openpyxl ~80ms CPU，连续预览多份文档时这笔钱重复付）。
+	//    任何失败（起不来/进程死了/协议错位）都**静默退回**②一次性执行 ——
+	//    预览是用户可见功能，绝不能因为优化而不能用。
+	if out, werr := p.worker.convert(ctx, workspace, docxPath, htmlPath); werr == nil {
+		if !strings.Contains(out, docxOKMarker) {
+			return DocxConvertResult{}, fmt.Errorf("转换失败: %s", singleLine(out))
+		}
+		if _, err := os.Stat(htmlPath); err != nil {
+			return DocxConvertResult{}, fmt.Errorf("转换脚本未产出 HTML: %w", err)
+		}
+		sweepStaleOfficeTempDirs(py, dir)
+		done = true
+		return DocxConvertResult{HTMLPath: htmlPath, Dir: dir}, nil
+	}
+
 	// 固定解释器 + 三个路径参数（单引号转义：路径可含空格/引号/中文）。命令行里没有任何来自
 	// 模型/前端的自由文本，故不存在「把用户输入拼进 shell」的面（同 xlsx 预览）。
+	// ② 一次性执行（老路径）：脚本写进本次目录再跑。
+	scriptPath := filepath.Join(dir, "convert_docx.py")
+	if err := os.WriteFile(scriptPath, []byte(docxToHTMLScript), 0o600); err != nil {
+		return DocxConvertResult{}, err
+	}
 	cmdline := shQuote(py.VenvPython) + " " + shQuote(scriptPath) + " " + shQuote(docxPath) + " " + shQuote(htmlPath)
 	var sbx sandbox.Sandbox = sandbox.NoSandbox{}
 	if p.sbxFor != nil {
@@ -413,8 +441,9 @@ def convert_image_capped(image):
     return [mammoth.html.element("img", {"src": src})]
 
 
-def main():
-    src, dst = sys.argv[1], sys.argv[2]
+def main(argv=None):
+    # argv 可显式传入（常驻 worker 调用）；None = 从命令行取（一次性执行）。
+    src, dst = (argv if argv is not None else sys.argv[1:3])
     try:
         check_unzipped_budget(src)
     except ValueError as exc:
@@ -449,5 +478,6 @@ def main():
     print("GOCODE_DOCX_OK", dst)
 
 
-main()
+if __name__ == "__main__":
+    main()
 `
