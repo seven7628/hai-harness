@@ -109,7 +109,22 @@ const LEN_TAG = '|len:'
 function keyChars(k: string): number | null {
   const at = k.lastIndexOf(LEN_TAG)
   if (at < 0) return null
-  const n = Number(k.slice(at + LEN_TAG.length))
+  // 只取紧跟 |len: 的**数字段**。
+  //
+  // ## 2026-11-17 修的 bug（这个 bug 让整个缓存永久失效）
+  //
+  // 键的形状是 `parts|len:5000|616035e5`（长度后面还跟着哈希）。
+  // 原实现 `Number(k.slice(at + LEN_TAG.length))` 拿到的是 `"5000|616035e5"`
+  // ⇒ Number(...) = NaN ⇒ 返回 null ⇒ 驱逐时 `cachedChars -= null ?? 0` **减 0**
+  // ⇒ cachedChars 永不回落 ⇒ 驱逐循环的 break 条件 `cachedChars <= MAX_CHARS`
+  // 再也不成立 ⇒ **每次插入都把整个缓存清空**。
+  //
+  // 症状（静默，无任何报错）：`[budget][mem] md 缓存: 0 条 / 1859130 字符`
+  // —— 实测渲染进程（dev 模式 27 小时）就是这样 ⇒ 每个 markdown 块每次渲染
+  // 都全量重解析（作者自测：一次渲染 25.8ms 里解析占 24ms）。
+  const m = /^\d+/.exec(k.slice(at + LEN_TAG.length))
+  if (!m) return null
+  const n = Number(m[0])
   return Number.isFinite(n) ? n : null
 }
 export function makeKey(parts: (string | number | boolean | undefined)[], text: string): string {

@@ -32,9 +32,10 @@ export default defineConfig({
     //
     // 实测：滚动缓冲里 25 分钟内 **152 次** `page reload`（≈每分钟 5–8 次）。
     // 每次重载都要重跑一遍会话恢复（解析 1000 张卡 + 重建 React 树）⇒
-    // 每次留几十 MB 垃圾；而我们没设 `--max-old-space-size` ⇒ V8 没有理由
-    // 回收 ⇒ 渲染进程堆单调上涨 ⇒ 机器进入换页颠簸 ⇒ **整个应用点不动**
-    // （2026-11-13 的真实卡死事故）。
+    // 每次留几十 MB 垃圾。
+    // 2026-11-17 更正：`--max-old-space-size=768` **已经设了**（在 electron/main.ts 的
+    // js-flags 里）⇒ V8 会及时回收；这里描述的「堆单调上涨」如今由视图预算的
+    // 「已提交堆」轴管（src/store/viewBudget.ts 的 v8HeapCommittedBytes）。
     //
     // 这些目录**不是应用源码** ⇒ 忽略它们不影响任何功能。
     //

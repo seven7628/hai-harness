@@ -1070,7 +1070,20 @@ function createWindow(): void {
   // 不会把应用顶到 V8 的 OOM 崩溃线（v8.dev/blog/heap-size-limit：到顶是
   // **崩溃**，不是降级 ⇒ 这是兜底，不是常规路径；常规路径是前端的字节预算 +
   // 堆轴降级）。
-  app.commandLine.appendSwitch('js-flags', '--max-old-space-size=768')
+  //
+  // `--expose-gc`：让渲染进程拿到 `window.gc()` —— 这是**不重启应用**就能把几百 MB
+  // 垃圾当场回收的唯一手段（2026-11-17 加）。
+  //
+  // 为什么需要：视图预算的「已提交堆超预算 ⇒ 强制 GC」泄压阀要靠它
+  // （src/store/viewBudget.ts 的 forceGc）。原来那条路走
+  // `performance.measureUserAgentSpecificMemory()`，但它**要求跨源隔离**
+  // （COOP/COEP），而生产是 `loadFile(dist/index.html)`（file:// 协议）
+  // ⇒ 永远拿不到 ⇒ 泄压阀从来没开过（实测日志：「内存分解不可用」）。
+  //
+  // 取舍：暴露 gc() 意味着页面里的脚本能主动逼一次完整 GC（大堆上几百毫秒）。
+  // 本应用的渲染层是自有代码；嵌入式 web 内容（插件/浏览器面板）在**独立进程**里，
+  // 影响面有限。代价可接受，换来的是「不重启就能泄压」。
+  app.commandLine.appendSwitch('js-flags', '--max-old-space-size=768 --expose-gc')
   // 渲染进程的 console 透传到终端（2026-11-12）。
   //
   // 为什么需要：视图内存预算的降级/淘汰会打一行 `[budget] …`，而渲染进程的
@@ -2522,7 +2535,13 @@ if (!MULTI_INSTANCE && !app.requestSingleInstanceLock()) {
 // 为什么必须自己做：V8 的堆上限是**崩溃线**不是降级线
 // （v8.dev/blog/heap-size-limit：到顶 → "a series of last resort garbage
 // collections" → 再不行就 "stops execution and reports an out-of-memory
-// failure" ⇒ Electron 里就是 Aw, Snap）。而且我们没设 --max-old-space-size。
+// failure" ⇒ Electron 里就是 Aw, Snap）。
+//
+// 2026-11-17 更正：**已经设了** `--max-old-space-size=768`（上面 createWindow 里的
+// js-flags），所以「堆撞上限 ⇒ OOM」这条不再是主要风险；真正的风险换成了
+// **已提交堆 ≫ 活对象**（V8 撑大不回收 ⇒ 已提交的那部分被换出到 swap ⇒
+// major GC 退化成全量磁盘读）。这条现在由视图预算的「已提交堆」轴管：
+// src/store/viewBudget.ts 的 v8HeapCommittedBytes + committedOver。
 //
 // 5 秒一次足够：内存压力是慢变量（换页颠簸以秒计，不是毫秒计）。
 function startMemPressureWatch(): void {

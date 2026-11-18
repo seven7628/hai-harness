@@ -1,7 +1,8 @@
 // 把真实会话的 live view blocks 导出成 JSON，供渲染探针使用。
 // 用法：node lab/dump-real-blocks.mjs <事件文件> <输出文件>
 import { build } from 'esbuild'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { createReadStream, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import * as readline from 'node:readline'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
@@ -39,10 +40,15 @@ useAppStore.setState({
 })
 
 const all = []
-for (const line of readFileSync(EVENTS, 'utf8').split('\n')) {
-  const s = line.trim()
-  if (!s) continue
-  try { const o = JSON.parse(s); if (o && o.event_type) all.push(o) } catch { /* 半行 */ }
+// 流式读：真实会话的事件文件动辄几百 MB（Node 的 readFileSync 上限 512MB 字符），
+// 而且整读进来会在这台 16G 机器上再吃一份峰值内存 ⇒ 逐行读。
+{
+  const rl = readline.createInterface({ input: createReadStream(EVENTS), crlfDelay: Infinity })
+  for await (const line of rl) {
+    const s = line.trim()
+    if (!s) continue
+    try { const o = JSON.parse(s); if (o && o.event_type) all.push(o) } catch { /* 半行 */ }
+  }
 }
 for (const e of all) dispatchEvent({ ...e, session_id: SID })
 

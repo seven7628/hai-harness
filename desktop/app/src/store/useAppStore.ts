@@ -21,15 +21,18 @@ import { isEditorEnabled, isTextLikePath } from '../lib/editorState'
 import { pickTodoList, todoTargetOf, withAgentTodos as scopeWithAgentTodos } from '../lib/todoScope'
 import {
   BUDGET_CHECK_INTERVAL_MS,
+  committedOver,
   currentBudgetBytes,
   degradeView,
   domStats,
+  forceGc,
   planBudget,
   measureExact,
   measureMemoryBreakdown,
   roughSize,
   setMemPressure,
   v8HeapBytes,
+  v8HeapCommittedBytes,
   viewBytes,
   viewHasPendingInteraction,
   V8_HEAP_BUDGET_BYTES,
@@ -10009,27 +10012,45 @@ function enforceViewBudget(force = false): void {
     protect: (_sid, v) => sessionBusy(v),
   })
   const heapBytes = v8HeapBytes()
+  const committedBytes = v8HeapCommittedBytes()
   const heapOver = heapBytes > V8_HEAP_BUDGET_BYTES
-  // —— 堆超预算 ⇒ 试一次「强制 GC + 内存分解」——
+  // —— 已提交堆超预算 ⇒ 强制 GC 泄压（**不降级视图**）——
   //
-  // `performance.measureUserAgentSpecificMemory()` **会先强制一次完整 GC**。
-  // 在没有 `--max-old-space-size` 的情况下（V8 默认上限 2~4GB ⇒ 它没理由回收），
-  // 这是**不重启应用**也能泄压的唯一手段：几百 MB 垃圾当场回收。
+  // ## 为什么换了个判据（2026-11-17）
   //
-  // 它同时是**判决工具**：GC 之后的堆才是活对象的真值 —— 堆从 600MB 掉到
-  // ~30MB ⇒ 那 570MB 就是垃圾（2026-11-13 的结论）；不掉 ⇒ 有活对象被攥着。
-  if (heapOver && now - lastHeapProbeAt >= heapProbeCooldownMs) {
+  // 原来这里判的是 `heapOver`（**活对象** usedJSHeapSize > 400MB）。但：
+  //
+  //   · 降级视图丢的是**用户历史** —— 只对「活对象多」有意义；
+  //   · 已提交堆 ≫ 活对象时，多出来的是 **V8 没回收的垃圾** —— 降级对它**无效**
+  //     （实测：堆 623MB 时降级一个视图，堆一点没降 623→625）；
+  //   · 而换页颠簸的来源恰恰是**已提交**那部分（被换出后 major GC 要从磁盘读回来，
+  //     每轮 ~48 秒 ⇒ 主线程卡死）。
+  //
+  // ⇒ 已提交堆超线时的正确动作是「**把垃圾收掉**」，不是「把用户历史丢了」。
+  //
+  // ## 为什么用 gc() 而不是 measureUserAgentSpecificMemory()
+  //
+  // 后者确实会先强制一次完整 GC，但**要求跨源隔离**（COOP/COEP）——
+  // 而生产环境是 `loadFile(dist/index.html)`（file:// 协议）⇒ 拿不到
+  // （实测日志：「内存分解不可用（Chrome 要求跨源隔离）」）⇒ 这条泄压阀**从来没开过**。
+  // `window.gc()`（主进程 `--expose-gc`）没有这个前提 ⇒ 改用它。
+  if (committedOver(committedBytes) && now - lastHeapProbeAt >= heapProbeCooldownMs) {
     lastHeapProbeAt = now
-    const before = heapBytes
+    const beforeCommitted = committedBytes
+    const beforeLive = heapBytes
+    const gced = forceGc()
+    const afterCommitted = v8HeapCommittedBytes()
+    const afterLive = v8HeapBytes()
+    console.info(
+      `[budget] 强制 GC（已提交 ${(beforeCommitted / 1048576).toFixed(0)}MB → ${(afterCommitted / 1048576).toFixed(0)}MB` +
+        ` ｜ 活对象 ${(beforeLive / 1048576).toFixed(0)}MB → ${(afterLive / 1048576).toFixed(0)}MB）` +
+        (gced ? '' : ' ⇒ **gc() 不可用**（主进程没开 --expose-gc？）'),
+    )
+    // 分解（可选）：跨源隔离拿得到时多一份归因；拿不到就静默。
     void measureMemoryBreakdown().then((bd) => {
-      if (!bd) {
-        console.info('[budget] 内存分解不可用（Chrome 要求跨源隔离）⇒ 无法从内部强制 GC')
-        return
-      }
-      const after = v8HeapBytes()
+      if (!bd) return
       console.info(
-        `[budget] 强制 GC：堆 ${(before / 1048576).toFixed(0)}MB → ${(after / 1048576).toFixed(0)}MB` +
-          ` | 活对象 JS ${(bd.jsHeapBytes / 1048576).toFixed(0)}MB DOM ${(bd.domBytes / 1048576).toFixed(0)}MB` +
+        `[budget] 内存分解：活对象 JS ${(bd.jsHeapBytes / 1048576).toFixed(0)}MB DOM ${(bd.domBytes / 1048576).toFixed(0)}MB` +
           ` | ${bd.types.join(' ')}`,
       )
     })

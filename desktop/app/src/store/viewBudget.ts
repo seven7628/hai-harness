@@ -72,11 +72,83 @@ export const VIEW_BUDGET_PRESSURE_BYTES = 128 * 1024 * 1024
  */
 export const V8_HEAP_BUDGET_BYTES = 400 * 1024 * 1024
 
-/** 读 V8 当前活堆字节数（0 = 读不到，Chromium 未开 precise-memory-info 时）。 */
+/**
+ * V8 **已提交**堆的预算（`totalJSHeapSize`）。
+ *
+ * ## 为什么要有第二根轴（2026-11-17）
+ *
+ * `V8_HEAP_BUDGET_BYTES` 看的是**活对象**（usedJSHeapSize）—— 「有多少东西还被引用着」。
+ * 但真正把机器拖进换页颠簸的是**已提交**（totalJSHeapSize）：V8 会为「分配速率高」
+ * 把堆**撑大**而不立刻回收，于是已提交 ≫ 活对象。
+ *
+ * 实测（渲染进程 PID 42010，dev 模式 27 小时）：
+ *   活对象 187 MB ｜ 已提交 634 MB（3.4 倍）｜ footprint 1283 MB
+ * 而 2026-11-13 那次事故是 活堆 554 MB / 已提交 3.7 GB（6.7 倍）。
+ *
+ * ## 两根轴各管什么（别混）
+ *
+ *   · **活对象**超预算 ⇒ 我们的数据/React 树真的大 ⇒ **降级视图**（丢可重取的历史）。
+ *   · **已提交**超预算而活对象不高 ⇒ 多出来的是 **V8 没回收的垃圾** ⇒ 降级视图
+ *     **对它无效**（实测：堆 623 MB 时降级一个视图，堆一点没降 623→625）⇒ 该做的是
+ *     **强制 GC**，不是拿用户历史去换。
+ *
+ * 定 512 MB 的依据：V8 的硬上限是 `--max-old-space-size=768`（见 electron/main.ts），
+ * 已提交堆涨到 512 就该先把垃圾回收掉，别等撞到 768 那条**崩溃线**
+ * （v8.dev/blog/heap-size-limit：到顶是 OOM 停止执行 ⇒ Electron 里就是 Aw, Snap）。
+ */
+export const V8_HEAP_COMMITTED_BUDGET_BYTES = 512 * 1024 * 1024
+
+/** 读 V8 当前**活对象**字节数（0 = 读不到，Chromium 未开 precise-memory-info 时）。 */
 export function v8HeapBytes(): number {
   const mem = (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory
   const n = mem?.usedJSHeapSize
   return typeof n === 'number' && n > 0 ? n : 0
+}
+
+/** 读 V8 当前**已提交**堆字节数（totalJSHeapSize）—— 进程真正付出的那部分。
+ *
+ *  与 `v8HeapBytes()` 的差值 = V8 已向系统要到手、但还没回收的页 ⇒
+ *  换页颠簸的直接来源（这些页被换出后，major GC 要从磁盘读回来）。
+ *
+ *  读不到时返回 0（= 不超预算 = 不触发泄压），**不能**拿活堆顶替 ——
+ *  两者差好几倍，顶替会让泄压阀对着错误的量纲开火。
+ */
+export function v8HeapCommittedBytes(): number {
+  const mem = (performance as unknown as { memory?: { totalJSHeapSize?: number } }).memory
+  const n = mem?.totalJSHeapSize
+  return typeof n === 'number' && n > 0 ? n : 0
+}
+
+/** 已提交堆是否超预算。
+ *
+ *  读不到 committed（=0）时返回 false —— 「量不到」不等于「超」，
+ *  更不能拿活堆顶替（两者差 3~7 倍，顶替会让泄压阀对着错误的量纲开火）。
+ */
+export function committedOver(committed: number): boolean {
+  return committed > 0 && committed > V8_HEAP_COMMITTED_BUDGET_BYTES
+}
+
+/** 强制一次完整 GC。返回 false = 拿不到。
+ *
+ *  依赖主进程给渲染进程开 `--expose-gc`（见 electron/main.ts 的 js-flags）——
+ *  这是**不重启应用**就能把几百 MB 垃圾当场回收的唯一手段。
+ *
+ *  为什么不走 `performance.measureUserAgentSpecificMemory()`：它也会先做一次完整 GC，
+ *  但**要求跨源隔离**（COOP/COEP），而生产是 `loadFile(dist/index.html)`（file://）
+ *  ⇒ 拿不到 ⇒ 那条泄压阀从来没开过（实测日志：「内存分解不可用」）。
+ *
+ *  代价：完整 GC 是**同步阻塞**的（大堆上几百毫秒）⇒ 只在「已提交堆超预算」
+ *  且有冷却期时调，别当成日常操作。
+ */
+export function forceGc(): boolean {
+  const g = (globalThis as unknown as { gc?: () => void }).gc
+  if (typeof g !== 'function') return false
+  try {
+    g()
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** **精确**计量（诊断用，无节点上限）。

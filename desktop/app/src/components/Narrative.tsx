@@ -12,6 +12,7 @@ import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
 import { answerIndex, answerOf, defersToTurnEnd, foldedBody, hasWork, mergeArtifacts, noticeBlocks, outsideOf, rememberSettleMark, runningBody, runWorkBody, segmentUsage, selectTurns, settleIndexOf, settleMarkValid, statsOfItems, turnHead, turnRuns, turnStats, turnUsage, workBody } from './runtime/turn/selectTurns'
 import { roundsOf } from './runtime/turn/rounds'
+
 import { batchLine, isDispatchTool } from './runtime/turn/batch'
 import { BatchGroup } from './runtime/turn/BatchGroup'
 import { Ledger } from './runtime/turn/Ledger'
@@ -39,6 +40,14 @@ import { ArtifactsBlock } from './runtime/artifacts/ArtifactsBlock'
 import { UsageActivityMini } from './UsageStats'
 import { useLang, useT } from '../i18n'
 import { bridge } from '../lib/bridge'
+
+/** 贴底校准的**心跳间隔**（毫秒）：即使没有事件，也至少每 250ms 做一次完整校准。
+ *
+ *  为什么要有心跳（而不是纯事件驱动）：作者 2026-10-21 修「刷新后停在某个位置不动」
+ *  时把校准循环改成**始终运行**，正是因为早退分支会让循环根本起不来。
+ *  心跳保留了这个契约（最坏情况：晚 250ms 贴底，而不是永远不贴）。
+ *  250ms 的代价：空闲时 4 次/秒的完整校准（原来是 60 次/秒）⇒ 布局读降到 ~1/15。 */
+const FULL_CHECK_INTERVAL_MS = 250
 
 // 空页表：切转录时先用它渲染，避免把上一段转录的展开状态带进来。
 const EMPTY_LIVE_PAGES: Record<string, number> = {}
@@ -204,6 +213,12 @@ export default function Narrative({ viewSid, source, header, footer, density: de
      判据必须是**引用相等**（块对象不可变，内容一变就是新对象），加上本组件里所有
      store 选择器的值与本地状态；少一项就会出现「点开不展开 / 账不更新」这类陈旧 UI。 */
   const turnCacheRef = useRef(new Map<string, { items: readonly unknown[]; globals: readonly unknown[]; state: readonly unknown[]; els: (ReactElement | null)[] }>())
+  /** turnCache 属于哪段转录（切会话要清 —— 见下面的 turnCacheKeyRef 比对）。 */
+  const turnCacheKeyRef = useRef<string | undefined>(undefined)
+  /** turnCache 的条目上限（LRU）。每条持有**整轮的 React 元素树**（元素 → props → 正文）
+   *  ⇒ 不设上限时，长会话 + 反复切会话会把这些元素树**永久**留在堆里。
+   *  300 轮 ≈ 一段很长的转录（实测长会话 82 轮）⇒ 正常会话永远碰不到上限。 */
+  const TURN_CACHE_MAX = 300
   // settledAtRef：这一轮**上一次结算时**有多少块（turn.items.length）。
   //
   // 用途只有一个：块上没有主 run id 时（冷恢复 / 旧快照 / 事件缺 run_id），turnRuns
@@ -555,6 +570,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   // 同上：lastMax 也必须跨重跑存活。放在闭包里会让 grew 每帧都为 true，
   // 无论高度是否真的变化都无条件钉底。
   const lastMaxRef = useRef(-1)
+  /** 布局脏标记：tick 只在「可能变了」时才读布局属性（见 tick 里的 2026-11-17 说明）。 */
+  const layoutDirtyRef = useRef(true)
+  /** 上次做**完整**校准的时刻（心跳兜底用）。 */
+  const lastFullCheckRef = useRef(0)
   // 用户手势标记：wheel / touchstart 置位（真实用户滚动输入）。程序滚动（校准
   // 循环赋值 scrollTop）不置位 —— 其 scroll 事件被 onScroll 忽略，stickRef 不受
   // 干扰。这解决了两个问题：
@@ -688,10 +707,13 @@ export default function Narrative({ viewSid, source, header, footer, density: de
         stickRef.current = false
         setAway(true)
       }
+      // 跟随状态变了 ⇒ 下一帧要重新校准（tick 的门会放行）。
+      layoutDirtyRef.current = true
     }
     // 恢复跟随（仅在**用户自己**把视图带回底部时）。
     const startFollow = () => {
       autoscrollRef.current = true
+      layoutDirtyRef.current = true
       awayHardRef.current = false
       // 基准必须同步成当前位置：否则 tick 的下一帧会把「距旧基准的落差」
       // 当成外部改动，刚恢复的跟随又被自己关掉。
@@ -764,6 +786,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     }
     const onScroll = () => {
       if (!el.isConnected) return
+      // 滚动位置被**外部**改了 ⇒ 布局脏（下一帧要重新校准）。
+      // 只认外部改动：我们自己写的 scrollTop 也会触发 scroll 事件，
+      // 若无脑置脏 ⇒ 每帧一次写 + 一次事件 + 一次完整校准 ⇒ 白转一圈。
+      if (Math.abs(el.scrollTop - expectedTopRef.current) > 2) layoutDirtyRef.current = true
       if (nodeFreshRef.current) {
         // 新节点的第一次 scroll：只对齐基准（见 nodeFreshRef 的注释）
         nodeFreshRef.current = false
@@ -851,6 +877,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   useEffect(() => {
     const el = ref.current
     if (!el) return
+    // 内容变了（块变了 / revealStart 变了 / 换了节点）⇒ 布局脏，下一帧做完整校准。
+    // 流式期间每个 chunk 都会走到这里 ⇒ **流式的贴底行为与从前完全一致**。
+    layoutDirtyRef.current = true
     // ## 校准循环**始终**运行（2026-10-21 修「刷新后停在某个位置不动」）
     //
     // 之前这里有两处早退：`!stickRef.current` 直接 return、`revealStart > 0`
@@ -884,6 +913,27 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 它不依赖任何事件时序，也不依赖高度是否稳定 —— 只依赖「我写过什么」。
     const tick = () => {
       raf = 0
+      // —— 布局读是**贵**的：读 scrollHeight/clientHeight/scrollTop 会触发强制同步布局 ——
+      //
+      // 实测（真实会话 4140 块 / 82 轮，headless Chrome，空闲 2 秒）：
+      //   布局属性读 **924 次**（scrollHeight 154 / clientHeight 154 / scrollTop 616，
+      //   全部落在 .narrative 元素上）⇒ 强制布局 150 次
+      //   ⇒ 主线程 task 时间 **1.41s / 2 秒**（占了 70%）
+      //   把这些 getter 换成缓存值（= 不读布局）⇒ task 降到 0.75s，**省 47%**。
+      //
+      // 为什么以前没显形：内存够时布局是干净的 ⇒ 读很便宜；只有在 **swap 颠簸**时
+      // 才变成灾难（被换出的页要重新从磁盘读回来）⇒ 正好是最该救的时候最贵。
+      //
+      // ⇒ 空闲时**不读布局**：只有「可能变了」才做完整校准。
+      //   「可能变了」= ① 内容/块变了（blocks effect 重跑时置脏 ⇒ 流式期间每帧都校准，
+      //   行为与从前**完全一致**）② 用户动了（scroll/wheel/touch）③ 心跳兜底（250ms）。
+      const nowMs = Date.now()
+      if (!layoutDirtyRef.current && nowMs - lastFullCheckRef.current < FULL_CHECK_INTERVAL_MS) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
+      layoutDirtyRef.current = false
+      lastFullCheckRef.current = nowMs
       const max = el.scrollHeight - el.clientHeight
       const prevMax = lastMaxRef.current
       lastMaxRef.current = max
@@ -1256,7 +1306,21 @@ export default function Narrative({ viewSid, source, header, footer, density: de
 
      折叠的**只有工作过程**，不含回答 —— v2 里折叠行包的是 groups（工具/子智能体），
      答案在它外面。所以简洁档收起时渲染的是「非工作块」，展开才回到原顺序。 */
-  const turns = selectTurns(visibleBlocks)
+  // 轮次派生是 **O(块数)** 的纯计算（selectTurns 只读 blocks，不碰 store/全局）。
+  //
+  // ## 为什么必须 memo（2026-11-17 实测）
+  //
+  // 它原来在**每次渲染**都重算。而本组件的渲染远不止「块变了」这一种触发：
+  // 贴底 tick 的状态、贴底按钮的开合、展开的轮次、1 秒时钟……都会带来一次渲染。
+  // 实测（真实会话 4140 块 / 82 轮，headless Chrome）：
+  //   每条事件 → 全树重渲+排版 平均 **65.8ms**，其中 script 占 **97%**
+  //   （DOM 变更 0 个 ⇒ 全是白算的元素重建）
+  // CPU profile 的热点正好是轮次分组这一族：batchLine 155ms / turnUsage 46ms /
+  // statsOfItems 11ms / selectTurns 9ms / roundsOf 8ms。
+  //
+  // visibleBlocks 的引用在块不变时是稳定的（revealStart<=0 时就是 blocks 本身），
+  // ⇒ memo 之后，只有真正换了块才重算。
+  const turns = useMemo(() => selectTurns(visibleBlocks), [visibleBlocks])
   const items: (ReactElement | null)[] = []
   /* 复用判据里的「全局输入」：本组件读到的每个 store 值与本地状态（storeBlocks 除外 ——
      它每个 chunk 都会变，逐轮比块引用就够了）。 */
@@ -1266,6 +1330,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   ]
   const sameList = (a: readonly unknown[], b: readonly unknown[]) => a.length === b.length && a.every((v, i) => v === b[i])
   const turnCache = turnCacheRef.current
+  // 切会话 ⇒ 旧会话的元素树**不该继续留着**。
+  //
+  // 缓存的键是轮键（t<块id>），不同会话不会误命中 ⇒ 旧条目只是白占内存。
+  // 而这些条目持有**整轮的 React 元素树**（元素 → props → 正文），是最重的一块留存。
+  // 组件本身不会因为切会话而重挂载（key 在内层 div 上）⇒ 必须自己清。
+  if (turnCacheKeyRef.current !== transcriptKey) {
+    turnCache.clear()
+    turnCacheKeyRef.current = transcriptKey
+  }
   for (const [ti, turn] of turns.entries()) {
     const stats = turnStats(turn)
     const usage = turnUsage(turn, turnMetrics)
@@ -1284,7 +1357,10 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const settleRec = settledAtRef.current.get(turn.key)
     const settleAt = settleMarkValid(settleRec, turn.items) ? settleRec.at : undefined
     if (settleRec && settleAt == null) settledAtRef.current.delete(turn.key)
-    const rawLive = turnLive({ isLast: ti === turns.length - 1, turnRunning: sameRun && turn.running, runEnded, sameRun })
+    // isLast：本轮是不是最后一轮。turns.length 在渲染里只以这个布尔量的形式被用到
+    // （下面 rawLive 与结算边界两处）⇒ 缓存键放 isLast 而不是 turns.length。
+    const isLast = ti === turns.length - 1
+    const rawLive = turnLive({ isLast, turnRunning: sameRun && turn.running, runEnded, sameRun })
     /* 结算过、且**没有新块**时，`live` 再被点亮也不认（渲染层面）。
        专治「主 run 已 AgentEnd、后台 run 起跑（没有用户输入、块上也没有 run id）」把已经
        收起的一段重新展开：探针 lab/probe-settled-fold-relight 里同一批内容会从「Worked
@@ -1333,7 +1409,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     // 那次转换根本观测不到。为什么不用 `!live && answer`：块比 agent_start 先到或根本
     // 缺 agent_start 时，`live` 会在运行中途读成 false，把「跑了一半」记成「结算过」，
     // 随后插话 / 续跑的块被切到第二段、整轮凭空多一个盒子（实测 test:transcript 场景 C）。
-    if (runEnded && ti === turns.length - 1 && turn.answer && !turn.answer.streaming && !turn.running) {
+    if (runEnded && isLast && turn.answer && !turn.answer.streaming && !turn.running) {
       // 旧边界仍有效就不要往后挪：AgentEnd 之后又来的工具/记录不能把多段缩回一段，
       // 否则 Worked 盒的 state key 从 turn#1 切回 turn，刚点开的盒子会弹回收起。
       settledAtRef.current.set(turn.key, rememberSettleMark(settleRec, turn.items))
@@ -1345,15 +1421,35 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     const liveWin = !multiRun && concise && work && live ? liveWindow(liveBox, livePageOf(turn.key)) : null
     /* 输入全都没变 → 直接交回上一次的那几个元素（React 看到同一个元素对象、props 同一个，
        整棵子树 bailout，连 beginWork 都不进）。 */
-    const turnState: readonly unknown[] = [open, live, multiRun, ti, turns.length]
+    //
+    // ## 缓存键里放 isLast 而不是 turns.length（2026-11-17 修）
+    //
+    // 原来放的是 `turns.length`。而 `turns.length` **每加一轮就变** ⇒
+    // **所有轮**的缓存同时失效 ⇒ 每一轮 agent 跑完都把**整条转录**重算一遍。
+    //
+    // 但 turns.length 在渲染里只以 `ti === turns.length - 1` 的形式被用到两处
+    // （rawLive 的 isLast、结算边界的判断）⇒ 换成布尔量语义完全等价，
+    // 而失效面从「全部轮」缩到「**上一轮**」（它的 isLast 从 true 变成 false）。
+    //
+    // 实测（真实会话 82 轮）：原来每轮 82 轮全废，现在只有 1 轮废。
+    const turnState: readonly unknown[] = [open, live, multiRun, ti, isLast]
     const hit = turnCache.get(turn.key)
     if (hit && sameList(hit.items, turn.items) && sameList(hit.globals, turnGlobals) && sameList(hit.state, turnState)) {
+      // 刷新 LRU 位置（Map 保持插入序：命中就挪到队尾）。
+      turnCache.delete(turn.key)
+      turnCache.set(turn.key, hit)
       items.push(...hit.els)
       continue
     }
     const startIdx = items.length
     const remember = () => {
       turnCache.set(turn.key, { items: turn.items, globals: turnGlobals, state: turnState, els: items.slice(startIdx) })
+      // LRU 上限：超了就淘汰最老的一条（这些条目持有整轮的 React 元素树）。
+      while (turnCache.size > TURN_CACHE_MAX) {
+        const oldest = turnCache.keys().next().value
+        if (oldest === undefined) break
+        turnCache.delete(oldest)
+      }
     }
     if (turn.user) items.push(renderBlock(turn.user))
     /* 用户 2026-10：轮尾账排在产出卡**上方** —— 先结算这一轮，再看这一轮的产出。

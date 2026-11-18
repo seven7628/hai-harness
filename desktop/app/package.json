@@ -238,7 +238,8 @@
     "test:session-switch": "node scripts/test-session-switch-hydrated.mjs",
     "test:bridge-boot-gate": "node scripts/test-bridge-boot-gate.mjs",
     "test:plugin-shortcuts": "esbuild src/surfaces/plugin/shortcuts-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/plugin-shortcuts.test.cjs && node --test /tmp/plugin-shortcuts.test.cjs",
-    "test:plugin-asset": "esbuild src/surfaces/pluginAsset-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/plugin-asset.test.cjs && node --test /tmp/plugin-asset.test.cjs"
+    "test:plugin-asset": "esbuild src/surfaces/pluginAsset-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/plugin-asset.test.cjs && node --test /tmp/plugin-asset.test.cjs",
+    "test:mdpipeline": "esbuild src/lib/mdPipeline-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/md-pipeline.test.cjs && node --test /tmp/md-pipeline.test.cjs"
   },
   "build": {
     "appId": "ai.hai.desktop",
