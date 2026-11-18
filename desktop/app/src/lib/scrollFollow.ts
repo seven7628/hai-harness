@@ -80,6 +80,61 @@ export function isExternalMoveUp(a: {
   return a.top < a.expectedTop - EPS
 }
 
+/** 停滞自愈的判定阈值（导出让测试与 Narrative 共用同一份口径）。 */
+export const HEAL_AFTER_MS = 1200
+export const HEAL_GESTURE_QUIET_MS = 1000
+/** 落后多少屏才算「内容跑掉了」（用户 2026-11 实测的那次是 766px / 700px ≈ 1.1 屏）。 */
+export const HEAL_MIN_GAP_SCREENS = 0.8
+/** 观察窗内内容至少长高多少屏，才说明是流式把它推走的（用户在读历史时不会长）。 */
+export const HEAL_MIN_GROW_SCREENS = 0.3
+/**
+ * 「这次 scrollTop 变小算不算用户的手势」的时间窗。
+ *
+ * 判据必须是**手势证据**，而不是几何：浏览器在长任务解冻、`content-visibility`
+ * 重估、plain→shiki 换形之后都会自己把 scrollTop 往下钳，那没有 wheel/touch/key/拖条，
+ * 不该被判成「用户想看历史」。实测（lab/probe-stream-long.mjs）：一次 30px 的回拨
+ * 会让 onScroll 走进 isUserScrollUp → stopFollow(true) → hardAway，从此再无恢复通道。
+ */
+export const GESTURE_WINDOW_MS = 600
+
+/**
+ * 启发式停止跟随之后，要不要**自动恢复**。
+ *
+ * ## 为什么需要（用户 2026-11：「大量文本流式时超出视口的内容不自动下滑」）
+ *
+ * 停止跟随有两条路：
+ *   ① 用户手势（wheel / 触摸 / 键盘）——意图明确，必须尊重，**不在此列**（hardAway）；
+ *   ② `isExternalMoveUp` 的几何兜底 —— 只要有一帧读到 scrollTop 变小就判「用户上移」。
+ *
+ * ② 会被物理上并非用户意图的位移骗到：一次 400ms~2s 的长任务冻结之后，chunk 堆积、
+ * 解冻时一次性跳几百像素；`content-visibility` 对离屏轮的估算变化、plain→shiki 换形，
+ * 都会让浏览器把 scrollTop 往下调。实测（lab/probe-stream-long.mjs，真实 27k 语料）：
+ * 中途一次 30px 的回拨就能让 follow 100% → 40%，最终落后 **766px**，而恢复通道
+ * `shouldResumeFollow` 要求「已经贴底」—— 落后 766px 永远贴不回去，于是永久卡住。
+ *
+ * 判据刻意保守，四条同时满足才自愈：非手势停止、停滞 ≥1.2s、这 1s 内没有新手势、
+ * 落后 ≥1.5 屏且期间内容长高 ≥1 屏。用户上滑看历史时最后一条不成立（内容不长），
+ * 手一放就又滑回去才是灾难，所以宁可少自愈也不要抢。
+ */
+export function shouldHealFollow(a: {
+  follow: boolean
+  hardAway: boolean
+  top: number
+  max: number
+  clientHeight: number
+  stalledMs: number
+  grewPx: number
+  sinceGestureMs: number
+}): boolean {
+  if (a.follow || a.hardAway) return false
+  if (a.clientHeight <= 0) return false
+  if (a.stalledMs < HEAL_AFTER_MS) return false
+  if (a.sinceGestureMs < HEAL_GESTURE_QUIET_MS) return false
+  // 落后不到 0.8 屏：交给 shouldResumeFollow（贴底阈值内即时恢复）
+  if (a.max - a.top < a.clientHeight * HEAL_MIN_GAP_SCREENS) return false
+  return a.grewPx >= a.clientHeight * HEAL_MIN_GROW_SCREENS
+}
+
 /**
  * 校准帧是否应该写 scrollTop。
  *

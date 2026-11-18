@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -896,6 +896,9 @@ function cacheGet(code: string, lang: string, themeKey: string, lineNumbers: boo
   return hlCache.get(hlKey(code, lang, themeKey, lineNumbers)) ?? ''
 }
 
+/* 流式里跟到底过的代码块（键 = 语言 + 正文前 48 字）。见 CodeBlock 里 followKey 的注释。 */
+const followedBlocks = new Set<string>()
+
 function cacheSet(code: string, lang: string, themeKey: string, lineNumbers: boolean, html: string): void {
   // 简单 LRU：超限时先淘汰最早写入的一批（Map 保插入序，re-insert 即刷新顺序）
   if (hlCache.size >= HL_CACHE_MAX) {
@@ -926,22 +929,86 @@ function cacheSet(code: string, lang: string, themeKey: string, lineNumbers: boo
 //      （沿用上一个稳定态），因此不会闪回未高亮原文。
 // 回归：e2e/verify_codeblock_stream_jitter.mjs（该目录不入库，本地/CI 手工跑）——
 // 锁住「流式全程形态切换 ≤1 次」与「plain/shiki 版式高度逐像素一致」两条不变量。
-function CodeBlock({ lang, code }: { lang: string; code: string }) {
+function CodeBlock({ lang, code, streaming }: { lang: string; code: string; streaming?: boolean }) {
   const t = useT()
   const resolved = useResolvedTheme()
   const ap = useAppearance()
   const codeTheme = resolved === 'paper' ? ap.codeThemeLight : ap.codeThemeDark
   // 行号：≥2 行的块才加 gutter（单行片段挂个「1」是噪音，参考稿是带行号的多行块）。
-  const lineNumbers = code.split('\n').length >= 2
+  const codeLines = code.split('\n')
+  const lineNumbers = codeLines.length >= 2
+  /* ## 流式期间只铺尾部窗口（用户 2026-11：「大量文本流式时卡顿/抖动」）
+     实测（lab/probe-stream-long.mjs，真实 27k 语料）：`.cb-body` 有 max-height 480px，
+     但浏览器仍要为**整段**算行框 —— 568 个 chunk 摊到 1,520 次 layout、2,500+ 次样式重算，
+     单次最长卡顿 400ms~2s。块内既然跟到底部，用户看到的本来就只有最后那二十来行，
+     所以流式期间只渲染尾部 WINDOW_LINES 行，落定后再整段渲染（一次）。
+     ⚠️ 窗口化只发生在 streaming 且行数超过阈值时；历史块/落定块一律整段。 */
+  const WIN_LINES = 240
+  const windowed = Boolean(streaming) && codeLines.length > WIN_LINES
+  const hiddenLines = windowed ? codeLines.length - WIN_LINES : 0
+  const shownCode = windowed ? codeLines.slice(-WIN_LINES).join('\n') : code
   // 主题命中码：解析后的主题名 + 深浅。**必须包含具体主题名** —— 外观设置里可换
   // shiki 主题（见 highlight.ts 的 themeOverride），同名深浅但主题不同时要重算。
   const themeKey = `${resolved}:${codeTheme}`
   // 初值就读缓存：组件被重建时（流式中的常态）第一帧就是已高亮结果，不闪回原文
   const [html, setHtml] = useState(() => cacheGet(code, lang, themeKey, lineNumbers))
   const { state: copyState, copy } = useCopy(code)
+  /* ## 流式时块内自己跟到底部（用户 2026-11：「超出展示框限制范围的内容没能自动下滑」）
+     `.codeblock { max-height: 480px }` + `.cb-body { overflow: auto }` 意味着长围栏
+     根本不撑高页面 —— 它是**块内**滚动。叙述区跟得再好，块里也永远停在第一屏，
+     用户看到的是这段 system prompt 的开头，而新内容全在下面。
+     判据与叙述区一致：用户上滑就不再拽回来（stickRef）。 */
+  const bodyRef = useRef<HTMLElement | null>(null)
+  const cbStickRef = useRef(true)
+  // 程序性滚动的目标值：scroll 事件分不清「我滚的」和「用户滚的」，
+  // 只知道我自己把 top 写成了多少（与叙述区 tick 的 expectedTop 同一套判据）。
+  const cbExpectRef = useRef(-1)
+  const cbNodeRef = useRef<HTMLElement | null>(null)
+  const cbWasBottomRef = useRef(false)
+  /* 这块是不是「流式时一路被跟到底」的那一块 —— 要跨组件实例记，因为流式里
+     react-markdown 每个 chunk 都会重建 CodeBlock（见文件头注释），实例级的 ref 留不住。
+     键取「语言 + 正文前 48 字」：正文在长，前缀不动，所以整段流式是同一个键。 */
+  const followKey = `${lang}\u0000${code.slice(0, 48)}`
+  useLayoutEffect(() => {
+    const el = bodyRef.current
+    if (!el) return
+    /* 换节点（plain <pre> → shiki div）或是**换了实例**：新节点 scrollTop 从 0 起，
+       且第一帧就派发一个 top=0 的 scroll 事件（会被当成「用户拉到顶」）。
+       三种情形要接力到底：
+         ① streaming 中且没被用户上翻 → 跟到底；
+         ② 刚从 streaming 落定（settle）→ 保持刚才的位置，不要弹回第一行；
+         ③ 其它（历史块第一次挂载）→ 停在开头，符合「代码块默认读第一行」。 */
+    const wasFollowed = followedBlocks.has(followKey)
+    if (streaming && cbStickRef.current) {
+      el.scrollTop = el.scrollHeight
+      cbExpectRef.current = el.scrollTop
+      followedBlocks.add(followKey)
+      if (followedBlocks.size > 200) followedBlocks.delete(followedBlocks.values().next().value as string)
+    } else if (!streaming && wasFollowed) {
+      // 落定这一帧：接着停在底部（此时节点可能刚换过）。
+      // 标记**不能立刻删**：落定与 shiki 高亮落地是两次提交（判题实测：删早了会在
+      // 第二次提交时把块弹回第一行，落后 11913px）。留 5s 覆盖这两次换节点再清。
+      el.scrollTop = el.scrollHeight
+      cbExpectRef.current = el.scrollTop
+      const key = followKey
+      setTimeout(() => followedBlocks.delete(key), 5000)
+    }
+    cbWasBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+    // html 也要在依赖里：plain → shiki 换的是一个**新节点**（div 替掉 pre）。
+  }, [code, streaming, html, followKey])
+  const onBodyScroll = () => {
+    const el = bodyRef.current
+    if (!el) return
+    if (Math.abs(el.scrollTop - cbExpectRef.current) <= 2) return // 我自己滚的，不算用户意图
+    cbStickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+    cbWasBottomRef.current = cbStickRef.current
+  }
 
   useEffect(() => {
     let alive = true
+    /* 窗口化期间不排高亮：整段 shiki 在 27k 字时单次 ≈400ms，而这段时间用户看到的是
+       未高亮的尾部窗口 —— 高亮等落定后再一次性做。 */
+    if (windowed) return () => { alive = false }
     // 缓存命中（重建 / 切主题又切回 / 同内容重复渲染）→ 同步用，不排高亮
     const hit = cacheGet(code, lang, themeKey, lineNumbers)
     if (hit) {
@@ -979,10 +1046,15 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
           {copyLabel(t, copyState)}
         </button>
       </div>
-      {html ? (
-        <div className="cb-body" dangerouslySetInnerHTML={{ __html: html }} />
+      {windowed ? (
+        <pre className="cb-body cb-plain cb-windowed" ref={(el) => { bodyRef.current = el }} onScroll={onBodyScroll}>
+          <span className="cb-more mono">{t('md.streamWindow').replace('{n}', String(hiddenLines))}</span>
+          <code>{shownCode}</code>
+        </pre>
+      ) : html ? (
+        <div className="cb-body" ref={(el) => { bodyRef.current = el }} onScroll={onBodyScroll} dangerouslySetInnerHTML={{ __html: html }} />
       ) : (
-        <pre className="cb-body cb-plain">
+        <pre className="cb-body cb-plain" ref={(el) => { bodyRef.current = el }} onScroll={onBodyScroll}>
           <code>{code}</code>
         </pre>
       )}
@@ -1120,8 +1192,8 @@ const MarkdownBody = memo(function MarkdownBody({ text, baseDir, streaming, rend
             if (match && match[1] === 'mermaid') return <MermaidBlock code={code} />
             // HTML：iframe 沙箱实时预览（渲染/源码可切换，见 HtmlPreviewBlock）
             if (match && (match[1] === 'html' || match[1] === 'html-preview')) return <HtmlPreviewBlock code={code} streaming={streaming} />
-            if (match) return <CodeBlock lang={match[1]} code={code} />
-            if (isBlock) return <CodeBlock lang="text" code={code} />
+            if (match) return <CodeBlock lang={match[1]} code={code} streaming={streaming} />
+            if (isBlock) return <CodeBlock lang="text" code={code} streaming={streaming} />
             return <code className={className}>{children as ReactNode}</code>
           },
           img: ({ node: _node, src, alt, ...props }) => (

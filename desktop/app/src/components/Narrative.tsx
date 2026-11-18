@@ -5,7 +5,8 @@ import { useAppStore, mainRunEnded } from '../store/useAppStore'
 import { resolveRunState, turnLive } from '../lib/turnSettle'
 import { signalText } from '../lib/signalFacts'
 import type { RevealWindow } from '../lib/scrollFollow'
-import { decideFollow, isExternalMoveUp, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, snapToTurnStart, stepReveal, wheelConsumedByScroller } from '../lib/scrollFollow'
+import { decideFollow, GESTURE_WINDOW_MS, isExternalMoveUp,
+  shouldHealFollow, isUserScrollUp, revealWindow, shouldPinBottom, shouldResumeFollow, snapToTurnStart, stepReveal, wheelConsumedByScroller } from '../lib/scrollFollow'
 import type { MsgBlock } from '../store/useAppStore'
 import type { TurnStats, TurnUsage } from './runtime/turn/selectTurns'
 import { Markdown } from './markdown'
@@ -571,6 +572,9 @@ export default function Narrative({ viewSid, source, header, footer, density: de
   const lastGestureAtRef = useRef(0)
   // 上一次观察到的 scrollTop：用于「变小 ⇒ 用户在往上看」这个与事件源无关的判据
   const lastTopRef = useRef(0)
+  // 停滞自愈的观察窗（见 lib/scrollFollow.shouldHealFollow 的注释）：
+  // 几何性停止跟随之后，记下「从哪一帧开始落后」和「当时的 max」。
+  const stallRef = useRef<{ since: number; maxAtStart: number } | null>(null)
   // 触摸滑动上一次的 Y（判断方向）
   const touchYRef = useRef(0)
   // intentRef：本次手势的方向（'up' = 看更早的内容）。
@@ -783,7 +787,14 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       //     表现为新会话再也不自动贴底（gap 一路涨到 850px）。
       //  ② 钳到当前底部：top 已经贴着 max，再变小只是高度变化的结果。
       const movedUp = isUserScrollUp({ top, prevTop, max, prevMax })
-      if (movedUp) stopFollow(true)
+      /* ## 「变小」必须配手势证据（用户 2026-11：长文本流式不再自动下滑）
+         浏览器会在长任务解冻、content-visibility 重估、plain→shiki 换形之后自己
+         把 scrollTop 往下钳 —— 那**不是**用户在看历史，却会被 isUserScrollUp 判成上滑，
+         走 stopFollow(true) 置 hardAway，之后连自愈都不允许（用户只能手动点按钮）。
+         现在：最近 GESTURE_WINDOW_MS 内有 wheel/touch/key/拖条 才算手势；纯几何位移
+         只做**软停**（awayHard=false），内容继续长时由 shouldHealFollow 收回跟随。 */
+      const gestural = userGestureRef.current || performance.now() - lastGestureAtRef.current < GESTURE_WINDOW_MS
+      if (movedUp) stopFollow(gestural)
       // 用户手势引发的 scroll 才重新评估「是否回到底部」。
       if (!userGestureRef.current) return
       userGestureRef.current = false
@@ -811,12 +822,15 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       mark(dir)
       if (dir === 'up') stopFollow(true)
     }
+    const onPointerDown = () => mark(null)
+    el.addEventListener('pointerdown', onPointerDown, { passive: true })
     el.addEventListener('wheel', onWheel, { passive: true })
     el.addEventListener('touchstart', onTouchStart, { passive: true })
     el.addEventListener('touchmove', onTouchMove, { passive: true })
     el.addEventListener('keydown', onKey, { passive: true })
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => {
+      el.removeEventListener('pointerdown', onPointerDown)
       el.removeEventListener('wheel', onWheel)
       el.removeEventListener('touchstart', onTouchStart)
       el.removeEventListener('touchmove', onTouchMove)
@@ -921,6 +935,39 @@ export default function Narrative({ viewSid, source, header, footer, density: de
       //
       // 去掉 grew 门槛为什么安全：跟随态下钉底是不变式（本来就该在底部），
       // 而用户一旦上滑，外部改动判据会先把 autoscroll 置 false —— 不会抢跑。
+      /* ## 停滞自愈（用户 2026-11：长文本流式时内容超出视口却不再下滑）
+         几何判据（isExternalMoveUp）会被**非用户**的位移骗到：一次 400ms~2s 的长任务
+         冻结之后 chunk 堆积、解冻时一次性跳几百像素，浏览器也可能把 scrollTop 往下钳。
+         实测（lab/probe-stream-long.mjs）：中途一次 30px 回拨 → follow 40%、
+         最终落后 766px，而 shouldResumeFollow 要求「已经贴底」，永远贴不回去。
+         这里只看「几何性停止 + 内容一直长 + 没有新手势」，见 shouldHealFollow 的阈值。 */
+      if (!autoscrollRef.current && !awayHardRef.current) {
+        const nowMs = performance.now()
+        if (!stallRef.current) stallRef.current = { since: nowMs, maxAtStart: max }
+        const sinceGestureMs = lastGestureAtRef.current ? nowMs - lastGestureAtRef.current : Number.POSITIVE_INFINITY
+        if (
+          shouldHealFollow({
+            follow: autoscrollRef.current,
+            hardAway: awayHardRef.current,
+            top: el.scrollTop,
+            max,
+            clientHeight: el.clientHeight,
+            stalledMs: nowMs - stallRef.current.since,
+            grewPx: max - stallRef.current.maxAtStart,
+            sinceGestureMs,
+          })
+        ) {
+          autoscrollRef.current = true
+          stickRef.current = true
+          awayHardRef.current = false
+          stallRef.current = null
+          expectedTopRef.current = el.scrollTop
+          setAway(false)
+          setFresh(false)
+        }
+      } else {
+        stallRef.current = null
+      }
       if (shouldPinBottom({ follow: autoscrollRef.current, top: el.scrollTop, max })) {
         setScrollTop(el, max)
       }
@@ -943,6 +990,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     stickRef.current = true
     autoscrollRef.current = true // 新会话默认跟随（用户没表达过「看历史」意图）
     awayHardRef.current = false
+    stallRef.current = null
     setAway(false)
     setFresh(false)
     const el = ref.current
@@ -974,6 +1022,7 @@ export default function Narrative({ viewSid, source, header, footer, density: de
     intentRef.current = null
     userGestureRef.current = false
     lastGestureAtRef.current = 0
+    stallRef.current = null
     setAway(false)
     setFresh(false)
     expectedTopRef.current = -1
