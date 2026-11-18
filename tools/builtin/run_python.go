@@ -58,6 +58,9 @@ type RunPythonTool struct {
 	ft      *FileTools    // 仅用于 script_path 的路径解析（与文件工具同口径：工作区锚定 + ~/.go-code 保护）
 	sbx     sandbox.Sandbox
 
+	// spill 落盘仓库（完整输出落盘；见 spill.go）。
+	spill *spillStore
+
 	// diff 本次调用对**声明的产物**的变更（engine 经 ToolDiffProvider 读走，见 Diff）。
 	// 暂存字段的并发前提：本工具 CanParallel=false（执行类工具，同 bash），同一实例不会
 	// 被并行批共享 —— 与 writeFileTool.diff 同一先例；若将来放开并行，必须改成 ctx 槽
@@ -70,6 +73,24 @@ type RunPythonTool struct {
 type PythonRuntime interface {
 	Ensure(ctx context.Context) (runtime.Python, error)
 }
+
+// runPythonSpillDirPrefix 落盘目录前缀（系统临时目录下的 0700 目录，见 spill.go）。
+const runPythonSpillDirPrefix = "hai-harness-python-spill-"
+
+// runPythonOutputLimit 脚本输出的**内存窗口**（头 + 尾合计）。
+//
+// 为什么要有（2026-11-17）：改造前脚本输出走**无界** bytes.Buffer ——
+// 脚本 print 10 MB ⇒ 沙箱缓冲 10 MB + String() 再拷一份 ⇒ 峰值 20 MB，
+// 而模型侧真正能看到的只有引擎截断后的 20 KB。⇒ 20 MB 内存换 20 KB 上下文。
+// 一条输出 1 GB 的脚本能把 bridge 撑爆。
+//
+// 与 bash 同一口径（bashModelOutputLimit = 16 KB）：内存里只留「头 + 尾」
+// （Python 的 traceback / 报错通常在**尾**），中间超出的部分落盘，
+// 模型拿路径分段读（read_file 的 start_line/end_line）。
+const runPythonOutputLimit = 16 << 10
+
+// runPythonSpillThreshold 超过这个量就把**完整**输出落盘（模型拿路径分段读）。
+const runPythonSpillThreshold = runPythonOutputLimit
 
 // 脚本时限策略（对齐 bash 的 default/max 口径：模型可经 timeout 参数覆盖，钳制 1s–1h）。
 const (
@@ -123,6 +144,7 @@ func NewRunPythonTool(workspace string, py PythonRuntime, sbx sandbox.Sandbox) *
 		py:      py,
 		ft:      NewFileTools(workspace),
 		sbx:     sbx,
+		spill:   newSpillStore(runPythonSpillDirPrefix),
 	}
 }
 
@@ -317,14 +339,62 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 	// 同一个事件类型）。无事件出口（直调工具 / 脚本路径里的嵌套调用）时 OnOutput 保持 nil
 	// —— 执行层走历史路径，零开销。模型侧完全无感：本工具照旧阻塞到脚本结束才返回。
 	tailer := newOutputTailer(ctx)
+	// 输出有界化 + 落盘（2026-11-17）：内存窗口 16 KB（头 8 + 尾 8），
+	// 超出的部分把**完整**输出落盘并把路径报给模型 ⇒ 模型可分段读，
+	// 而不是只拿到被引擎硬砍的 20 KB。内存占用与输出大小**无关**。
+	var exitCode int
+	var timedOut, canceled bool
+	var spilled bool
+	var omitted, totalOut int64
+	spillPath := t.spill.reserve(ctx)
 	out, err := sbx.Run(ctx, sandbox.ExecSpec{
-		Command:  cmdline,
-		Cwd:      t.Cwd,
-		Timeout:  scriptTimeout,
-		OnOutput: spec0OnOutput(tailer),
+		Command:          cmdline,
+		Cwd:              t.Cwd,
+		Timeout:          scriptTimeout,
+		OnOutput:         spec0OnOutput(tailer),
+		ExitCode:         &exitCode,
+		TimedOut:         &timedOut,
+		Canceled:         &canceled,
+		OutputLimit:      runPythonOutputLimit,
+		OutputFile:       spillPath,
+		OutputFileAfter:  runPythonSpillThreshold,
+		Spilled:          &spilled,
+		OmittedBytes:     &omitted,
+		TotalOutputBytes: &totalOut,
 	})
+	// 上报结构化结局（旁路：Call 必须返回 nil error，否则引擎会丢弃 out）。
+	//
+	// 改造前（2026-11-17 之前）**根本没有这一句** ⇒ 脚本异常退出（exit 1）、
+	// 超时被杀、用户中断，三种都返回 nil error ⇒ 引擎判为**成功** ⇒
+	// 模型把失败的脚本当成功结果继续推理，且失败账本不记 ⇒
+	// 「重复失败调用守卫」对 run_python 完全失效（模型可以无限重跑同一个必失败脚本）。
+	if sink := tools.ExecSinkFrom(ctx); sink != nil {
+		sink.SetExit(cmdline, exitCode, timedOut, canceled)
+	}
 	if err != nil {
 		return out, err // 执行后端本身失败（非脚本非零退出）：不产生产出（engine 也不会读 diff）
+	}
+	// 结局声明（**首行**，模型据此判断「这份输出能不能当完整结果用」）：
+	//   - 超时/取消 ⇒ 输出是**部分输出**，必须显式声明（与 bash 同一口径）。
+	//   - 非零退出 ⇒ 脚本报错信息通常在**尾**（traceback），窗口的尾段正好留着；
+	//     但「非零退出 = 失败」这件事也要说清楚，否则模型会把 traceback 当正文。
+	switch {
+	case canceled:
+		out = "[CANCELLED — the script was interrupted before finishing; the output below is PARTIAL]\n" + out
+	case timedOut:
+		limit := "the configured limit"
+		if scriptTimeout > 0 {
+			limit = scriptTimeout.String()
+		}
+		out = "[TIMEOUT after " + limit + " — the script was killed and the output below is PARTIAL]\n" + out
+	case exitCode != 0:
+		out = fmt.Sprintf("[EXIT %d — the script failed; the output below is the failure detail (traceback is at the end)]\n", exitCode) + out
+	}
+	// 落盘提示（**只加在给模型的文本上**）：模型拿到路径就能分段读完整输出。
+	if spilled && spillPath != "" {
+		out = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s\n"+
+			"Read it with read_file (start_line/end_line) or bash (head/grep/sed) to get the parts you need.]\n%s",
+			humanBytes(totalOut), spillPath, out)
 	}
 	// ⑦ 补齐产物事实（存在性/尺寸/指纹 → FileDiff）+ 结果文本里的显式告知。
 	return t.summarizeOutputs(out, outs), nil

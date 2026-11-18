@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/seven7628/hai-harness/core"
-	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/tools"
 	"os"
@@ -56,10 +55,10 @@ type BashTool struct {
 	// 注意**没有**「结构化结果暂存」字段：结构化结果写进引擎注入的**每次调用独立**的
 	// ctx 槽（tools.StructuredSinkFrom(ctx)）。用实例字段会在「主 agent 与后台子 agent
 	// 共享同一 ToolEngine」的并发下互相清空/串味（评审实测：脚本路径 3/300 拿到 nil，
-	// 退化成 20KB 文本）。smu 保护下面两个字段。
-	smu      sync.Mutex
-	spillDir string
-	spillSeq uint64
+	// 退化成 20KB 文本）。
+	//
+	// spill 落盘仓库（目录 + 序号；见 spill.go：与 run_python 共用同一套约定）。
+	spill *spillStore
 
 	// BeforeExec 可选钩子：每条命令真正执行前调用（参数 = 最终命令文本，cd 前缀
 	// 已剥离）。宿主注入产品级副作用（如检测 ego-browser 命令激活窗口），工具层
@@ -132,6 +131,7 @@ func NewBashTool(cwd string, timeout time.Duration, sbx sandbox.Sandbox, appAllo
 		sbx:      sbx,
 		appAllow: appAllow,
 		curCwd:   cwd,
+		spill:    newSpillStore(bashSpillDirPrefix),
 	}
 	return t
 }
@@ -418,34 +418,12 @@ func (t *BashTool) buildStructured(ctx context.Context, out string, exitCode int
 // 不删文件：路径已经交给脚本/宿主（full_output_path），删掉等于给死链；留在系统临时目录由
 // 操作系统回收（与 slim 的 spill 同性质）。
 func (t *BashTool) spillFile(ctx context.Context, full string) string {
-	dir, err := t.ensureSpillDir()
-	if err != nil {
-		return ""
-	}
-	runID := ""
-	if tc := events.ToolContextFrom(ctx); tc != nil {
-		runID = tc.RunId
-	}
-	path := filepath.Join(dir, t.nextSpillName(runID))
-	if err := os.WriteFile(path, []byte(full), 0o600); err != nil {
-		return ""
-	}
-	return path
+	return t.spill.write(ctx, full)
 }
 
 // ensureSpillDir 惰性建落盘目录（0700，见 spillFile 的约定）；同实例复用同一个目录。
 func (t *BashTool) ensureSpillDir() (string, error) {
-	t.smu.Lock()
-	defer t.smu.Unlock()
-	if t.spillDir != "" {
-		return t.spillDir, nil
-	}
-	dir, err := os.MkdirTemp("", bashSpillDirPrefix)
-	if err != nil {
-		return "", err
-	}
-	t.spillDir = dir
-	return dir, nil
+	return t.spill.dirPath()
 }
 
 // reserveSpillPath 预留一个落盘路径（**文件由执行层按需创建** —— 输出没超阈值
@@ -454,58 +432,7 @@ func (t *BashTool) ensureSpillDir() (string, error) {
 // 与 spillFile 的分工：spillFile 是「拿到完整文本后再写一遍」；本函数是**提前
 // 给出路径**，让执行层边跑边写 ⇒ 命令输出 1 GB 也不会在内存里堆 1 GB。
 func (t *BashTool) reserveSpillPath(ctx context.Context) string {
-	dir, err := t.ensureSpillDir()
-	if err != nil {
-		return ""
-	}
-	runID := ""
-	if tc := events.ToolContextFrom(ctx); tc != nil {
-		runID = tc.RunId
-	}
-	return filepath.Join(dir, t.nextSpillName(runID))
-}
-
-// humanBytes 把字节数格式化成人类可读的量（用于结果里的落盘提示）。
-func humanBytes(n int64) string {
-	switch {
-	case n >= 1<<30:
-		return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", n)
-	}
-}
-
-// nextSpillName 生成落盘文件名（spill-<runId>-<n>.txt；无 runId 时省略该段）。
-// runId 经 sanitize 处理：它来自事件层（宿主/模型可影响），不能带路径分隔符。
-func (t *BashTool) nextSpillName(runID string) string {
-	t.smu.Lock()
-	defer t.smu.Unlock()
-	t.spillSeq++
-	if runID = sanitizeSpillID(runID); runID == "" {
-		return fmt.Sprintf("spill-%d.txt", t.spillSeq)
-	}
-	return fmt.Sprintf("spill-%s-%d.txt", runID, t.spillSeq)
-}
-
-// sanitizeSpillID 只保留文件名安全字符（字母/数字/.-_），其余替换为 "_"，并限长。
-func sanitizeSpillID(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-		if b.Len() >= 48 {
-			break
-		}
-	}
-	return strings.Trim(b.String(), "._-")
+	return t.spill.reserve(ctx)
 }
 
 // currentCwd 返回当前工作目录（会话内跨调用；初始 = 构造 cwd）。
