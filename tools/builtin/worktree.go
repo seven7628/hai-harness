@@ -30,6 +30,12 @@ const worktreeBaseRel = ".go-code" + string(os.PathSeparator) + "worktrees"
 type GitWorktreeTool struct {
 	tools.BaseTool
 	root string // 工作区根目录（git 仓库根）
+
+	// 「是不是 git 工作树」的判定**只查一次**（root 在会话内不变）：
+	// 改造前每次调用都跑一个 `git rev-parse` 进程（list 是最高频动作 ⇒
+	// 每次都付一次进程启动 + git 二进制加载，~15–50 ms）。
+	gitOnce sync.Once
+	gitErr  error
 }
 
 // NewGitWorktreeTool 创建 git_worktree 工具；root 为工作区根目录（绝对路径）。
@@ -93,18 +99,29 @@ func (t *GitWorktreeTool) ensureWorktreesDir() (string, error) {
 // 全部以 git 原始报错失败，模型只能看到 "致命错误：不是 git 仓库" 而不知如何自救；
 // 这里换成可操作的说明，并说明 worktree 能力依赖 git。
 func (t *GitWorktreeTool) ensureGitRepo(ctx context.Context) error {
-	out, err := runGit(ctx, "-C", t.root, "rev-parse", "--is-inside-work-tree")
-	if err != nil {
-		return fmt.Errorf(
-			"git_worktree: 当前工作区不是 git 仓库（%s 内未找到 .git），因此 worktree 功能不可用。"+
-				"请在 git 仓库内使用本工具；若本会话的任务不需要 worktree，请改用普通文件工具在该工作区内工作。"+
-				"（git 原始输出: %s）", t.root, strings.TrimSpace(out))
-	}
-	if strings.TrimSpace(out) != "true" {
-		return fmt.Errorf("git_worktree: %s 不是 git 工作树（rev-parse 返回 %q），worktree 功能不可用", t.root, strings.TrimSpace(out))
-	}
-	return nil
+	// 只查一次（sync.Once）：root 在会话内不变，判定结果不会变；
+	// 改造前每次调用都跑一个 git 进程（list 最高频 ⇒ 每次 15–50 ms 的进程启动）。
+	t.gitOnce.Do(func() {
+		out, err := runGit(ctx, "-C", t.root, "rev-parse", "--is-inside-work-tree")
+		if err != nil {
+			t.gitErr = fmt.Errorf(
+				"git_worktree: 当前工作区不是 git 仓库（%s 内未找到 .git），因此 worktree 功能不可用。"+
+					"请在 git 仓库内使用本工具；若本会话的任务不需要 worktree，请改用普通文件工具在该工作区内工作。"+
+					"（git 原始输出: %s）", t.root, strings.TrimSpace(out))
+			return
+		}
+		if strings.TrimSpace(out) != "true" {
+			t.gitErr = fmt.Errorf("git_worktree: %s 不是 git 工作树（rev-parse 返回 %q），worktree 功能不可用", t.root, strings.TrimSpace(out))
+		}
+	})
+	return t.gitErr
 }
+
+// ToolTimeout 实现 tools.ToolTimeoutProvider：声明工具级时限。
+//
+// create 是一次完整 checkout（大仓可能几分钟）；引擎默认 5 分钟兜底，
+// 但这里给 120s 更明确的语义（超时会被判失败并让模型知道「太慢」而不是「坏了」）。
+func (t *GitWorktreeTool) ToolTimeout() time.Duration { return 120 * time.Second }
 
 func (t *GitWorktreeTool) ValidParams(_ context.Context, _, arguments string) error {
 	var a worktreeArgs
@@ -225,18 +242,37 @@ const gitWaitDelayNote = "[exec: WaitDelay 到期 —— 输出可能被进程�
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
+	cut bool // 已超上限：后面的内容被丢弃
 }
+
+// gitOutputCap 单条 git 输出的内存上限（字节）。
+//
+// 改造前**无上限**：git 的输出（`git worktree list` 的路径、超长错误信息）全部进内存，
+// 而引擎的 20 KB 闸门在这之后才生效 ⇒ 一次异常输出就能吃掉大量内存。
+const gitOutputCap = 1 << 20
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	if b.buf.Len() >= gitOutputCap {
+		b.cut = true
+		return len(p), nil // 丢弃后续内容（**不报错**：命令本身继续跑）
+	}
+	n, err := b.buf.Write(p)
+	if b.buf.Len() >= gitOutputCap {
+		b.cut = true
+	}
+	return n, err
 }
 
 func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.String()
+	s := b.buf.String()
+	if b.cut {
+		s += "\n[git output truncated at 1 MiB]"
+	}
+	return s
 }
 
 // runGit 执行 git 命令，捕获 stdout+stderr。命令超时跟随 ctx（引擎兜底 / 批超时）。
