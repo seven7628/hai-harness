@@ -345,6 +345,3 @@ func (w *previewWorker) close() {
 	w.broken.Store(true)
 	_ = w.proc.Close()
 }
-
-// previewWorkerQueueCancellableDoc 放在文件末尾提醒：队列用信号量（可取消）而不是
-// mutex（不可取消）—— 用户中断后，排队的预览不该干等前一个跑完。
