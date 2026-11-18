@@ -120,6 +120,9 @@ type Service struct {
 	maxInput     int64
 	now          func() time.Time
 	hashHook     func(enter bool)
+	// memo 内容键的两级备忘（L1 stat → L2 内容哈希）：命中缓存时不必把整个源文件
+	// 再读一遍算 sha256（见 keymemo.go）。
+	memo *keyMemo
 	// sweeps 已执行的清扫次数（诊断 + 接线断言）：证明清扫走的是**这个** Service 的
 	// Cache 实例，而不是另建一份同目录的 Cache（那种写法让 Cache.mu 形同虚设）。
 	sweeps atomic.Int64
@@ -175,6 +178,7 @@ func New(opts Options) (*Service, error) {
 		maxInput:     maxInput,
 		now:          now,
 		hashHook:     opts.HashWaitHook,
+		memo:         newKeyMemo(0),
 	}, nil
 }
 
@@ -294,12 +298,24 @@ func (s *Service) convert(ctx context.Context, req Request) (Result, error) {
 	return Result{HTMLPath: p, Key: key}, nil
 }
 
-// cacheKey 在哈希闸门内算内容键。
+// cacheKey 算内容键。
+//
+// **两级**：先查进程内备忘（L1 = stat 凭据 ⇒ 命中就免掉全文件读盘 + 哈希），
+// 未命中才进哈希闸门真算（L2 = 内容 sha256）。
 //
 // 闸门内的原因：算键要**把整个文件读一遍**（100 MiB ≈ 0.2s CPU + 全量读盘）。
 // 5 个请求同时进来时，不加闸就是 5 路全量读 —— 与「并发 2」的初衷（别把机器跑满）
-// 正好相反。闸门只包住读+哈希，不包缓存查询与转换本身。
+// 正好相反。闸门只包住读+哈希，不包缓存查询与转换本身；备忘命中**不进闸门**
+// （它不读盘，占着闸门只会把别人堵在后面）。
 func (s *Service) cacheKey(ctx context.Context, req Request) (string, error) {
+	name := filepath.Base(req.Path)
+	l1, err := l1Key(req.Kind, name, req.Params, req.Path)
+	if err != nil {
+		return "", err
+	}
+	if key, ok := s.memo.get(l1); ok {
+		return key, nil
+	}
 	select {
 	case s.hashSem <- struct{}{}:
 		defer func() { <-s.hashSem }()
@@ -310,7 +326,19 @@ func (s *Service) cacheKey(ctx context.Context, req Request) (string, error) {
 		s.hashHook(true)
 		defer s.hashHook(false)
 	}
-	return CacheKey(req.Kind, filepath.Base(req.Path), req.Params, req.Path)
+	key, err := CacheKey(req.Kind, name, req.Params, req.Path)
+	if err != nil {
+		return "", err
+	}
+	s.memo.put(l1, key)
+	return key, nil
+}
+
+// ContentKey 返回源文件的内容键（供 bridge 侧直接用，如 PDF 导出那条路径）。
+//
+// 与 CacheKey 同参同结果；命中进程内备忘时**不读文件**（省一次全量读盘 + 哈希）。
+func (s *Service) ContentKey(kind, name string, params map[string]string, src string) (string, error) {
+	return s.memo.ContentKey(kind, name, params, src)
 }
 
 // classify 把转换器错误翻成带码错误（超时/取消优先于「转换失败」）。

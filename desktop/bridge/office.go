@@ -160,7 +160,8 @@ func (m *manager) convertOfficePDF(ctx context.Context, abs, kind string) (strin
 	if err != nil {
 		return "", err
 	}
-	key, err := conversion.CacheKey(kind, filepath.Base(abs), map[string]string{
+	// ContentKey：两级键（命中备忘时不读文件）—— 键与 conversion.CacheKey 逐字相同。
+	key, err := svc.ContentKey(kind, filepath.Base(abs), map[string]string{
 		"renderer": "libreoffice",
 		"kit":      kit.Version,
 	}, abs)
@@ -244,7 +245,8 @@ func (m *manager) renderOfficePages(ctx context.Context, src string, pages []int
 	if err != nil {
 		return officeRenderOutput{}, err
 	}
-	key, err := conversion.CacheKey("render", filepath.Base(pdf), map[string]string{
+	// ContentKey：两级键（命中备忘时不读文件）—— 键与 conversion.CacheKey 逐字相同。
+	key, err := svc.ContentKey("render", filepath.Base(pdf), map[string]string{
 		"dpi": strconv.Itoa(dpi), "pages": pageList(pages), "limit": strconv.Itoa(limit),
 		"kit": st.prober.Kit().Version,
 	}, pdf)
