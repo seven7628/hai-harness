@@ -75,6 +75,18 @@ type XlsxConvertResult struct {
 	Dir      string // 临时目录（同上）
 }
 
+// Close 关掉预览器：连同它的常驻 worker 池（第 5 轮爬山第 4 步）。
+//
+// 为什么需要：常驻 worker 是**常驻进程**（每个约 33MB）。预览槽位被淘汰 / 工作区
+// 被关闭时若不关，这些进程要等 5 分钟空闲回收才消失 ⇒ 一批进程在内存里排队等死。
+// 不关还会漏掉回收巡检协程（它随池退出）。
+func (p *XlsxPreviewer) Close() {
+	if p == nil || p.worker == nil {
+		return
+	}
+	p.worker.Close()
+}
+
 // Convert 把 xlsxPath（绝对路径）转换为 HTML，返回产物路径。
 //
 // workspace = 沙箱的读写根（决定策略里哪些路径可读写；与 run_python 同锚：工作区读写两开、

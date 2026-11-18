@@ -124,13 +124,30 @@ func (m *manager) evictOldestPreviewSlotsLocked(keep string) {
 		if oldest == "" {
 			return
 		}
+		// 淘汰时**关掉它的常驻进程**（第 5 轮爬山第 4 步）：不关的话，这些
+		// python 进程（每个约 33MB）要等 5 分钟空闲回收才消失 ⇒ 槽位反复换工作区
+		// 时，就是一批进程在内存里排队等死。
+		m.previewSlots[oldest].close()
 		delete(m.previewSlots, oldest)
 	}
+}
+
+// close 关掉槽位里的三条转换器（连同它们的常驻 worker）。
+func (s *previewSlot) close() {
+	if s == nil {
+		return
+	}
+	s.xlsx.Close()
+	s.docx.Close()
+	s.pptx.Close()
 }
 
 // releasePreviewSlot 回收某工作区的槽位（删除/关闭工作区调用；不存在的 key 无副作用）。
 func (m *manager) releasePreviewSlot(ws string) {
 	m.previewMu.Lock()
+	if s, ok := m.previewSlots[ws]; ok {
+		s.close()
+	}
 	delete(m.previewSlots, ws)
 	m.previewMu.Unlock()
 }
@@ -138,6 +155,9 @@ func (m *manager) releasePreviewSlot(ws string) {
 // releaseAllPreviewSlots 回收全部槽位（进程退出）。
 func (m *manager) releaseAllPreviewSlots() {
 	m.previewMu.Lock()
+	for _, s := range m.previewSlots {
+		s.close()
+	}
 	m.previewSlots = nil
 	m.previewMu.Unlock()
 }

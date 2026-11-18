@@ -115,6 +115,86 @@ const previewWorkerIdleTimeout = 5 * time.Minute
 // previewWorkerReapInterval 回收巡检间隔。
 const previewWorkerReapInterval = time.Minute
 
+// previewWorkerGlobalMax 全局常驻进程上限（xlsx/docx/pptx 三个池**合计**）。
+//
+// 为什么要有（第 5 轮爬山第 4 步，实测）：三个 previewer 都是 manager 级单例、
+// 共用「按工作区」的池，而**工作区数没有上限** ⇒ 常驻进程数 = 3 × 工作区数，
+// 每个约 33MB（实测：常驻 python 进程 RSS 24–34MB）⇒ 10 个工作区就是 **1GB RSS**。
+// 这是内置工具层**唯一真正吃 swap 的大头**（Go 侧的堆是干净的：实测 12 轮大输出
+// 后活堆 0.3MB → 0.3MB）。
+//
+// 4 个 = 约 130MB 上限：桌面端同时活跃的工作区是个位数，预览只在用户点开产出时
+// 建 worker ⇒ 4 个够用；超了按 LRU 淘汰最久没用的那个（腾出位置给它）。
+var previewWorkerGlobalMax = 4
+
+// previewWorkerRegistry 全局登记所有常驻转换进程：预算 + LRU 淘汰共用。
+//
+// 为什么是**全局**而不是每个池各限各的：三个池互相独立 ⇒ 各限各的话总进程数
+// 仍是 3 倍 ⇒ 限不住。必须有一个跨池的账本。
+type previewWorkerRegistry struct {
+	mu      sync.Mutex
+	workers map[*previewWorker]struct{}
+}
+
+// previewWorkers 全局账本（进程级单例）。
+//
+// 注意：上限**不在这里存一份**（那样改策略 var 不会生效 —— 上限是策略，不是账本
+// 自己的状态）：admit() 直接读 previewWorkerGlobalMax。
+var previewWorkers = &previewWorkerRegistry{
+	workers: map[*previewWorker]struct{}{},
+}
+
+// admit 为新 worker 腾位置：没超预算 ⇒ true；超了 ⇒ 淘汰**全局最久没用且空闲**的
+// 那一个（LRU）。返回 false = 挤不出位置（所有 worker 都在忙）⇒ 调用方应退回
+// 一次性执行（慢一点，但不占常驻内存）。
+func (r *previewWorkerRegistry) admit() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.workers) < previewWorkerGlobalMax {
+		return true
+	}
+	var victim *previewWorker
+	for w := range r.workers {
+		if w.inUse() {
+			continue // 正在转换 ⇒ 不能杀（杀了这次转换就失败）
+		}
+		if victim == nil || w.lastUse().Before(victim.lastUse()) {
+			victim = w
+		}
+	}
+	if victim == nil {
+		return false // 全在忙 ⇒ 挤不进来
+	}
+	if !victim.markDying() {
+		return false // 淘汰窗口内它开始跑了 ⇒ 放弃（宁可不换也不要打断正在跑的转换）
+	}
+	// 关进程 + 从账本里摘掉。属主池下次用到它会发现 broken ⇒ 自动重建。
+	victim.close()
+	delete(r.workers, victim)
+	return true
+}
+
+// add 登记一个新 worker。
+func (r *previewWorkerRegistry) add(w *previewWorker) {
+	r.mu.Lock()
+	r.workers[w] = struct{}{}
+	r.mu.Unlock()
+}
+
+// remove 从账本里摘掉一个 worker（它被关掉了）。
+func (r *previewWorkerRegistry) remove(w *previewWorker) {
+	r.mu.Lock()
+	delete(r.workers, w)
+	r.mu.Unlock()
+}
+
+// count 当前登记的常驻进程数（诊断用）。
+func (r *previewWorkerRegistry) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.workers)
+}
+
 // previewWorkerPool 按工作区复用常驻转换进程。
 type previewWorkerPool struct {
 	py     PythonRuntime
@@ -130,6 +210,8 @@ type previewWorkerPool struct {
 	bootPath   string                    // 引导脚本落盘路径（写一次）
 	scriptDir  string                    // 两个脚本所在目录
 	reapOnce   sync.Once
+	closed     bool          // 池已关闭（Close 之后不再起进程）
+	closeCh    chan struct{} // 停回收巡检用
 }
 
 // newPreviewWorkerPool 构造常驻 worker 池（script/marker 与一次性路径同一份）。
@@ -139,6 +221,7 @@ func newPreviewWorkerPool(py PythonRuntime, sbxFor SandboxFor, script string) *p
 		sbxFor:  sbxFor,
 		script:  script,
 		workers: map[string]*previewWorker{},
+		closeCh: make(chan struct{}),
 	}
 }
 
@@ -158,6 +241,9 @@ func (p *previewWorkerPool) convert(ctx context.Context, workspace, src, dst str
 func (p *previewWorkerPool) worker(ctx context.Context, workspace string) (*previewWorker, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return nil, fmt.Errorf("预览转换池已关闭")
+	}
 	if w, ok := p.workers[workspace]; ok {
 		if !w.broken.Load() {
 			w.touch()
@@ -166,13 +252,20 @@ func (p *previewWorkerPool) worker(ctx context.Context, workspace string) (*prev
 		}
 		// 坏掉的（崩了/协议错位）：关掉重起
 		w.close()
+		previewWorkers.remove(w)
 		delete(p.workers, workspace)
+	}
+	// 全局预算：超了就先淘汰最久没用的空闲 worker（第 5 轮爬山第 4 步）。
+	// 挤不出位置（都在忙）⇒ 报错 ⇒ 调用方退回一次性执行。
+	if !previewWorkers.admit() {
+		return nil, fmt.Errorf("常驻转换进程已达全局上限（%d 个，都在忙）", previewWorkerGlobalMax)
 	}
 	w, err := p.start(ctx, workspace)
 	if err != nil {
 		return nil, err
 	}
 	p.workers[workspace] = w
+	previewWorkers.add(w)
 	p.startReaperLocked()
 	return w, nil
 }
@@ -205,7 +298,17 @@ func (p *previewWorkerPool) start(ctx context.Context, workspace string) (*previ
 		return nil, fmt.Errorf("起常驻转换进程失败: %w", err)
 	}
 	p.starts.Add(1)
-	return &previewWorker{proc: proc, reader: bufio.NewReader(proc.Stdout()), sem: make(chan struct{}, 1)}, nil
+	return newPreviewWorker(proc), nil
+}
+
+// newPreviewWorker 造一个常驻 worker。
+//
+// **构造即打点**：改造前 last=0（= 1970）⇒ 空闲回收器在第一次转换**之前**就会
+// 把它当成「空闲 5 分钟」杀掉（新建后第一次转换可能被拒）。
+func newPreviewWorker(proc sandbox.Process) *previewWorker {
+	w := &previewWorker{proc: proc, reader: bufio.NewReader(proc.Stdout()), sem: make(chan struct{}, 1)}
+	w.touch()
+	return w
 }
 
 // ensureScripts 把引导脚本与转换脚本落盘（**整个池只写一次**）。
@@ -242,27 +345,70 @@ func fileExists(path string) bool {
 }
 
 // startReaperLocked 起空闲回收巡检（每个池只起一次；调用方须持 p.mu）。
+//
+// 巡检协程会随池关闭而退出（closeCh）—— 改造前是 `for range t.C` **永不退出**，
+// 池被丢弃（槽位淘汰）时这个协程连同 ticker 一起泄漏。
 func (p *previewWorkerPool) startReaperLocked() {
 	p.reapOnce.Do(func() {
 		go func() {
 			t := time.NewTicker(previewWorkerReapInterval)
 			defer t.Stop()
-			for range t.C {
-				p.reapIdle(time.Now())
+			for {
+				select {
+				case <-t.C:
+					p.reapIdle(time.Now())
+				case <-p.closeCh:
+					return
+				}
 			}
 		}()
 	})
 }
 
+// Close 关池：停回收巡检 + 关掉所有常驻进程（幂等）。
+//
+// 谁会调：预览槽位被淘汰时（workspace_slots.go 的槽位上限 32）。manager 级单例
+// 不用调（它们跟 bridge 同寿）。不关的话，这些 worker 要等 5 分钟空闲回收才消失
+// —— 槽位反复换工作区时，就是一批进程在内存里排队等死。
+func (p *previewWorkerPool) Close() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	workers := p.workers
+	p.workers = map[string]*previewWorker{}
+	p.mu.Unlock()
+
+	for _, w := range workers {
+		w.close()
+		previewWorkers.remove(w)
+	}
+	close(p.closeCh)
+}
+
 // reapIdle 回收空闲超时的常驻进程。
+//
+// **正在转换的不回收**（改造前的缺陷：一个跑了 6 分钟的转换会被当成「空闲 5 分钟」
+// 杀掉 ⇒ 转换凭空失败）。
 func (p *previewWorkerPool) reapIdle(now time.Time) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	var victims []*previewWorker
 	for key, w := range p.workers {
+		if w.inUse() {
+			continue // 正在转换 ⇒ 不动
+		}
 		if now.Sub(w.lastUse()) > previewWorkerIdleTimeout {
-			w.close()
+			victims = append(victims, w)
 			delete(p.workers, key)
 		}
+	}
+	p.mu.Unlock()
+	// 关进程放在锁外（kill+wait 不该占着池锁）。
+	for _, w := range victims {
+		w.close()
+		previewWorkers.remove(w)
 	}
 }
 
@@ -277,6 +423,53 @@ type previewWorker struct {
 	sem    chan struct{}
 	broken atomic.Bool
 	last   atomic.Int64 // unix nano
+
+	// mu 保护 busy/dying 两个标志的切换（不是保护数据，是保护**状态迁移**）。
+	//
+	// busy：正在跑转换。**正在跑的 worker 不能被回收**（杀了它，转换就失败）——
+	// 改造前回收器只看「多久没用」，于是一个跑了 6 分钟的转换会被当成
+	// 「空闲 5 分钟」杀掉（第 5 轮爬山第 4 步修的既有缺陷）。
+	// dying：正在被淘汰（全局预算挤掉）。run 看到它就直接放弃 ⇒ 调用方退回
+	// 一次性执行，而不是把一个刚被杀的进程用下去。
+	mu    sync.Mutex
+	busy  bool
+	dying bool
+}
+
+// inUse 正在跑转换吗（回收器据此跳过它）。
+func (w *previewWorker) inUse() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.busy
+}
+
+// beginRun 声明「开始跑一次转换」；返回 false = 这个 worker 正在被淘汰，别用了。
+func (w *previewWorker) beginRun() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.dying {
+		return false
+	}
+	w.busy = true
+	return true
+}
+
+// endRun 声明「这次转换结束」。
+func (w *previewWorker) endRun() {
+	w.mu.Lock()
+	w.busy = false
+	w.mu.Unlock()
+}
+
+// markDying 标记「正在被淘汰」并返回「现在是否可以关它」（忙 ⇒ 不行）。
+func (w *previewWorker) markDying() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.busy {
+		return false
+	}
+	w.dying = true
+	return true
 }
 
 func (w *previewWorker) touch() { w.last.Store(time.Now().UnixNano()) }
@@ -295,6 +488,11 @@ func (w *previewWorker) run(ctx context.Context, src, dst string) (string, error
 	if w.broken.Load() {
 		return "", fmt.Errorf("常驻转换进程已失效")
 	}
+	// 占用标记：回收器与全局淘汰都据此跳过「正在转换」的 worker。
+	if !w.beginRun() {
+		return "", fmt.Errorf("常驻转换进程正在被淘汰")
+	}
+	defer w.endRun()
 	w.touch()
 	req, err := json.Marshal(map[string]string{"src": src, "dst": dst})
 	if err != nil {
@@ -316,8 +514,11 @@ func (w *previewWorker) run(ctx context.Context, src, dst string) (string, error
 	}()
 	select {
 	case <-ctx.Done():
+		// 取消：关掉整个进程（杀进程组 + **关管道 + wait 回收**）。
+		// 改造前只 Kill() ⇒ 管道 fd 不关、子进程不被 wait ⇒ **僵尸 + fd 泄漏**，
+		// 最多滞留到空闲回收器接手（5 分钟）。
 		w.broken.Store(true)
-		_ = w.proc.Kill()
+		w.close()
 		return "", ctx.Err()
 	case r := <-ch:
 		if r.err != nil {
@@ -341,7 +542,12 @@ func (w *previewWorker) run(ctx context.Context, src, dst string) (string, error
 }
 
 // close 关掉常驻进程（幂等）。
+//
+// nil-safe：没有进程时（测试里的假 worker、构造失败的残留）直接标记即可。
 func (w *previewWorker) close() {
 	w.broken.Store(true)
+	if w.proc == nil {
+		return
+	}
 	_ = w.proc.Close()
 }
