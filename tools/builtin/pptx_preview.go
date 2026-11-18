@@ -83,7 +83,9 @@ func (p *PptxPreviewer) Convert(ctx context.Context, pptxPath, workspace string)
 			sbx = s
 		}
 	}
-	out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: dir, Timeout: PptxPreviewTimeout})
+	// 输出封顶：子进程的 stdout 不该无界进内存（脚本正常只打印一行标记，
+	// 但 traceback + 大量 warning 也可能到 MB 级）。
+	out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: dir, Timeout: PptxPreviewTimeout, OutputLimit: 64 << 10})
 	if err != nil {
 		return PptxConvertResult{}, fmt.Errorf("执行转换脚本失败: %w", err)
 	}
@@ -147,6 +149,7 @@ import html
 import os
 import re
 import sys
+import zipfile
 
 from lxml import etree
 from pptx import Presentation
@@ -872,8 +875,31 @@ def render_slide(slide, index, prs, stats, budget):
     return "".join(out)
 
 
+# 解压后总大小上限（字节）：OOXML 就是 zip，而 zip 的**解压后**大小可以远大于
+# 压缩包本身（纯色/零内容的 deflate 压缩比可达 ~1000:1）⇒ 一个 1 MB 的 pptx
+# 可以含 1 GB 媒体。python-pptx 的 Presentation() 会把**每个部件**一次性
+# 解压进内存（{PackURI: z.read(name) for name in z.namelist()}）⇒ zip bomb
+# 直接打穿宿主进程（实测 100 MB 输入可炸到 ~50 GB）。
+# 闸门放在**解压之前**：先按 ZipInfo.file_size 累加（不解压）⇒ 超限直接拒。
+MAX_UNZIPPED_BYTES = 200 * 1024 * 1024
+
+
+def check_unzipped_budget(path, limit=MAX_UNZIPPED_BYTES):
+    """解压前检查 zip 的解压后总大小（zip bomb 第一道防线）。"""
+    with zipfile.ZipFile(path) as z:
+        total = sum(i.file_size for i in z.infolist())
+    if total > limit:
+        raise ValueError("文档解压后约 %d MB，超过预览上限 %d MB"
+                         % (total // (1024 * 1024), limit // (1024 * 1024)))
+
+
 def main():
     src, dst = sys.argv[1], sys.argv[2]
+    try:
+        check_unzipped_budget(src)
+    except (zipfile.BadZipFile, ValueError) as exc:
+        sys.stderr.write("%s\n" % exc)
+        sys.exit(2)
     try:
         prs = Presentation(src)
     except PackageNotFoundError as exc:

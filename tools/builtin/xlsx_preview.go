@@ -117,7 +117,8 @@ func (p *XlsxPreviewer) Convert(ctx context.Context, xlsxPath, workspace string)
 			sbx = s
 		}
 	}
-	out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: dir, Timeout: XlsxPreviewTimeout})
+	// 输出封顶：子进程的 stdout 不该无界进内存。
+	out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: dir, Timeout: XlsxPreviewTimeout, OutputLimit: 64 << 10})
 	if err != nil {
 		return XlsxConvertResult{}, fmt.Errorf("执行转换脚本失败: %w", err)
 	}
@@ -241,6 +242,11 @@ import openpyxl
 
 MAX_SHEETS = 20
 MAX_ROWS = 500
+# 扫描行数上限（**解析成本闸**）：iter_rows 必须带边界。
+# 不带的话 openpyxl 按 <dimension> 里声明的尺寸扫，而那个值是**文件里可控的**
+# （最大 16384 列 × 1048576 行）⇒ 1 KB 的文件能烧掉几百秒 CPU（实测单个工作簿 839 s）。
+# 5000 行足够看一个表的「头几屏」，且解析成本有界。
+MAX_SCAN_ROWS = 5000
 MAX_COLS = 40
 MAX_CELLS = 8000
 
@@ -731,7 +737,7 @@ def col_px(width_chars):
     return max(COL_MIN_PX, min(COL_MAX_PX, int(round(width_chars * 7 + 5))))
 
 
-def rows_of(ws):
+def rows_of(ws, max_col=None, max_row=None):
     """流式产出 (行号, {列号: 单元格})；read_only 模式下整行皆空的记录不产出。
 
     为什么用 enumerate 取行列号，而不是 c.row / c.column：
@@ -742,7 +748,9 @@ def rows_of(ws):
     enumerate 的位置与 c.column 实测完全一致（含行首为空格的情况，iter_rows 从
     min_column 起算），故在此按位置取号是安全的。保留读 c.value 的判空语义。
     """
-    for row_no, tup in enumerate(ws.iter_rows(), 1):
+    # max_col/max_row **必须传**：openpyxl 在 read_only 模式下按 worksheet 的
+    # <dimension> 扫，而那个尺寸是文件里可控的（不传边界 ⇒ 声明多大就扫多大）。
+    for row_no, tup in enumerate(ws.iter_rows(max_col=max_col, max_row=max_row), 1):
         if not tup:
             continue
         cells = {}
@@ -803,14 +811,18 @@ def merge_spans(merges, rownos, cols):
 def render_sheet(idx, name, state, ws_form, ws_val, meta, out):
     """渲染单个 sheet（返回统计：顶部截断汇总与导航条都读它，不去反查 DOM）。"""
     hidden = state not in (None, "visible")
-    form_rows = rows_of(ws_form)
-    val_rows = rows_of(ws_val)
-    v_row_no, v_cells = next(val_rows, (None, None))
 
     # 列上界：用 dimension 的 max_column（Excel 一定写；异常时按实际行宽兜底），受列闸约束。
     declared_cols = ws_form.max_column if isinstance(ws_form.max_column, int) else 0
     cols_cap = min(max(declared_cols, 1), MAX_COLS)
     rows_cap = min(MAX_ROWS, MAX_CELLS // cols_cap)
+
+    # 扫描边界（**解析成本闸**，见 MAX_SCAN_ROWS）：列按列闸钳、行按扫描闸钳。
+    # 没有 dimension 时（declared_cols == 0）用列闸当上界。
+    scan_cols = max(1, min(declared_cols if declared_cols > 0 else MAX_COLS, MAX_COLS))
+    form_rows = rows_of(ws_form, scan_cols, MAX_SCAN_ROWS)
+    val_rows = rows_of(ws_val, scan_cols, MAX_SCAN_ROWS)
+    v_row_no, v_cells = next(val_rows, (None, None))
 
     shown = []          # [(行号, {列号: (文本, 右对齐, 是否公式未计算)})]
     max_col_seen = 0
@@ -855,6 +867,7 @@ def render_sheet(idx, name, state, ws_form, ws_val, meta, out):
         shown.append((row_no, cells))
 
     total_rows = row_count
+    scan_capped = row_count >= MAX_SCAN_ROWS
     hidden_rows = total_rows - len(shown)
     cols = max(min(max_col_seen, cols_cap), 1) if shown else cols_cap
     wide = declared_cols > MAX_COLS
@@ -867,7 +880,8 @@ def render_sheet(idx, name, state, ws_form, ws_val, meta, out):
         label += ' <span class="range">(隐藏)</span>'
     out.append('<section class="sheet" id="sheet-%d" data-sheet="%s">' % (idx + 1, attr_clean(name)))
     out.append('<div class="sheet-head"><h2>%d. %s</h2>' % (idx + 1, label))
-    out.append('<span class="range">%d 行 × %d 列</span></div>' % (total_rows, max(declared_cols, max_col_seen)))
+    rows_label = ("≥%d" % total_rows) if scan_capped else ("%d" % total_rows)
+    out.append('<span class="range">%s 行 × %d 列</span></div>' % (rows_label, max(declared_cols, max_col_seen)))
 
     # 冻结上限的钳制（见 MAX_FROZEN_*）。注意 head_rows 下面用的是 max(frozen_rows, 1)：
     # 没有冻结窗格时表头行照样进 thead（吸顶），只是整块 thead 不挂 frozen-head。
@@ -877,6 +891,8 @@ def render_sheet(idx, name, state, ws_form, ws_val, meta, out):
     notes = []
     if idx == 0:
         notes.append("首行按表头显示（xlsx 没有表头标记，无法可靠推断）")
+    if scan_capped:
+        notes.append('<span class="warn">只扫描了前 %d 行（文件声明的行数更多）</span>' % MAX_SCAN_ROWS)
     if hidden_rows > 0:
         notes.append('<span class="warn">还有 %d 行未显示（单表上限 %d 行）</span>' % (hidden_rows, rows_cap))
     if wide:

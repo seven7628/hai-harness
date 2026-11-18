@@ -83,7 +83,8 @@ func (p *DocxPreviewer) Convert(ctx context.Context, docxPath, workspace string)
 			sbx = s
 		}
 	}
-	out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: dir, Timeout: DocxPreviewTimeout})
+	// 输出封顶：子进程的 stdout 不该无界进内存。
+	out, err := sbx.Run(ctx, sandbox.ExecSpec{Command: cmdline, Cwd: dir, Timeout: DocxPreviewTimeout, OutputLimit: 64 << 10})
 	if err != nil {
 		return DocxConvertResult{}, fmt.Errorf("执行转换脚本失败: %w", err)
 	}
@@ -189,9 +190,11 @@ const docxToHTMLScript = `# -*- coding: utf-8 -*-
 成功时 stdout 末行打印 GOCODE_DOCX_OK；失败时非零退出 + 单行中文原因（预期内的用户错误）
 或 traceback（我们的 bug，需要完整堆栈定位）。
 """
+import base64
 import html
 import os
 import re
+import zipfile
 import sys
 import zipfile
 
@@ -290,6 +293,10 @@ def cap_images(fragment):
         tag = match.group(0)
         stats["count"] += 1
         m = DATA_SRC.search(tag)
+        if m is not None and m.group(1) == PLACEHOLDER_IMG:
+            # 回调阶段就超预算被顶替的图（convert_image_capped 放的 1×1 占位）。
+            stats["skipped"] += 1
+            return '<span class="img-skip">［图片已省略：超出预览预算］</span>'
         if m is not None:
             if stats["count"] > MAX_IMAGES or stats["bytes"] + len(m.group(1)) * 3 // 4 > MAX_IMAGE_BYTES:
                 stats["skipped"] += 1
@@ -358,12 +365,65 @@ def build(src, fragment, stats, cut, messages):
     return "\n".join(parts)
 
 
+# 解压后总大小上限（字节）—— zip bomb 第一道防线（见 pptx_preview 的同名闸门）。
+MAX_UNZIPPED_BYTES = 200 * 1024 * 1024
+
+
+def check_unzipped_budget(path, limit=MAX_UNZIPPED_BYTES):
+    """解压前检查 zip 的解压后总大小。"""
+    with zipfile.ZipFile(path) as z:
+        total = sum(i.file_size for i in z.infolist())
+    if total > limit:
+        raise ValueError("文档解压后约 %d MB，超过预览上限 %d MB"
+                         % (total // (1024 * 1024), limit // (1024 * 1024)))
+
+
+# 图片预算的**过程态**（回调里累计用）。
+_img_state = {"count": 0, "bytes": 0, "skipped": 0}
+
+
+# 占位图（1×1 透明 GIF）：超预算的图用它顶替 —— 回调必须返回 mammoth 的
+# **属性表**（dict），不能返回裸 HTML 字符串（mammoth 会把它当节点处理而崩）。
+PLACEHOLDER_IMG = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+
+
+def convert_image_capped(image):
+    """图片转换回调：**在解码回调里**累计字节数，超预算的图**不做 base64**。
+
+    为什么不在产出 HTML 之后再裁（改造前的做法）：mammoth.images.data_uri 会把
+    每张图读出来 base64（1.37× 膨胀）再拼进 HTML 字符串 ⇒ 一个 1 MB 的 docx 里
+    塞 1 GB 的图 ⇒ 峰值 ≈ 1 GB 原始 + 1.37 GB base64 + 替换时新旧两份 ≈ 3.5 GB。
+    在回调里累计 ⇒ 超预算的图**根本不会被 base64**（只读一次、不编码）。
+
+    返回值必须是**节点列表**（与 images.img_element 同形）⇒ 产出的是 <img>。
+    占位图（1×1 透明 GIF）由产出后的 cap_images 换成「图片已省略」提示（见其注释）。
+    """
+    with image.open() as fh:
+        data = fh.read()
+    if (_img_state["count"] >= MAX_IMAGES
+            or _img_state["bytes"] + len(data) > MAX_IMAGE_BYTES):
+        _img_state["skipped"] += 1
+        src = PLACEHOLDER_IMG
+    else:
+        _img_state["count"] += 1
+        _img_state["bytes"] += len(data)
+        src = "data:%s;base64,%s" % (
+            image.content_type, base64.b64encode(data).decode("ascii"))
+    # 回调必须返回**节点列表**（mammoth.images.img_element 同形）⇒ 产出 <img>。
+    return [mammoth.html.element("img", {"src": src})]
+
+
 def main():
     src, dst = sys.argv[1], sys.argv[2]
     try:
+        check_unzipped_budget(src)
+    except (zipfile.BadZipFile, ValueError) as exc:
+        sys.stderr.write("%s\n" % exc)
+        sys.exit(2)
+    try:
         with open(src, "rb") as fh:
             result = mammoth.convert_to_html(fh, style_map=STYLE_MAP,
-                                             convert_image=mammoth.images.data_uri)
+                                             convert_image=convert_image_capped)
     except zipfile.BadZipFile as exc:
         # 可预期的用户错误（最常见：文件损坏、把别的东西改名成 .docx、空文件）→ 单行中文提示，
         # 不把 traceback 甩到用户脸上（toast 里塞 40 行堆栈等于没提示）。
