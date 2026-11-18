@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/seven7628/hai-harness/tools"
 )
 
@@ -56,5 +57,8 @@ func (t *planSubmitTool) Call(_ context.Context, _, arguments string) (string, e
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	return "plan submitted: " + a.Plan, nil
+	// **不回显整份计划**：计划原文已经在上下文里（它就是本次 tool_call 的参数），
+	// 再抄一遍 = 同一份内容付两次 token（8 KB 的计划 = 8 KB 的白烧）。
+	// 宿主要计划原文有正规通道：ToolRunEnd 事件带 Arguments（见 tools/engine.go finish）。
+	return fmt.Sprintf("plan submitted (%d chars)", len(a.Plan)), nil
 }

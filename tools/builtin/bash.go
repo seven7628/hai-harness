@@ -638,6 +638,8 @@ type dangerRule struct {
 // commandWordRe 构造「以命令身份出现 word」的深度正则：前导须为命令分隔符（行首/;&&|||()反引号），
 // 后随单词边界。这样仅拦真实命令调用（shutdown -h now），放行纯文本/文件名/参数
 // （echo shutdown、python shutdown.py、print("reboot")）。
+//
+// 只在**包初始化**时调用（dangerRules 的元素构造）⇒ 编译一次。
 func commandWordRe(word string) *regexp.Regexp {
 	return regexp.MustCompile(`(^|[\n;&|()\x60])\s*` + regexp.QuoteMeta(word) + `\b`)
 }
@@ -645,9 +647,10 @@ func commandWordRe(word string) *regexp.Regexp {
 // notFunctionDef 排除 shell 函数定义形态（`shutdown() { ... }`）：命令词后紧跟 `()`
 // 是定义不是调用（定义本身不执行危险动作）。注意命令位已保证 word 以命令身份出现。
 func notFunctionDef(word string) func(cmd string) bool {
+	// 正则在**闭包外**编译一次（改造前在闭包内 ⇒ 每命中一次规则就重编译一次正则）。
+	re := regexp.MustCompile(`(^|[\n;&|()\x60])\s*` + regexp.QuoteMeta(word) + `\s*\(\)`)
 	return func(cmd string) bool {
 		// 在 cmd 中找命令位的 word，其后若紧跟 () 则为函数定义 → 放行
-		re := regexp.MustCompile(`(^|[\n;&|()\x60])\s*` + regexp.QuoteMeta(word) + `\s*\(\)`)
 		return !re.MatchString(cmd)
 	}
 }
@@ -722,11 +725,14 @@ func fdiskDanger(cmd string) bool {
 	return false
 }
 
+// commandSeparatorRe 命令分隔符（包级编译一次 —— 改造前每次调用都重编译）。
+var commandSeparatorRe = regexp.MustCompile(`[\n;&|()\x60]+`)
+
 // splitCommands 把命令按分隔符切成独立命令片段（去空白；含引号内分隔符的误切
 // 可接受——词法启发式，见 stripShellLiterals 威胁模型注释）。
 func splitCommands(cmd string) []string {
 	var out []string
-	for _, seg := range regexp.MustCompile(`[\n;&|()\x60]+`).Split(cmd, -1) {
+	for _, seg := range commandSeparatorRe.Split(cmd, -1) {
 		if s := strings.TrimSpace(seg); s != "" {
 			out = append(out, s)
 		}
@@ -743,10 +749,12 @@ var structuralDangers = []dangerRule{
 	{name: `\b(curl|wget)\b.*\|\s*sh\b`, re: regexp.MustCompile(`\b(curl|wget)\b.*\|\s*sh\b`)}, // 远程脚本管道执行
 }
 
+// chmodRoot777RootRe chmod -R 777 的目标恰为根目录（包级编译一次）。
+var chmodRoot777RootRe = regexp.MustCompile(`\bchmod\s+-R\s+777\s+/\s*([;&|\x60\n]|$)`)
+
 // chmodRootDanger chmod -R 777 的目标是否为根目录（/ 后随空白/结束）。
 func chmodRootDanger(cmd string) bool {
-	re := regexp.MustCompile(`\bchmod\s+-R\s+777\s+/\s*([;&|\x60\n]|$)`)
-	return re.MatchString(cmd)
+	return chmodRoot777RootRe.MatchString(cmd)
 }
 
 // ---------- 字面量剥离（问题八：内嵌脚本里的 open() 等同形词误报） ----------
