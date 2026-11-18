@@ -205,7 +205,7 @@ func (p *previewWorkerPool) start(ctx context.Context, workspace string) (*previ
 		return nil, fmt.Errorf("起常驻转换进程失败: %w", err)
 	}
 	p.starts.Add(1)
-	return &previewWorker{proc: proc, reader: bufio.NewReader(proc.Stdout())}, nil
+	return &previewWorker{proc: proc, reader: bufio.NewReader(proc.Stdout()), sem: make(chan struct{}, 1)}, nil
 }
 
 // ensureScripts 把引导脚本与转换脚本落盘（**整个池只写一次**）。
@@ -271,7 +271,10 @@ type previewWorker struct {
 	proc   sandbox.Process
 	reader *bufio.Reader
 
-	mu     sync.Mutex // 一次一个转换
+	// sem 容量 1 的信号量（**不是 mutex**）：排队要能被 ctx 打断 ——
+	// mutex.Lock 不可取消 ⇒ 用户中断后，那个排队的转换还要干等前一个跑完
+	// （前一个可能还在跑几十秒）。信号量的 select 天然可取消。
+	sem    chan struct{}
 	broken atomic.Bool
 	last   atomic.Int64 // unix nano
 }
@@ -282,8 +285,13 @@ func (w *previewWorker) lastUse() time.Time { return time.Unix(0, w.last.Load())
 
 // run 发一次转换请求并等结果。
 func (w *previewWorker) run(ctx context.Context, src, dst string) (string, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	// 排队可被 ctx 打断（见 sem 的注释）。
+	select {
+	case w.sem <- struct{}{}:
+		defer func() { <-w.sem }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	if w.broken.Load() {
 		return "", fmt.Errorf("常驻转换进程已失效")
 	}
@@ -337,3 +345,6 @@ func (w *previewWorker) close() {
 	w.broken.Store(true)
 	_ = w.proc.Close()
 }
+
+// previewWorkerQueueCancellableDoc 放在文件末尾提醒：队列用信号量（可取消）而不是
+// mutex（不可取消）—— 用户中断后，排队的预览不该干等前一个跑完。
