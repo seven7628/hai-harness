@@ -7467,7 +7467,7 @@ func serve() error {
 	// 逃逸者兜底清扫（第 5 步）：setsid / 双重 fork 逃出进程组的残留 ⇒ 组杀够不着
 	// ⇒ 靠「执行标记 + 父进程已死」认领并收掉（周期 60s）。
 	m.orphanSweeper = sandbox.StartOrphanSweeper()
-	go m.warmOfficeKit()     // R08d：kit 可用时预热一次（空转换，把 3–6s 冷启挪出首次转换）
+	go m.warmOfficeKit() // R08d：kit 可用时预热一次（空转换，把 3–6s 冷启挪出首次转换）
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
 	startupLog("A2.5.browserEngine("+string(m.getBrowserEngine())+")", serveStart)
@@ -7783,9 +7783,12 @@ func main() {
 // 推论：旧的 `maxLiveSessions()=64` 实际允许 64 × 420MB = **27GB** 同时驻留
 // —— 这就是「应用把机器吃满」的机制。新的上限是 5 个会话（≈750MB 最坏），
 // 与 GOMEMLIMIT（2GB）相称。
+// sessionMemBudgetBytes 是「同时驻留的会话」内存预算（512MB，真实堆口径）。
+//
+// **var 而不是 const**：淘汰判据要能被测试注入（生产恒为这个值）。
+var sessionMemBudgetBytes int64 = 512 << 20
+
 const (
-	// sessionMemBudgetBytes 是「同时驻留的会话」内存预算（512MB）。
-	sessionMemBudgetBytes = 512 << 20
 	// sessionLiveCostBytes 是保守的单会话成本（96MB）：实测 152MB/会话
 	// （含窗口 2063 块 + 卡片 items），留 1/3 余量给尚未测到的大会话。
 	sessionLiveCostBytes = 96 << 20
@@ -7811,9 +7814,30 @@ func maxLiveSessions() int {
 //
 // 绝不淘汰：刚创建的 keepID、有 run 在跑的、10s 内被访问过的。
 // 若候选都不满足（全在跑），**允许超预算** —— 不为了守预算打断运行中的 run。
+//
+// 口径（2026-11-18 改）：在「会话数上限」之外**叠加一个字节预算**。
+// 为什么：会话成本按事件数缩放（预算假设 96MB/会话，实测真实值 248MB，2.6 倍），
+// 只按个数记账等于「1 个大会话顶掉 5 个普通会话的额度」——
+// 实测 bridge 曾同时驻留 6 个会话 ≈ 1.2GB，把 16G 机器的 swap 撑到 91%。
+// 字节预算取 reducer 的估算值（ApproxBytes）：口径稳定即可，淘汰本来就是启发式。
+//
+// 会话数上限**保留**：小会话场景行为不变（≤5 个不淘汰），
+// 只是字节账算不过来时**额外**淘汰。
 func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 	limit := maxLiveSessions()
-	for len(ws.sessions) > limit {
+	for {
+		overCount := len(ws.sessions) > limit
+		overBytes := false
+		if !overCount {
+			var total int64
+			for _, bs := range ws.sessions {
+				total += sessionCostBytes(bs)
+			}
+			overBytes = total > sessionMemBudgetBytes
+		}
+		if !overCount && !overBytes {
+			return
+		}
 		var victim *bridgeSession
 		var oldest int64
 		now := time.Now()
@@ -7846,6 +7870,14 @@ func (m *manager) evictIdleSessionsLocked(ws *workspaceRuntime, keepID string) {
 		}
 		startupLog("A7.evict: "+victim.id, now)
 	}
+}
+
+// sessionCostBytes 估算一个驻留会话的堆占用（0 = 没有 reducer 或还没加载）。
+func sessionCostBytes(bs *bridgeSession) int64 {
+	if bs == nil || bs.reducer == nil {
+		return 0
+	}
+	return bs.reducer.ApproxBytes()
 }
 
 // sweepSessionFilesInBackground 后台清扫会话文件（限速）。

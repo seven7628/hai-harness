@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
@@ -4580,6 +4581,71 @@ func (r *ViewReducer) BlockCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.blocks)
+}
+
+// ApproxBytes 估算 reducer 当前持有的堆占用（同一口径下稳定即可，不是精确记账）。
+//
+// 为什么需要它（2026-11-18）：会话内存预算以前按**会话个数**算（假设 96MB/会话），
+// 而会话成本按事件数缩放 —— 实测一个 60 万事件的大会话常驻 248MB，是假设的 2.6 倍
+// ⇒ 「5 个会话 = 480MB」的预算当场失效（实测 bridge 同时驻留 6 个会话 ≈ 1.2GB）。
+//
+// 口径：结构体本身用 unsafe.Sizeof（精确）+ 字符串内容长度。
+// 不追精确：Go 的堆没有「这个对象占多少」的查询（要精确得跑 heap profile，
+// 生产环境不可行）；淘汰是启发式，同一口径下可比就够。
+func (r *ViewReducer) ApproxBytes() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	raw := blocksApproxBytes(r.blocks)
+	return raw * approxBytesCalibNum / approxBytesCalibDen
+}
+
+// approxBytesCalib 是「估算值 → 真实存活堆」的校准系数（3/2）。
+//
+// 实测（2026-11-18，真实大会话 2517 块 / 120MB 卡片转录）：
+// 原始估算 110.5MB vs 堆剖面存活 182.4MB ⇒ 系数 ≈ 1.65，取 3/2 略保守。
+// 差的那部分是 JSON 解码器的**每值开销**（literalStore / growslice：每个字符串
+// 值的 header + 容量取整）与 sidecar 的片段缓冲 —— 它们不在块结构体里，
+// 但确实占堆。
+const (
+	approxBytesCalibNum = 3
+	approxBytesCalibDen = 2
+)
+
+// blocksApproxBytes 估算一批块的堆占用。
+func blocksApproxBytes(blocks []Block) int64 {
+	var total int64
+	for i := range blocks {
+		total += blockApproxBytes(&blocks[i])
+	}
+	return total
+}
+
+// blockApproxBytes 估算单个块的堆占用（结构体 + 字符串内容 + 元素数组）。
+func blockApproxBytes(b *Block) int64 {
+	n := int64(unsafe.Sizeof(*b))
+	n += int64(len(b.Kind) + len(b.Text) + len(b.Thinking) + len(b.Args) + len(b.Result) +
+		len(b.ToolID) + len(b.Name) + len(b.Model) + len(b.RunID) + len(b.RequestID) +
+		len(b.TaskID) + len(b.Status) + len(b.Label) + len(b.Tone) +
+		len(b.EndKind) + len(b.DividerReason))
+	for i := range b.Contents {
+		c := &b.Contents[i]
+		n += int64(unsafe.Sizeof(*c)) + int64(len(c.Type)+len(c.Content)+len(c.MimeType))
+	}
+	for i := range b.Images {
+		c := &b.Images[i]
+		n += int64(unsafe.Sizeof(*c)) + int64(len(c.Type)+len(c.Content)+len(c.MimeType))
+	}
+	for i := range b.Items {
+		it := &b.Items[i]
+		n += int64(unsafe.Sizeof(*it))
+		n += int64(len(it.Kind) + len(it.RunID) + len(it.Text) + len(it.ToolID) + len(it.Name) +
+			len(it.Args) + len(it.Status) + len(it.Result) + len(it.TaskID))
+		for j := range it.NestedCalls {
+			nc := &it.NestedCalls[j]
+			n += int64(unsafe.Sizeof(*nc)) + int64(len(nc.ID)+len(nc.Name)+len(nc.Args)+len(nc.Result)+len(nc.Error))
+		}
+	}
+	return n
 }
 
 // turnsBodyWindow 是 record body 里保留的 turns 条数。
