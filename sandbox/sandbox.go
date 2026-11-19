@@ -301,6 +301,10 @@ func runExec(ctx context.Context, cmd *exec.Cmd, spec ExecSpec) (string, error) 
 	// 组长 pid == pgid（Setpgid）⇒ 登记表里的 pid 可直接用于 kill(-pid)。
 	registerLiveGroup(cmd.Process.Pid)
 	defer unregisterLiveGroup(cmd.Process.Pid)
+	// cgroup v2 兜底（Linux 专属；不可用就静默降级）：把子进程放进我们的 cgroup
+	// ⇒ 它的后代继承 ⇒ 应用退出时一次 cgroup.kill 连 setsid 逃逸者也一起收
+	// （进程组杀够不着的那一类）。
+	cgroupAttach(cmd.Process.Pid)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()

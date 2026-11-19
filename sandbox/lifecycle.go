@@ -192,6 +192,9 @@ func startBackgroundProcess(ctx context.Context, argv []string, cwd string, env 
 		_ = f.Close()
 		return nil, err
 	}
+	// cgroup v2 兜底（Linux 专属；不可用就静默降级）：后台进程也进我们的 cgroup
+	// ⇒ 应用退出时（含崩溃后的下一次启动）也能被内核一次收掉。
+	cgroupAttach(cmd.Process.Pid)
 	p := &bgProcess{cmd: cmd}
 	bgRegistry.add(p)
 	// 回收协程：进程退出后 wait（**不制造僵尸**）+ 关日志文件 + 注销。
@@ -280,6 +283,8 @@ func (r *bgRegistryT) killAll() int {
 func Shutdown() int {
 	n := killLiveGroups()
 	n += bgRegistry.killAll()
+	// cgroup v2 兜底（Linux 专属）：内核一次收掉 cgroup 里的全部（含逃逸者）。
+	cgroupKillAll()
 	return n
 }
 
