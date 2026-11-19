@@ -20,7 +20,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"os"
+	"github.com/seven7628/hai-harness/eventslog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -201,7 +201,7 @@ type spanAcc struct {
 // projectTraces 把事件日志投影成 trace 列表（每个 root run 一条）。
 // 返回的 traces 已按开始时间倒序（最近在上）。
 func projectTraces(evPath, liveRoot string) []*traceDetail {
-	f, err := os.Open(evPath)
+	f, err := eventslog.OpenReader(evPath)
 	if err != nil {
 		return nil
 	}

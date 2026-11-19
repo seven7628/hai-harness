@@ -5,8 +5,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/seven7628/hai-harness/desktop/bridge/jsonwire"
+	"github.com/seven7628/hai-harness/eventslog"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -49,7 +49,7 @@ func (m *manager) eventsDirFor(wsPath string) string {
 // buildSnapshotFromPath 从任意事件日志文件聚合 snapshot（buildSnapshot 的底层实现；
 // cron 独立历史目录复用同一管线，保证详情页与主对话页恢复同构）。
 func buildSnapshotFromPath(evPath string) (map[string]any, bool) {
-	f, err := os.Open(evPath)
+	f, err := eventslog.OpenReader(evPath)
 	if err != nil {
 		return nil, false
 	}

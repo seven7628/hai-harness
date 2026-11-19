@@ -94,7 +94,7 @@ func (c Config) ScanTranscripts(d Dir, window time.Duration) (TranscriptReport, 
 		dir := filepath.Join(root, de.Name())
 		files, _ := c.ReadDir(dir)
 		for _, fe := range files {
-			if fe.IsDir() || !strings.HasSuffix(fe.Name(), ".jsonl") {
+			if fe.IsDir() || !isEventLogName(fe.Name()) {
 				continue
 			}
 			p := filepath.Join(dir, fe.Name())

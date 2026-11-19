@@ -41,6 +41,7 @@ import (
 
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/eventslog"
 	"github.com/seven7628/hai-harness/session"
 	"github.com/seven7628/hai-harness/todo"
 )
@@ -668,7 +669,7 @@ func (bs *bridgeSession) migrateLegacyToCheckpoint() bool {
 		return false
 	}
 	path := filepath.Join(bs.eventsDir, bs.id+".jsonl")
-	f, err := os.Open(path)
+	f, err := eventslog.OpenReader(path)
 	if err != nil {
 		return false
 	}

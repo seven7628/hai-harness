@@ -39,6 +39,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/seven7628/hai-harness/eventslog"
 	"io"
 	"net"
 	"os"
@@ -615,7 +616,17 @@ func (bs *bridgeSession) logEventLine(line []byte) {
 	bs.eventsMu.Lock()
 	defer bs.eventsMu.Unlock()
 	if bs.eventsF == nil {
-		f, err := os.OpenFile(filepath.Join(dir, bs.id+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // 事件日志含敏感内容，0600
+		evPath := filepath.Join(dir, bs.id+".jsonl")
+		// 会话被**重新激活**（用户打开旧会话继续聊）时，它的事件日志可能已被
+		// 后台封存成 `.gz` ⇒ 追加前先解压还原成明文（原子）。
+		// 不还原就会**新建一个空的 .jsonl** ⇒ 旧事件留在 .gz 里，而新事件进了
+		// 空文件 ⇒ 事件流被劈成两半（trace 面板只看到后半截）。
+		if _, err := os.Stat(evPath); os.IsNotExist(err) {
+			if _, rerr := eventslog.Restore(evPath); rerr != nil {
+				fmt.Fprintf(os.Stderr, "[events] 还原封存日志失败 sid=%s: %v\n", bs.id, rerr)
+			}
+		}
+		f, err := os.OpenFile(evPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // 事件日志含敏感内容，0600
 		if err != nil {
 			return
 		}
@@ -4992,6 +5003,8 @@ func (m *manager) deleteSession(wsPath, id string) {
 	}
 	_ = os.Remove(filepath.Join(storeDir, id+".jsonl"))
 	_ = os.Remove(filepath.Join(eventsDir, id+".jsonl"))
+	// 封存的 .gz 也要删（2026-11-19 爬 4）：否则删了会话却留着 1GB 事件日志。
+	_ = os.Remove(filepath.Join(eventsDir, id+".jsonl"+eventslog.GzSuffix))
 	// record 文件（checkpoint-first 目标恢复源）+ 其 .bak 一并删除；coord 已 drain 完毕
 	// record 目录跟着 record store 的根走（插件虚拟 Project 在 plugin-sessions/<id>/sessions
 	// 下的同名子目录里）。recordKey 与 sessionRecordKey 同源，否则删不掉写的那一份。
@@ -5322,6 +5335,10 @@ func sessionUpdatedAt(storeDir, eventsDir, id string, lastActive int64) int64 {
 		return lastActive
 	}
 	if fi, err := os.Stat(filepath.Join(eventsDir, id+".jsonl")); err == nil {
+		return fi.ModTime().UnixMilli()
+	}
+	// 封存的（.gz）：mtime = 压缩时刻 ≈ 最后一次写入时刻（够用）。
+	if fi, err := os.Stat(filepath.Join(eventsDir, id+".jsonl"+eventslog.GzSuffix)); err == nil {
 		return fi.ModTime().UnixMilli()
 	}
 	if fi, err := os.Stat(filepath.Join(storeDir, id+".jsonl")); err == nil {
@@ -8018,6 +8035,20 @@ func sweepSessionFilesInBackground() {
 		fmt.Fprintf(os.Stderr, "[checkpoint] 回收 sidecar 死字节: %d 个文件 %.1fMB → %.1fMB（省 %.1fMB），孤儿 tmp %d 个，校验失败 %d 个，用时 %s\n",
 			cres2.Files, float64(cres2.Before)/1e6, float64(cres2.After)/1e6, float64(cres2.Saved())/1e6,
 			cres2.OrphanTmp, cres2.VerifyErr, cres2.Elapsed.Round(time.Millisecond))
+	}
+	// events 日志 gzip 封存（2026-11-19，爬 4）：**不删内容**，只换编码。
+	//
+	// 实测 528 个事件文件 / 6.7GB / 最早 8-29，**全仓库无任何保留期逻辑**
+	// ⇒ 只涨不消。JSON 文本 gzip 压缩比 6–7× ⇒ 6.7GB → 约 1GB。
+	//
+	// 放在启动清扫的最后：它最慢（1–2 分钟 CPU），前面几项先做完。
+	ares, aerr := archiveEventsFiles(filepath.Join(appDataDir(), "events"), eventsArchiveMinAge, eventsArchiveMaxBytesPerRun, sweepPause)
+	if aerr != nil {
+		fmt.Fprintln(os.Stderr, "events archive: 失败:", aerr)
+	} else if ares.Files > 0 {
+		fmt.Fprintf(os.Stderr, "[events] 封存 %d 个事件日志 %.1fMB → %.1fMB（省 %.1fMB），跳过 %d，放弃 %d，用时 %s\n",
+			ares.Files, float64(ares.Before)/1e6, float64(ares.After)/1e6, float64(ares.Saved())/1e6,
+			ares.Skipped, ares.Aborted, ares.Elapsed.Round(time.Millisecond))
 	}
 	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
 	rres, rerr := session.SweepRecordFiles(root, sweepPause, ix)

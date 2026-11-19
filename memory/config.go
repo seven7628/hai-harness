@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"github.com/seven7628/hai-harness/eventslog"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -285,3 +287,27 @@ func lookupBool(key string) (bool, bool) {
 
 // Bool 是 *bool 构造助手，供设置面板把「开/关/跟随」映射成三态。
 func Bool(v bool) *bool { return &v }
+
+// readEventFile 读事件日志（明文或 **gzip 封存**）。
+//
+// 事件日志会被后台封存成 `<sid>.jsonl.gz`（见 internal/eventslog）⇒
+// 记忆层的三处扫描（transcripts / conflicts / anchors）都要能读封存件，
+// 否则**老会话的转录会静默消失**（记忆层少料，用户看不出来但 AI 会变笨）。
+//
+// 明文走 c.ReadFile（测试注入点保持不变）；封存件走 eventslog（它要解压）。
+func (c Config) readEventFile(path string) ([]byte, error) {
+	if strings.HasSuffix(path, eventslog.GzSuffix) {
+		rc, err := eventslog.OpenReader(strings.TrimSuffix(path, eventslog.GzSuffix))
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return io.ReadAll(rc)
+	}
+	return c.ReadFile(path)
+}
+
+// isEventLogName 报告文件名是不是事件日志（明文或封存）。
+func isEventLogName(name string) bool {
+	return strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".jsonl"+eventslog.GzSuffix)
+}

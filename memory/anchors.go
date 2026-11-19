@@ -230,10 +230,10 @@ func (c Config) DiscoverWorkspaces(ctx context.Context, d Dir) ([]string, error)
 func (c Config) firstWorkspace(dir string) string {
 	files, _ := c.ReadDir(dir)
 	for _, fe := range files {
-		if fe.IsDir() || !strings.HasSuffix(fe.Name(), ".jsonl") {
+		if fe.IsDir() || !isEventLogName(fe.Name()) {
 			continue
 		}
-		raw, err := c.ReadFile(filepath.Join(dir, fe.Name()))
+		raw, err := c.readEventFile(filepath.Join(dir, fe.Name()))
 		if err != nil {
 			continue
 		}

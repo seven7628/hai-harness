@@ -119,7 +119,7 @@ func (c Config) ConflictCandidates(d Dir, window time.Duration) ([]ConflictCandi
 		dir := filepath.Join(root, de.Name())
 		files, _ := c.ReadDir(dir)
 		for _, fe := range files {
-			if fe.IsDir() || !strings.HasSuffix(fe.Name(), ".jsonl") {
+			if fe.IsDir() || !isEventLogName(fe.Name()) {
 				continue
 			}
 			c.collectSnippets(filepath.Join(dir, fe.Name()), anchors, modified, since, found)
@@ -137,7 +137,7 @@ func (c Config) ConflictCandidates(d Dir, window time.Duration) ([]ConflictCandi
 // collectSnippets 从一个会话文件里捞出与各条记忆锚点共现的用户发言。
 func (c Config) collectSnippets(path string, anchors map[string][]string,
 	modified map[string]time.Time, since time.Time, found map[string][]string) {
-	raw, err := c.ReadFile(path)
+	raw, err := c.readEventFile(path)
 	if err != nil {
 		return
 	}
