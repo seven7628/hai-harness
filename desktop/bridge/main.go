@@ -4893,6 +4893,9 @@ func (m *manager) shutdownAll() {
 	m.closePluginRuntimes()
 	// 预览转换器槽位回收（进程退出：不留任何工作区登记）
 	m.releaseAllPreviewSlots()
+	// 沙箱作用域收尾（进程退出）：在飞的执行组 + 后台常驻进程（run_in_background
+	// 起的那些）⇒ 我们起的进程由我们负责，不留孤儿（PPID=1、继续烧 CPU）。
+	sandbox.Shutdown()
 	// 进程级单例的显式收尾（IM 连接不随工作区关闭而停，只能在这里停一次）
 	m.closeIMPlugin()
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）

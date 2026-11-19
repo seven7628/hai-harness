@@ -80,6 +80,22 @@ func (s *spillStore) reserve(ctx context.Context) string {
 	return filepath.Join(dir, s.nextName(toolRunID(ctx)))
 }
 
+// reserveNamed 预留一个**带指定基名**的落盘路径（后台日志用：名字要能让人一眼
+// 看出是后台日志，而不是命令输出 spill）。
+//
+// 与 reserve 的差别只在文件名（内容与权限约定完全一致：同目录 0700 / 文件 0600）。
+func (s *spillStore) reserveNamed(ctx context.Context, base string) string {
+	dir, err := s.dirPath()
+	if err != nil {
+		return ""
+	}
+	s.mu.Lock()
+	s.seq++
+	seq := s.seq
+	s.mu.Unlock()
+	return filepath.Join(dir, fmt.Sprintf("%s-%d.log", sanitizeSpillID(base), seq))
+}
+
 // write 把未截断全文落盘并返回路径（失败 = ""）。
 func (s *spillStore) write(ctx context.Context, full string) string {
 	dir, err := s.dirPath()

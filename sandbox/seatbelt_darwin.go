@@ -274,6 +274,16 @@ func (s *Seatbelt) Start(ctx context.Context, spec ExecSpec) (Process, error) {
 	return startProcProcess(ctx, argv, spec.Cwd, isolatedEnv())
 }
 
+// StartBackground 起一个**后台常驻**进程（立即返回，不等它结束）。
+//
+// 与 Start 同一套策略与隔离（sandbox-exec 拉起 ⇒ 进程在 Seatbelt 策略里活着；
+// 独立进程组 ⇒ 与调用方那次执行的组无关 ⇒ 不会被那次执行的收组波及）。
+// 差别：stdout/stderr 合并写进日志文件（不是协议管道），stdin 接 /dev/null。
+func (s *Seatbelt) StartBackground(ctx context.Context, spec ExecSpec) (BackgroundProc, error) {
+	argv := []string{seatbeltBin, "-p", s.Policy, "sh", "-c", spec.Command}
+	return startBackgroundProcess(ctx, argv, spec.Cwd, isolatedEnv(), spec.BackgroundLog)
+}
+
 func (s *Seatbelt) Run(ctx context.Context, spec ExecSpec) (string, error) {
 	cmd := exec.Command(seatbeltBin, "-p", s.Policy, "sh", "-c", spec.Command)
 	cmd.Dir = spec.Cwd
