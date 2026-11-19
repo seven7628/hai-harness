@@ -33,4 +33,8 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: tracked package tests
-        run: go test ./agenthub/ ./agents/ ./subagent/ ./provider/ ./tools/ ./mcp/ -count=1
+        # ./tools/ **不含子包**（tools/builtin、tools/builtin/codemode、tools/question）
+        # ⇒ 工具层的单测此前在 CI 上**根本没跑**；./sandbox/ 也不在清单里 ⇒
+        # 「跨平台兼容」无人守（2026-11-18 资源有界化的第 7 步）。
+        # 这三个包正是「进程生命周期 + 落盘回收 + 脚本路径」的主战场，必须进清单。
+        run: go test ./agenthub/ ./agents/ ./subagent/ ./provider/ ./tools/ ./tools/builtin/ ./tools/builtin/codemode/ ./mcp/ ./sandbox/ -count=1
