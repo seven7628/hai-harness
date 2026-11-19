@@ -9,6 +9,8 @@ package main
 // 「只解码尾部 → 从 sidecar 的 span 里取卡片头」。
 //
 // 这条测试**只测不改**：证明今天这两条路已经产出**字节完全相同**的 agents。
+// 路 B 调的是**生产代码**（card_head.go 的 pickCardHeadsFromSpans）⇒
+// 这条测试同时是那份生产代码的验收。
 // ⇒ 等价性成立 ⇒ 后面的切换就是「换个来源拿同样的东西」⇒ 页面零影响。
 //
 // ## 第一版就红在这里（两条必须复刻的语义）
@@ -46,66 +48,6 @@ import (
 
 	"github.com/seven7628/hai-harness/session"
 )
-
-// blockHead 是「卡片头」投影：**整张卡片照常解码**，只有 items 换成零尺寸元素
-// ⇒ 拿到 item **条数**（ItemsTrimmed 要用）但不分配内容。
-//
-// 靠 Go 的 json 规则实现：外层 Items（深度 0）遮蔽嵌入的 Block.Items（深度 1）
-// ⇒ 解码器用外层那个 ⇒ Block.Items 保持 nil，Items 有条数。
-type blockHead struct {
-	Block
-	Items []struct{} `json:"items,omitempty"`
-}
-
-// pickCardHeadsFromSpans 是「将来的路」的原型：从 sidecar 的 span 取卡片头，
-// 判据与预算**完全复刻** detachAgents。
-//
-// upperIdx = 候选范围的**上界**（spans 索引）。
-//
-// 关键语义（第一版踩过）：detachAgents 迭代的是 blocks[:start]，而 blocks[:start]
-// 取的是**最旧**的那 start 个 ⇒ 候选集 = 尾部窗口之前**最旧**的 start 张卡片类块
-// ⇒ 候选集在 spans 里是**索引最小**的一段 ⇒ 遍历要从 upperIdx 往回，不是从最新往回。
-func pickCardHeadsFromSpans(spans []session.BlockSpan, kinds []uint8, upperIdx int) ([]Block, int, int, error) {
-	var picked []Block
-	var total int64
-	trimmedCount := 0
-	keptItems := 0
-	for i := upperIdx; i >= 0; i-- {
-		if i < len(kinds) && !session.HasCardKind(kinds[i]) {
-			continue
-		}
-		var h blockHead
-		if err := spans[i].LogicalTransient(func(raw []byte) error {
-			return json.Unmarshal(raw, &h)
-		}); err != nil {
-			return nil, 0, 0, err
-		}
-		b := h.Block
-		switch {
-		case b.Kind == blockKindAgent, b.Kind == blockKindAsyncTask:
-		case b.Kind == blockKindTool && b.Promoted && b.TaskID != "":
-		default:
-			continue
-		}
-		if b.TaskID != "" && len(h.Items) > 0 {
-			b.ItemsTrimmed += len(h.Items)
-			b.Items = nil
-			trimmedCount++
-		} else {
-			keptItems += len(h.Items)
-		}
-		sz := detachedCardBytes(b)
-		if len(picked) > 0 && (total+sz > detachAgentsBudgetBytes || len(picked) >= detachAgentsMaxCards) {
-			break
-		}
-		total += sz
-		picked = append(picked, b)
-	}
-	for i, j := 0, len(picked)-1; i < j; i, j = i+1, j-1 {
-		picked[i], picked[j] = picked[j], picked[i]
-	}
-	return picked, trimmedCount, keptItems, nil
-}
 
 // TestDetachedAgentsEquivalence：两条路产出的 agents 字节必须完全一致。
 func TestDetachedAgentsEquivalence(t *testing.T) {
@@ -206,7 +148,7 @@ func TestDetachedAgentsEquivalence(t *testing.T) {
 			break
 		}
 	}
-	agentsB, trimmed, kept, err := pickCardHeadsFromSpans(spans, kinds, upperIdx)
+	agentsB, err := pickCardHeadsFromSpans(spans, kinds, upperIdx)
 	if err != nil {
 		t.Fatalf("取卡片头失败: %v", err)
 	}
@@ -225,8 +167,8 @@ func TestDetachedAgentsEquivalence(t *testing.T) {
 	t.Logf("会话 %s", sid)
 	t.Logf("  窗口解码块数=%d（其中尾部 %d 个，归一化丢弃 k=%d）", windowBlocks, len(tailBlocks), k)
 	t.Logf("  尾部之前的卡片类块=%d ⇒ 候选范围=%d", cardKindBefore, candidateCount)
-	t.Logf("  路A agents %d 张 / %d 字节；路B agents %d 张 / %d 字节（置空 items 的 %d 张，仍带 items 的 %d 张）",
-		len(agentsA), len(bytesA), len(agentsB), len(bytesB), trimmed, kept)
+	t.Logf("  路A agents %d 张 / %d 字节；路B agents %d 张 / %d 字节",
+		len(agentsA), len(bytesA), len(agentsB), len(bytesB))
 	if len(agentsA) != len(agentsB) {
 		t.Fatalf("agents 数量不同：A=%d B=%d", len(agentsA), len(agentsB))
 	}
