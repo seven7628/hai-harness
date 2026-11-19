@@ -10,10 +10,11 @@ node <this-skill>/scripts/validate-plugin.mjs <plugin-dir>
 bash <this-skill>/scripts/install-smoke.sh <plugin-dir>
 ```
 
-`validate-plugin.mjs` is a **narrow** static preflight: manifest shape, entry exists, D11 commands,
-manifest/tool limits, token names, no JSX/bare imports. It is **not** a second installer and does not
-simulate the loader. `install-smoke.sh` runs the real installer in a throw-away HOME and is the
-authority for `applied` / `rejected`.
+`validate-plugin.mjs` is a **narrow** static preflight: manifest shape, entry exists (panel shape
+only — a `web` plugin needs no `panel.js`), D11 commands, manifest/tool limits, token names, no
+JSX/bare imports. It is **not** a second installer and does not simulate the loader.
+`install-smoke.sh` runs the real installer in a throw-away HOME and is the authority for
+`applied` / `rejected`; it works for both shapes.
 
 Both checks take **the directory you just wrote** (absolute path is safest, because `go test`
 runs with the package as its working directory):
@@ -36,11 +37,14 @@ What they prove — and each one is a failure, not a warning:
 - **Installer** (`TestSurfaceInstallExternal`): the real installer copies your directory into a
   throw-away `HOME` and prints the receipt. `status` must be `applied`, the receipt carries
   `entries: <n>` (how many entrances you declared) and `entryHint` (where the user finds them:
-  right panel ＋ → Panel plugins), `index.json` must have exactly one item whose `hash` is
-  `sha256(<your entry file>)`, and the installed copy keeps `0600` files / `0700` directories.
-  A rejected receipt prints the reason the installer refused (`reason`) — fix the manifest and
-  run it again.
-- **Browser** (`verify_external_surface.mjs`): loads **your real `panel.js` bytes** into the app
+  right panel ＋ → Panel plugins), `index.json` must have exactly one item whose `hash` is the
+  content hash (all files for a copy install; tracked files for a dev install — not just
+  `panel.js`), and the installed copy keeps `0600` files / `0700` directories. A rejected receipt
+  prints the reason the installer refused (`reason`) — fix the manifest and run it again. For a
+  `web` plugin there is no entry file; the installer skips that check and still verifies the
+  manifest, entries, and permissions.
+- **Browser** (`verify_external_surface.mjs`, **panel shape only** — it loads `panel.js`): loads
+  **your real `panel.js` bytes** into the app
   and clicks what a user would click — every `entries[].id` appears in the ＋ menu with your
   title, the first one renders non-empty content (a crash card or a tombstone fails), the tab
   title equals your declared title, `pageerror` stays 0, and the ＋ menu itself is keyboard
@@ -71,8 +75,28 @@ worktree's old `dist` produces an empty index, which used to look like a 30 s me
 An empty host index is a **precondition failure (`exit 2`)**, not a plugin failure.
 
 Exit codes: `0` pass, `1` plugin **or host** failure (use the control to tell which), `2` the
-environment is wrong (port taken, `--dir` has no `surface.json` / no `panel.js`, or the host index
-has no enabled plugin) — `2` never means "your panel is fine".
+environment is wrong (port taken, `--dir` has no `surface.json`, a panel plugin has no `panel.js`,
+or the host index has no enabled plugin) — `2` never means "your panel is fine".
+
+**Web-app plugins do not use the browser/Electron panel checks.** They have no `panel.js` to feed
+into the probe; those scripts are panel-shape tools. Validate the manifest with the two commands
+above, then use the runtime checklist in [`web-app.md`](web-app.md#verification-checklist) (two
+entries → two tabs, tab switching keeps state, stopping the dev server shows the host error).
+
+For the **server shape** (`web.start`), the repo has a real-Electron probe that installs the
+template **while the app is already running**, asserts the server is not listening before the first
+tab, then checks auto-start, full-bleed, two tabs sharing one process, kill/retry, and
+close-tab-vs-quit lifecycle:
+
+```bash
+cd desktop/app && npm run e2e:web-server-surface
+```
+
+The app assets must be built first (`npm run build:electron && npx vite build`, then
+`go build -o dist/hai-bridge ./desktop/bridge` — the last step is after `vite build`, which cleans
+`dist/`). The probe copies `templates/surface-web-server` to a temp dir and picks a free port, so it
+does not touch the repo or a running app.
+
 
 `entries[].title` accepts either form; `{ zh, en }` is picked by the host's current language, the
 plain string is used for every language:

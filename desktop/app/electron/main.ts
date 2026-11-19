@@ -8,6 +8,8 @@ import * as os from 'os'
 import { randomUUID } from 'crypto'
 // M0 POC：右侧栏内嵌浏览器视图（WebContentsView + CDP 驱动通路）
 import { showEmbed, setEmbedBounds, reflowEmbed, hideEmbed, embedCommand, embedStatus, destroyEmbed, startDebuggerProxy, stopDebuggerProxy, navigateEmbed, embedGoBack, embedGoForward, embedReload, reloadEmbedTarget, navigateEmbedTarget, openEmbedTarget, activateEmbedTarget, closeEmbedTarget, setEmbedSession, setBusySids } from './embed'
+// URL 型插件（2026-11）：原生视图池 + 页面 ↔ 渲染层 host 的桥。与 embed 分开（不接 CDP）。
+import { closeAllPluginApps, hideAllPluginApps, registerPluginAppIpc, setPluginAppWindow } from './plugin-app'
 // 登录同步：一键导入用户 Chrome 登录状态（读+解密 → 写入 Electron partition；见 chrome-import.ts）
 import { importCookiesToPartition } from './chrome-import'
 import type { ChromeCookie as ImportableChromeCookie } from './chrome-cookies-read'
@@ -976,6 +978,7 @@ function createWindow(): void {
   // 点击后 Electron 默认在应用内新建一个「裸 BrowserWindow」（无 preload/无 UI，
   // 只有一片空白 + 目标网页，关掉还要手动找窗口），实测 windowsAfterExternalLink 1→2。
   // 现在：deny 新窗口 + shell.openExternal 交给系统浏览器（与 OAuth 链接同一约定）。
+  setPluginAppWindow(mainWindow)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
@@ -1038,6 +1041,7 @@ function createWindow(): void {
     // visible，会浮在最上层挡住主页面（2026-08-30 实测：展开右栏后刷新必现）。
     // 刷新完成后由 renderer 的可见性 effect 按需重新 show。
     hideEmbed()
+    hideAllPluginApps()
   })
   // renderer 首帧/动画开始回传（preload 经 console-message 或 IPC）
   mainWindow.webContents.on('did-stop-loading', () => {
@@ -1100,6 +1104,8 @@ function createWindow(): void {
   })
   mainWindow.on('closed', () => {
     destroyEmbed()
+    closeAllPluginApps()
+    setPluginAppWindow(null)
     mainWindow = null
   })
   // M0：窗口尺寸变化时按右侧区域自动重排内嵌视图（渲染进程手动定位后不再覆盖）
@@ -2576,6 +2582,8 @@ app.whenReady().then(() => {
   registerHubProtocol()
 
   registerIpc()
+  // URL 型插件的原生视图 + window.haiHost 桥（handlers 只认主窗口 sender）
+  registerPluginAppIpc()
   // 媒体协议：只读、只服务工作区内、只服务媒体扩展名（拒绝分支见 media-protocol.ts）
   registerMediaProtocol()
   // Surface 插件资产（PR-14）：只读、只服务 `<cfgDir>/surfaces/<id>/`、只服务资产扩展名，
@@ -2616,5 +2624,6 @@ app.on('before-quit', (e) => {
     sendToRenderer('app:quit-request')
     return
   }
+  closeAllPluginApps()
   stopBridge()
 })

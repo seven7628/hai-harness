@@ -34,6 +34,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -173,6 +174,51 @@ type surfaceManifest struct {
 	// 与 entries 同一条纪律：形状/重复/超限在**安装期**判死（写盘前），
 	// 运行期只读这份声明（注册点见 plugin_tools.go 的 buildPluginEngine）。
 	Tools []surfaceToolDecl `json:"tools"`
+	// Web URL 型插件（2026-11）：插件不再提供 panel.js，而是声明一个已经跑起来的前端
+	// 应用（React/Vite/Next 的 dev server 或部署地址）。宿主用原生视图打开
+	// `web.url + entries[].path`，像浏览器标签一样占满右栏；页面通过 preload 注入的
+	// `window.haiHost` 使用与 ESM 面板同一套 command/onEvent 能力。
+	//
+	// 与 Entry 的关系：web 存在时 entry 被忽略（允许旧目录保留 panel.js，迁移期不报错）；
+	// 两者都没有 = 安装 rejected（没有内容可渲染）。
+	Web *surfaceWebDecl `json:"web,omitempty"`
+}
+
+// surfaceWebDecl manifest.web 的一项：URL 型插件的根地址。
+//
+// 只允许 http/https 的**根**（可以有 path，不能有 query/fragment/userinfo）：
+// entries[].path 是相对这个根的页面路径，宿主用字符串拼接而不是 `new URL(path, base)`
+// —— 后者遇到 `//evil`/`https://evil` 会把 origin 换掉，而这是安装期就要判死的边界。
+type surfaceWebDecl struct {
+	URL string `json:"url"`
+	// Start 可选：宿主替插件拉起前端服务（MCP server 同一条心智：配置命令，连上去）。
+	// 没有 start = 服务由用户/插件自己启动，宿主只 loadURL；有 start = 第一次打开标签时
+	// 先探活，没起才 spawn，服务就绪后再加载页面。
+	Start *surfaceWebStartDecl `json:"start,omitempty"`
+	// Permissions 页面允许申请的浏览器权限。目前只支持 "media"（麦克风/摄像头）：
+	// 学习类应用会用麦克风做跟读；默认空 = 全拒。加新权限前先想清楚「一个网页插件
+	// 为什么需要它」，并同步 plugin-app.ts 的 permission handler。
+	Permissions []string `json:"permissions,omitempty"`
+}
+
+// surfaceWebStartDecl manifest.web.start：一个受控的子进程启动声明。
+//
+// 为什么把这个能力放在安装期校验：命令、cwd、env 都是「装插件 = 授权它跑这段程序」的
+// 一部分。形状非法（空命令、逃逸 cwd、坏 env 名、超长）必须在写盘前判死 —— 运行期再
+// 报错，用户看到的是「标签一直转圈」而不是「manifest 哪一行错了」。
+type surfaceWebStartDecl struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+	// Cwd 可选：相对插件目录（`.` / `app`）或**绝对路径**（React 源码不在插件目录时）。
+	// 相对路径会做 realpath 逃逸检查；绝对路径需要显式出现在 manifest 里（用户可见）。
+	Cwd string `json:"cwd,omitempty"`
+	// Env 只覆盖/补充宿主挑出来的最小环境（PATH/HOME/...），不会把应用进程的全部环境
+	// 变量交给插件服务（否则一份 manifest 就能读到模型的 API key）。
+	Env map[string]string `json:"env,omitempty"`
+	// Health 相对 web.url 的探活路径（缺省 `/`）；宿主轮询到 <500 才 loadURL。
+	Health string `json:"health,omitempty"`
+	// TimeoutMS 从 spawn 到服务就绪的上限；0 = 默认 20s。
+	TimeoutMS int `json:"timeout_ms,omitempty"`
 }
 
 // surfaceToolDecl manifest.tools[] 的一项（§5.3）。
@@ -215,6 +261,9 @@ type surfaceEntryDecl struct {
 	Title surfaceEntryTitle `json:"title"`
 	Icon  string            `json:"icon"`
 	Order int               `json:"order"`
+	// Path URL 型插件的页面路径（相对 manifest.web.url）：`/`、`/admin`、`#/admin`。
+	// 只有 web 插件可以声明；ESM 面板的页面由 panel.js 的 render 决定，path 会被拒绝。
+	Path string `json:"path,omitempty"`
 }
 
 // surfaceEntryTitle entries[].title 的两种写法（R16b）。
@@ -990,24 +1039,39 @@ func validateSurfaceSource(target string, dev bool) (surfaceSource, error) {
 		return surfaceSource{manifest: mf}, err
 	}
 
+	// URL 型插件（2026-11）：manifest.web 存在时没有 panel.js —— 内容是一个已经跑起来的
+	// 前端应用，宿主用原生视图打开 `web.url + entries[].path`。entry 被忽略（允许旧目录
+	// 继续带着 panel.js，迁移期不强制删文件）；没有 web 且没有 entry 才是装不上。
+	web := mf.Web != nil
+	if web {
+		if err := validateSurfaceWeb(mf, target); err != nil {
+			return surfaceSource{manifest: mf}, err
+		}
+	}
+
 	entry := strings.TrimSpace(mf.Entry)
-	if entry == "" {
-		entry = surfaceDefaultEntry // 默认 panel.js（manifest 可以省略 entry）
-	}
-	entryPath, err := resolveSurfaceEntry(target, entry)
-	if err != nil {
-		return surfaceSource{manifest: mf}, err
-	}
-	st, err := os.Stat(entryPath)
-	if err != nil || !st.Mode().IsRegular() {
-		return surfaceSource{manifest: mf}, fmt.Errorf("%s: entry %q 不是常规文件（面板入口默认 %s）", mf.ID, entry, surfaceDefaultEntry)
-	}
-	if st.Size() > maxSurfaceEntryBytes {
-		return surfaceSource{manifest: mf}, fmt.Errorf("%s: entry %q 有 %s，超过 256 KiB 上限", mf.ID, entry, humanKiB(st.Size()))
+	var entryPath, entryRel string
+	if !web {
+		if entry == "" {
+			entry = surfaceDefaultEntry // 默认 panel.js（manifest 可以省略 entry）
+		}
+		entryPath, err = resolveSurfaceEntry(target, entry)
+		if err != nil {
+			return surfaceSource{manifest: mf}, err
+		}
+		st, err := os.Stat(entryPath)
+		if err != nil || !st.Mode().IsRegular() {
+			return surfaceSource{manifest: mf}, fmt.Errorf("%s: entry %q 不是常规文件（面板入口默认 %s）", mf.ID, entry, surfaceDefaultEntry)
+		}
+		if st.Size() > maxSurfaceEntryBytes {
+			return surfaceSource{manifest: mf}, fmt.Errorf("%s: entry %q 有 %s，超过 256 KiB 上限", mf.ID, entry, humanKiB(st.Size()))
+		}
+		entryRel = filepath.Clean(entry)
 	}
 	// entries[] 与 entry/icon 同属「manifest 指哪读哪」的声明：形状/重复/逃逸必须在**写盘前**
 	// 判死（D-3）。它在体积校验之后、hash 之前 —— 便宜的先跑，且失败时还没算过任何东西。
-	if err := validateSurfaceEntries(target, mf.ID, mf.Entries); err != nil {
+	// web 传进去只为一条：entries[].path 只对 URL 型插件有意义，ESM 面板声明了要拒。
+	if err := validateSurfaceEntries(target, mf.ID, mf.Entries, web); err != nil {
 		return surfaceSource{manifest: mf}, err
 	}
 
@@ -1036,7 +1100,7 @@ func validateSurfaceSource(target string, dev bool) (surfaceSource, error) {
 	if err != nil {
 		return surfaceSource{manifest: mf}, fmt.Errorf("%s: 计算内容修订失败：%v", mf.ID, err)
 	}
-	return surfaceSource{manifest: mf, entryPath: entryPath, entryRel: filepath.Clean(entry), hash: hash}, nil
+	return surfaceSource{manifest: mf, entryPath: entryPath, entryRel: entryRel, hash: hash}, nil
 }
 
 // surfaceRetiredCommands P1c/D11 下线、安装期一律拒绝的四条旧宿主命令。
@@ -1254,6 +1318,199 @@ func resolveSurfaceEntry(target, entry string) (string, error) {
 	return realEntry, nil
 }
 
+// validateSurfaceWeb URL 型插件的根地址（manifest.web.url）。
+//
+// 只允许 http/https 的**根**（可以带 path，不能带 query/fragment/userinfo）。三个理由：
+//  1. entries[].path 是相对这个根拼的，root 带 query 会让拼接语义变得不可推理；
+//  2. userinfo（`http://user:pass@host`）会被原样显示在地址里，凭证泄露面；
+//  3. 非 http(s) 的 scheme（file/javascript/data）等于把宿主变成任意协议启动器。
+func validateSurfaceWeb(mf surfaceManifest, target string) error {
+	raw := strings.TrimSpace(mf.Web.URL)
+	if raw == "" {
+		return fmt.Errorf("%s: web.url 不能为空", mf.ID)
+	}
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return fmt.Errorf("%s: web.url 不能含空白：%q", mf.ID, raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s: web.url 不是合法 URL：%v", mf.ID, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("%s: web.url 只允许 http/https（实得 %q）", mf.ID, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s: web.url 缺少 host：%q", mf.ID, raw)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%s: web.url 不许带用户名/密码：%q", mf.ID, raw)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s: web.url 只能是根地址（查询串/片段请写进 entries[].path）：%q", mf.ID, raw)
+	}
+	for _, p := range mf.Web.Permissions {
+		if strings.TrimSpace(p) != "media" {
+			return fmt.Errorf("%s: web.permissions 只支持 media（实得 %q）", mf.ID, p)
+		}
+	}
+	if mf.Web.Start != nil {
+		if err := validateSurfaceWebStart(mf.ID, target, *mf.Web.Start); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// surfaceWebStartMax* 启动声明的硬上限。数值不是「性能调优」，是安装期的拒绝边界：
+// 一个 manifest 最多能让宿主 spawn 一个多长的 argv / 环境，必须可解释。
+const (
+	surfaceWebStartMaxArgs          = 32
+	surfaceWebStartMaxArgChars      = 2048
+	surfaceWebStartMaxCommandChars  = 512
+	surfaceWebStartMaxCwdChars      = 4096
+	surfaceWebStartMaxEnv           = 32
+	surfaceWebStartMaxEnvValueBytes = 4096
+	surfaceWebStartMinTimeoutMS     = 1000
+	surfaceWebStartMaxTimeoutMS     = 60000
+	surfaceWebStartDefaultTimeoutMS = 20000
+)
+
+// surfaceWebEnvKeyPattern 环境变量名：与 POSIX 的 name 同一口径（Windows 更宽松，
+// 但收窄不会挡住真实用法；`PATH`/`NODE_ENV`/`PORT` 都匹配）。
+var surfaceWebEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateSurfaceWebStart 校验 web.start 的形状与 cwd 边界（写盘前）。
+//
+// 这条命令是**用户安装插件时授权执行的程序**，不是插件页面里的 fetch：它拿的是宿主
+// 挑出来的最小环境（见 plugin-server.ts 的 baseEnv），但仍是同用户进程。cwd 允许绝对
+// 路径（React 源码不在插件目录是常态），相对路径必须经 realpath 证明还在插件目录里。
+func validateSurfaceWebStart(id, target string, st surfaceWebStartDecl) error {
+	cmd := strings.TrimSpace(st.Command)
+	if cmd == "" {
+		return fmt.Errorf("%s: web.start.command 不能为空", id)
+	}
+	if len([]rune(cmd)) > surfaceWebStartMaxCommandChars || strings.ContainsAny(cmd, "\x00\r\n") {
+		return fmt.Errorf("%s: web.start.command 非法（空/换行/NUL 或超过 %d 字符）", id, surfaceWebStartMaxCommandChars)
+	}
+	if len(st.Args) > surfaceWebStartMaxArgs {
+		return fmt.Errorf("%s: web.start.args 有 %d 项，超过 %d 项上限", id, len(st.Args), surfaceWebStartMaxArgs)
+	}
+	for i, a := range st.Args {
+		if strings.ContainsAny(a, "\x00\r\n") {
+			return fmt.Errorf("%s: web.start.args[%d] 含 NUL/换行", id, i)
+		}
+		if len([]rune(a)) > surfaceWebStartMaxArgChars {
+			return fmt.Errorf("%s: web.start.args[%d] 超过 %d 字符", id, i, surfaceWebStartMaxArgChars)
+		}
+	}
+	if len(st.Env) > surfaceWebStartMaxEnv {
+		return fmt.Errorf("%s: web.start.env 有 %d 项，超过 %d 项上限", id, len(st.Env), surfaceWebStartMaxEnv)
+	}
+	for k, v := range st.Env {
+		if !surfaceWebEnvKeyPattern.MatchString(k) {
+			return fmt.Errorf("%s: web.start.env 的键 %q 不合法（需匹配 ^[A-Za-z_][A-Za-z0-9_]*$）", id, k)
+		}
+		if strings.ContainsRune(v, '\x00') || len(v) > surfaceWebStartMaxEnvValueBytes {
+			return fmt.Errorf("%s: web.start.env[%q] 含 NUL 或超过 %d 字节", id, k, surfaceWebStartMaxEnvValueBytes)
+		}
+	}
+	if st.TimeoutMS != 0 && (st.TimeoutMS < surfaceWebStartMinTimeoutMS || st.TimeoutMS > surfaceWebStartMaxTimeoutMS) {
+		return fmt.Errorf("%s: web.start.timeout_ms = %d，必须在 [%d, %d]（0 = 默认 %d ms）",
+			id, st.TimeoutMS, surfaceWebStartMinTimeoutMS, surfaceWebStartMaxTimeoutMS, surfaceWebStartDefaultTimeoutMS)
+	}
+	if h := strings.TrimSpace(st.Health); h != "" {
+		if err := validateSurfaceWebHealth(id, h); err != nil {
+			return err
+		}
+	}
+	cwd := strings.TrimSpace(st.Cwd)
+	if cwd == "" {
+		return nil
+	}
+	if strings.ContainsAny(cwd, "\x00\r\n") || len([]rune(cwd)) > surfaceWebStartMaxCwdChars {
+		return fmt.Errorf("%s: web.start.cwd 含 NUL/换行或超过 %d 字符", id, surfaceWebStartMaxCwdChars)
+	}
+	// 绝对 cwd 是显式逃生门：React 源码通常在另一个仓库。它仍然必须存在且是目录 ——
+	// 否则用户看到的是「服务启动失败」，而不是「manifest 指错了目录」。
+	dir := cwd
+	inside := false
+	if !filepath.IsAbs(cwd) {
+		for _, seg := range strings.Split(strings.ReplaceAll(cwd, "\\", "/"), "/") {
+			if seg == ".." {
+				return fmt.Errorf("%s: web.start.cwd 不许上跳（..）：%q", id, cwd)
+			}
+		}
+		inside = true
+		dir = filepath.Join(target, filepath.FromSlash(cwd))
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("%s: web.start.cwd 不存在或不是目录：%q", id, cwd)
+	}
+	if inside {
+		realTarget, terr := filepath.EvalSymlinks(target)
+		realDir, derr := filepath.EvalSymlinks(dir)
+		if terr != nil || derr != nil {
+			return fmt.Errorf("%s: web.start.cwd 解析失败：%v / %v", id, terr, derr)
+		}
+		rel, rerr := filepath.Rel(realTarget, realDir)
+		if rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("%s: web.start.cwd 经软链逃出了插件目录：%q", id, cwd)
+		}
+	}
+	return nil
+}
+
+// validateSurfaceWebHealth 探活路径：只能是相对 web.url 的 path/query（与 entries[].path
+// 同一条纪律），不允许自带 scheme/host 或 `..`。
+func validateSurfaceWebHealth(id, raw string) error {
+	if strings.ContainsAny(raw, "\\\x00\r\n\t") {
+		return fmt.Errorf("%s: web.start.health 含非法字符：%q", id, raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s: web.start.health 不是合法路径：%v", id, err)
+	}
+	if u.Scheme != "" || u.Host != "" || u.User != nil {
+		return fmt.Errorf("%s: web.start.health 只能是相对路径（不许带 scheme/host）：%q", id, raw)
+	}
+	for _, seg := range strings.Split(raw, "/") {
+		if seg == ".." {
+			return fmt.Errorf("%s: web.start.health 不许上跳（..）：%q", id, raw)
+		}
+	}
+	return nil
+}
+
+// validateSurfaceWebPath entries[].path 的路径纪律。
+//
+// 这条路径最终会被宿主拼成 `web.url + "/" + path` 塞进原生视图的 loadURL，所以它必须
+// 是**相对路径**：不能自带 scheme/host（`https:`、`//evil.com`）、不能上跳（`..`）、
+// 不能含反斜杠/NUL。允许 `#/admin`（hash 路由）与 `?x=1`（查询串）。
+func validateSurfaceWebPath(id, entryID, raw string) error {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return nil
+	}
+	if strings.ContainsAny(p, "\\\x00\r\n\t") {
+		return fmt.Errorf("%s: entries[%s].path 含非法字符：%q", id, entryID, p)
+	}
+	u, err := url.Parse(p)
+	if err != nil {
+		return fmt.Errorf("%s: entries[%s].path 不是合法路径：%v", id, entryID, err)
+	}
+	if u.Scheme != "" || u.Host != "" {
+		return fmt.Errorf("%s: entries[%s].path 只能是相对路径（不许带 scheme/host）：%q", id, entryID, p)
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return fmt.Errorf("%s: entries[%s].path 不许上跳（..）：%q", id, entryID, p)
+		}
+	}
+	return nil
+}
+
 // validateSurfaceEntries 校验 manifest.entries[]（D-3：任何一条不过 = 安装 rejected）。
 //
 // 三条边界上的取舍，改之前先读：
@@ -1262,7 +1519,10 @@ func resolveSurfaceEntry(target, entry string) (string, error) {
 //  2. **title 按 rune 数**：`len([]rune(s))`，与 version 的既有校验同口径（字节数会把中文判死）。
 //  3. **icon 只查「在目录内」，不查「存在」**：逃逸是安全问题（拒绝安装），缺失只是少一个图标
 //     （D-3 明说用 kind 图标兜底、不阻塞安装）。两者处置不同，判据也就必须分开写。
-func validateSurfaceEntries(target, id string, list []surfaceEntryDecl) error {
+//
+// web 参数只影响 entries[].path：ESM 面板声明 path 会被拒（语义归 panel.js 的 render），
+// URL 型插件才允许声明它。
+func validateSurfaceEntries(target, id string, list []surfaceEntryDecl, web bool) error {
 	if len(list) == 0 {
 		return nil
 	}
@@ -1287,6 +1547,13 @@ func validateSurfaceEntries(target, id string, list []surfaceEntryDecl) error {
 		}
 		if err := validateSurfaceEntryIcon(target, e.Icon); err != nil {
 			return fmt.Errorf("%s: entries[%d] (%s) 的 icon %v", id, i, entryID, err)
+		}
+		if web {
+			if err := validateSurfaceWebPath(id, entryID, e.Path); err != nil {
+				return err
+			}
+		} else if strings.TrimSpace(e.Path) != "" {
+			return fmt.Errorf("%s: entries[%d] (%s) 声明了 path，但这不是 web 插件（path 只对 manifest.web 有效）", id, i, entryID)
 		}
 	}
 	return nil

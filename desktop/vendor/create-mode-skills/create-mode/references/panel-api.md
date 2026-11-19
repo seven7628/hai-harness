@@ -3,6 +3,11 @@
 Part of `create-mode`. Read `SKILL.md` first; this file is loaded only when you are
 writing `surface.json` / `panel.js` or debugging rendering/lifecycle.
 
+> This file describes the **ESM panel shape**. If the extension is an existing web app
+> (React/Vite/Next, its own dev server, `window.haiHost`), read
+> [`web-app.md`](web-app.md) instead. The command/event tables below are shared; only the
+> transport differs (`host` vs `window.haiHost`).
+
 ## surface.json fields
 
 The installer and loader read this exact set. Unknown JSON keys are ignored by Go, so a typo does
@@ -14,17 +19,21 @@ The installer and loader read this exact set. Unknown JSON keys are ignored by G
 | `name` | object | recommended | language → display name, e.g. `{"zh":"成本看板","en":"Cost board"}`. A **plain string fails to unmarshal** (the installer reports it as “surface.json 不是合法 JSON”). Missing name falls back to `id`. |
 | `version` | string | yes | non-empty; use semver (`1.0.0`) so upgrades read naturally |
 | `kind` | string | yes | exactly `plugin:<id>` |
-| `entry` | string | no | entry file inside the folder; default `panel.js` |
+| `entry` | string | no | **panel shape only**: entry file inside the folder; default `panel.js`. Ignored when `web` is present. |
 | `icon` | string | no | path inside the folder; provider fallback icon |
 | `commands` | string[] | no | host commands the plugin may call (see below) |
 | `data` | string[] | no | event types the plugin may subscribe to |
-| `entries` | object[] | no | declared pages, ≤ 20; see [`entries.md`](entries.md) |
+| `entries` | object[] | no | declared pages/tabs, ≤ 20; see [`entries.md`](entries.md). In the web-app shape each entry has a `path` (relative to `web.url`). |
 | `tools` | object[] | no | model-callable tools, ≤ 16; see [`tools.md`](tools.md) |
+| `web` | object | no | **web-app shape**: `{ "url": "http://127.0.0.1:5173", "start"?: { command, args?, cwd?, env?, health?, timeout_ms? }, "permissions"?: ["media"] }`. Presence means “no panel.js; open `web.url + entries[].path` in a native view”. `start` is optional; with it the host launches the service on first open (MCP-server style) and reuses an already-running URL. The two shapes are mutually exclusive in practice. |
 
 `api` and `placement` are **not part of the contract**: the current template no longer ships them.
 If an old plugin still carries them, they are ignored; do not add them to new plugins.
 
-## panel.js rules (the hard ones)
+## panel.js rules (the hard ones — ESM panel shape only)
+
+> A web-app plugin has no `panel.js`. Its page is served by your own app and talks to the host
+> through `window.haiHost`; see [`web-app.md`](web-app.md). The rules below do not apply to it.
 
 - **No JSX, no bundler.** `panel.js` is the file the browser imports; there is no compile step.
   Use `React.createElement` (aliased `h`). Anything you would `import` from npm will fail — React
@@ -141,7 +150,9 @@ Four questions every plugin hits while it is being written; the answers are not 
 rest of this file.
 
 **Where your code runs.** `panel.js` is imported into the app's own page — not an iframe, not a
-worker. You share its `window`, its `document.documentElement` and its web storage. Your globals,
+worker. You share its `window`, its `document.documentElement` and its web storage. (If your UI is
+an existing web app, do **not** wrap it in an iframe inside a panel; use the web-app shape with
+`web.url` — that is the supported native-view path.) Your globals,
 timers and listeners live as long as the panel stays loaded.
 
 **Storage is yours — and disposable.** The host gives plugins no storage API and no file write. Keep
@@ -197,7 +208,8 @@ component effect; do not leave it running after the panel unmounts.
 
 ## Forbidden
 
-- No iframe / no `mock HTML preview` — the panel renders in the app's own React tree.
+- No iframe / no `mock HTML preview` — the panel renders in the app's own React tree. A real
+  standalone web app belongs in the web-app shape (`web.url` + entries), not inside `panel.js`.
 - No touching `document.body`, no replacing the app root, no global CSS, no reading another
   panel's DOM. Your island is your provider's subtree.
 - No `capabilities: ['write']` — plugins cannot ask for write access (the registry rejects it).

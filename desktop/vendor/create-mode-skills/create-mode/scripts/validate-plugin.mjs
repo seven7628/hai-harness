@@ -22,6 +22,7 @@ if (!fs.existsSync(dir)) {
   console.error(`plugin dir does not exist: ${dir}`)
   process.exit(1)
 }
+let isWeb = false
 const raw = read('surface.json')
 if (raw == null) {
   fail('surface.json is missing')
@@ -29,6 +30,7 @@ if (raw == null) {
   let mf = null
   try { mf = JSON.parse(raw) } catch (e) { fail(`surface.json is not valid JSON: ${e.message}`) }
   if (mf && typeof mf === 'object') {
+    isWeb = !!(mf.web && typeof mf.web === 'object' && !Array.isArray(mf.web))
     const id = typeof mf.id === 'string' ? mf.id.trim() : ''
     if (!/^[a-z][a-z0-9-]{1,40}$/.test(id)) fail(`id must match ^[a-z][a-z0-9-]{1,40}$ (got ${JSON.stringify(id)})`)
     if (mf.kind !== `plugin:${id}`) fail(`kind must be exactly plugin:<id> (got ${JSON.stringify(mf.kind)})`)
@@ -45,8 +47,81 @@ if (raw == null) {
         }
       }
     }
-    const entry = typeof mf.entry === 'string' && mf.entry.trim() ? mf.entry : 'panel.js'
-    if (!fs.existsSync(path.join(dir, entry))) fail(`entry "${entry}" does not exist`)
+    if (isWeb) {
+      const url = typeof mf.web.url === 'string' ? mf.web.url.trim() : ''
+      try {
+        const u = new URL(url)
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') fail(`web.url must be http/https (got ${JSON.stringify(u.protocol)})`)
+        if (!u.host) fail('web.url needs a host')
+        if (u.username || u.password) fail('web.url must not contain username/password')
+        if (u.search || u.hash) fail('web.url must be a root (put query/hash in entries[].path)')
+      } catch {
+        fail(`web.url is not a valid http(s) URL: ${JSON.stringify(url)}`)
+      }
+      const perms = mf.web.permissions
+      if (perms != null) {
+        if (!Array.isArray(perms)) fail('web.permissions must be an array')
+        else for (const perm of perms) if (perm !== 'media') fail(`web.permissions only supports "media" (got ${JSON.stringify(perm)})`)
+      }
+      if (mf.web.start != null) {
+        const st = mf.web.start
+        if (!st || typeof st !== 'object' || Array.isArray(st)) fail('web.start must be an object')
+        else {
+          const command = typeof st.command === 'string' ? st.command.trim() : ''
+          if (!command) fail('web.start.command is required')
+          else if (/[\r\n\0]/.test(command) || [...command].length > 512) fail('web.start.command contains a newline/NUL or is > 512 characters')
+          if (st.args != null) {
+            if (!Array.isArray(st.args)) fail('web.start.args must be an array')
+            else if (st.args.length > 32) fail('web.start.args must be ≤ 32 items')
+            else for (const [i, a] of st.args.entries()) {
+              if (typeof a !== 'string' || /[\r\n\0]/.test(a) || [...a].length > 2048) fail(`web.start.args[${i}] must be a string without newline/NUL and ≤ 2048 characters`)
+            }
+          }
+          if (st.cwd != null) {
+            if (typeof st.cwd !== 'string' || /[\r\n\0]/.test(st.cwd) || [...st.cwd].length > 4096) fail('web.start.cwd must be a string without newline/NUL and ≤ 4096 characters')
+            else {
+              const cwd = st.cwd.trim()
+              if (cwd) {
+                if (!path.isAbsolute(cwd) && cwd.replace(/\\/g, '/').split('/').includes('..')) fail('web.start.cwd must not contain ".." segments')
+                const resolved = path.isAbsolute(cwd) ? cwd : path.join(dir, cwd)
+                if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) fail(`web.start.cwd does not exist or is not a directory: ${JSON.stringify(cwd)}`)
+              }
+            }
+          }
+          if (st.env != null) {
+            if (!st.env || typeof st.env !== 'object' || Array.isArray(st.env)) fail('web.start.env must be an object')
+            else {
+              const keys = Object.keys(st.env)
+              if (keys.length > 32) fail('web.start.env must be ≤ 32 keys')
+              for (const k of keys) {
+                if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) fail(`web.start.env key is invalid: ${JSON.stringify(k)}`)
+                const v = st.env[k]
+                if (typeof v !== 'string' || v.includes('\0') || v.length > 4096) fail(`web.start.env[${JSON.stringify(k)}] must be a string without NUL and ≤ 4096 bytes`)
+              }
+            }
+          }
+          if (st.health != null) {
+            if (typeof st.health !== 'string' || /[\\\r\n\t\0]/.test(st.health)) fail('web.start.health must be a string without backslash/newline/NUL')
+            else {
+              const h = st.health.trim()
+              if (h) {
+                if (h.startsWith('//')) fail('web.start.health must not be protocol-relative')
+                if (h.split('/').includes('..')) fail('web.start.health must not contain ".."')
+                try { const u = new URL(h); if (u.protocol || u.host) fail('web.start.health must be relative to web.url (no scheme/host)') } catch { /* 相对路径合法 */ }
+              }
+            }
+          }
+          if (st.timeout_ms != null) {
+            const ms = Number(st.timeout_ms)
+            if (!Number.isFinite(ms) || (ms !== 0 && (ms < 1000 || ms > 60000))) fail('web.start.timeout_ms must be 0 or 1000–60000')
+          }
+        }
+      }
+      if (mf.entry != null) warn('entry is ignored when web is present (the page URL is web.url + entries[].path)')
+    } else {
+      const entry = typeof mf.entry === 'string' && mf.entry.trim() ? mf.entry : 'panel.js'
+      if (!fs.existsSync(path.join(dir, entry))) fail(`entry "${entry}" does not exist`)
+    }
     if (mf.commands != null && !Array.isArray(mf.commands)) fail('commands must be an array')
     if (mf.data != null && !Array.isArray(mf.data)) fail('data must be an array')
     if (mf.placement != null) warn('placement is not part of the manifest contract; remove it')
@@ -70,6 +145,23 @@ if (raw == null) {
             if (!labels.length) fail(`entries[${i}].title object needs at least one non-empty language`)
             for (const v of Object.values(title)) if (typeof v === 'string' && [...v].length > 64) fail(`entries[${i}].title.${Object.keys(title).find((k) => title[k] === v)} is > 64 characters`)
           } else fail(`entries[${i}].title must be a string or a language object`)
+          if (e.path != null) {
+            if (!isWeb) fail(`entries[${i}].path is only valid for a web plugin (web.url present)`)
+            else if (typeof e.path !== 'string') fail(`entries[${i}].path must be a string`)
+            else {
+              const p = e.path.trim()
+              if (p) {
+                if (/[\\\0]/.test(p) || p.split('/').includes('..')) fail(`entries[${i}].path must not contain ".." or backslashes`)
+                try {
+                  const u = new URL(p)
+                  if (u.protocol || u.host) fail(`entries[${i}].path must be relative (no scheme/host): ${JSON.stringify(p)}`)
+                } catch {
+                  // relative path: new URL throws without a base — the expected case
+                }
+                if (p.startsWith('//')) fail(`entries[${i}].path must not be protocol-relative: ${JSON.stringify(p)}`)
+              }
+            }
+          }
         }
       }
     }
@@ -106,6 +198,9 @@ if (raw == null) {
     }
   }
 }
+if (isWeb) {
+  if (fs.existsSync(path.join(dir, 'panel.js'))) warn('panel.js is ignored in the web shape; remove it or leave it unused')
+} else {
 const panel = read('panel.js')
 if (panel == null) {
   fail('panel.js is missing')
@@ -125,6 +220,7 @@ if (panel == null) {
   for (const m of code.matchAll(/(?:theme|host\.theme\(\))\.tokens\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
     if (!TOKENS.has(m[1])) fail(`unknown theme token "tokens.${m[1]}" (allowed: ${[...TOKENS].join(', ')})`)
   }
+}
 }
 if (warnings.length) for (const w of warnings) console.warn('WARN:', w)
 if (errors.length) {

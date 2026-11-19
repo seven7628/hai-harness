@@ -395,6 +395,51 @@ export default function SurfacesPage() {
                 ))
               )}
             </div>
+            {/* URL 型插件的地址与设备权限：装之前/之后都能在这里对账。尤其是 media ——
+                它绕过浏览器的权限提示，只在这份 manifest 里声明；不显示就等于默认授权。 */}
+            {item.web && (
+              <>
+                <div className="mcp-s-cmd" data-surface-web>
+                  <span className="set-desc">{t('surfaces.declared.web')}</span>{' '}
+                  <span className="mcp-type mono" data-surface-web-url>{item.web.url}</span>
+                </div>
+                <div className="mcp-s-cmd" data-surface-web-permissions>
+                  <span className="set-desc">{t('surfaces.declared.permissions')}</span>{' '}
+                  {item.web.permissions?.length ? (
+                    item.web.permissions.map((p) => (
+                      <span className="mcp-type mono" key={`p-${p}`} data-surface-permission={p}>{p}</span>
+                    ))
+                  ) : (
+                    <span className="set-desc">{t('surfaces.declared.none')}</span>
+                  )}
+                </div>
+                {item.web.start && (
+                  <>
+                    <div className="mcp-s-cmd" data-surface-web-start>
+                      <span className="set-desc">{t('surfaces.declared.start')}</span>{' '}
+                      <span className="mcp-type mono" data-surface-web-start-command>
+                        {[item.web.start.command, ...(item.web.start.args ?? [])].join(' ')}
+                      </span>
+                      {item.web.start.cwd && (
+                        <>
+                          {' '}
+                          <span className="set-desc">{t('surfaces.declared.startCwd')}</span>{' '}
+                          <span className="mcp-type mono" data-surface-web-start-cwd>{item.web.start.cwd}</span>
+                        </>
+                      )}
+                    </div>
+                    {!!Object.keys(item.web.start.env ?? {}).length && (
+                      <div className="mcp-s-cmd" data-surface-web-start-env>
+                        <span className="set-desc">{t('surfaces.declared.startEnv')}</span>{' '}
+                        {Object.keys(item.web.start.env ?? {}).map((k) => (
+                          <span className="mcp-type mono" key={`e-${k}`} data-surface-env-key={k}>{k}</span>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
 
             {/* R16 / D-2 第 4 条：入口在哪。写在**每一行**（而不是页面顶部一句话）：
                 用户是看着某一行的「打开」按钮问「其它入口在哪」的，提示要贴着那个问题。 */}

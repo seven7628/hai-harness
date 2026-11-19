@@ -183,6 +183,9 @@ export default function RightPanel({ maximized = false }: { maximized?: boolean 
   const tabs = tabSet?.tabs ?? []
   const closedTabs = tabSet?.closed ?? []
   const activeTab = tabs.find((x) => x.id === tabSet?.activeId) ?? null
+  // URL 型插件声明 fullBleed：内容自己铺满右栏（去掉 .right-body 的 10px 内边距/滚动）。
+  // 这里读注册表而不是写 kind 判别 —— 判定权属于 provider（与 nativeHost 同一条纪律）。
+  const activeFullBleed = !!activeTab && (getSurface(activeTab.kind)?.fullBleed ?? false)
   // PR-10：内容区要不要渲染 provider（墓碑判定，见 unavailableReason）。非 null = 渲染占位卡，
   // **不渲染 provider** —— 被禁用的面板连挂载都不该发生（否则又是一次崩溃/白屏）。
   const activeUnavailable = activeTab ? unavailableReason(activeTab) : null
@@ -838,7 +841,7 @@ export default function RightPanel({ maximized = false }: { maximized?: boolean 
             </>
           )}
         </div>
-        <div className={`right-body ${activeTab?.kind === 'file' ? 'file-mode' : ''}`}>
+        <div className={`right-body ${activeTab?.kind === 'file' ? 'file-mode' : ''}${activeFullBleed ? ' full-mode' : ''}`}>
           {!activeTab && (
             <div className="empty rtabs-empty">
               <div className="big">{t('rp.tabs.empty')}</div>

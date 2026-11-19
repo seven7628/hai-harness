@@ -29,12 +29,15 @@ import { emitUI, subscribeUI } from '../../lib/uiBus'
 import { t as i18nT } from '../../i18n'
 import { registerSurface, unregisterSurface } from '../registry'
 import { noteSurfaceVersion } from '../health'
-import { setSurfaceEntryIndex } from './entries'
+import { entryTitleText, setSurfaceEntryIndex } from './entries'
 import { reconcileKnownIds } from './storage'
 import { clearSurfaceLoadError, setSurfaceLoadError } from './status'
 import type { SurfaceIndex, SurfaceIndexItem, SurfaceCommandReply, SurfaceAgentEventPayload, SurfaceEvent } from '../../transport/types'
-import type { DistributiveOmit, HostApi, SurfaceKind, SurfaceProvider, SurfaceTab } from '../types'
+import type { DistributiveOmit, HostApi, PluginTabInstance, SurfaceKind, SurfaceProvider, SurfaceTab } from '../types'
 import { bridge } from '../../lib/bridge'
+import { getHostLang } from '../../host/lang'
+import { appUrlOf } from '../../lib/surfaceApp'
+import type { PluginAppHostProps } from './webApp'
 
 /** 生产 base URL：`hai-surface://<id>`（协议见 electron/surface-protocol.ts）。 */
 export function surfaceBaseUrl(id: string): string {
@@ -146,11 +149,40 @@ interface LoadedPlugin {
   kind: SurfaceKind
   hash: string
   entry: string
+  /** 内容修订键：hash + 入口（ESM）或 web URL（网页型）。sync 用它判「要不要重载」。 */
+  revision: string
   dispose: () => void
 }
 
 /** 已加载的插件（id → 句柄）。模块级单例：注册表也是单例，两者生命周期必须一致。 */
 const loaded = new Map<string, LoadedPlugin>()
+
+/**
+ * URL 型插件的 host 对象（pluginId → createHost 的产物）。
+ *
+ * 为什么不是每来一条 command 新建一个：createHost 在创建时领一次 agent token，并持有
+ * 事件订阅表；每次新建会让 token 越领越多、订阅越叠越厚。一个插件一份，dispose 时删。
+ */
+const webHosts = new Map<string, HostApi>()
+
+/**
+ * URL 型插件的 React 宿主组件（由 main.tsx 注入，见 registerPluginAppHost）。
+ *
+ * 为什么不直接 import webApp.tsx：webApp 要用 store（rightExpanded/panelMenuOpen/弹窗闸门），
+ * 而 store 反过来 import 本文件 —— 直接 import 会形成 loader → webApp → store → loader
+ * 的运行期环（本文件开头「不 import store」那条纪律）。类型是 type-only（擦除），
+ * 组件在 main.tsx 求值时注入；探针没注入时渲染一行宿主错误，而不是白屏。
+ */
+let appHostComponent: React.ComponentType<PluginAppHostProps> | undefined
+
+export function registerPluginAppHost(component: React.ComponentType<PluginAppHostProps>): void {
+  appHostComponent = component
+}
+
+/** 内容修订键：hash 变 / 入口变 / web URL 变都要重载（三者在 index 里是不同字段）。 */
+function revisionOf(item: SurfaceIndexItem): string {
+  return `${item.hash}|${item.web ? `web:${item.web.url}` : `entry:${item.entry || 'panel.js'}`}`
+}
 
 /** 最近一次 sync 用的 base（渲染层拼入口图标 URL 时沿用同一条来源，不另猜协议）。 */
 let currentBase: SurfaceBaseUrl | undefined
@@ -634,7 +666,110 @@ async function applyManifest(item: SurfaceIndexItem, baseUrl: SurfaceBaseUrl, de
     }
     loaded.delete(id)
   }
-  return { id, kind: expected, hash: item.hash, entry, dispose }
+  return { id, kind: expected, hash: item.hash, entry, revision: revisionOf(item), dispose }
+}
+
+/** 入口声明（按 params.entry 找）；没找到 = 零 entry 的默认入口 / 老标签。 */
+function webEntryOf(item: SurfaceIndexItem, tab: PluginTabInstance): { path: string; title: string } {
+  const entryId = typeof tab.params?.entry === 'string' ? tab.params.entry : ''
+  const decl = (item.entries ?? []).find((e) => e.id === entryId)
+  if (decl) return { path: decl.path || '', title: entryTitleText(decl.title, getHostLang()) }
+  return { path: '', title: item.name || item.id }
+}
+
+/**
+ * applyWebManifest 加载一个 URL 型插件（manifest.web）：不 import panel.js，注册一个
+ * 宿主 provider，页面在原生视图里跑（见 electron/plugin-app.ts）。
+ *
+ * 与 applyManifest 的共同点：kind 校验、createHost、manifest 白名单、dispose 回滚、
+ * 失败只黑自己。不同点只有「内容从哪来」——ESM 是 import 的 React 组件，web 是
+ * `web.url + entries[].path` 的原生视图。
+ */
+function applyWebManifest(item: SurfaceIndexItem, deps: PluginHostDeps): LoadedPlugin {
+  const id = item.id
+  const expected = pluginKindOf(id)
+  if (item.kind !== expected) {
+    throw new Error(`surface.json 的 kind 必须是 ${expected}（实得 ${item.kind || '空'}）`)
+  }
+  const web = item.web
+  if (!web?.url) throw new Error('manifest.web.url 缺失')
+
+  const disposers: Array<() => void> = []
+  const host = createHost(item, deps, disposers)
+  webHosts.set(id, host)
+
+  // 事件：宿主先按 manifest.data 订好，再统一转发给该插件的所有视图。为什么不给页面
+  // 加「订阅才转发」的协议：tool.call 的 requires_panel 门禁需要在页面还没订阅时就
+  // 成立；而 agent.* 的过滤本来就在 Go 侧按 surface_id 做完了。
+  for (const type of item.data) {
+    try {
+      host.onEvent(type, (ev) => {
+        void bridge?.pluginAppEvent?.({ pluginId: id, type, event: ev })
+      })
+    } catch (e) {
+      console.warn(`[surface] web 插件 ${id} 订阅 ${type} 失败：`, e)
+    }
+  }
+
+  const provider: SurfaceProvider<PluginTabInstance> = {
+    kind: expected,
+    namespace: 'plugin',
+    group: 'plugin',
+    title: (tab) => webEntryOf(item, tab).title,
+    ...(item.icon ? { icon: () => iconNode(pluginAssetUrl(id, item.icon!)) } : {}),
+    // 页面就是面板本身：去掉 .right-body 的 10px 内边距与滚动条（见 index.css full-mode）。
+    fullBleed: true,
+    // 视图由 PluginAppHost 自己 show/hide；RightPanel 的全局 embed 闸门不该把它当成
+    // 「没人认领的视图」而误伤（那是浏览器 embed 的闸门，两者是两张池子）。
+    nativeHost: () => true,
+    render: ({ tab }) => {
+      const props: PluginAppHostProps = {
+        pluginId: id,
+        tabId: tab.id,
+        url: appUrlOf(web.url, webEntryOf(item, tab).path),
+        webUrl: web.url,
+        events: item.data,
+        commands: item.commands,
+        ...(web.start ? { start: web.start } : {}),
+        ...(web.permissions?.length ? { permissions: web.permissions } : {}),
+      }
+      return appHostComponent
+        ? React.createElement(appHostComponent, props)
+        : React.createElement('div', { className: 'plugin-app-state', 'data-plugin-app-missing': id }, 'URL 插件宿主未注册')
+    },
+    onClose: (tab) => {
+      void bridge?.pluginAppClose?.(`${id}:${tab.id}`)
+    },
+  }
+
+  try {
+    registerSurface(provider)
+  } catch (e) {
+    webHosts.delete(id)
+    for (const d of [...disposers].reverse()) {
+      try {
+        d()
+      } catch {
+        /* 撤销自己的失败不掩盖原始错误 */
+      }
+    }
+    throw e
+  }
+  disposers.push(() => unregisterSurface(expected))
+
+  const dispose = (): void => {
+    for (const d of [...disposers].reverse()) {
+      try {
+        d()
+      } catch {
+        /* 单个 disposer 失败不影响其余 */
+      }
+    }
+    webHosts.delete(id)
+    void bridge?.pluginAppClosePlugin?.(id)
+    loaded.delete(id)
+  }
+  return { id, kind: expected, hash: item.hash, entry: item.entry, revision: revisionOf(item), dispose }
 }
 
 /** reportFailure 登记 + 上报（`ui_inspect` 的 surfaces[] 与 console 都看得见）。 */
@@ -710,7 +845,8 @@ async function syncOnce(
       if (before) console.info(`[surface] 插件 ${id} 已卸载`)
       continue
     }
-    if (item.hash !== loaded.get(id)?.hash || item.entry !== loaded.get(id)?.entry) {
+    const cur = loaded.get(id)
+    if (cur && cur.revision !== revisionOf(item)) {
       if (unloadPlugin(id)) report.unloaded.push(id)
     }
   }
@@ -718,7 +854,7 @@ async function syncOnce(
   // ② 再加载/复用。
   for (const [id, item] of alive) {
     const cur = loaded.get(id)
-    if (cur && cur.hash === item.hash && cur.entry === item.entry) {
+    if (cur && cur.revision === revisionOf(item)) {
       report.skipped.push(id)
       clearSurfaceLoadError(cur.kind) // 之前失败过、这一轮 index 又好了 → 清掉旧的错误行
       continue
@@ -728,7 +864,7 @@ async function syncOnce(
       // 时，旧版本留下的「3 次失败 → 自动禁用」会继续挂在墓碑上，用户看到的是「装了新版
       // 还是坏的」。真正的坏版本由 status.ts 的 load error 报告，不走这套计数。
       noteSurfaceVersion(pluginKindOf(id), item.hash)
-      const p = await applyManifest(item, baseUrl, deps)
+      const p = item.web ? applyWebManifest(item, deps) : await applyManifest(item, baseUrl, deps)
       loaded.set(id, p)
       clearSurfaceLoadError(p.kind)
       deps.send?.('surface_status', { kind: p.kind, mounted: true, disabled: false, error: '' })
@@ -791,9 +927,23 @@ export function startPluginLoader(deps: PluginLoaderDeps): () => void {
   }
   run()
   const off = subscribeUI('surfaces_changed', () => run())
+  // URL 型插件的页面调 host.command：main 校验来源/声明后转发到这里，再用**同一个**
+  // createHost 执行（agent token、D11、manifest 白名单都在那一份里）。
+  const offHost = bridge?.onPluginAppHostCommand?.((req) => {
+    const host = webHosts.get(req.pluginId)
+    if (!host) {
+      bridge?.pluginAppHostReply?.({ id: req.id, reply: { ok: false, reason: 'unknown_id' } })
+      return
+    }
+    void host
+      .command(req.name, req.payload)
+      .then((reply) => bridge?.pluginAppHostReply?.({ id: req.id, reply }))
+      .catch(() => bridge?.pluginAppHostReply?.({ id: req.id, reply: { ok: false, reason: 'error' } }))
+  })
   return () => {
     stopped = true
     off()
+    offHost?.()
   }
 }
 

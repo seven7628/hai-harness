@@ -736,6 +736,18 @@ export interface SurfaceEntryDecl {
   icon?: string
   /** 排序权重（缺省 100，升序） */
   order?: number
+  /** URL 型插件的页面路径（相对 `web.url`）；ESM 面板不读它 */
+  path?: string
+}
+
+/** manifest.web.start：宿主替插件拉起前端服务（与 electron/surface-index.ts 同构）。 */
+export interface SurfaceWebStartDecl {
+  command: string
+  args?: string[]
+  cwd?: string
+  env?: Record<string, string>
+  health?: string
+  timeoutMs?: number
 }
 
 export interface SurfaceIndexItem {
@@ -758,6 +770,11 @@ export interface SurfaceIndexItem {
   entry: string
   /** `<id>` 目录内的相对路径（如 icon.svg） */
   icon?: string
+  /**
+   * URL 型插件（2026-11）：manifest.web 存在时没有 panel.js，宿主用原生视图打开
+   * `web.url + entries[].path`；页面通过 preload 注入的 `window.haiHost` 使用宿主能力。
+   */
+  web?: { url: string; start?: SurfaceWebStartDecl; permissions?: string[] }
   /** manifest 读不出来时的原因（loader 跳过这一条，其余照常） */
   error?: string
 }
@@ -765,6 +782,50 @@ export interface SurfaceIndexItem {
 export interface SurfaceIndex {
   version: number
   items: SurfaceIndexItem[]
+}
+
+// —— URL 型插件的原生视图桥（2026-11）——
+//
+// 页面在独立 WebContentsView 里，拿不到宿主 window；这三条类型是「页面 ↔ 主进程 ↔
+// 渲染层 host」的 wire 形状。字段名即协议，改之前先读 plugin-app.ts / plugin-app-preload.ts。
+
+/** 一条原生视图的加载状态（宿主据此画 loading/error，而不是让 Chromium 错误页裸奔）。 */
+export interface SurfaceAppStatus {
+  /** `${pluginId}:${tabId}`（与 tab 一一对应；关闭 tab 即关视图） */
+  key: string
+  status: 'loading' | 'starting' | 'ready' | 'error'
+  url?: string
+  error?: string
+  /** Chromium 的 did-fail-load errorCode（-3 = ABORTED，不算错误） */
+  code?: number
+  /** 服务启动失败时的最近日志（宿主错误态直接显示，省得用户去翻控制台） */
+  logs?: string
+}
+
+/** 渲染层 → 主进程：为某个 tab 建/复用一条原生视图。 */
+export interface SurfaceAppOpenInput {
+  key: string
+  pluginId: string
+  url: string
+  /** manifest.web.url 的根（服务探活/启动用）；缺省 = url（老调用） */
+  webUrl?: string
+  /** manifest.data：页面允许订阅的事件（preload 第一道闸门） */
+  events: string[]
+  /** manifest.commands：页面允许调用的命令（main / 渲染层各再挡一次） */
+  commands: string[]
+  /** manifest.web.start：有它则先确保服务就绪再 loadURL（缺省 = 假设服务已在跑） */
+  start?: SurfaceWebStartDecl
+  /** manifest.web.permissions：目前只支持 media（麦克风/摄像头） */
+  permissions?: string[]
+}
+
+/** 主进程 → 渲染层：页面调用 host.command，等渲染层用 pluginAppHostReply 回。 */
+export interface SurfaceHostRequest {
+  /** 单调递增的请求 id（主进程分配；渲染层原样带回） */
+  id: number
+  pluginId: string
+  name: string
+  payload?: unknown
 }
 
 /** host.command 的返回（**永不抛**：拒绝是一个值，见 surfaces/plugin/loader.ts） */

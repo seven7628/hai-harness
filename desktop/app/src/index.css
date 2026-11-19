@@ -6024,6 +6024,18 @@ body.is-electron .left.collapsed .rail .rbtn {
   flex: 1;
   min-height: 0;
 }
+/* URL 型插件（provider.fullBleed）：内容就是页面本身，不能有面板内边距，也不该出现
+   第二层滚动条（页面自己滚）。与 file-mode 同一套「内容自己管溢出」的语义。 */
+.right-body.full-mode {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+.right-body.full-mode > * {
+  flex: 1;
+  min-height: 0;
+}
 /* ===== PR-10：面板崩溃卡 / 墓碑 =====
    两者都是**内容区**里的占位（标签条、收起钮、＋ 菜单在边界外面 —— 崩一个面板不能让人没法切走）。
    视觉上要一眼看出「这不是正常工作区」，但不抢眼：中性底色 + 边框 + 一枚小徽标/虚线边。
@@ -15617,4 +15629,75 @@ body.is-electron .page-head {
     display: block;
     text-align: right;
   }
+}
+
+/* ===== URL 型插件（2026-11）：原生视图的 DOM 占位 + 宿主 loading/error =====
+   真正的内容是主进程的 WebContentsView（不在 DOM 里），这块只负责量矩形和「视图没
+   就绪时看得见的状态」。原生视图 show 后会盖住整个容器，所以 loading 态不需要 z-index
+   战争；hidden 时视图被 hide，DOM 状态自然露出。 */
+.plugin-app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+}
+.plugin-app-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-2);
+}
+.plugin-app-state-title {
+  font: 600 13px/1.5 var(--font-ui, system-ui, sans-serif);
+  color: var(--text);
+}
+.plugin-app-state-detail {
+  max-width: 92%;
+  color: var(--danger);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.plugin-app-state-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.plugin-app-state-url {
+  max-width: 92%;
+  color: var(--text-3, var(--text-2));
+  font-size: 11px;
+  word-break: break-all;
+  opacity: 0.75;
+}
+.plugin-app-state-hint {
+  max-width: 92%;
+  color: var(--text-3, var(--text-2));
+  font-size: 11px;
+  opacity: 0.7;
+}
+.plugin-app-state-logs {
+  max-width: 92%;
+  max-height: 180px;
+  overflow: auto;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--ink-line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

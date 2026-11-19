@@ -1783,6 +1783,28 @@ interface PersistedTabs { v: number; scopes: Record<ScopeKey, PersistedTabSet> }
 // 反查顺序：① 标签自带的快照（待重建的）→ ② 视图池 targets（按 viewId）→ ③ MCP 页列表
 // （按 pageId）。反查不到就**丢弃**（池里已被 LRU 关掉/从未导航成功）——宁可不恢复，
 // 也不要恢复一个点不开的死标签。
+/**
+ * 通知 provider「这个插件标签真的被关掉了」。
+ *
+ * 为什么现在才接：onClose 在 SurfaceProvider 契约里一直存在，但此前没有消费者 ——
+ * ESM 面板卸载由 React 负责，视图没有需要回收的进程。URL 型插件的原生视图活在主进程，
+ * 只有真正关标签时才该 close（切标签只是 hide，靠组件卸载的 cleanup 完成）；不接这个
+ * 钩子，每关一个插件 tab 就留一条 WebContentsView。
+ *
+ * 用 `(fn as (x: unknown) => void)` 而不是把 TabInstance 联合扩出 plugin 成员：与
+ * toPersistedTab 同一条口径（插件形状不进静态联合，语义归注册表）。
+ */
+function notifyPluginTabClosed(t: TabInstance): void {
+  if (!t.kind.startsWith('plugin:')) return
+  try {
+    const p = getSurface(t.kind)
+    const fn = p?.onClose as ((tab: unknown) => void) | undefined
+    fn?.(t)
+  } catch {
+    /* 插件已卸载/回调抛错：关标签本身不能被阻断 */
+  }
+}
+
 function toPersistedTab(t: TabInstance, s: AppState): PersistedTab | undefined {
   // PR-14c：plugin 必须在 switch **之前**分流 —— `default:` 是 web 的兜底分支，把它写在那里
   // 不会报任何错（类型也过得去），症状是「重启后插件标签变成一张空白网页」。回归探针 T4 钉住。
@@ -10924,6 +10946,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     const views = { ...s.views }
     delete views[sid]
     // 标签集随会话一起回收（否则重开同名会话会捡到旧标签；也防 tabsByScope 无界增长）
+    // 回收前先通知插件关原生视图：视图在 main 里，不会随 React 树卸载自动消失。
+    for (const t of s.tabsByScope[sid]?.tabs ?? []) notifyPluginTabClosed(t)
     const tabsByScope = { ...s.tabsByScope }
     delete tabsByScope[sid]
     // 输入历史随会话回收（含它的子智能体作用域）；localStorage 镜像 + 本地文件都要清
@@ -11011,6 +11035,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     for (const scope of [...wsSids, path]) {
       for (const t of s.tabsByScope[scope]?.tabs ?? []) {
         if (t.kind === 'file') disposeMediaElementsForPath((t as FileTabInstance).path ?? '')
+        else notifyPluginTabClosed(t)
       }
     }
     // 主进程的「媒体根」清单同步删除（评审裁决 1 的「关闭时删除」）：
@@ -12404,6 +12429,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const i = set0.tabs.findIndex((t) => t.id === id)
     if (i < 0) return
     const gone = set0.tabs[i]
+    notifyPluginTabClosed(gone)
     const tabs = set0.tabs.filter((t) => t.id !== id)
     // 关掉激活标签 → 顺延到**右邻居**，没有则左邻居（Chrome 口径）；全关光 → activeId=null（空态）
     const activeId = set0.activeId === id ? ((tabs[i] ?? tabs[i - 1])?.id ?? null) : set0.activeId

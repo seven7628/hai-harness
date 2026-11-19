@@ -8,7 +8,7 @@
 //	node e2e/verify_external_surface.mjs --dir=<插件目录>        （npm run e2e:external-surface）
 //
 // 本文件只管前半段（安装器）：装机走**生产入口**（临时 HOME → appDataDir → newSurfaceStore
-// → Install，与 main.go 同一个构造路径），断言 applied / index 一条 / hash = sha256(入口文件)
+// → Install，与 main.go 同一个构造路径），断言 applied / index 一条 / hash = 内容修订
 // / entries 条数与声明一致 / 权限 0600·0700，并把回执与 index 原样打印出来（-v 时可见）。
 //
 // 反例也在这里：`TestSurfaceInstallExternalRejectsMissingPanel` 不需要任何参数，永远跑 ——
@@ -34,7 +34,7 @@ import (
 // 自带路径，报告里能原样复述；`-args` 之后的 flag 由测试二进制自己解析（testing 在
 // M.Run 里调 flag.Parse，包级 var 在 init 期已注册，不会报 "flag provided but not defined"）。
 var surfaceExternalDir = flag.String("dir", "",
-	"外部插件目录（含 surface.json + 入口文件）；配合 -run TestSurfaceInstallExternal 使用")
+	"外部插件目录（含 surface.json；panel 形态还有入口文件，web 形态没有）；配合 -run TestSurfaceInstallExternal 使用")
 
 // surfaceExternalHome 是可选的「装到指定 HOME」（缺省 = t.TempDir() 用完即删）。
 //
@@ -171,26 +171,35 @@ func TestSurfaceInstallExternal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读回 manifest 失败：%v", err)
 	}
+	// URL 型插件没有 panel.js：entry 只是诊断字段，不能拿去读文件。
+	web := mf.Web != nil
 	entryRel := strings.TrimSpace(mf.Entry)
 	if entryRel == "" {
 		entryRel = surfaceDefaultEntry
 	}
 	installedEntry := filepath.Join(root, rec.ID, entryRel)
 	// hash 的口径随安装模式而异，这两条断言只对**拷贝快照**成立：
-	//   · 拷贝：hash = sha256(入口文件) —— 装进来的字节就是源字节；
-	//   · dev：hash = **内容修订**（surfaceContentHash 覆盖全部受追踪文件，见 surfaces.go），
-	//     改 panel.js / surface.json / icon.svg 任何一处都会变 —— 否则 watcher 认不出改动。
+	//   · 拷贝：hash = 内容修订（surfaceContentHash 覆盖全部常规文件）—— 装进来的字节
+	//     就是源字节；不能再用 sha256(入口文件)，改 surface.json/icon 时那个口径不会变；
+	//   · dev：hash = 内容修订（surfaceContentHash 覆盖受追踪文件），改 panel.js /
+	//     surface.json / icon.svg 任何一处都会变 —— 否则 watcher 认不出改动。
 	if !*surfaceExternalDev {
-		sum := sha256.Sum256(readBytes(t, installedEntry))
-		wantHash := hex.EncodeToString(sum[:])
+		wantHash, herr := surfaceContentHash(dir, false)
+		if herr != nil {
+			t.Fatalf("源目录内容修订算不出来：%v", herr)
+		}
 		if rec.Hash != wantHash || idx.Items[0].Hash != wantHash {
-			t.Fatalf("hash = %q（回执）/ %q（index），want sha256(%s) = %q",
-				rec.Hash, idx.Items[0].Hash, entryRel, wantHash)
+			t.Fatalf("hash = %q（回执）/ %q（index），want 内容修订 %q（源目录 %s）",
+				rec.Hash, idx.Items[0].Hash, wantHash, dir)
 		}
 		// 源文件没被安装器改动（安装是「读源、写目标」，不是「就地加工」）。
-		srcSum := sha256.Sum256(readBytes(t, filepath.Join(dir, entryRel)))
-		if hex.EncodeToString(srcSum[:]) != wantHash {
-			t.Fatalf("装进来的 %s 与源目录里的字节不同（安装器改了内容？）", entryRel)
+		// URL 型插件没有入口文件，跳过节字断言；manifest 仍要逐字节相同。
+		if !web {
+			srcSum := sha256.Sum256(readBytes(t, filepath.Join(dir, entryRel)))
+			installedSum := sha256.Sum256(readBytes(t, installedEntry))
+			if hex.EncodeToString(srcSum[:]) != hex.EncodeToString(installedSum[:]) {
+				t.Fatalf("装进来的 %s 与源目录里的字节不同（安装器改了内容？）", entryRel)
+			}
 		}
 	} else if len(rec.Hash) < 8 {
 		t.Fatalf("dev 安装的内容修订太短：%q", rec.Hash)
@@ -222,7 +231,9 @@ func TestSurfaceInstallExternal(t *testing.T) {
 	if !*surfaceExternalDev {
 		wantMode(t, filepath.Join(root, rec.ID), surfaceDirMode)
 		wantMode(t, filepath.Join(root, rec.ID, "surface.json"), surfaceFileMode)
-		wantMode(t, installedEntry, surfaceFileMode)
+		if !web {
+			wantMode(t, installedEntry, surfaceFileMode)
+		}
 	} else if fi, lerr := os.Lstat(filepath.Join(root, rec.ID)); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("dev 安装的 %s 不是软链：%v", filepath.Join(root, rec.ID), lerr)
 	}

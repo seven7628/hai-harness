@@ -134,3 +134,99 @@ test('零 entries（缺省 / 空数组 / manifest 读不出来）都是合法的
   assert.deepEqual(byId.broken.entries, [])
   assert.ok(byId.broken.error, '坏 manifest 仍要带上可读原因（这一条不因 entries 改变）')
 })
+
+// —— URL 型插件（2026-11）：没有 panel.js，内容在 web.url + entries[].path ——
+
+test('web.url / permissions / entries[].path 原样进索引', () => {
+  const root = mkRoot([entry('learning-world')])
+  mkPlugin(root, 'learning-world', {
+    id: 'learning-world',
+    kind: 'plugin:learning-world',
+    name: { zh: '学习世界' },
+    web: { url: 'http://127.0.0.1:5173', permissions: ['media', 'geolocation'] },
+    entries: [
+      { id: 'learn', title: '学习世界', path: '/' },
+      { id: 'admin', title: '课程后台', path: '/admin' },
+      { id: 'hash', title: '哈希路由', path: '#/detail?id=1' },
+    ],
+  })
+  const it = readSurfaceIndex(root).items[0]
+  assert.deepEqual(it.web, { url: 'http://127.0.0.1:5173', permissions: ['media'] }, '只认识的权限进索引')
+  assert.deepEqual(it.entries.map((e) => e.path), ['/', '/admin', '#/detail?id=1'])
+  assert.equal(it.error, undefined)
+})
+
+test('web.start 原样进索引（命令/args/cwd/env/health/timeout_ms）', () => {
+  const root = mkRoot([entry('server-app')])
+  mkPlugin(root, 'server-app', {
+    id: 'server-app',
+    kind: 'plugin:server-app',
+    web: {
+      url: 'http://127.0.0.1:5235',
+      start: {
+        command: 'node',
+        args: ['server.mjs'],
+        cwd: '.',
+        env: { PORT: '5235' },
+        health: '/health',
+        timeout_ms: 15000,
+      },
+    },
+    entries: [{ id: 'home', title: '首页', path: '/' }],
+  })
+  const it = readSurfaceIndex(root).items[0]
+  assert.deepEqual(it.web, {
+    url: 'http://127.0.0.1:5235',
+    start: { command: 'node', args: ['server.mjs'], cwd: '.', env: { PORT: '5235' }, health: '/health', timeoutMs: 15000 },
+  })
+  assert.equal(it.error, undefined)
+})
+
+test('坏 web.start（空命令 / 逃逸 health / 坏 timeout）→ 整条 web 带 error', () => {
+  for (const [name, start] of [
+    ['empty', { command: '' }],
+    ['health', { command: 'node', health: '//evil.com' }],
+    ['timeout', { command: 'node', timeout_ms: 10 }],
+    ['env', { command: 'node', env: { '1BAD': 'x' } }],
+    ['cwd', { command: 'node', cwd: '../escape' }],
+  ] as const) {
+    const root = mkRoot([entry(`bad-start-${name}`)])
+    mkPlugin(root, `bad-start-${name}`, {
+      id: `bad-start-${name}`,
+      kind: `plugin:bad-start-${name}`,
+      web: { url: 'http://127.0.0.1:5235', start },
+    })
+    const it = readSurfaceIndex(root).items[0]
+    assert.equal(it.web, undefined, name)
+    assert.match(it.error || '', /web/, name)
+  }
+})
+
+test('坏 web.url 带 error（loader 会跳过它，而不是退回 import panel.js）', () => {
+  const root = mkRoot([entry('bad-web')])
+  mkPlugin(root, 'bad-web', {
+    id: 'bad-web',
+    kind: 'plugin:bad-web',
+    web: { url: 'file:///etc/passwd' },
+  })
+  const it = readSurfaceIndex(root).items[0]
+  assert.equal(it.web, undefined)
+  assert.match(it.error || '', /web/)
+})
+
+test('entries[].path 坏（绝对 URL / 上跳）→ 丢这一项，不把 origin 交出去', () => {
+  const root = mkRoot([entry('bad-path')])
+  mkPlugin(root, 'bad-path', {
+    id: 'bad-path',
+    kind: 'plugin:bad-path',
+    web: { url: 'http://127.0.0.1:5173' },
+    entries: [
+      { id: 'ok', title: '正常', path: '/admin' },
+      { id: 'external', title: '外站', path: 'https://evil.com/x' },
+      { id: 'proto-rel', title: '协议相对', path: '//evil.com/x' },
+      { id: 'up', title: '上跳', path: '/a/../b' },
+    ],
+  })
+  const it = readSurfaceIndex(root).items[0]
+  assert.deepEqual(it.entries.map((e) => e.id), ['ok'])
+})

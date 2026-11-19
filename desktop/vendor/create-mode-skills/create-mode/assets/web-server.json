@@ -1,0 +1,48 @@
+{
+  "id": "my-server-app",
+  "name": {
+    "zh": "我的服务应用",
+    "en": "My server app"
+  },
+  "version": "0.1.0",
+  "kind": "plugin:my-server-app",
+  "web": {
+    "url": "http://127.0.0.1:5235",
+    "start": {
+      "command": "node",
+      "args": ["server.mjs"],
+      "cwd": ".",
+      "health": "/health",
+      "timeout_ms": 20000,
+      "env": {
+        "PORT": "5235"
+      }
+    }
+  },
+  "commands": [
+    "agent.session",
+    "agent.run",
+    "agent.cancel",
+    "composer.quote",
+    "ui.toast"
+  ],
+  "data": [
+    "agent.delta",
+    "agent.done",
+    "agent.error"
+  ],
+  "entries": [
+    {
+      "id": "home",
+      "title": "首页",
+      "path": "/",
+      "order": 10
+    },
+    {
+      "id": "admin",
+      "title": "后台",
+      "path": "/admin",
+      "order": 20
+    }
+  ]
+}

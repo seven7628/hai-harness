@@ -16,7 +16,7 @@
  * `await import(...)` 之前注入，正是这个原因）。
  */
 
-import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus, SurfaceIndex, SurfaceCommandReply, SurfaceActionResult, SurfaceAuditReply, SurfaceAgentEventPayload } from '../transport/types'
+import type { AppSettings, ProviderSaveInput, MCPServerCfg, ExternalSkillsStatusResult, ExternalSkillsImportResult, FsOpReply, FsImportReply, InputHistoryItem, InputHistoryReply, OfficeKitStatus, SurfaceIndex, SurfaceCommandReply, SurfaceActionResult, SurfaceAuditReply, SurfaceAgentEventPayload, SurfaceAppStatus, SurfaceAppOpenInput, SurfaceHostRequest } from '../transport/types'
 
 export type DesktopApi = {
   startupMark: (phase: string) => Promise<boolean>
@@ -38,6 +38,17 @@ export type DesktopApi = {
   surfaceAgentToken: (id: string) => Promise<{ ok: boolean; token?: string; reason?: string }>
   surfaceAgent: (p: { token: string; name: string; args?: unknown }) => Promise<SurfaceCommandReply>
   onSurfaceAgentEvent: (cb: (p: SurfaceAgentEventPayload) => void) => () => void
+  // URL 型插件的原生视图 + host bridge（2026-11）：视图活在主进程，页面经 preload
+  // 注入的 window.haiHost 调 command/onEvent，渲染层用同一份 createHost 兜住权限。
+  pluginAppOpen: (p: SurfaceAppOpenInput) => Promise<{ ok: boolean; error?: string }>
+  pluginAppShow: (p: { key: string; rect: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string }>
+  pluginAppHide: (key: string) => Promise<{ ok: boolean }>
+  pluginAppClose: (key: string) => Promise<{ ok: boolean }>
+  pluginAppClosePlugin: (pluginId: string) => Promise<{ ok: boolean }>
+  onPluginAppStatus: (cb: (s: SurfaceAppStatus) => void) => () => void
+  onPluginAppHostCommand: (cb: (req: SurfaceHostRequest) => void) => () => void
+  pluginAppHostReply: (p: { id: number; reply: SurfaceCommandReply }) => void
+  pluginAppEvent: (p: { pluginId: string; type: string; event: unknown }) => void
   stopBridge: () => Promise<{ ok: boolean }>
   settingsGet: () => Promise<AppSettings>
   settingsSet: (patch: Partial<AppSettings>) => Promise<{ ok: boolean; error?: string; settings?: AppSettings }>

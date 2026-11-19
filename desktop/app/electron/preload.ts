@@ -5,6 +5,24 @@ export interface BridgeExitInfo {
   err: string
 }
 
+/** URL 型插件原生视图的加载状态（与 src/transport/types.ts 的 SurfaceAppStatus 同构）。 */
+export interface PluginAppStatusWire {
+  key: string
+  status: 'loading' | 'starting' | 'ready' | 'error'
+  url?: string
+  error?: string
+  code?: number
+  logs?: string
+}
+
+/** 主进程 → 渲染层：页面调用 host.command 的请求。 */
+export interface PluginHostRequestWire {
+  id: number
+  pluginId: string
+  name: string
+  payload?: unknown
+}
+
 // 与 main.ts 的 AppSettings 对齐（renderer 侧只读消费；写经 settings:set/provider:save/mcp:save）
 export interface ProviderCfg {
   base_url: string
@@ -147,6 +165,29 @@ const api = {
     const listener = (_e: unknown, payload: SurfaceAgentEventPayload) => cb(payload)
     ipcRenderer.on('surface:agent-event', listener)
     return () => ipcRenderer.removeListener('surface:agent-event', listener)
+  },
+  // URL 型插件（2026-11）：视图 + 页面 ↔ 宿主 host bridge。只有渲染层拿得到这些方法，
+  // 插件页面拿到的是 plugin-app-preload 注入的 window.haiHost（两个函数）。
+  pluginAppOpen: (p: { key: string; pluginId: string; url: string; webUrl?: string; events: string[]; commands: string[]; start?: { command: string; args?: string[]; cwd?: string; env?: Record<string, string>; health?: string; timeoutMs?: number }; permissions?: string[] }) => ipcRenderer.invoke('plugin-app:open', p) as Promise<{ ok: boolean; error?: string }>,
+  pluginAppShow: (p: { key: string; rect: { x: number; y: number; width: number; height: number } }) => ipcRenderer.invoke('plugin-app:show', p) as Promise<{ ok: boolean; error?: string }>,
+  pluginAppHide: (key: string) => ipcRenderer.invoke('plugin-app:hide', key) as Promise<{ ok: boolean }>,
+  pluginAppClose: (key: string) => ipcRenderer.invoke('plugin-app:close', key) as Promise<{ ok: boolean }>,
+  pluginAppClosePlugin: (pluginId: string) => ipcRenderer.invoke('plugin-app:close-plugin', pluginId) as Promise<{ ok: boolean }>,
+  onPluginAppStatus: (cb: (s: PluginAppStatusWire) => void) => {
+    const listener = (_e: unknown, s: PluginAppStatusWire) => cb(s)
+    ipcRenderer.on('plugin-app:status', listener)
+    return () => ipcRenderer.removeListener('plugin-app:status', listener)
+  },
+  onPluginAppHostCommand: (cb: (req: PluginHostRequestWire) => void) => {
+    const listener = (_e: unknown, req: PluginHostRequestWire) => cb(req)
+    ipcRenderer.on('plugin-app:host-command', listener)
+    return () => ipcRenderer.removeListener('plugin-app:host-command', listener)
+  },
+  pluginAppHostReply: (p: { id: number; reply: { ok: boolean; reason?: string; data?: unknown } }) => {
+    ipcRenderer.send('plugin-app:host-reply', p)
+  },
+  pluginAppEvent: (p: { pluginId: string; type: string; event: unknown }) => {
+    ipcRenderer.send('plugin-app:event', p)
   },
   stopBridge: () => ipcRenderer.invoke('bridge:stop'),
   settingsGet: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
@@ -381,6 +422,15 @@ export interface HostApi {
   surfaceAgentToken: (id: string) => Promise<{ ok: boolean; token?: string; reason?: string }>
   surfaceAgent: (p: { token: string; name: string; args?: unknown }) => Promise<{ ok: boolean; reason?: string; data?: unknown }>
   onSurfaceAgentEvent: (cb: (p: SurfaceAgentEventPayload) => void) => () => void
+  pluginAppOpen: (p: { key: string; pluginId: string; url: string; webUrl?: string; events: string[]; commands: string[]; start?: { command: string; args?: string[]; cwd?: string; env?: Record<string, string>; health?: string; timeoutMs?: number }; permissions?: string[] }) => Promise<{ ok: boolean; error?: string }>
+  pluginAppShow: (p: { key: string; rect: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; error?: string }>
+  pluginAppHide: (key: string) => Promise<{ ok: boolean }>
+  pluginAppClose: (key: string) => Promise<{ ok: boolean }>
+  pluginAppClosePlugin: (pluginId: string) => Promise<{ ok: boolean }>
+  onPluginAppStatus: (cb: (s: PluginAppStatusWire) => void) => () => void
+  onPluginAppHostCommand: (cb: (req: PluginHostRequestWire) => void) => () => void
+  pluginAppHostReply: (p: { id: number; reply: { ok: boolean; reason?: string; data?: unknown } }) => void
+  pluginAppEvent: (p: { pluginId: string; type: string; event: unknown }) => void
   // hub:// 深链（P4-02）：返回取消订阅。
   onHubDeepLink: (cb: (url: string) => void) => () => void
   hubTakeDeepLinks: () => Promise<string[]>

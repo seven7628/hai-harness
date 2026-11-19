@@ -1,0 +1,41 @@
+{
+  "id": "my-app",
+  "name": {
+    "zh": "我的应用",
+    "en": "My app"
+  },
+  "version": "0.1.0",
+  "kind": "plugin:my-app",
+  "web": {
+    "url": "http://127.0.0.1:5173"
+  },
+  "commands": [
+    "agent.session",
+    "agent.run",
+    "agent.cancel",
+    "agent.snapshot",
+    "composer.quote",
+    "ui.toast"
+  ],
+  "data": [
+    "agent.delta",
+    "agent.done",
+    "agent.error",
+    "agent.state",
+    "surfaces_changed"
+  ],
+  "entries": [
+    {
+      "id": "home",
+      "title": "首页",
+      "path": "/",
+      "order": 10
+    },
+    {
+      "id": "admin",
+      "title": "后台",
+      "path": "/admin",
+      "order": 20
+    }
+  ]
+}

@@ -14,6 +14,8 @@
 // 监听哪些目录：store 根（新装/卸载）+ 每个 dev 插件的**真实目录**及其子目录（跳过
 // node_modules / .git / 点目录，上限 200 个目录）。为什么用真实目录：<root>/<id> 是软链，
 // fsnotify 不跟随软链；对链接本身挂 watch 只能看到链接被替换，看不到面板文件的写入。
+// store 根下的 index.json 也是一个信号：另一个进程（安装器测试 / CLI / 手工修）写盘时
+// 没有进程内的 push，watcher 必须补一次 surfaces_changed，否则「装完不重启看不到插件」。
 //
 // 为什么 debounce 250ms：一次编辑器保存通常产生 2-3 个事件（CREATE/WRITE/CHMOD），
 // 逐个处理会让同一个面板重挂 2-3 次（每次都是一次 import + apply）。
@@ -74,14 +76,15 @@ type surfaceWatcher struct {
 	store *surfaceStore
 	push  func()
 
-	mu      sync.Mutex
-	fsn     *fsnotify.Watcher
-	dirs    map[string]string // 已监听的**真实**目录 → 插件 id（"" = store 根）
-	dirty   map[string]bool   // 待重算 hash 的插件 id
-	resync  bool              // 需要重建监听（新装/卸载/新子目录）
-	timer   *time.Timer
-	stop    chan struct{}
-	stopped bool
+	mu           sync.Mutex
+	fsn          *fsnotify.Watcher
+	dirs         map[string]string // 已监听的**真实**目录 → 插件 id（"" = store 根）
+	dirty        map[string]bool   // 待重算 hash 的插件 id
+	resync       bool              // 需要重建监听（新装/卸载/新子目录）
+	indexChanged bool              // index.json 变了：外部装/卸/改启用也要推一次 surfaces_changed
+	timer        *time.Timer
+	stop         chan struct{}
+	stopped      bool
 }
 
 func newSurfaceWatcher(store *surfaceStore, push func()) *surfaceWatcher {
@@ -242,11 +245,17 @@ func (w *surfaceWatcher) onEvent(name string) {
 	if !ok {
 		return
 	}
-	// store 根目录下的 index.json / audit / 原子写的临时文件（`.atomic-*`）是我们自己写的：
-	// 忽略，否则每次写索引都触发一轮 resync。
+	// store 根目录下的 index.json 是**外部安装**的唯一信号：surface_install 工具在进程内
+	// 会自己 push，但另一个进程（安装器测试 / 未来的 CLI / 手工修 index）写盘时没有事件。
+	// 这里也要推一次，否则「装完不重启看不到插件」。bak/audit/原子临时文件仍忽略。
 	if id == "" {
 		base := filepath.Base(name)
-		if base == surfaceIndexName || base == surfaceBakName || base == surfaceAuditName ||
+		if base == surfaceIndexName {
+			w.indexChanged = true
+			w.scheduleLocked()
+			return
+		}
+		if base == surfaceBakName || base == surfaceAuditName ||
 			strings.HasPrefix(base, ".") || strings.Contains(base, ".corrupt-") {
 			return
 		}
@@ -294,8 +303,10 @@ func (w *surfaceWatcher) flush() {
 	w.dirty = map[string]bool{}
 	needResync := w.resync
 	w.resync = false
+	indexChanged := w.indexChanged
+	w.indexChanged = false
 	w.timer = nil
-	if needResync {
+	if needResync || indexChanged {
 		w.syncLocked()
 	}
 	w.mu.Unlock()
@@ -330,7 +341,7 @@ func (w *surfaceWatcher) flush() {
 	}
 	// 新子目录可能刚建出来：补监听（廉价；没有变化时只是几次 map 比较）。
 	w.Sync()
-	if changed && w.push != nil {
+	if (changed || indexChanged) && w.push != nil {
 		w.push()
 	}
 }

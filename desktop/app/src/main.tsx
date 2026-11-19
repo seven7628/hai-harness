@@ -5,6 +5,12 @@ import App from './App'
 import { HostPanelsProvider } from './host/panels-desktop'
 import './index.css'
 import { bridge } from './lib/bridge'
+import { registerPluginAppHost } from './surfaces/plugin/loader'
+import { PluginAppHost } from './surfaces/plugin/webApp'
+
+// URL 型插件（2026-11）：把 store 依赖的渲染宿主注入 loader，避免
+// loader → webApp → store → loader 的运行期环（loader 只留 type-only 引用）。
+registerPluginAppHost(PluginAppHost)
 
 // TEMP-STARTUP：黑屏定位打点（renderer 侧时间轴，经 IPC 回传 main 写 electron-startup.log）
 if (bridge) {

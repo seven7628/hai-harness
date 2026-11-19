@@ -115,6 +115,15 @@ export interface SurfaceProvider<T extends SurfaceTab = SurfaceTab> {
    */
   nativeHost?: (tab: T, s: AppState) => boolean
 
+  /**
+   * 满幅面板（2026-11）：这一页自己负责整块内容区，宿主不再给 `.right-body` 的 10px
+   * 内边距与滚动条。URL 型插件（原生视图/全屏 iframe）必须为 true —— 否则页面四周
+   * 会留一圈宿主底色，看起来像「预览」而不是「应用」。
+   *
+   * 缺省 false：内置面板与 ESM 面板保持既有内边距（它们的排版建立在那 10px 上）。
+   */
+  fullBleed?: boolean
+
   singleton?: boolean
   allowDuplicate?: boolean
   scope?: SurfaceScope

@@ -403,6 +403,164 @@ func TestSurfaceInstallRejectsBadManifests(t *testing.T) {
 	}
 }
 
+// ---- URL 型插件（2026-11）：没有 panel.js，entries[].path 是页面地址 ----
+
+// TestSurfaceWebManifest 证明三件事：
+//  1. web 插件**不需要 panel.js**（entry 缺省也装得上）；
+//  2. entries[].path 原样可读，且 `//evil.com` / `..` / 自带 scheme 的 path 装不上；
+//  3. 普通 ESM 插件声明 path 会被拒（path 不是 ESM 面板的运行时字段）。
+func TestSurfaceWebManifest(t *testing.T) {
+	webManifest := func(m map[string]any) {
+		m["web"] = map[string]any{"url": "http://127.0.0.1:5173"}
+		m["entries"] = []any{
+			map[string]any{"id": "learn", "title": "学习世界", "path": "/"},
+			map[string]any{"id": "admin", "title": "课程后台", "path": "/admin"},
+		}
+	}
+
+	t.Run("装得上且 path 可读", func(t *testing.T) {
+		st, _ := testSurfaceStore(t)
+		src := surfaceFixture(t, "learning-world", "1.0.0", "", withManifest(webManifest))
+		rec := st.Install(src, true)
+		if rec.Status != surfaceApplied {
+			t.Fatalf("web 插件安装失败: %+v", rec)
+		}
+		got, err := st.Manifest("learning-world")
+		if err != nil {
+			t.Fatalf("Manifest: %v", err)
+		}
+		if got.Web == nil || got.Web.URL != "http://127.0.0.1:5173" {
+			t.Fatalf("web = %+v，want url=http://127.0.0.1:5173", got.Web)
+		}
+		if len(got.Entries) != 2 || got.Entries[1].Path != "/admin" {
+			t.Fatalf("entries = %+v，want 第二项 path=/admin", got.Entries)
+		}
+	})
+
+	bad := []struct {
+		name   string
+		path   string
+		entry  bool
+		web    map[string]any
+		reason string
+	}{
+		{name: "path 协议相对", path: "//evil.com/x", reason: "path"},
+		{name: "path 自带 scheme", path: "https://evil.com/x", reason: "path"},
+		{name: "path 上跳", path: "/a/../b", reason: ".."},
+		{name: "url 非 http", web: map[string]any{"url": "file:///etc/passwd"}, reason: "http"},
+		{name: "url 空", web: map[string]any{"url": ""}, reason: "web.url"},
+	}
+	for _, c := range bad {
+		t.Run(c.name, func(t *testing.T) {
+			st, root := testSurfaceStore(t)
+			base := surfaceFixture(t, "bad-web", "1.0.0", "export default () => null\n",
+				withManifest(func(m map[string]any) {
+					if c.web != nil {
+						m["web"] = c.web
+					} else {
+						m["web"] = map[string]any{"url": "http://127.0.0.1:5173"}
+					}
+					if c.path != "" {
+						m["entries"] = []any{map[string]any{"id": "page", "title": "页", "path": c.path}}
+					}
+				}))
+			before, _ := os.ReadFile(filepath.Join(root, "index.json"))
+			rec := st.Install(base, true)
+			if rec.Status != surfaceRejected {
+				t.Fatalf("status = %q，want rejected（reason=%q）", rec.Status, rec.Reason)
+			}
+			if !strings.Contains(rec.Reason, c.reason) {
+				t.Fatalf("reason = %q，必须包含 %q", rec.Reason, c.reason)
+			}
+			after, _ := os.ReadFile(filepath.Join(root, "index.json"))
+			if string(before) != string(after) {
+				t.Fatalf("rejected 却改了 index")
+			}
+		})
+	}
+
+	t.Run("web.start 装得上且字段可读", func(t *testing.T) {
+		st, _ := testSurfaceStore(t)
+		src := surfaceFixture(t, "server-app", "1.0.0", "", withManifest(func(m map[string]any) {
+			m["web"] = map[string]any{
+				"url": "http://127.0.0.1:5235",
+				"start": map[string]any{
+					"command":    "node",
+					"args":       []any{"server.mjs", "--port", "5235"},
+					"cwd":        ".",
+					"health":     "/health",
+					"timeout_ms": 15000,
+					"env":        map[string]any{"PORT": "5235", "NODE_ENV": "development"},
+				},
+			}
+			m["entries"] = []any{map[string]any{"id": "home", "title": "首页", "path": "/"}}
+		}))
+		rec := st.Install(src, true)
+		if rec.Status != surfaceApplied {
+			t.Fatalf("web.start 插件安装失败: %+v", rec)
+		}
+		got, err := st.Manifest("server-app")
+		if err != nil {
+			t.Fatalf("Manifest: %v", err)
+		}
+		if got.Web == nil || got.Web.Start == nil {
+			t.Fatalf("web.start = %+v，want 非 nil", got.Web)
+		}
+		stt := got.Web.Start
+		if stt.Command != "node" || len(stt.Args) != 3 || stt.Cwd != "." || stt.Health != "/health" ||
+			stt.TimeoutMS != 15000 || stt.Env["PORT"] != "5235" {
+			t.Fatalf("web.start 读回不一致：%+v", stt)
+		}
+	})
+
+	startBad := []struct {
+		name   string
+		start  map[string]any
+		reason string
+	}{
+		{name: "start 空命令", start: map[string]any{"command": ""}, reason: "command"},
+		{name: "start cwd 上跳", start: map[string]any{"command": "node", "cwd": "../escape"}, reason: "cwd"},
+		{name: "start cwd 不存在", start: map[string]any{"command": "node", "cwd": "no-such-dir"}, reason: "cwd"},
+		{name: "start health 协议相对", start: map[string]any{"command": "node", "health": "//evil.com"}, reason: "health"},
+		{name: "start env 键非法", start: map[string]any{"command": "node", "env": map[string]any{"1BAD": "x"}}, reason: "env"},
+		{name: "start timeout 过小", start: map[string]any{"command": "node", "timeout_ms": 10}, reason: "timeout_ms"},
+	}
+	for _, c := range startBad {
+		t.Run(c.name, func(t *testing.T) {
+			st, root := testSurfaceStore(t)
+			base := surfaceFixture(t, "bad-start", "1.0.0", "",
+				withManifest(func(m map[string]any) {
+					m["web"] = map[string]any{"url": "http://127.0.0.1:5235", "start": c.start}
+					m["entries"] = []any{map[string]any{"id": "home", "title": "首页", "path": "/"}}
+				}))
+			before, _ := os.ReadFile(filepath.Join(root, "index.json"))
+			rec := st.Install(base, true)
+			if rec.Status != surfaceRejected {
+				t.Fatalf("status = %q，want rejected（reason=%q）", rec.Status, rec.Reason)
+			}
+			if !strings.Contains(rec.Reason, c.reason) {
+				t.Fatalf("reason = %q，必须包含 %q", rec.Reason, c.reason)
+			}
+			after, _ := os.ReadFile(filepath.Join(root, "index.json"))
+			if string(before) != string(after) {
+				t.Fatalf("rejected 却改了 index")
+			}
+		})
+	}
+
+	t.Run("ESM 插件不许声明 path", func(t *testing.T) {
+		st, _ := testSurfaceStore(t)
+		src := surfaceFixture(t, "plain-panel", "1.0.0", "export default () => null\n",
+			withManifest(func(m map[string]any) {
+				m["entries"] = []any{map[string]any{"id": "page", "title": "页", "path": "/x"}}
+			}))
+		rec := st.Install(src, true)
+		if rec.Status != surfaceRejected || !strings.Contains(rec.Reason, "path") {
+			t.Fatalf("status/reason = %q/%q，want rejected 且提到 path", rec.Status, rec.Reason)
+		}
+	})
+}
+
 // ---- 入口声明 entries（R16 / D-2 · D-3）----
 //
 // 两条不变式（与 §4.7「生产入口」一起读）：

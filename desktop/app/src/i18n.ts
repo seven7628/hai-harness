@@ -1275,6 +1275,11 @@ const zh: Record<string, string> = {
   'surfaces.declared.commands': '声明的命令：',
   'surfaces.declared.data': '订阅的数据：',
   'surfaces.declared.none': '无',
+  'surfaces.declared.web': '网页地址：',
+  'surfaces.declared.permissions': '设备权限：',
+  'surfaces.declared.start': '启动命令：',
+  'surfaces.declared.startEnv': '环境变量（值不在界面显示）：',
+  'surfaces.declared.startCwd': 'cwd：',
   // R16：入口在宿主界面的落点（D-2 的第 3 处：设置页每行的「打开」+ 提示）
   'surfaces.open': '打开',
   'surfaces.openHint': '入口在右栏 ＋ → 面板',
@@ -2117,6 +2122,12 @@ const zh: Record<string, string> = {
   'rp.surface.removeTab': '移除标签',
   'rp.surface.tabDisabled': '面板已禁用（点开可重新启用）',
   'rp.surface.tabMissing': '插件缺失（面板暂时不可用）',
+  // URL 型插件（原生视图）：宿主自己的加载/失败态（不再由插件画「重新检测」）
+  'rp.surface.app.loading': '正在打开插件页面…',
+  'rp.surface.app.starting': '正在启动插件服务…',
+  'rp.surface.app.startingHint': '首次打开会拉起 web.start；若服务已在跑会直接复用。',
+  'rp.surface.app.failed': '插件页面打不开',
+  'rp.surface.app.retry': '重试',
   // 链路 tab
   'rp.trace.noRun': '尚无运行',
   'rp.trace.noRunHint': '发起会话后这里显示最近一次执行过程',
@@ -3718,6 +3729,11 @@ const en: Record<string, string> = {
   'surfaces.declared.commands': 'Declared commands:',
   'surfaces.declared.data': 'Subscribed data:',
   'surfaces.declared.none': 'none',
+  'surfaces.declared.web': 'Web URL:',
+  'surfaces.declared.permissions': 'Device permissions:',
+  'surfaces.declared.start': 'Start command:',
+  'surfaces.declared.startEnv': 'Env (values hidden):',
+  'surfaces.declared.startCwd': 'cwd:',
   // R16: where the entrances live (D-2 #3: per-row "Open" + hint on the settings page)
   'surfaces.open': 'Open',
   'surfaces.openHint': 'Entrances live in the right panel ＋ → Surfaces',
@@ -4468,6 +4484,12 @@ const en: Record<string, string> = {
   'rp.surface.removeTab': 'Remove tab',
   'rp.surface.tabDisabled': 'Panel disabled (open to re-enable)',
   'rp.surface.tabMissing': 'Plugin missing (panel unavailable)',
+  // URL surfaces (native view): host-owned loading/failure state
+  'rp.surface.app.loading': 'Opening the plugin page…',
+  'rp.surface.app.starting': 'Starting the plugin service…',
+  'rp.surface.app.startingHint': 'The first open launches web.start; an already-running service is reused.',
+  'rp.surface.app.failed': 'The plugin page could not be opened',
+  'rp.surface.app.retry': 'Retry',
   // Trace tab
   'rp.trace.noRun': 'No runs yet',
   'rp.trace.noRunHint': 'Start a session to see the latest process here',

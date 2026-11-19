@@ -59,12 +59,39 @@ export interface SurfaceEntryDecl {
   icon?: string
   /** 菜单里的排序权重（缺省 100；升序） */
   order?: number
+  /**
+   * URL 型插件的页面路径（相对 `manifest.web.url`）：`/`、`/admin`、`#/admin`。
+   * ESM 面板不读它（安装器也会拒）；这里只做形状防御，真正的路径纪律在 bridge。
+   */
+  path?: string
+}
+
+/** manifest.web.start：宿主替插件拉起前端服务的受控声明（2026-11）。 */
+export interface SurfaceWebStartDecl {
+  command: string
+  args?: string[]
+  /** 相对插件目录或绝对路径；缺省 = 插件目录 */
+  cwd?: string
+  env?: Record<string, string>
+  /** 相对 web.url 的探活路径；缺省 = `/` */
+  health?: string
+  /** spawn 到就绪的上限；缺省 = 20000 */
+  timeoutMs?: number
+}
+
+/** manifest.web：URL 型插件的根地址（2026-11）。 */
+export interface SurfaceWebDecl {
+  url: string
+  /** 可选：宿主自动启动的服务（MCP server 同一心智：配置命令，连上去） */
+  start?: SurfaceWebStartDecl
+  /** 允许申请的浏览器权限（目前只支持 media） */
+  permissions?: string[]
 }
 
 export interface SurfaceIndexItem {
   id: string
   version: string
-  /** sha256(入口文件) 的十六进制（bridge 安装时算的） */
+  /** 内容修订（copy=全部常规文件 / dev=受追踪文件；bridge 安装时算的） */
   hash: string
   enabled: boolean
   /** manifest 声明的 kind（必须等于 `plugin:<id>`，loader 校验；坏 manifest 时缺省） */
@@ -84,6 +111,11 @@ export interface SurfaceIndexItem {
   entry: string
   /** manifest.icon：`<id>` 目录内的相对路径（如 icon.svg）；缺省 = 没有图标 */
   icon?: string
+  /**
+   * manifest.web：URL 型插件（没有 panel.js，宿主用原生视图打开 web.url + entries[].path）。
+   * 缺省 = ESM 面板，loader 走 import(panel.js) 那条老路。
+   */
+  web?: SurfaceWebDecl
   /** 这份 manifest 读不出来时的原因（loader 跳过它、ui_inspect 里能看到） */
   error?: string
 }
@@ -162,6 +194,91 @@ function parseEntryTitle(v: unknown): SurfaceEntryTitle | null {
   return out.zh || out.en ? out : null
 }
 
+/** manifest.web.start 的防御性解析：形状/数值不对 → 整个 web 视为坏（不赌一半能跑）。 */
+function parseWebStart(v: unknown): SurfaceWebStartDecl | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const m = v as Record<string, unknown>
+  const command = str(m.command).trim()
+  if (!command || /[\0\r\n]/.test(command) || [...command].length > 512) return undefined
+  const argsRaw = Array.isArray(m.args) ? m.args : []
+  if (argsRaw.length > 32) return undefined
+  const args: string[] = []
+  for (const a of argsRaw) {
+    const x = str(a)
+    if (/[\0\r\n]/.test(x) || [...x].length > 2048) return undefined
+    args.push(x)
+  }
+  const cwd = str(m.cwd).trim()
+  if (cwd && (/[\0\r\n]/.test(cwd) || [...cwd].length > 4096)) return undefined
+  if (cwd && !path.isAbsolute(cwd) && cwd.replace(/\\/g, '/').split('/').includes('..')) return undefined
+  const envRaw = m.env && typeof m.env === 'object' && !Array.isArray(m.env) ? (m.env as Record<string, unknown>) : {}
+  const env: Record<string, string> = {}
+  let envCount = 0
+  for (const [k, val] of Object.entries(envRaw)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) return undefined
+    const sval = str(val)
+    if (sval.includes('\0') || sval.length > 4096) return undefined
+    if (++envCount > 32) return undefined
+    env[k] = sval
+  }
+  const health = str(m.health).trim()
+  if (health) {
+    if (/[\\\0\r\n\t]/.test(health)) return undefined
+    if (health.startsWith('//')) return undefined
+    try {
+      const u = new URL(health)
+      if (u.protocol || u.host || u.username || u.password) return undefined
+    } catch {
+      /* 相对路径（含 ?/#）合法 */
+    }
+    if (health.split('/').includes('..')) return undefined
+  }
+  const timeoutRaw = typeof m.timeout_ms === 'number' ? m.timeout_ms : 0
+  if (!Number.isFinite(timeoutRaw) || (timeoutRaw !== 0 && (timeoutRaw < 1000 || timeoutRaw > 60000))) return undefined
+  return {
+    command,
+    ...(args.length ? { args } : {}),
+    ...(cwd ? { cwd } : {}),
+    ...(Object.keys(env).length ? { env } : {}),
+    ...(health ? { health } : {}),
+    ...(timeoutRaw ? { timeoutMs: timeoutRaw } : {}),
+  }
+}
+
+/** manifest.web 的防御性解析：只认 http/https 根地址（query/fragment/userinfo 一律拒）。 */
+function parseWeb(v: unknown): SurfaceWebDecl | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const raw = str((v as Record<string, unknown>).url).trim()
+  if (!raw || /\s/.test(raw)) return undefined
+  try {
+    const u = new URL(raw)
+    if ((u.protocol !== 'http:' && u.protocol !== 'https:') || !u.host) return undefined
+    if (u.username || u.password || u.search || u.hash) return undefined
+    const perms = strList((v as Record<string, unknown>).permissions).filter((p) => p === 'media')
+    const startRaw = (v as Record<string, unknown>).start
+    const start = startRaw === undefined ? undefined : parseWebStart(startRaw)
+    if (startRaw !== undefined && !start) return undefined
+    return { url: raw, ...(start ? { start } : {}), ...(perms.length ? { permissions: perms } : {}) }
+  } catch {
+    return undefined
+  }
+}
+
+/** entries[].path 的防御性解析：只收相对路径（不许 scheme/host/上跳/反斜杠）。 */
+function parseAppPath(v: unknown): string | undefined {
+  const p = str(v).trim()
+  if (!p || /[\\\0]/.test(p)) return undefined
+  try {
+    const u = new URL(p)
+    if (u.protocol || u.host) return undefined
+  } catch {
+    // 相对路径不是绝对 URL：new URL 会抛，这正是合法情况
+  }
+  if (p.split('/').includes('..')) return undefined
+  if (p.startsWith('//')) return undefined
+  return p
+}
+
 function parseEntries(v: unknown): SurfaceEntryDecl[] {
   if (!Array.isArray(v)) return []
   const out: SurfaceEntryDecl[] = []
@@ -179,6 +296,9 @@ function parseEntries(v: unknown): SurfaceEntryDecl[] {
     const icon = relInDir(m.icon)
     if (icon) decl.icon = icon
     if (typeof m.order === 'number' && Number.isFinite(m.order)) decl.order = m.order
+    const appPath = parseAppPath(m.path)
+    if (appPath) decl.path = appPath
+    else if (m.path !== undefined && str(m.path).trim() !== '') continue // 坏 path = 丢这一项
     out.push(decl)
   }
   return out
@@ -255,6 +375,10 @@ export function readSurfaceIndex(root: string = surfaceRoot()): SurfaceIndex {
       item.entries = parseEntries(mf.entries)
       const name = displayName(mf.name)
       if (name) item.name = name
+      const web = parseWeb(mf.web)
+      if (mf.web !== undefined && !web) item.error = 'manifest.web 非法（url 只允许 http/https 根；start/health/cwd/env 形状需合法）'
+      else if (web) item.web = web
+      // URL 型插件没有 panel.js：entry 保持缺省值只是给诊断看，loader 不会 import 它。
       item.entry = relInDir(mf.entry) || DEFAULT_SURFACE_ENTRY
       // 图标：manifest 显式声明的优先；没声明但目录里**有** icon.svg 就用它
       //（01-design §5.6 的模板本来就带这个文件名 —— 让「拷模板」自动有图标）。
