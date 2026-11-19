@@ -120,11 +120,11 @@ func NewBashTool(cwd string, timeout time.Duration, sbx sandbox.Sandbox, appAllo
 	t := &BashTool{
 		BaseTool: tools.BaseTool{
 			Name_:        "bash",
-			Description_: "Execute a bash/shell command and return its output (including stderr). For file operations (read/search/edit/find files), prefer the dedicated tools (read_file/grep/edit_file/glob) — they return more refined results; use bash for command execution, builds, tests, git, and scripts. Keep a whole shell step in ONE call (commands joined with &&, loops, heredocs) rather than one command per call — and don't wrap a single command in a codemode script: a single-call script only adds a process spawn and hands the output back as JSON instead of text. The working directory persists across calls within this session: after a command like `cd /some/dir && make`, subsequent commands start in /some/dir (no need to re-cd); use `cd` to change it again, or use absolute paths to escape. Each command runs as an isolated process (env/state other than the directory does not persist). PROCESS LIFETIME: when the command finishes, any process it left behind is cleaned up — work you background with `&` inside the command will be killed, so never rely on `&` to keep something running. To run a process that must keep running (a dev server, a watcher), pass run_in_background: true: it starts in its own process group, returns immediately with a pid and a log file, and survives later commands (it stops only when it exits itself or the app quits). Access outside the workspace via absolute paths still works (installed Python/Node/Go packages, desktop apps). High-risk commands (rm clearing, sudo, disk operations, curl|sh, etc.) are statically blocked — be explicit about the exact subdirectory when deleting; when approval is enabled, commands require user confirmation before running.",
+			Description_: "Execute a bash/shell command and return its output (including stderr). For file operations (read/search/edit/find files), prefer the dedicated tools (read_file/grep/edit_file/glob) — they return more refined results; use bash for command execution, builds, tests, git, and scripts. Keep a whole shell step in ONE call (commands joined with &&, loops, heredocs) rather than one command per call — and don't wrap a single command in a codemode script: a single-call script only adds a process spawn and hands the output back as JSON instead of text. The working directory persists across calls within this session: after a command like `cd /some/dir && make`, subsequent commands start in /some/dir (no need to re-cd); use `cd` to change it again, or use absolute paths to escape. Each command runs as an isolated process (env/state other than the directory does not persist). PROCESS LIFETIME: processes a command leaves behind are killed when it finishes. A trailing `&` or run_in_background: true starts a background process instead (it returns a pid and a log file, and survives later commands). Access outside the workspace via absolute paths still works (installed Python/Node/Go packages, desktop apps). High-risk commands (rm clearing, sudo, disk operations, curl|sh, etc.) are statically blocked — be explicit about the exact subdirectory when deleting; when approval is enabled, commands require user confirmation before running.",
 			Params_: tools.Obj(map[string]any{
 				"command": tools.Str("Command to execute (bash syntax)"),
 				"timeout": tools.Map{"type": "number", "minimum": 1, "maximum": 3600, "default": 300, "description": "Command timeout in seconds (optional); default 300, range 1-3600"},
-				"run_in_background": tools.Bool("Start the command as a persistent background process and return immediately (optional; default false). Use it when the command must keep running (dev server, watcher): it gets its own process group plus a log file, survives later commands, and is stopped when the app quits. Do NOT use `&` inside the command for this — processes started that way are cleaned up when the command finishes."),
+				"run_in_background": tools.Bool("Run the command as a background process and return immediately (optional; default false). Use it for anything that must keep running (dev server, watcher); it returns a pid and a log file, and survives later commands."),
 			}, "command"),
 			CanParallel_: false,
 		},
@@ -258,17 +258,31 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 			}
 		}
 	}
+	// 后台意图的两种表达，统一收敛到后台模式：
+	//   - 显式参数 run_in_background=true（模型主动声明）；
+	//   - **命令末尾的 `&`**（shell 惯例）⇒ 自动改写。
+	//     不改写的话，那条后台进程会被「命令结束即收组」杀掉 ⇒ 模型以为服务
+	//     起来了、其实已经死了（命令返回 0、输出为空 ⇒ 静默失败，最难查）。
+	//     改写后语义更好：独立进程组 + 立即返回 pid 与日志路径。
+	// 显式参数优先（模型明确说了要后台 ⇒ 别动它的命令文本）。
+	background := a.RunInBackground
+	if !background {
+		if stripped, ok := splitTrailingBackground(cmd); ok {
+			cmd = stripped
+			background = true
+		}
+	}
 	// 宿主钩子（BeforeExec）：真实执行前通知（命令 = 剥离 cd 后的最终文本）。
 	// 快速返回约定；慢实现阻塞命令本身（宿主应自行异步/限时）。
 	if t.BeforeExec != nil {
 		t.BeforeExec(cmd)
 	}
-	// 后台模式（run_in_background=true）：起一个**独立进程组**的常驻进程，
-	// 立即返回（不等它结束）⇒ 模型可以继续做别的事。
+	// 后台模式：起一个**独立进程组**的常驻进程，立即返回（不等它结束）
+	// ⇒ 模型可以继续做别的事。
 	//
 	// 豁免机制：后台进程在**自己的进程组**里 ⇒ 之后任何命令结束时的「收组」
 	// 都不会波及它（豁免靠**边界不同**，不靠标志位 ⇒ 不会漏判、也不会误杀）。
-	if a.RunInBackground {
+	if background {
 		return t.startBackground(ctx, sbx, cmd, cwd)
 	}
 	var exitCode int
@@ -351,7 +365,7 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	// 位置：在超时/取消声明**之后**加 —— 那两条声明必须留在首行。
 	modelOut := out
 	if spilled && spillPath != "" {
-		modelOut = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s (this path stays valid for %d hours; after that the file is cleaned up)\n"+
+		modelOut = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s (this path is valid for %d hours)\n"+
 			"Read it with read_file (start_line/end_line) or bash (head/grep/sed) to get the parts you need.]\n%s",
 			humanBytes(totalOut), spillPath, int(spillFileTTL.Hours()), out)
 	}
@@ -483,8 +497,7 @@ func (t *BashTool) startBackground(ctx context.Context, sbx sandbox.Sandbox, cmd
 		return "", fmt.Errorf("bash: background start failed: %w", err)
 	}
 	return fmt.Sprintf("[started in background] pid=%d log=%s\n"+
-		"The process keeps running after this call returns (own process group; later commands will not clean it up). "+
-		"Follow its output with `tail -f %s`, or read the file; stop it with `kill %d`.",
+		"It keeps running after this call. Follow it with `tail -f %s` (or read the file); stop it with `kill %d`.",
 		proc.Pid(), logPath, logPath, proc.Pid()), nil
 }
 

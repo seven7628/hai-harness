@@ -1619,7 +1619,7 @@ func (e *Engine) truncate(s string, callID string) string {
 	// 「Narrow the output to see it all」——没落盘却让人去读文件是纯粹的谎话。
 	if path := e.spillText(callID, s); path != "" {
 		return s[:headEnd] + fmt.Sprintf(
-			"\n\n[... %d bytes omitted from the middle (%.2f%% of %d bytes total); showing the first %d and the last %d bytes — both ends are present, the middle is not. The **full** output is written to %s — read the missing middle from that file (read_file with start_line/end_line for line-oriented logs; for a huge single line use `sed -n`/`tail -c`/`grep` on that path) instead of re-running this command. That path stays valid for %d hours (after that it is cleaned up) ...]\n\n",
+			"\n\n[... %d bytes omitted from the middle (%.2f%% of %d bytes total); showing the first %d and the last %d bytes — both ends are present, the middle is not. The **full** output is written to %s — read the missing middle from that file (read_file with start_line/end_line for line-oriented logs; for a huge single line use `sed -n`/`tail -c`/`grep` on that path) instead of re-running this command. That path is valid for %d hours ...]\n\n",
 			omitted, 100*float64(omitted)/float64(len(s)), len(s), headEnd, len(s)-tailStart, path, spillTTLHours) +
 			s[tailStart:]
 	}

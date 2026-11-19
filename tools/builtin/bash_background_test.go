@@ -150,7 +150,8 @@ func TestBashDescriptionStatesProcessContract(t *testing.T) {
 	d := tool.Description_
 	for _, want := range []string{
 		"run_in_background", // 模型能显式表达「后台」
-		"cleaned up",         // 残留进程会被收
+		"killed",             // 残留进程会被收（不是「悄悄留着」）
+		"background",         // 后台模式的说法在描述里出现过
 	} {
 		if !strings.Contains(d, want) {
 			t.Fatalf("工具描述里缺少 %q（进程收尾契约）:\n%s", want, d)
