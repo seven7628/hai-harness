@@ -953,11 +953,34 @@ func hasActiveCompressionItem(items []AgentItem) bool {
 }
 
 func (r *ViewReducer) snapshotLocked() *Checkpoint {
+	return r.snapshotLockedMode(true)
+}
+
+// snapshotShallowLocked 是**交付路径**专用的快照：块切片只复制结构体（浅拷贝）。
+//
+// 与 snapshotLocked 的唯一差别：Blocks 走 cloneBlocksForEncode（只复制
+// normalizeSnapshotBlocks 会写穿的那几张 agent 卡的 items），其余切片字段共享。
+//
+// 为什么可以（2026-11-18 实测）：调用方（MarshalTail / ReadBlockPage）都在
+// r.mu 之内把快照**就地序列化**成字节，字节才是出口 ⇒ 共享的切片不会被改
+// （唯一的写穿已被 cloneBlocksForEncode 覆盖）。
+// 而深拷贝的代价：真实大会话 2517 块 / 120MB 卡片转录 ⇒ **每次 UI 请求白拷
+// 120MB** ⇒ 触发 GC ⇒ 卡。
+func (r *ViewReducer) snapshotShallowLocked() *Checkpoint {
+	return r.snapshotLockedMode(false)
+}
+
+func (r *ViewReducer) snapshotLockedMode(deep bool) *Checkpoint {
 	r.flushChunkLocked()
+
+	blocks := cloneBlocksForEncode(r.blocks)
+	if deep {
+		blocks = cloneBlocks(r.blocks)
+	}
 
 	out := &Checkpoint{
 		SchemaVersion:      checkpointSchemaVersion,
-		Blocks:             cloneBlocks(r.blocks),
+		Blocks:             blocks,
 		RunNodes:           cloneRunNodes(r.runNodes),
 		Turns:              cloneTurns(r.turns),
 		TurnsTotal:         r.turnsTotal,
@@ -1473,7 +1496,26 @@ func backfillOutputTokens(blocks []Block, turns []Turn) {
 
 // Restore 用已校验 checkpoint 重建 reducer 状态（不扫描 raw events）。
 // 内存去重集合与计时瞬态全部清空：恢复后到达的事件按新事件处理。
+// Restore 从 checkpoint 恢复 reducer 状态（**深拷贝** cp ⇒ 调用方仍可继续用 cp）。
 func (r *ViewReducer) Restore(cp *Checkpoint) error {
+	return r.restore(cp, false)
+}
+
+// RestoreOwned 与 Restore 同义，但**接管** cp.Blocks 的所有权（不再深拷贝）。
+//
+// 什么时候用：cp 刚由 parseCheckpointFromRecordWindow 解出来、调用方随即丢弃
+// （打开会话路径）⇒ 深拷贝纯属浪费。
+//
+// 代价实测（2026-11-18，真实大会话 2517 块 / 120MB 卡片转录）：
+// 深拷贝让常驻堆从 ~130MB 变成 ~253MB（整整多留一份）。
+//
+// 契约：调用方**不得**在 RestoreOwned 返回后再读写 cp.Blocks
+// —— 它已经是 reducer 的本体。
+func (r *ViewReducer) RestoreOwned(cp *Checkpoint) error {
+	return r.restore(cp, true)
+}
+
+func (r *ViewReducer) restore(cp *Checkpoint, takeOwnership bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cp == nil {
@@ -1487,7 +1529,11 @@ func (r *ViewReducer) Restore(cp *Checkpoint) error {
 	if r.blocksTotal < len(cp.Blocks) {
 		r.blocksTotal = len(cp.Blocks)
 	}
-	r.blocks = cloneBlocks(cp.Blocks)
+	if takeOwnership {
+		r.blocks = cp.Blocks
+	} else {
+		r.blocks = cloneBlocks(cp.Blocks)
+	}
 	r.blockIdxDirty = true // 索引随新 blocks 惰性重建
 	r.runNodes = cloneRunNodes(cp.RunNodes)
 	r.turns = cloneTurns(cp.Turns)
@@ -4215,7 +4261,7 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	//  在两次 Marshal 之间还有别的变更并入 —— 但差 1 的切片错位更隐蔽）。
 	//
 	// 正确做法：以快照为唯一事实来源，total/tail/骨架全部来自同一份 cp.Blocks。
-	cp := r.snapshotLocked()
+	cp := r.snapshotShallowLocked()
 	blocks := cp.Blocks
 	total := r.blocksTotal
 	if total < len(blocks) {
@@ -4449,7 +4495,7 @@ func (r *ViewReducer) ReadBlockPage(beforeID uint64, limit int) (blocks []json.R
 	if r.paged != nil && beforeID > 0 && len(r.paged.IDs) > 0 && (len(r.blocks) == 0 || beforeID <= r.blocks[0].ID) {
 		return r.readPagedPageLocked(beforeID, limit)
 	}
-	snap := r.snapshotLocked()
+	snap := r.snapshotShallowLocked()
 	view := snap.Blocks
 	total = len(view) // 归一化后的真实条数（空壳 assistant 块已丢弃）
 	if r.paged != nil && r.blocksTotal > total {

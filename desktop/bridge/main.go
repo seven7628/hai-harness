@@ -2308,7 +2308,9 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 					if cp.PagedBlocks == nil {
 						rec.ReleaseView() // 没有分页句柄 → 解码完即可释放映射
 					}
-					if err := reducer.Restore(cp); err != nil {
+					// RestoreOwned：cp 是刚解出来的、随后就丢弃 ⇒ 不必深拷贝
+					// （真实大会话实测省下 ~120MB 常驻）。
+					if err := reducer.RestoreOwned(cp); err != nil {
 						recordCorrupt = true
 						fmt.Fprintf(os.Stderr, "✗ checkpoint restore 失败 sid=%s: %v\n", id, err)
 					} else {
