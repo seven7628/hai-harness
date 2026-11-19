@@ -1609,6 +1609,9 @@ type manager struct {
 	// **必须是进程级单例**：并发闸门和缓存条目的 LRU 都建立在「同一份状态」上，
 	// 每次命令新建一个等于没有限额。懒建（见 previewService）。
 	conv *conversion.Service
+	// previewSweeper 预览缓存的**运行期**周期清扫器（2026-11-18 资源有界化第 3 步）。
+	// 零值可用（manager 由多处字面量构造）—— nil = 没起周期清扫。
+	previewSweeper *previewCacheSweeper
 	// hookTrust 进程内共享的 hooks 信任库（~/.go-code/hooks-state.json；懒读一次，
 	// 见 hookTrustStore）。**必须共享同一实例**：信任判定发生在每次派发时，面板的
 	// hooks_trust 写的就是它 —— 否则新信任要重建会话才生效（契约 §5.5 要求即刻生效）。
@@ -4800,6 +4803,7 @@ func (m *manager) dispatch(c command) {
 			m.shutdownAll()     // 兜底：全部工作区
 			m.stopFileWatches() // 进程级：停编辑器目录监听（等 goroutine 退出）
 			m.stopSurfaceWatch()
+			m.previewSweeper.stop() // 进程级：停预览缓存的周期清扫（等 goroutine 退出）
 		}
 		m.resp(c, true, "", nil)
 
@@ -4861,6 +4865,8 @@ func (m *manager) shutdownWorkspace(wsPath string) {
 	ws.plugins.Close(context.Background()) // 关闭插件私有连接（Browser Use 子进程清理）
 	// 预览槽位随会话一起收尾（下次预览按需重建；见 workspace_slots.go）
 	m.releasePreviewSlot(wsPath)
+	// 工作区关闭 ⇒ 会话作用域的落盘资源也清一次（见 sweepSpillResources）。
+	sweepSpillResources()
 }
 
 // shutdownAll：stdin EOF 兜底，全部工作区优雅关闭
@@ -4896,6 +4902,8 @@ func (m *manager) shutdownAll() {
 	// 沙箱作用域收尾（进程退出）：在飞的执行组 + 后台常驻进程（run_in_background
 	// 起的那些）⇒ 我们起的进程由我们负责，不留孤儿（PPID=1、继续烧 CPU）。
 	sandbox.Shutdown()
+	// 预览缓存的周期清扫协程收尾（进程级）。
+	m.previewSweeper.stop()
 	// 进程级单例的显式收尾（IM 连接不随工作区关闭而停，只能在这里停一次）
 	m.closeIMPlugin()
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）
@@ -4969,6 +4977,10 @@ func (m *manager) deleteSession(wsPath, id string) {
 	sessionPins.set(workspaceKey(wsPath), id, false)
 	sessionManualTitles.set(workspaceKey(wsPath), id, "")
 	diskTitles.Delete(diskTitleKey(workspaceKey(wsPath), id))
+	// 会话结束 ⇒ 清一次落盘资源（会话作用域的收尾点；见 sweepSpillResources）。
+	// 注意：只删**过期**的文件（TTL 24h）⇒ 会话刚结束时它的 spill 文件仍可读
+	//（路径是交给模型的承诺，承诺窗口 = 模型读完之前）。
+	sweepSpillResources()
 }
 
 // subagentsBase 子任务输出 journal 根目录（D1 路径规则：sessions/<wsKey>/<sid>/agents）。
@@ -6160,7 +6172,27 @@ func toolSpillDir(sid string) string {
 			safe = sid
 		}
 	}
-	return filepath.Join(os.TempDir(), "hai-harness-toolspill", safe)
+	return filepath.Join(toolSpillRoot(), safe)
+}
+
+// toolSpillRoot 工具结果落盘的**根目录**（各会话目录建在它下面）。
+func toolSpillRoot() string {
+	return filepath.Join(os.TempDir(), "hai-harness-toolspill")
+}
+
+// sweepSpillResources 清扫落盘资源（会话开始/结束各调一次）。
+//
+// 两族：
+//   - **引擎级**：各会话的截断落盘（$TMPDIR/hai-harness-toolspill/<sid>/）——
+//     按 TTL + 总量回收，空目录不留；
+//   - **工具级**：bash / run_python / codemode 的输出落盘（$TMPDIR/hai-harness-*-spill-*）
+//     —— 同样按 TTL 回收，空壳目录不留（改造前每次调用都建目录 ⇒ 87% 空壳）。
+//
+// 触发点挂在**会话**上（不是挂在 Engine 上，也不是挂在「产生资源的那次调用」上）：
+// 后者只会在「又写了一个新文件」时才触发 ⇒ 会话一死，最后一次清扫永远不发生。
+func sweepSpillResources() {
+	tools.SweepSpillRoot(toolSpillRoot())
+	builtin.SweepToolSpillDirs()
 }
 
 // wireAgentResume 把本会话的 agent_resume 工具接到 bridgeSession.resumeTask。
@@ -6207,6 +6239,10 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 	}
 	// 子 agent 档位持有者：装配期与主 loop 同档，之后由 switch_effort 同步（见类型注释）。
 	effortRef := newSubagentEffortRef(provider.ReasoningEffortLevel(effort))
+	// 会话开始 ⇒ 清一次落盘资源（会话作用域的收尾点，2026-11-18 资源有界化第 2 步）。
+	// 为什么不挂在 Engine 上：Engine 随模型/人格切换重建 ⇒ 活得比资源短 ⇒
+	// 会话一死，最后一次清扫永远不发生（实测 72 个会话目录 / 43MB 永久留下）。
+	sweepSpillResources()
 	eng := tools.NewToolEngine(tools.WithSpillDir(toolSpillDir(sid)))
 	ft := builtin.NewFileTools(workspace)
 	// Project Memory 的 Step 4 钩子：记忆文件由模型用标准 write_file / edit_file
@@ -7416,6 +7452,9 @@ func serve() error {
 		go sweepSessionFilesInBackground()
 	}
 	go m.sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU），见 (*manager).sweepPreviewCache
+	// 运行期周期清扫（2026-11-18 第 3 步）：启动那一次扫完就**再也不扫**⇒
+	// 512MiB 的预算在运行期从不生效 ⇒ 桌面端连开一天，磁盘只增不减。
+	m.previewSweeper = startPreviewCacheSweeper(m.sweepPreviewCache)
 	go m.warmOfficeKit()     // R08d：kit 可用时预热一次（空转换，把 3–6s 冷启挪出首次转换）
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
