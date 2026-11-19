@@ -147,6 +147,7 @@ func NewRunPythonTool(workspace string, py PythonRuntime, sbx sandbox.Sandbox) *
 			Description_: "Execute a Python script and return its output (stdout+stderr merged). This is the execution channel for office documents and data work: python-docx, openpyxl, python-pptx, pypdf, pypdfium2 and mammoth are preinstalled. " +
 				"The interpreter is fixed (you cannot choose a binary or command-line switches) and the script runs inside the OS sandbox with the working directory set to the workspace root; under the default policy the workspace, $HOME and /tmp are writable, go-code's own config directory (~/.go-code, except its managed plugins/ and runtime/ subtrees) is denied for read and write, and writes to any other host path are rejected — but that policy does not cover credential files under $HOME (e.g. ~/.ssh/.aws) unless the user listed them in sandbox.sensitive_paths, so never read or copy them. Obviously destructive literals (wiping the workspace, home or root itself) are rejected before execution. " +
 				"Network access must not be assumed: outbound connections follow the same host policy as bash (currently allowed), but nothing guarantees reachability — do not design a task around downloads, and do not run pip install on your own. Python can still call subprocess internally, so treat this as a policy boundary rather than a hard isolation. " +
+				"PROCESS LIFETIME: when the script finishes, every process it left behind is cleaned up (including the ones it spawned with subprocess) — never rely on a child process outliving the run; if something must keep running, start it from bash with run_in_background instead. " +
 				"Provide exactly one of script (source) or script_path (a .py file in the workspace). script is written to a temporary file that is deleted after the run, so write outputs with paths relative to the working directory (the workspace), not next to the script. " +
 				"Declare what the script writes in outputs (up to 10 workspace-relative or absolute paths, most important first): the declared files that exist after the run are reported to the user as this run's artifacts, and the result tells you which declared paths did not materialize. List only files this call writes — not inputs, not files you merely read. " +
 				"The first call can take minutes while the managed runtime installs itself (tens of MB, one time only; the venv measures about 70 MB).",
@@ -409,9 +410,9 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 	}
 	// 落盘提示（**只加在给模型的文本上**）：模型拿到路径就能分段读完整输出。
 	if spilled && spillPath != "" {
-		out = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s\n"+
+		out = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s (this path stays valid for %d hours; after that the file is cleaned up)\n"+
 			"Read it with read_file (start_line/end_line) or bash (head/grep/sed) to get the parts you need.]\n%s",
-			humanBytes(totalOut), spillPath, out)
+			humanBytes(totalOut), spillPath, int(spillFileTTL.Hours()), out)
 	}
 	// ⑦ 补齐产物事实（存在性/尺寸/指纹 → FileDiff）+ 结果文本里的显式告知。
 	return t.summarizeOutputs(ctx, out, outs), nil

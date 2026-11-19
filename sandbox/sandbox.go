@@ -103,6 +103,13 @@ type ExecSpec struct {
 	// TotalOutputBytes 出参：命令输出的**总**字节数（不管有没有被窗口/落盘处理）。
 	// nil = 不采集。
 	TotalOutputBytes *int64
+
+	// BackgroundLog 可选：**后台模式**（StartBackground）下 stdout+stderr 的合并
+	// 日志路径。空 = 不记日志（输出丢弃）—— 不推荐：模型就没有办法知道后台进程
+	// 出了什么错（后台模式没有「等它结束」的那一刻可以回填结果）。
+	//
+	// 只对 BackgroundStarter 有意义；Run/RunArgs 忽略本字段。
+	BackgroundLog string
 }
 
 // Sandbox 沙箱执行后端。
@@ -290,12 +297,29 @@ func runExec(ctx context.Context, cmd *exec.Cmd, spec ExecSpec) (string, error) 
 	}
 	// 管道挂起的根治（见上面常量注释的 waitDelayAfterKill）：Start 成功后设置。
 	cmd.WaitDelay = waitDelayAfterKill
+	// 执行作用域登记（应用关闭时收掉在飞的组 ⇒ 我们不留下孤儿）。
+	// 组长 pid == pgid（Setpgid）⇒ 登记表里的 pid 可直接用于 kill(-pid)。
+	registerLiveGroup(cmd.Process.Pid)
+	defer unregisterLiveGroup(cmd.Process.Pid)
+	// cgroup v2 兜底（Linux 专属；不可用就静默降级）：把子进程放进我们的 cgroup
+	// ⇒ 它的后代继承 ⇒ 应用退出时一次 cgroup.kill 连 setsid 逃逸者也一起收
+	// （进程组杀够不着的那一类）。
+	cgroupAttach(cmd.Process.Pid)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
 	select {
 	case err := <-done:
+		// 命令结束 ⇒ **收掉它留下的进程组**（执行作用域收尾）。
+		//
+		// 改造前这里直接返回 ⇒ 一条 `cmd &` 成功结束后，它 fork 的后台进程
+		// 就地变孤儿（PPID=1、继续烧 CPU）—— 本机 100 个孤儿 Chrome 的成因。
+		// 语义对齐 systemd 的 KillMode=control-group（默认「不留残余」）。
+		//
+		// 异步执行（不拖慢返回）：收组只投递信号就返回，宽限期在后台协程里。
+		// 后台常驻进程（run_in_background）走的是**另一个进程组** ⇒ 不受影响。
+		reapProcGroup(cmd.Process.Pid)
 		// ErrWaitDelay：进程**已成功退出**，只是输出管道被进程组外的后代占着（Go 仅在
 		// 进程成功退出时返回它，见 os/exec.Cmd.Wait 文档）。旧行为是无限期等管道 EOF
 		// —— 那正是本事故机制的一半；现在改成「有界等待 + 明说输出可能被截断」：
@@ -461,9 +485,9 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 // isolatedEnv 最小环境白名单：PATH/HOME/LANG/TERM/TMPDIR + 代理变量。
 // agent 进程的全部其他环境变量（可能含密钥/token）不传给命令。
 func isolatedEnv() []string {
-	// 容量一次给足（5 个固定项 + 6 个代理变量）：append 扩容会**整体拷贝**，
+	// 容量一次给足（5 个固定项 + 6 个代理变量 + 1 个执行标记）：append 扩容会**整体拷贝**，
 	// 实测原来 3 次分配 / 1128 B ⇒ 改成 1 次分配 / 约 640 B（第 4 轮爬山第 9 步）。
-	env := make([]string, 0, 11)
+	env := make([]string, 0, 12)
 	env = append(env,
 		"PATH="+os.Getenv("PATH"),
 		"HOME="+os.Getenv("HOME"),
@@ -474,6 +498,9 @@ func isolatedEnv() []string {
 		// TMPDIR —— macOS 默认 /var/folders/... 在 Seatbelt 沙箱内未放行写 → EPERM。
 		// /tmp 在 NoSandbox 全局可写、Seatbelt 已放行 file-write*（见 seatbelt_darwin.go）。
 		"TMPDIR=/tmp",
+		// 执行标记（逃逸者兜底的认领依据；见 orphan.go）：后代继承它 ⇒ setsid /
+		// 双重 fork 逃出去的进程仍带标记 ⇒ 清扫器能认领并收掉它。
+		execIDEnvVar+"="+newExecID(),
 	)
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
 		if v := os.Getenv(k); v != "" {

@@ -13,6 +13,7 @@ package sandbox
 //
 // 例外（显式列出，不许偷偷加）：
 //   - preview_worker 的 Start（常驻进程的 stdout 是协议通道，不是「输出」）；
+//   - StartBackground（后台常驻进程：stdout/stderr 直接写日志文件，不经内存缓冲）；
 //   - 测试文件（_test.go）—— 测试里的假沙箱不受生产内存约束。
 
 import (
@@ -139,7 +140,11 @@ func TestEveryExecSpecBoundsItsOutput(t *testing.T) {
 				continue
 			}
 			// 常驻进程的 Start：stdout 是协议通道，不受「输出封顶」约束。
-			if strings.Contains(literal, "Start(") || strings.Contains(text[max(0, loc[0]-40):loc[0]], "Start(") {
+			// 后台常驻进程（StartBackground）：stdout/stderr 直接写**日志文件**，
+			// 不经过内存缓冲 ⇒ 同样不受「输出封顶」约束。
+			near := text[max(0, loc[0]-40):loc[0]]
+			if strings.Contains(literal, "Start(") || strings.Contains(near, "Start(") ||
+				strings.Contains(literal, "StartBackground(") || strings.Contains(near, "StartBackground(") {
 				continue
 			}
 			offenders = append(offenders, rel+":"+strconv.Itoa(line))

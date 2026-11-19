@@ -22,3 +22,11 @@ func NewSeatbelt(workspace string, opts ...SeatbeltOption) (*Seatbelt, error) {
 func (s *Seatbelt) Run(ctx context.Context, spec ExecSpec) (string, error) {
 	return "", errSeatbeltUnavailable
 }
+
+// StartBackground 防御性实现（构造不会成功，正常不可达）。
+//
+// 注意：Linux 上**不使用** Seatbelt 后端（装配层降级到 NoSandbox，见 NewSeatbelt
+// 返回错误）⇒ 后台能力由 NoSandbox 提供 ⇒ 两平台的**用户可见行为一致**。
+func (s *Seatbelt) StartBackground(ctx context.Context, spec ExecSpec) (BackgroundProc, error) {
+	return nil, errSeatbeltUnavailable
+}

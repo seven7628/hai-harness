@@ -1619,8 +1619,8 @@ func (e *Engine) truncate(s string, callID string) string {
 	// 「Narrow the output to see it all」——没落盘却让人去读文件是纯粹的谎话。
 	if path := e.spillText(callID, s); path != "" {
 		return s[:headEnd] + fmt.Sprintf(
-			"\n\n[... %d bytes omitted from the middle (%.2f%% of %d bytes total); showing the first %d and the last %d bytes — both ends are present, the middle is not. The **full** output is written to %s — read the missing middle from that file (read_file with start_line/end_line for line-oriented logs; for a huge single line use `sed -n`/`tail -c`/`grep` on that path) instead of re-running this command ...]\n\n",
-			omitted, 100*float64(omitted)/float64(len(s)), len(s), headEnd, len(s)-tailStart, path) +
+			"\n\n[... %d bytes omitted from the middle (%.2f%% of %d bytes total); showing the first %d and the last %d bytes — both ends are present, the middle is not. The **full** output is written to %s — read the missing middle from that file (read_file with start_line/end_line for line-oriented logs; for a huge single line use `sed -n`/`tail -c`/`grep` on that path) instead of re-running this command. That path stays valid for %d hours (after that it is cleaned up) ...]\n\n",
+			omitted, 100*float64(omitted)/float64(len(s)), len(s), headEnd, len(s)-tailStart, path, spillTTLHours) +
 			s[tailStart:]
 	}
 	return s[:headEnd] + fmt.Sprintf(
@@ -1785,6 +1785,42 @@ func sweepSpillDir(dir string, now time.Time, maxTotalBytes int64) {
 			total -= it.size
 		}
 	}
+}
+
+// SweepSpillRoot 清扫落盘根目录下的**全部会话目录**（会话作用域的资源回收）。
+//
+// 为什么要有这个公开入口（2026-11-18 资源有界化第 2 步）：清扫的**触发点**
+// 不能挂在 Engine 上 —— Engine 随模型/人格切换重建 ⇒ **活得比资源短** ⇒
+// 会话一死，最后一次清扫永远不发生 ⇒ 会话目录永久留下（实测 72 个 / 43MB）。
+// ⇒ 收尾点必须挂在**会话**上（开始/结束各一次）⇒ 由宿主显式调用。
+//
+// 规则（与既有的单目录清扫同口径）：
+//   - 文件超过 TTL ⇒ 删；
+//   - 总量超上限 ⇒ 按最旧先删；
+//   - 目录空了 ⇒ 删（空壳不留）。
+//
+// 异步跑（目录多时是上千次 readdir/stat，不能挂在会话关键路径上）。
+// 失败一律忽略（回收是尽力而为）。
+func SweepSpillRoot(root string) {
+	if root == "" {
+		return
+	}
+	go func() {
+		now := time.Now()
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			dir := filepath.Join(root, e.Name())
+			sweepSpillDir(dir, now, spillMaxTotalBytes)
+			// 目录空了 ⇒ 删（会话结束 + 文件被回收 ⇒ 目录也不留）。
+			_ = os.Remove(dir) // 非空目录会返回 ENOTEMPTY，忽略即可
+		}
+	}()
 }
 
 // toolStuckResult 构造「工具不响应取消」的结果（共享超时预算用尽时也用它）。
