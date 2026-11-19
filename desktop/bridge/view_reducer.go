@@ -88,6 +88,18 @@ type Checkpoint struct {
 	BlocksTotal int          `json:"blocks_total,omitempty"`
 	PagedBlocks *PagedBlocks `json:"-"`
 
+	// DetachedCards 是**窗口外卡片的头部**（items 只留条数，正文不进内存）。
+	//
+	// 为什么单独一份：这些卡片的正文在交付时**必然**被 detachAgents 置空
+	// （实测该会话 2017 张 / 119.9MB，而真正的对话尾部只有 1.7MB）⇒
+	// 把正文解码进 reducer 的堆是纯浪费。
+	// ⇒ 但它们**不能**进 reducer 的 blocks（blocks 是 checkpoint 的来源 ⇒
+	//    瘦卡片会被写回 sidecar ⇒ 覆盖完整转录 ⇒ 不可逆丢数据）
+	// ⇒ ⇒ 单独存头部，交付时与 blocks[:start] 合成候选（见 MarshalTail）。
+	//
+	// 与今天的等价性由 detach_agents_equivalence_test.go 守着。
+	DetachedCards []Block `json:"-"`
+
 	// usage / cost_usd 是当前 clear generation 的展示累计（clear 后归零）；
 	// lifetime_usage / lifetime_cost_usd 是跨 generation 的对账值（clear 不清）。
 	Usage           Usage   `json:"usage"`
@@ -705,6 +717,11 @@ type ViewReducer struct {
 	blockIdx      map[uint64]int
 	blockIdxDirty bool
 
+	// detachedCards 是**窗口外卡片的头部**（正文不进内存，见 Checkpoint.DetachedCards）。
+	// 交付时与 blocks[:start] 合成候选；全量路径（ensureFullBlocksLocked）
+	// 解出完整卡片后会清空它（否则同一张卡会被交付两次）。
+	detachedCards []Block
+
 	// agentRunIdx 是「存在 agent 卡片」的 run_id 集合（O(1) 判子 run）。
 	//
 	// 为什么不能只靠 agentBlockID：Restore 会清空 agentBlockID（恢复后的旧卡片
@@ -1119,6 +1136,9 @@ func (r *ViewReducer) ensureFullBlocksLocked() error {
 	}
 	r.paged = nil
 	r.blocks = out
+	// 卡片已被解出**完整**内容并合入 r.blocks ⇒ 清空头部副本，
+	// 否则同一张卡会在交付时被算两遍（头部 + 完整块）。
+	r.detachedCards = nil
 	r.blockIdxDirty = true
 	r.invalidateMarshalCache()
 	return nil
@@ -1546,6 +1566,7 @@ func (r *ViewReducer) restore(cp *Checkpoint, takeOwnership bool) error {
 		r.paged.Release()
 	}
 	r.paged = cp.PagedBlocks
+	r.detachedCards = cp.DetachedCards
 	r.blocksTotal = cp.BlocksTotal
 	if r.blocksTotal < len(cp.Blocks) {
 		r.blocksTotal = len(cp.Blocks)
@@ -4288,7 +4309,15 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 	if total < len(blocks) {
 		total = len(blocks)
 	}
-	if limit <= 0 || limit >= len(blocks) {
+	// 「不截断」分支的条件多了 detachedCards 一项（2026-11-19）：
+	//
+	// 骨架级优化后，窗口外卡片的**头部**单独存在 r.detachedCards 里
+	// （正文不进内存）⇒ 它们**不在 blocks 里** ⇒ 必须走下面的截断分支
+	// 才能把 agents 带上（这条分支按构造不带 Agents）。
+	//
+	// 而「窗口里没有 detachedCards」时（旧的单窗口会话 / 全量路径）行为不变：
+	// 块数不超过 limit ⇒ 全量编码等价于尾部切片（见函数头的说明）。
+	if limit <= 0 || (limit >= len(blocks) && len(r.detachedCards) == 0) {
 		// 不截断：走全量编码（带逐块字节缓存）。**不能**在这里自己拼 JSON ——
 		// 那会绕过 blockBytes 缓存，让每个会话每次打开都重新序列化全部块（小会话也变慢）。
 		view, _, _, err := r.marshalLockedSpans()
@@ -4329,7 +4358,15 @@ func (r *ViewReducer) MarshalTail(limit int) (*PartialView, error) {
 		cp.Diffs = cp.Diffs[len(cp.Diffs)-limit:]
 	}
 	// 窗口之外的子智能体/任务卡片：独立于 blocks 带回（见 PartialView.Agents 的注释）
-	agents := detachAgents(blocks[:start])
+	//
+	// 候选 = 窗口外卡片的**头部**（打开时现取）++ 尾部窗口之前滑出来的块
+	// ⇒ 顺序与「改造前 r.blocks 里卡片在前、尾部在后」的结构一致
+	// ⇒ detachAgents 挑出来的集合与改造前**逐字节相同**
+	// （等价性测试 detach_agents_equivalence_test.go 守着这条）。
+	candidates := make([]Block, 0, len(r.detachedCards)+start)
+	candidates = append(candidates, r.detachedCards...)
+	candidates = append(candidates, blocks[:start]...)
+	agents := detachAgents(candidates)
 
 	// 骨架：blocks 置 nil 后序列化，再注入尾部块 + 三个标注字段。
 	cp.Blocks = nil

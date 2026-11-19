@@ -1,34 +1,28 @@
 package main
 
-// 「窗口外卡片」两条取法的**等价性测试**（2026-11-19，bridge 内存爬山第 5 步的前置）。
+// 「窗口外卡片」**旧实现 vs 新实现**的等价性测试（2026-11-19）。
 //
 // ## 要证明什么
 //
-// 骨架级优化的全部风险 = **「交付给 UI 的 agents 变了」**。今天 agents 来自
-// 「窗口全解码 → reducer → detachAgents(blocks[:start])」；将来的路是
-// 「只解码尾部 → 从 sidecar 的 span 里取卡片头」。
+// 骨架级优化把「窗口外的卡片正文」从 reducer 的堆里赶出去（实测该会话
+// 2017 张卡片 / 119.9MB，而真正的对话尾部只有 1.7MB —— 那 120MB 在交付时
+// 必然被 detachAgents 置空 ⇒ 纯浪费）。
 //
-// 这条测试**只测不改**：证明今天这两条路已经产出**字节完全相同**的 agents。
-// 路 B 调的是**生产代码**（card_head.go 的 pickCardHeadsFromSpans）⇒
-// 这条测试同时是那份生产代码的验收。
-// ⇒ 等价性成立 ⇒ 后面的切换就是「换个来源拿同样的东西」⇒ 页面零影响。
+// 这次改动的全部风险 = **「交付给 UI 的 agents 变了」**。这条测试证明：
 //
-// ## 第一版就红在这里（两条必须复刻的语义）
+//	路 A（旧）：窗口全解码 → reducer → MarshalTail → .Agents
+//	路 B（新）：只解码尾部 + 从 sidecar 取卡片头 → reducer → MarshalTail → .Agents
 //
-// ① **候选边界在「归一化之后」的块数组上算**：
-//    detachAgents 迭代 `blocks[:start]`，其中 `start = len(blocks) - limit`，
-//    而 blocks 已经过 normalizeDanglingState（丢弃空壳 assistant / 悬空 tool 块，
-//    实测 k=17）⇒ 候选集 = **最旧**的 start' 个块，
-//    start' = 卡片类块数 + 尾部存活数 - limit（实测 2017 + 483 - 500 = 2000）。
-//    ⇒ 「将来那条路」必须先解码尾部窗口、跑同样的归一化、算出尾部存活数。
+// ⇒ 两条路产出的 agents **字节完全相同** ⇒ 页面零影响。
 //
-// ② **候选集取的是「最旧」的一段，不是「最新」**：
-//    `blocks[:start]` 是**前缀** ⇒ 候选是 spans 索引**最小**的一段。
-//    第一版从最新往回收集 ⇒ 拿到的是最新 500 张 ⇒ 与现状差 17 张 ⇒ 测试立刻红了。
-//    ⇒ 这就是这条测试的价值：把「交付集合到底怎么定的」变成机器可验证的事实。
+// ## 两条必须复刻的隐式语义（第一版就踩了，测试立刻红）
 //
-// （k=17 造成的「最新 17 张卡片不在候选集里」**不是缺陷**：它们在尾部窗口里，
-//   作为普通块交付，左栏树照样能看到 —— 只是分工不同。）
+// ① **候选边界在「归一化之后」算**：detachAgents 迭代 blocks[:start]，
+//    start = len(blocks) - limit，而 blocks 已过 normalizeDanglingState
+//    （丢空壳 assistant / 悬空 tool，实测 k=17）⇒ start' = 卡片类块数 +
+//    尾部存活数 - limit。
+// ② **候选集取 `blocks[:start]` 这个前缀** ⇒ 是 spans 索引**最小**的一段
+//    ⇒ 新实现要取的是**最旧**的 N 张卡片里的**最新**的那些。
 //
 // ## 跑法（需要真实会话数据）
 //
@@ -49,7 +43,82 @@ import (
 	"github.com/seven7628/hai-harness/session"
 )
 
-// TestDetachedAgentsEquivalence：两条路产出的 agents 字节必须完全一致。
+// legacyWindowParse 是**改造前**的窗口解析：窗口外的卡片类块 + 尾部窗口
+// **全部解码**（卡片正文因此进了堆）。
+//
+// 保留它是为了当「参照实现」——它必须逐字复刻改造前 parseCheckpointFromRecordWindow
+// 的行为（need = [卡片类块(i<start) 升序..., 尾部(start..n) 升序...]）。
+func legacyWindowParse(t *testing.T, rec *session.SessionRecord, limit int) *Checkpoint {
+	t.Helper()
+	spans := rec.LoadedBlockSpans
+	kinds := rec.LoadedBlockKinds
+	n := len(spans)
+	start := n - limit
+	need := make([]int, 0, limit+16)
+	decoded := make(map[int]struct{}, limit+16)
+	for i := 0; i < start; i++ {
+		if session.HasCardKind(kinds[i]) {
+			need = append(need, i)
+			decoded[i] = struct{}{}
+		}
+	}
+	for i := start; i < n; i++ {
+		need = append(need, i)
+		decoded[i] = struct{}{}
+	}
+	selSpans := make([]session.BlockSpan, len(need))
+	selHashes := make([][8]byte, len(need))
+	hasHashes := len(rec.LoadedBlockHashes) == n
+	for j, i := range need {
+		selSpans[j] = spans[i]
+		if hasHashes {
+			selHashes[j] = rec.LoadedBlockHashes[i]
+		}
+	}
+	blocks := make([]Block, len(need))
+	var hsh [][8]byte
+	if hasHashes {
+		hsh = selHashes
+	}
+	if err := decodeBlocksParallel(selSpans, hsh, blocks); err != nil {
+		t.Fatalf("旧路径解码失败: %v", err)
+	}
+	pagedIDs := make([]uint64, 0, start)
+	pagedSpans := make([]session.BlockSpan, 0, start)
+	pagedHashes := make([][8]byte, 0, start)
+	for i := 0; i < start; i++ {
+		if _, ok := decoded[i]; ok {
+			continue
+		}
+		pagedIDs = append(pagedIDs, rec.LoadedBlockIDs[i])
+		pagedSpans = append(pagedSpans, spans[i])
+		if hasHashes {
+			pagedHashes = append(pagedHashes, rec.LoadedBlockHashes[i])
+		}
+	}
+	return &Checkpoint{
+		Blocks:      blocks,
+		BlocksTotal: n,
+		PagedBlocks: &PagedBlocks{IDs: pagedIDs, Spans: pagedSpans, Hashes: pagedHashes},
+	}
+}
+
+// loadAgents 走「窗口解析 → reducer → MarshalTail」，返回交付的 agents。
+func loadAgents(t *testing.T, cp *Checkpoint) []Block {
+	t.Helper()
+	red := NewViewReducer()
+	if err := red.Restore(cp); err != nil {
+		t.Fatalf("restore 失败: %v", err)
+	}
+	red.NormalizeForRestore()
+	pv, err := red.MarshalTail(restoreWindowBlocks)
+	if err != nil {
+		t.Fatalf("MarshalTail 失败: %v", err)
+	}
+	return pv.Agents
+}
+
+// TestDetachedAgentsEquivalence：旧实现与新实现交付的 agents 字节必须完全一致。
 func TestDetachedAgentsEquivalence(t *testing.T) {
 	recPath := os.Getenv("HAI_LAB_SESSION")
 	storeRoot := os.Getenv("HAI_LAB_STORE_ROOT")
@@ -73,87 +142,26 @@ func TestDetachedAgentsEquivalence(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// ——— 路 A：现状（窗口全解码 → reducer → MarshalTail）———
-	rec, err := store.LoadRecordForView(ctx, wsKey, sid)
+	// ——— 路 A：旧实现（窗口全解码）———
+	recA, err := store.LoadRecordForView(ctx, wsKey, sid)
 	if err != nil {
 		t.Fatalf("加载 record 失败: %v", err)
 	}
-	cp, err := parseCheckpointFromRecordWindow(rec, restoreWindowBlocks)
-	if err != nil {
-		t.Fatalf("解析窗口失败: %v", err)
-	}
-	windowBlocks := len(cp.Blocks)
-	red := NewViewReducer()
-	if err := red.Restore(cp); err != nil {
-		t.Fatalf("restore 失败: %v", err)
-	}
-	red.NormalizeForRestore()
-	pv, err := red.MarshalTail(restoreWindowBlocks)
-	if err != nil {
-		t.Fatalf("MarshalTail 失败: %v", err)
-	}
-	agentsA := pv.Agents
+	cpA := legacyWindowParse(t, recA, restoreWindowBlocks)
+	agentsA := loadAgents(t, cpA)
+	recA.ReleaseView()
 
-	// ——— 路 B：将来的路（只解码尾部 + 从 sidecar 取卡片头）———
-	rec2, err := store.LoadRecordForView(ctx, wsKey, sid)
+	// ——— 路 B：新实现（只解码尾部 + 现取卡片头）———
+	recB, err := store.LoadRecordForView(ctx, wsKey, sid)
 	if err != nil {
 		t.Fatalf("加载 record 失败: %v", err)
 	}
-	spans := rec2.LoadedBlockSpans
-	kinds := rec2.LoadedBlockKinds
-	n := len(spans)
-	boundary := n - restoreWindowBlocks
-	if boundary < 0 {
-		boundary = 0
-	}
-	// B-1：只解码尾部窗口（restoreWindowBlocks 个），跑**同样的归一化**，
-	//      得出尾部存活块数 ⇒ k = 尾部被归一化丢弃的块数。
-	tail := make([]session.BlockSpan, 0, restoreWindowBlocks)
-	for i := boundary; i < n; i++ {
-		tail = append(tail, spans[i])
-	}
-	tailBlocks := make([]Block, len(tail))
-	if err := decodeBlocksParallel(tail, nil, tailBlocks); err != nil {
-		t.Fatalf("解码尾部失败: %v", err)
-	}
-	probe := &Checkpoint{Blocks: tailBlocks}
-	normalizeDanglingState(probe)
-	tailKept := len(probe.Blocks)
-	k := len(tailBlocks) - tailKept
-
-	// B-2：候选范围 = 尾部窗口之前的「卡片类块」，但要按归一化后的 start 截断：
-	//      路 A 的 blocks 数组 = [卡片类块(全部)..., 尾部(存活 tailKept 个)]，
-	//      start = len(blocks) - limit = (卡片类块数 + tailKept) - limit，
-	//      而候选 = blocks[:start] ⇒ 卡片类块里只有 (卡片类块数 + tailKept - limit) 个进候选。
-	cardKindBefore := 0
-	for i := 0; i < boundary && i < len(kinds); i++ {
-		if session.HasCardKind(kinds[i]) {
-			cardKindBefore++
-		}
-	}
-	candidateCount := cardKindBefore + tailKept - restoreWindowBlocks
-	if candidateCount < 0 {
-		candidateCount = 0
-	}
-	// 候选集 = spans 里**最旧**的 candidateCount 张卡片类块 ⇒ 找出它的索引上界。
-	upperIdx := -1
-	seen := 0
-	for i := 0; i < boundary && i < len(kinds); i++ {
-		if !session.HasCardKind(kinds[i]) {
-			continue
-		}
-		seen++
-		if seen == candidateCount {
-			upperIdx = i
-			break
-		}
-	}
-	agentsB, err := pickCardHeadsFromSpans(spans, kinds, upperIdx)
+	cpB, err := parseCheckpointFromRecordWindow(recB, restoreWindowBlocks)
 	if err != nil {
-		t.Fatalf("取卡片头失败: %v", err)
+		t.Fatalf("新路径解析窗口失败: %v", err)
 	}
-	rec.ReleaseView()
-	rec2.ReleaseView()
+	agentsB := loadAgents(t, cpB)
+	recB.ReleaseView()
 
 	// ——— 比较 ———
 	bytesA, err := json.Marshal(agentsA)
@@ -164,13 +172,10 @@ func TestDetachedAgentsEquivalence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("会话 %s", sid)
-	t.Logf("  窗口解码块数=%d（其中尾部 %d 个，归一化丢弃 k=%d）", windowBlocks, len(tailBlocks), k)
-	t.Logf("  尾部之前的卡片类块=%d ⇒ 候选范围=%d", cardKindBefore, candidateCount)
-	t.Logf("  路A agents %d 张 / %d 字节；路B agents %d 张 / %d 字节",
-		len(agentsA), len(bytesA), len(agentsB), len(bytesB))
+	t.Logf("会话 %s：旧 %d 张 / %d 字节（旧路径解码块数 %d）；新 %d 张 / %d 字节（新路径解码块数 %d）",
+		sid, len(agentsA), len(bytesA), len(cpA.Blocks), len(agentsB), len(bytesB), len(cpB.Blocks))
 	if len(agentsA) != len(agentsB) {
-		t.Fatalf("agents 数量不同：A=%d B=%d", len(agentsA), len(agentsB))
+		t.Fatalf("agents 数量不同：旧=%d 新=%d", len(agentsA), len(agentsB))
 	}
 	if string(bytesA) != string(bytesB) {
 		for i := range agentsA {
@@ -180,10 +185,10 @@ func TestDetachedAgentsEquivalence(t *testing.T) {
 			ja, _ := json.Marshal(agentsA[i])
 			jb, _ := json.Marshal(agentsB[i])
 			if string(ja) != string(jb) {
-				t.Fatalf("agents[%d] 不同：\n A=%s\n B=%s", i, ja, jb)
+				t.Fatalf("agents[%d] 不同：\n 旧=%s\n 新=%s", i, ja, jb)
 			}
 		}
-		t.Fatalf("agents 字节不同（A %d 字节 / B %d 字节）", len(bytesA), len(bytesB))
+		t.Fatalf("agents 字节不同（旧 %d 字节 / 新 %d 字节）", len(bytesA), len(bytesB))
 	}
-	t.Logf("✅ 两条路的 agents 字节完全一致（%d 字节）⇒ 换来源不影响交付", len(bytesA))
+	t.Logf("✅ 旧实现与新实现交付的 agents 字节完全一致（%d 字节）⇒ 页面零影响", len(bytesA))
 }
