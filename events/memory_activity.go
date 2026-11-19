@@ -21,6 +21,8 @@ import "time"
 type MemoryActivity struct {
 	// RunId 本次运行；与 agent_start / agent_end 同 RunId 关联。
 	RunId string `json:"run_id"`
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
 	// Scope 谁在动这份记忆：主会话还是子 agent。
 	//
 	// 子 agent 有自己独立的记忆目录（官方：enabled with the subagent `memory`

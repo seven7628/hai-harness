@@ -7,11 +7,13 @@ import "time"
 // 发事件者 = AgentLoop（经 Run 的 handler）；compact 命令不发本事件
 // （结果经 CompressStart/End 事件感知）。
 type CommandResult struct {
-	RunId     string    `json:"run_id,omitempty"`
-	Name      string    `json:"name"`
-	Result    string    `json:"result,omitempty"` // 命令产出文本（如 skills 清单）
-	Error     string    `json:"error,omitempty"`  // 执行失败信息
-	Timestamp time.Time `json:"timestamp"`
+	RunId string `json:"run_id,omitempty"`
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string    `json:"agent_task_id,omitempty"`
+	Name        string    `json:"name"`
+	Result      string    `json:"result,omitempty"` // 命令产出文本（如 skills 清单）
+	Error       string    `json:"error,omitempty"`  // 执行失败信息
+	Timestamp   time.Time `json:"timestamp"`
 
 	EventType EventType `json:"event_type"`
 }

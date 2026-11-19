@@ -105,9 +105,11 @@ func (a *AgentEnd) Type() EventType {
 
 // 只用于客户端提示，不进入会话历史。
 type GoalAlignmentReminder struct {
-	RunId     string    `json:"run_id"`
-	Round     int       `json:"round"`
-	EventType EventType `json:"event_type"`
+	RunId string `json:"run_id"`
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string    `json:"agent_task_id,omitempty"`
+	Round       int       `json:"round"`
+	EventType   EventType `json:"event_type"`
 }
 
 func (e *GoalAlignmentReminder) Type() EventType { return e.EventType }
@@ -136,6 +138,8 @@ func (e *GoalAlignmentReminder) Type() EventType { return e.EventType }
 // 加字段会牵动它们的假设。独立事件只需在此登记（未知类型在重放侧安全跳过）。
 type RunSilentEnd struct {
 	RunId string `json:"run_id"`
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
 	// Rounds 本次 Run 执行的 LLM 决策轮数（与 AgentEnd.Index 同源；含收尾那个空轮）。
 	Rounds int `json:"rounds"`
 	// ToolCalls 本次 Run 的工具调用总数；HadToolCalls 为其布尔投影（便于直接聚合

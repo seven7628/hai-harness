@@ -147,9 +147,11 @@ func (w *QuestionWaiter) AnswerBatch(id string, answers []QuestionAnswer) error 
 // AskUserQuestion 模型→用户提问批次事件（UI 一次性展示全部问题与选项，用户经
 // Session.AnswerQuestions(batchId, answers) 注入整批回答）。
 type AskUserQuestion struct {
-	RunId     string         `json:"run_id,omitempty"` // 所属运行（事件自包含）
-	Id        string         `json:"id"`               // 批次 id（回答锚：Session.AnswerQuestions 按此匹配）
-	Questions []QuestionItem `json:"questions"`
+	RunId string `json:"run_id,omitempty"` // 所属运行（事件自包含）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string         `json:"agent_task_id,omitempty"`
+	Id          string         `json:"id"` // 批次 id（回答锚：Session.AnswerQuestions 按此匹配）
+	Questions   []QuestionItem `json:"questions"`
 	// TimeoutMs 等待窗口（毫秒）；0/缺省 = 无时间限制。UI 据此显示「剩余决策时间」倒计时，
 	// 与 QuestionWaiter 的 timeout 同源（工具写入），倒计时口径不另设常量。
 	TimeoutMs int64     `json:"timeout_ms,omitempty"`

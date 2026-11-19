@@ -105,7 +105,7 @@ func CallUserPromptSubmit(h events.UserPromptSubmitHook, ctx context.Context, up
 
 // toolHookWarning 发 ToolHookWarning 事件（hook 异常时调用方统一入口）。
 func toolHookWarning(ac *AgentContext, name, message string) {
-	ac.Handler(ac.ctx, &events.ToolHookWarning{
+	ac.emit(&events.ToolHookWarning{
 		RunId:     ac.RunId,
 		Name:      name,
 		Message:   message,

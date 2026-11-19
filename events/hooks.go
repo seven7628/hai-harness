@@ -146,10 +146,12 @@ type ToolHooks struct {
 // ToolHookWarning hook 异常警告事件（回调 panic、改写参数非法 JSON 等——
 // 按安全默认处理不 kill 运行，异常经事件暴露供审计）。
 type ToolHookWarning struct {
-	RunId     string    `json:"run_id,omitempty"`
-	Name      string    `json:"name,omitempty"` // 上下文（工具名 / hook 名）
-	Message   string    `json:"message"`
-	Timestamp time.Time `json:"timestamp"`
+	RunId string `json:"run_id,omitempty"`
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string    `json:"agent_task_id,omitempty"`
+	Name        string    `json:"name,omitempty"` // 上下文（工具名 / hook 名）
+	Message     string    `json:"message"`
+	Timestamp   time.Time `json:"timestamp"`
 
 	EventType EventType `json:"event_type"`
 }

@@ -461,7 +461,7 @@ func expandUserRefsInMessagesEmit(ac *AgentContext, msgs []core.Message, workspa
 		}
 	}
 	if emitEvent && len(allItems) > 0 {
-		ac.Handler(ac.ctx, &events.RefsLoaded{
+		ac.emit(&events.RefsLoaded{
 			RunId:     ac.RunId,
 			Items:     allItems,
 			Timestamp: time.Now(),

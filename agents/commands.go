@@ -50,7 +50,7 @@ func (a *AgentLoop) injectCommands(ac *AgentContext, opts *RunOptions, msgs []co
 func (a *AgentLoop) executeCommand(ac *AgentContext, opts *RunOptions, m core.Message) (core.Message, bool) {
 	name, args := parseCommand(m)
 	emit := func(result, errMsg string) {
-		ac.Handler(ac.ctx, &events.CommandResult{
+		ac.emit(&events.CommandResult{
 			RunId:     ac.RunId,
 			Name:      name,
 			Result:    result,

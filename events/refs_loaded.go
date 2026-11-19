@@ -14,6 +14,8 @@ type RefsLoaded struct {
 	SessionId string `json:"session_id,omitempty"`
 	// RunId 触发本次展开的 agent 运行 id（关联事件流）。
 	RunId string `json:"run_id,omitempty"`
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
 	// Items 引用结果列表（批量；空 = 本次无引用展开，可不下发）。
 	Items []RefLoadedItem `json:"items"`
 	// Timestamp 事件时间。

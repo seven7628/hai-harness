@@ -81,7 +81,7 @@ func newOutputTailer(ctx context.Context) *outputTailer {
 	// stdout 管道就堵 ⇒ 命令被拖慢（实测：回调每块睡 100ms ⇒ 命令 173ms → 2.14s）。
 	// 搬进独立协程后，拷贝协程只做「存最新一帧 + 敲铃」，恒为 O(1)、永不阻塞。
 	sink := newTailSink(func(seq int64, tail string, total int64, truncated bool) {
-		h(ctx, &events.ToolOutput{
+		h(ctx, events.WithAgentTaskID(ctx, &events.ToolOutput{
 			RunId:      runID,
 			Id:         callID,
 			Seq:        seq,
@@ -90,7 +90,7 @@ func newOutputTailer(ctx context.Context) *outputTailer {
 			Truncated:  truncated,
 			Timestamp:  time.Now(),
 			EventType:  events.ToolOutputType,
-		})
+		}))
 	})
 	t.sink = sink
 	t.emit = sink.push

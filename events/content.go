@@ -3,8 +3,10 @@ package events
 import "time"
 
 type ContentChunk struct {
-	RunId     string `json:"run_id,omitempty"`     // 所属运行（事件自包含，多并发 agent 区分归属）
-	RequestId string `json:"request_id,omitempty"` // 所属请求（多轮运行时区分轮次）
+	RunId string `json:"run_id,omitempty"` // 所属运行（事件自包含，多并发 agent 区分归属）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
+	RequestId   string `json:"request_id,omitempty"` // 所属请求（多轮运行时区分轮次）
 	// Index 该请求内 content 块序号（0 起自增，provider 层生成）：
 	// 流式渲染顺序、丢块检测、首字耗时定位（首个块时间戳 = TTFT）。
 	Index   int64  `json:"index"`
@@ -20,8 +22,10 @@ func (c *ContentChunk) Type() EventType {
 }
 
 type ReasoningChunk struct {
-	RunId     string `json:"run_id,omitempty"`     // 所属运行（事件自包含，多并发 agent 区分归属）
-	RequestId string `json:"request_id,omitempty"` // 所属请求（多轮运行时区分轮次）
+	RunId string `json:"run_id,omitempty"` // 所属运行（事件自包含，多并发 agent 区分归属）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
+	RequestId   string `json:"request_id,omitempty"` // 所属请求（多轮运行时区分轮次）
 	// Index 该请求内 reasoning 块序号（0 起自增，与 content 独立计数）。
 	Index   int64  `json:"index"`
 	Content string `json:"content"`

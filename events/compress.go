@@ -10,6 +10,8 @@ type CompressStart struct {
 	Before int    `json:"before"`
 	Reason string `json:"reason,omitempty"` // manual 或 automatic
 	RunId  string `json:"run_id,omitempty"` // 所属运行；旧事件缺失时前端回退主 Agent
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
 
 	// Timestamp 压缩开始时刻。trace 链路（docs/TRACE_CHAIN_REDESIGN.md）需要与
 	// CompressEnd.Timestamp 配对算出压缩 span 的时长与时间轴位置。
@@ -33,6 +35,8 @@ type CompressEnd struct {
 	After  int    `json:"after"`
 	Reason string `json:"reason,omitempty"` // manual 或 automatic
 	RunId  string `json:"run_id,omitempty"` // 所属运行；旧事件缺失时前端回退主 Agent
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
 
 	// CtxTokens 压缩后有效上下文 token 估算（>0；失败降级时 = 压前大小）。
 	CtxTokens int64 `json:"ctx_tokens,omitempty"`

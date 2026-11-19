@@ -46,13 +46,15 @@ var ErrApprovalTimeout = errors.New("approval timed out with no decision from th
 // ToolApprovalRequested 工具审批请求事件（UI 展示「谁要执行什么」，
 // 用户经 Session.Approve(id, decision) 注入决策）。
 type ToolApprovalRequested struct {
-	RunId     string    `json:"run_id"`               // 所属运行（事件自包含）
-	RequestId string    `json:"request_id,omitempty"` // 关联请求（审计用，非决策锚）
-	Id        string    `json:"id"`                   // 调用 id（决策锚：Session.Approve 按此匹配）
-	Index     int64     `json:"index"`
-	Name      string    `json:"name"`
-	Arguments string    `json:"arguments"`
-	Timestamp time.Time `json:"timestamp"`
+	RunId string `json:"run_id"` // 所属运行（事件自包含）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string    `json:"agent_task_id,omitempty"`
+	RequestId   string    `json:"request_id,omitempty"` // 关联请求（审计用，非决策锚）
+	Id          string    `json:"id"`                   // 调用 id（决策锚：Session.Approve 按此匹配）
+	Index       int64     `json:"index"`
+	Name        string    `json:"name"`
+	Arguments   string    `json:"arguments"`
+	Timestamp   time.Time `json:"timestamp"`
 
 	// ParentCallId / Depth 嵌套调用的来源标注（空/0 = 顶层调用）。
 	// 存在意义：编排型工具（codemode）内部的第 N 个子调用要人确认时，UI 得能显示
@@ -68,12 +70,14 @@ func (a *ToolApprovalRequested) Type() EventType { return a.EventType }
 
 // ToolStart 工具执行开始。
 type ToolStart struct {
-	RequestId string    `json:"request_id,omitempty"` // 发起该调用的请求（事件自包含）
-	Index     int64     `json:"index"`
-	Id        string    `json:"id"`
-	Name      string    `json:"name"`
-	RunId     string    `json:"run_id,omitempty"` // 所属运行（事件自包含：主/子 agent 并发工具归属）
-	Timestamp time.Time `json:"timestamp"`        // 开始时间（与 ToolResponse.Timestamp 差即工具耗时）
+	RequestId string `json:"request_id,omitempty"` // 发起该调用的请求（事件自包含）
+	Index     int64  `json:"index"`
+	Id        string `json:"id"`
+	Name      string `json:"name"`
+	RunId     string `json:"run_id,omitempty"` // 所属运行（事件自包含：主/子 agent 并发工具归属）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string    `json:"agent_task_id,omitempty"`
+	Timestamp   time.Time `json:"timestamp"` // 开始时间（与 ToolResponse.Timestamp 差即工具耗时）
 
 	// Arguments 实际执行的参数 JSON（UI 展示「传了什么」；PreToolUse 改写后，
 	// 与 ToolResponse.Arguments 同语义）。历史 ToolCall 保留原参（审计）。
@@ -122,6 +126,8 @@ type ToolResponse struct {
 	Id        string `json:"id"`
 	Name      string `json:"name"`
 	RunId     string `json:"run_id,omitempty"` // 所属运行（事件自包含：主/子 agent 并发工具归属）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
 	// Arguments 实际执行的参数 JSON（PreToolUse 改写后；历史 ToolCall 保留原参——
 	// 审计「实际执行了什么」经此字段，见 agents/hooks.go）
 	Arguments  string    `json:"arguments,omitempty"`
@@ -204,7 +210,9 @@ func (l *ToolResponse) Type() EventType {
 // 谁想把它塞进上下文，先回答「为什么模型需要看一个还在跑的命令的中间输出」。
 type ToolOutput struct {
 	RunId string `json:"run_id,omitempty"`
-	Id    string `json:"id"` // 所属工具调用 id（客户端据此把尾巴挂到那一行）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
+	Id          string `json:"id"` // 所属工具调用 id（客户端据此把尾巴挂到那一行）
 	// Seq 同一调用的帧号（1 起、单调递增）。客户端「更大才采纳」，用来丢弃乱序/重复。
 	Seq int64 `json:"seq"`
 	// Tail 最近的输出窗口（**替换**语义）。空 = 目前还没有输出。

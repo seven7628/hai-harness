@@ -162,14 +162,14 @@ func (t *questionTool) Call(ctx context.Context, _, arguments string) (string, e
 	// 事件的归属口径一致（events/toolctx.go:11）。用 ParentRunId 时根运行的提问
 	// run_id 恒为空，trace 链路（docs/TRACE_CHAIN_REDESIGN.md）挂不上主 Agent。
 	// TimeoutMs = 等待窗口：UI 据此显示「剩余决策时间」倒计时（<0 无时限 → 不带该字段）。
-	tc.Handler(ctx, &events.AskUserQuestion{
+	tc.Handler(ctx, events.WithAgentTaskID(ctx, &events.AskUserQuestion{
 		RunId:     tc.RunId,
 		Id:        batchID,
 		Questions: items,
 		TimeoutMs: timeoutMsOf(t.w),
 		Timestamp: time.Now(),
 		EventType: events.AskUserQuestionType,
-	})
+	}))
 	answers, err := wait(ctx)
 	if err != nil {
 		return "", err // 打断（abort）：提问中止

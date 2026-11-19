@@ -390,7 +390,7 @@ func (h *memoryHost) emitMemoryActivity(ctx context.Context, scope events.Memory
 	if tc == nil || tc.Handler == nil {
 		return
 	}
-	tc.Handler(ctx, &events.MemoryActivity{
+	tc.Handler(ctx, events.WithAgentTaskID(ctx, &events.MemoryActivity{
 		RunId:     tc.RunId,
 		Scope:     scope,
 		Action:    action,
@@ -398,5 +398,5 @@ func (h *memoryHost) emitMemoryActivity(ctx context.Context, scope events.Memory
 		Count:     1,
 		Timestamp: time.Now(),
 		EventType: events.MemoryActivityType,
-	})
+	}))
 }

@@ -7,10 +7,12 @@ import (
 
 // LLMStart 一次模型调用开始（与 LLMEnd 对称的调用级标识）。
 type LLMStart struct {
-	RunId     string    `json:"run_id,omitempty"` // 所属运行（事件自包含，多运行区分归属）
-	Model     string    `json:"model"`
-	RequestId string    `json:"request_id,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	RunId string `json:"run_id,omitempty"` // 所属运行（事件自包含，多运行区分归属）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string    `json:"agent_task_id,omitempty"`
+	Model       string    `json:"model"`
+	RequestId   string    `json:"request_id,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
 
 	EventType EventType `json:"event_type"`
 }
@@ -21,10 +23,12 @@ func (l *LLMStart) Type() EventType {
 
 // LLMEnd 单次模型调用结束（一次 Run 可有多个）：该轮回复/思考/工具调用/用量。
 type LLMEnd struct {
-	RunId     string          `json:"run_id,omitempty"` // 所属运行（事件自包含）
-	Content   string          `json:"content"`
-	Reasoning string          `json:"reasoning"`
-	ToolCalls []core.ToolCall `json:"tool_calls"`
+	RunId string `json:"run_id,omitempty"` // 所属运行（事件自包含）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string          `json:"agent_task_id,omitempty"`
+	Content     string          `json:"content"`
+	Reasoning   string          `json:"reasoning"`
+	ToolCalls   []core.ToolCall `json:"tool_calls"`
 
 	FinishReason core.FinishReason `json:"finish_reason"`
 
@@ -55,8 +59,10 @@ func (l *LLMEnd) Type() EventType {
 // canceled 与 aborted 都是 context.Canceled 且都不重试，区别只在**谁取消的**（见
 // provider.ErrorKindAborted 注释）：文案必须不同，否则一次都没重试却显示「重试已耗尽」。
 type LLMError struct {
-	RunId string `json:"run_id"`          // 所属运行（事件自包含）
-	Model string `json:"model,omitempty"` // 失败的那次调用用的模型（metrics 归因/展示用）
+	RunId string `json:"run_id"` // 所属运行（事件自包含）
+	// AgentTaskId 子智能体身份（`task-xxx`）；空 = 主会话自己的事件。语义与理由见 events/agentlabel.go。
+	AgentTaskId string `json:"agent_task_id,omitempty"`
+	Model       string `json:"model,omitempty"` // 失败的那次调用用的模型（metrics 归因/展示用）
 	// RequestId 失败 attempt 的请求 id —— provider 在 LLMStart 里给的那个（首字节之前
 	// 就失败/取消时为空，如连接失败、首字超时）。用途：把这次失败**精确归到那一轮**。
 	//

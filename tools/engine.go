@@ -32,7 +32,7 @@ const (
 )
 
 // toolStuckTimeout 取消后等待工具退出的硬上限：工具忽略 ctx 时不再无限等待
-//（V2 P1-RUNTIME-03：防 Session Shutdown / 进程退出被第三方工具拖住）。
+// （V2 P1-RUNTIME-03：防 Session Shutdown / 进程退出被第三方工具拖住）。
 //
 // **是 var 不是 const**：回归网要跑「判卡死」这条路径（见 TestStuckToolReclaimsTimeoutBox），
 // 按真实值 5 s 跑会把测试套件拖慢 5 秒；测试里临时改小、跑完还原。
@@ -1138,7 +1138,7 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 			return nil, fmt.Errorf("approver returned nil wait function for call %q", c.Id)
 		}
 		if handler != nil {
-			handler(ctx, &events.ToolApprovalRequested{
+			handler(ctx, events.WithAgentTaskID(ctx, &events.ToolApprovalRequested{
 				RunId:        tc.RunId,
 				RequestId:    c.RequestId,
 				Id:           c.Id,
@@ -1149,7 +1149,7 @@ func (e *Engine) preApprove(ctx context.Context, calls []core.ToolCall, handler 
 				Depth:        c.Depth,
 				Timestamp:    time.Now(),
 				EventType:    events.ToolApprovalType,
-			})
+			}))
 		}
 		ok, err := wait(ctx)
 		if errors.Is(err, events.ErrApprovalTimeout) {
@@ -1257,7 +1257,7 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 
 	if handler != nil {
 		tc := events.ToolContextFrom(ctx)
-		handler(ctx, &events.ToolStart{
+		handler(ctx, events.WithAgentTaskID(ctx, &events.ToolStart{
 			RequestId:    call.RequestId,
 			Index:        call.Index,
 			Id:           call.Id,
@@ -1269,7 +1269,7 @@ func (e *Engine) execute(ctx context.Context, call core.ToolCall, handler events
 			Depth:        call.Depth,
 			Timestamp:    time.Now(),
 			EventType:    events.ToolRunStartType,
-		})
+		}))
 	}
 
 	// 参数语法修复（jsonpair）：LLM 的 tool arguments 常有流式截断/单引号/尾逗号等
@@ -1546,7 +1546,7 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 				code = fallbackErrorCode(in.result)
 			}
 		}
-		handler(ctx, &events.ToolResponse{
+		handler(ctx, events.WithAgentTaskID(ctx, &events.ToolResponse{
 			RequestId:    call.RequestId,
 			Index:        call.Index,
 			Id:           call.Id,
@@ -1571,7 +1571,7 @@ func (e *Engine) finish(ctx context.Context, handler events.EventHandler, call c
 			Todos:        todoSnap,
 			Timestamp:    time.Now(),
 			EventType:    events.ToolRunEndType,
-		})
+		}))
 	}
 	return r
 }

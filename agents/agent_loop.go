@@ -471,6 +471,14 @@ type AgentContext struct {
 	Depth       int    // 运行深度（根 = 0）
 	Name        string // 运行的短标签（子 agent 名，RunOptions.Name 注入）；空 = 无标签
 
+	// AgentTaskId 本次运行所属的**子智能体身份**（后台任务 id `task-xxx`；
+	// 经 RunOptions.TaskId 注入）。空 = 主会话运行 / 同步子运行。
+	//
+	// 用途：本运行发出的事件一律盖上这个标记（见 emit），让消费方能**按子智能体**
+	// 直接归组，而不必先扫 agent_start 走 run 树。
+	// 语义与命名理由见 events/agentlabel.go（`task_id` 在 events 里已是三义，不能复用）。
+	AgentTaskId string
+
 	Handler events.EventHandler // 本次运行的事件消费者
 
 	Messages   []core.Message // 当前上下文，每轮追加/压缩
@@ -584,6 +592,23 @@ type AgentContext struct {
 
 	// Err 本次运行的最终错误（重试耗尽或不可重试），nil 表示成功
 	Err error
+}
+
+// emit 发射事件：先盖上本次运行的**子智能体身份**（ac.AgentTaskId），再交给 Handler。
+//
+// 为什么在**发射点**盖章，而不是包一层 Handler：
+// 子运行继承父的 Handler（`tc.Handler`），包一层的话**外层先执行** ⇒ 父的 id 会覆盖
+// 子的 id ⇒ 嵌套派发（子智能体再派孙任务）时归属错乱。
+// 发射点是最内层（谁发谁盖），天然拿到**最具体**的身份。
+//
+// 谁盖章、盖什么：ac.AgentTaskId = RunOptions.TaskId（后台子运行 = `task-xxx`；
+// 主会话运行 / 同步子运行为空 ⇒ 不盖 ⇒ **事件 JSON 逐字节不变**）。
+// 语义与命名理由见 events/agentlabel.go。
+func (ac *AgentContext) emit(ev events.Event) {
+	if ac.AgentTaskId != "" {
+		events.StampAgentTaskID(ev, ac.AgentTaskId)
+	}
+	ac.Handler(ac.ctx, ev)
 }
 
 // Abort 中断当前轮后退出。
@@ -994,6 +1019,9 @@ func (a *AgentLoop) RunStream(ctx context.Context, input []core.Message, handler
 		failures:    newFailureLedger(),
 		slim:        nil,
 	}
+	// 子智能体身份（后台任务 id）：本运行发出的事件都盖上它（见 emit）。
+	// 空 = 主会话运行 / 同步子运行 ⇒ 不盖 ⇒ 事件 JSON 逐字节不变。
+	ac.AgentTaskId = opts.TaskId
 	if a.cfg.Slim != nil {
 		ac.slim = newSlimState(*a.cfg.Slim)
 	}
@@ -1625,7 +1653,7 @@ func (a *AgentLoop) emitRunSilentEnd(ac *AgentContext, toolCalls int) {
 	if ac.Handler == nil {
 		return // 无消费者：静默跳过（与既有事件一致）
 	}
-	ac.Handler(ac.ctx, &events.RunSilentEnd{
+	ac.emit(&events.RunSilentEnd{
 		RunId:            ac.RunId,
 		Rounds:           ac.Iteration, // 此处即最终轮号（自然结束，未被 MaxIterations 截断）
 		ToolCalls:        toolCalls,
@@ -1864,7 +1892,7 @@ func (a *AgentLoop) streamWithRetry(ac *AgentContext, r *roundResult) error {
 			ac.addUsage(u)
 			partial = &u
 		}
-		ac.Handler(ac.ctx, &events.LLMError{
+		ac.emit(&events.LLMError{
 			RunId:        ac.RunId,
 			Model:        a.currentModel(),
 			RequestId:    r.requestId, // 失败 attempt 的请求 id（空 = 首事件前就失败）
@@ -1985,7 +2013,7 @@ func (a *AgentLoop) streamOnce(ac *AgentContext, r *roundResult) (bool, error) {
 	threshold := a.currentGoalAlignmentReminderRounds()
 	if threshold > 0 && ac.goalAlignmentRounds >= threshold && !ac.goalAlignmentReminderInjected {
 		requestMessages = append(requestMessages, core.Message{Role: core.User, Content: []core.Content{{Type: core.ContentTypeText, Content: prompt.GoalAlignmentReminder}}})
-		ac.Handler(ac.ctx, &events.GoalAlignmentReminder{RunId: ac.RunId, Round: ac.goalAlignmentRounds, EventType: events.GoalAlignmentReminderType})
+		ac.emit(&events.GoalAlignmentReminder{RunId: ac.RunId, Round: ac.goalAlignmentRounds, EventType: events.GoalAlignmentReminderType})
 		ac.goalAlignmentReminderInjected = true
 	}
 	// 工具轮后空轮的续跑提醒（问题十三）：ephemeral user 消息，不落历史（同
@@ -2064,7 +2092,7 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 			ts = time.Now() // provider 未设置时间戳时兜底
 		}
 		r.requestId = ev.RequestId // 失败事件据此归轮（见 roundResult.requestId）
-		ac.Handler(ac.ctx, &events.LLMStart{
+		ac.emit(&events.LLMStart{
 			RunId:     ac.RunId, // 事件自包含：多并发 agent 归属
 			Model:     ev.Model,
 			RequestId: ev.RequestId,
@@ -2072,7 +2100,7 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 			EventType: events.LLMStartType,
 		})
 	case provider.LLMContentDeltaEvent:
-		ac.Handler(ac.ctx, &events.ContentChunk{
+		ac.emit(&events.ContentChunk{
 			RunId:     ac.RunId,
 			RequestId: ev.RequestId,
 			Index:     ev.Index,
@@ -2081,7 +2109,7 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 			Timestamp: time.Now(),
 		})
 	case provider.LLMReasoningDeltaEvent:
-		ac.Handler(ac.ctx, &events.ReasoningChunk{
+		ac.emit(&events.ReasoningChunk{
 			RunId:     ac.RunId,
 			RequestId: ev.RequestId,
 			Index:     ev.Index,
@@ -2119,7 +2147,7 @@ func (a *AgentLoop) translate(ac *AgentContext, e provider.StreamEvent, received
 			u := usage
 			usagePtr = &u
 		}
-		ac.Handler(ac.ctx, &events.LLMEnd{
+		ac.emit(&events.LLMEnd{
 			RunId:        ac.RunId, // 事件自包含：用量按 run 归集
 			Content:      ev.Content,
 			Reasoning:    ev.Reasoning,
@@ -2272,7 +2300,7 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 	if forced {
 		reason = "manual"
 	}
-	ac.Handler(ac.ctx, &events.CompressStart{Before: before, Reason: reason, RunId: ac.RunId, Timestamp: time.Now(), EventType: events.CompressStartType})
+	ac.emit(&events.CompressStart{Before: before, Reason: reason, RunId: ac.RunId, Timestamp: time.Now(), EventType: events.CompressStartType})
 	result, err := a.cfg.Compressor.Compact(ac.ctx, messages)
 	if err != nil {
 		// 失败退避（R3/C3.2）：记录退避截止，窗口内不再自动重试
@@ -2289,7 +2317,7 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 			failUsage = &u
 		}
 		// 失败降级：保持原上下文（绝不丢消息），错误经事件暴露，下轮再试
-		ac.Handler(ac.ctx, &events.CompressEnd{
+		ac.emit(&events.CompressEnd{
 			Before: before,
 			After:  before,
 			Reason: reason,
@@ -2354,7 +2382,7 @@ func (a *AgentLoop) maybeCompact(ac *AgentContext, opts *RunOptions, forced bool
 	if !result.FailedUsage.IsZero() {
 		evUsage = evUsage.Add(result.FailedUsage)
 	}
-	ac.Handler(ac.ctx, &events.CompressEnd{
+	ac.emit(&events.CompressEnd{
 		Before: before,
 		After:  len(ac.Messages),
 		Reason: reason,
