@@ -63,6 +63,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -104,22 +105,150 @@ func compressBlock(payload []byte) ([]byte, bool) {
 	return out, true
 }
 
+// —— 解压上下文池 ——
+//
+// 一次「打开大会话」要解压上千个块（实测 2026-11-18：1971 块 / 输出 100.3MB）。
+// 每块各造一个 zlib reader + 一次 io.ReadAll，代价有两处：
+//
+//  1. **zlib.NewReader ⇒ 新的 flate 解码器** ⇒ 每次重新分配 LZ77 的 32KB 滑窗
+//     （实测 compress/flate 累计 219MB）。
+//  2. **io.ReadAll 从 512B 起倍增扩容**，每一步都抛弃旧数组 ⇒ 实测总分配
+//     **897MB**（真实输出的 8.9 倍），而最终只留下 58MB。
+//
+// 改法（2026-11-18，bridge 内存爬山第 1 步）：
+//
+//   - zlib reader 池化 —— `zlib.Resetter.Reset` **复用** flate 的 hist 窗口
+//     （Go 源码 compress/flate/dict_decoder.go 的 init：`cap(hist) < size` 才重分配）
+//     ⇒ 解码器状态跨块复用；
+//   - 输出缓冲池化 —— 稳态**零分配**（缓冲跨块复用，不再倍增）；
+//   - 交付时拷一份**精确大小**的 ⇒ 调用方独占，倍增留下的余量一并丢掉。
+//
+// 语义不变：返回的仍是「解压后的完整字节」，调用方照旧独占。
+type decompCtx struct {
+	// zr 是 zlib 的 reader（具体类型未导出，但它同时实现了 zlib.Resetter ⇒ 可复位复用）。
+	zr  io.ReadCloser
+	buf []byte
+}
+
+// decompPool 解压上下文池（zlib reader + 输出缓冲，整体一个）。
+var decompPool = sync.Pool{
+	New: func() any {
+		c := &decompCtx{buf: make([]byte, 0, 256<<10)}
+		if zr, err := newResettableZlib(); err == nil {
+			c.zr = zr
+		}
+		return c
+	},
+}
+
+// emptyZlibStream 是一个**空的 zlib 流**（用标准库自己生成 ⇒ 不依赖任何魔数）。
+//
+// 用途：newResettableZlib 用它造出「可 Reset」的 reader 实例。
+// 为什么全局生成一次：zlib.NewWriter 一次要 ~1.1MB（flate 的 hash 表 + 窗口），
+// 而 sync.Pool 的条目会被 GC 清掉 ⇒ 每次新建都付 1.1MB 纯属浪费。
+var emptyZlibStream = func() []byte {
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	_, _ = zw.Write(nil)
+	_ = zw.Close()
+	return buf.Bytes()
+}()
+
+// newResettableZlib 造一个**可 Reset** 的 zlib reader。
+func newResettableZlib() (io.ReadCloser, error) {
+	zr, err := zlib.NewReader(bytes.NewReader(emptyZlibStream))
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := zr.(zlib.Resetter); !ok {
+		return nil, fmt.Errorf("zlib: reader 不支持 Reset")
+	}
+	return zr, nil
+}
+
+// decompMaxKeep 归还池的输出缓冲上限：超大块（>4MB，典型是 base64 图片块）
+// 不留在池里 —— 否则一个巨无霸会长期占着池。
+const decompMaxKeep = 4 << 20
+
 // decompressBlock 解开一个块的 payload。
 //
 // 输入不是合法 zlib 流时返回错误 —— 调用方据此把该块判为损坏
 // （与「摘要不符」同等处理）。
+//
+// 返回的字节由调用方**独占**（拷贝出来的精确大小，不引用池化缓冲）。
 func decompressBlock(payload []byte) ([]byte, error) {
-	r, err := zlib.NewReader(bytes.NewReader(payload))
+	c := decompPool.Get().(*decompCtx)
+	out, err := c.decompress(payload)
 	if err != nil {
+		decompPool.Put(c)
 		return nil, err
 	}
-	defer r.Close()
-	out, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	// 交出所有权：拷一份精确大小的（倍增扩容留下的余量也不要了）。
+	res := bytes.Clone(out)
+	c.release()
+	decompPool.Put(c)
+	return res, nil
 }
+
+// decompressBlockTransient 解压到**池化缓冲**并在回调期间交它使用。
+//
+// 回调返回后缓冲归池 ⇒ 调用方**不得**保留它（要留就用 decompressBlock）。
+// 给「只读一遍就不留」的路径用（后台清扫：逐块解压只为了算摘要）。
+func decompressBlockTransient(payload []byte, fn func([]byte) error) error {
+	c := decompPool.Get().(*decompCtx)
+	out, err := c.decompress(payload)
+	if err != nil {
+		decompPool.Put(c)
+		return err
+	}
+	err = fn(out)
+	c.release()
+	decompPool.Put(c)
+	return err
+}
+
+// decompress 把 payload 解到池化缓冲（结果在 release 之前有效）。
+func (c *decompCtx) decompress(payload []byte) ([]byte, error) {
+	if c.zr == nil {
+		zr, err := newResettableZlib()
+		if err != nil {
+			return nil, err
+		}
+		c.zr = zr
+	}
+	rs, ok := c.zr.(zlib.Resetter)
+	if !ok {
+		return nil, fmt.Errorf("zlib: reader 不支持 Reset")
+	}
+	if err := rs.Reset(bytes.NewReader(payload), nil); err != nil {
+		return nil, err
+	}
+	buf := c.buf[:0]
+	for {
+		if len(buf) == cap(buf) {
+			// 倍增扩容（同 io.ReadAll）：稳态下缓冲已足够大 ⇒ 不会走到这里。
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, rerr := c.zr.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return nil, rerr
+		}
+	}
+	c.buf = buf
+	return buf, nil
+}
+
+// release 决定缓冲要不要留在池里（超大的不留）。
+func (c *decompCtx) release() {
+	if cap(c.buf) > decompMaxKeep {
+		c.buf = nil
+	}
+}
+
 
 // blockKindCodeCompressed 取压缩块的**真实块类型**。
 //
