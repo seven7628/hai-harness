@@ -410,9 +410,9 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 	}
 	// 落盘提示（**只加在给模型的文本上**）：模型拿到路径就能分段读完整输出。
 	if spilled && spillPath != "" {
-		out = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s\n"+
+		out = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s (this path stays valid for %d hours; after that the file is cleaned up)\n"+
 			"Read it with read_file (start_line/end_line) or bash (head/grep/sed) to get the parts you need.]\n%s",
-			humanBytes(totalOut), spillPath, out)
+			humanBytes(totalOut), spillPath, int(spillFileTTL.Hours()), out)
 	}
 	// ⑦ 补齐产物事实（存在性/尺寸/指纹 → FileDiff）+ 结果文本里的显式告知。
 	return t.summarizeOutputs(ctx, out, outs), nil

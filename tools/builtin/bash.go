@@ -351,9 +351,9 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	// 位置：在超时/取消声明**之后**加 —— 那两条声明必须留在首行。
 	modelOut := out
 	if spilled && spillPath != "" {
-		modelOut = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s\n"+
+		modelOut = fmt.Sprintf("[OUTPUT TOO LARGE (%s) — full output saved to %s (this path stays valid for %d hours; after that the file is cleaned up)\n"+
 			"Read it with read_file (start_line/end_line) or bash (head/grep/sed) to get the parts you need.]\n%s",
-			humanBytes(totalOut), spillPath, out)
+			humanBytes(totalOut), spillPath, int(spillFileTTL.Hours()), out)
 	}
 	// 结构化结果（**仅脚本路径**）：与文本同源（同一份 out，含超时/取消首行声明），
 	// 只是上限放宽到 1 MiB 且带真实结局。引擎在 Call 成功后读走它 → 脚本里
@@ -444,11 +444,6 @@ func (t *BashTool) buildStructured(ctx context.Context, out string, exitCode int
 // 操作系统回收（与 slim 的 spill 同性质）。
 func (t *BashTool) spillFile(ctx context.Context, full string) string {
 	return t.spill.write(ctx, full)
-}
-
-// ensureSpillDir 惰性建落盘目录（0700，见 spillFile 的约定）；同实例复用同一个目录。
-func (t *BashTool) ensureSpillDir() (string, error) {
-	return t.spill.dirPath()
 }
 
 // reserveSpillPath 预留一个落盘路径（**文件由执行层按需创建** —— 输出没超阈值

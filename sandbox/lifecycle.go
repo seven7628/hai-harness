@@ -23,6 +23,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -166,6 +167,11 @@ func startBackgroundProcess(ctx context.Context, argv []string, cwd string, env 
 	}
 	if logPath == "" {
 		return nil, errors.New("sandbox: 后台进程必须有日志路径（BackgroundLog）")
+	}
+	// 日志目录按需创建（工具层的落盘目录是「不预建」的，见 tools/builtin/spill.go：
+	// 没发生溢出的调用不留空壳目录 ⇒ 这里第一次真要写日志时才建）。
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return nil, err
 	}
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {

@@ -83,3 +83,56 @@ func TestSweepSpillDirKeepsDirectoryEntries(t *testing.T) {
 		t.Errorf("子目录不该被删: %v", err)
 	}
 }
+
+// TestSweepSpillRootRemovesExpiredSessionDirs 会话目录按 TTL 回收。
+//
+// 钉住「**会话级**」的语义（2026-11-18 资源有界化第 2 步）：根目录下的每个
+// 会话目录都被扫一遍 —— 新鲜文件留着（模型读得到）、过期文件删、空目录删。
+//
+// 为什么值得单独测：改造前清扫的触发点挂在 **Engine** 上（只在「又写了一个新
+// 文件」时才扫）⇒ 会话一死，最后一次清扫永远不发生 ⇒ 会话目录永久留下
+// （实测 72 个 / 15MB）。现在触发点挂在**会话**上（宿主显式调 SweepSpillRoot）。
+func TestSweepSpillRootRemovesExpiredSessionDirs(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+
+	// ① 有新鲜文件的会话目录 ⇒ 保留（模型可能还要读那个路径）。
+	keep := filepath.Join(root, "sess-fresh")
+	if err := os.MkdirAll(keep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSpillFile(t, keep, "spill-a.txt", 1024, now.Add(-time.Hour))
+
+	// ② 全是过期文件的会话目录 ⇒ 删。
+	expired := filepath.Join(root, "sess-expired")
+	if err := os.MkdirAll(expired, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSpillFile(t, expired, "spill-b.txt", 1024, now.Add(-48*time.Hour))
+
+	// ③ 空目录 ⇒ 删（空壳）。
+	empty := filepath.Join(root, "sess-empty")
+	if err := os.MkdirAll(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	SweepSpillRoot(root)
+
+	// 清扫是异步的 ⇒ 轮询等它落地。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, keepErr := os.Stat(keep)
+		_, expiredErr := os.Stat(expired)
+		_, emptyErr := os.Stat(empty)
+		if keepErr == nil && os.IsNotExist(expiredErr) && os.IsNotExist(emptyErr) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("清扫未生效：keep=%v expired=%v empty=%v", keepErr, expiredErr, emptyErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(keep, "spill-a.txt")); err != nil {
+		t.Fatalf("TTL 内的文件必须留着（模型读得到）: %v", err)
+	}
+}
