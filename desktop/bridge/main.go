@@ -7964,6 +7964,13 @@ func sweepSessionFilesInBackground() {
 	// 最多多扫一遍，不会写坏数据。版本变了（清扫逻辑改了）→ 旧指纹全部
 	// 作废 → 触发一次全量。
 	ix := session.OpenSweepIndex(filepath.Join(appDataDir(), "checkpoint_sweep.json"), session.SweepIndexVersion)
+	// 死字节回收用**独立索引**（见下面的说明：两者都按 sidecar 路径记指纹）。
+	cix := session.OpenSweepIndex(filepath.Join(appDataDir(), "checkpoint_sweep_compact.json"), session.SweepIndexVersion)
+	defer func() {
+		if err := cix.Flush(); err != nil {
+			fmt.Fprintln(os.Stderr, "sweep compact index: 落盘失败:", err)
+		}
+	}()
 	// 清扫结束把内存还给 OS。
 	//
 	// 这一轮是启动期**唯一的堆峰值来源**（实测冲到 3 GB，其中 2.8 GB 被系统
@@ -7996,6 +8003,21 @@ func sweepSessionFilesInBackground() {
 		fmt.Fprintf(os.Stderr, "[checkpoint] 压缩 sidecar: %d 个文件（%d 个重写，跳过 %d）%.1fMB → %.1fMB（压缩 %d/%d 块），用时 %s\n",
 			cres.Files, cres.Rewritten, cres.Skipped, float64(cres.Before)/1e6, float64(cres.After)/1e6,
 			cres.Blocks, cres.BlocksTotal, cres.Elapsed.Round(time.Millisecond))
+	}
+	// sidecar 死字节回收（2026-11-19，爬 3）：把「同一 id 的历史版本」扔掉。
+	//
+	// 实测：一个大会话 828.7MB 里只有 111.2MB 是活的（**死字节 86.6%**）。
+	// 回收机制本来就有（needsCompactAt），但**只在提交时触发** ⇒ 冷会话没人管。
+	//
+	// 用**独立索引**（不与压缩清扫共用）：两者都按 sidecar 路径记指纹，
+	// 共用会互相「清过且没动过 ⇒ 跳过」⇒ 一方刚标过，另一方就再也不会碰这个文件。
+	cres2, cerr2 := session.SweepBlockStoreDeadBytes(root, session.SweepCompactMinBytesDefault, sweepPause, cix)
+	if cerr2 != nil {
+		fmt.Fprintln(os.Stderr, "sweep compact: 失败:", cerr2)
+	} else if cres2.Files > 0 || cres2.OrphanTmp > 0 || cres2.VerifyErr > 0 {
+		fmt.Fprintf(os.Stderr, "[checkpoint] 回收 sidecar 死字节: %d 个文件 %.1fMB → %.1fMB（省 %.1fMB），孤儿 tmp %d 个，校验失败 %d 个，用时 %s\n",
+			cres2.Files, float64(cres2.Before)/1e6, float64(cres2.After)/1e6, float64(cres2.Saved())/1e6,
+			cres2.OrphanTmp, cres2.VerifyErr, cres2.Elapsed.Round(time.Millisecond))
 	}
 	// record 清扫（P3-1）：与上面同一把限速思路，独立失败互不影响。
 	rres, rerr := session.SweepRecordFiles(root, sweepPause, ix)
