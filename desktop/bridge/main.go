@@ -583,6 +583,28 @@ func (bs *bridgeSession) logEventLine(line []byte) {
 	if bytes.Contains(line, []byte(`"event_type":"agent_end"`)) {
 		line = stripTopLevelField(line, "tool_calls")
 	}
+	// llm_end 的 tool_calls（2026-11-19，爬 2）：**模型本轮请求的工具调用**。
+	//
+	// 为什么它是纯冗余：它与 `tool_run_start.arguments` **同源**（同一批调用的参数，
+	// 逐字相同 —— provider 原文 vs SDK 重序列化），而 tool_run_start 那份**被 reducer
+	// 消费**（工具块的参数展示）⇒ 只能裁 llm_end 这一份。
+	//
+	// 全仓库零消费方（2026-11-19 逐处核对）：reducer 对 `.ToolCalls` **零引用**；
+	// trace / memory / cron 零引用；前端只读 `typeof raw.tool_calls === 'number'`
+	//（那是 AgentEnd 的**计数**字段，不是数组）。
+	// 实测体量：最近 6 个会话的事件文件（1.6GB）里，llm_end.tool_calls 占
+	// **153.6MB = 9.4%** ⇒ 裁掉即止住事件日志 9% 的增速。
+	//
+	// **不影响 checkpoint / 会话恢复**：落盘裁剪只动文件；reducer 吃的是实时流
+	// （stdout 那一份**保留**），且本来就不看这个字段。
+	// 等价性由 events_toolcalls_equivalence_test.go 钉住（重放两条路 ⇒ checkpoint
+	// 字节必须相同）。
+	//
+	// 成本：每条 llm_end 多一次顶层扫描（实测 1867ns / 365MB/s，见
+	// events_strip_bench_test.go）—— 落盘路径，可接受。
+	if bytes.Contains(line, []byte(`"event_type":"llm_end"`)) {
+		line = stripTopLevelField(line, "tool_calls")
+	}
 	dir := bs.eventsDir
 	if bs.cronEvDir != "" {
 		dir = bs.cronEvDir
