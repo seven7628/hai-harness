@@ -11,6 +11,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/larksuite/oapi-sdk-go/v3 v3.11.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+	golang.org/x/sys v0.35.0
 	gopkg.in/yaml.v3 v3.0.1
 	nhooyr.io/websocket v1.8.17
 )
@@ -28,7 +29,6 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/sync v0.16.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
 )
 
 require (

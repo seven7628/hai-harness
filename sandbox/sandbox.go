@@ -481,9 +481,9 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 // isolatedEnv 最小环境白名单：PATH/HOME/LANG/TERM/TMPDIR + 代理变量。
 // agent 进程的全部其他环境变量（可能含密钥/token）不传给命令。
 func isolatedEnv() []string {
-	// 容量一次给足（5 个固定项 + 6 个代理变量）：append 扩容会**整体拷贝**，
+	// 容量一次给足（5 个固定项 + 6 个代理变量 + 1 个执行标记）：append 扩容会**整体拷贝**，
 	// 实测原来 3 次分配 / 1128 B ⇒ 改成 1 次分配 / 约 640 B（第 4 轮爬山第 9 步）。
-	env := make([]string, 0, 11)
+	env := make([]string, 0, 12)
 	env = append(env,
 		"PATH="+os.Getenv("PATH"),
 		"HOME="+os.Getenv("HOME"),
@@ -494,6 +494,9 @@ func isolatedEnv() []string {
 		// TMPDIR —— macOS 默认 /var/folders/... 在 Seatbelt 沙箱内未放行写 → EPERM。
 		// /tmp 在 NoSandbox 全局可写、Seatbelt 已放行 file-write*（见 seatbelt_darwin.go）。
 		"TMPDIR=/tmp",
+		// 执行标记（逃逸者兜底的认领依据；见 orphan.go）：后代继承它 ⇒ setsid /
+		// 双重 fork 逃出去的进程仍带标记 ⇒ 清扫器能认领并收掉它。
+		execIDEnvVar+"="+newExecID(),
 	)
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
 		if v := os.Getenv(k); v != "" {

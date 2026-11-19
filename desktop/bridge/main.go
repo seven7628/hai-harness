@@ -1612,6 +1612,10 @@ type manager struct {
 	// previewSweeper 预览缓存的**运行期**周期清扫器（2026-11-18 资源有界化第 3 步）。
 	// 零值可用（manager 由多处字面量构造）—— nil = 没起周期清扫。
 	previewSweeper *previewCacheSweeper
+	// orphanSweeper 逃逸者兜底清扫器（2026-11-18 资源有界化第 5 步）：扫出
+	// 「父进程已死 + 带我们执行标记」的孤儿并收掉（组杀够不着的那一类）。
+	// 零值可用 —— nil = 没起兜底清扫。
+	orphanSweeper *sandbox.OrphanSweeper
 	// hookTrust 进程内共享的 hooks 信任库（~/.go-code/hooks-state.json；懒读一次，
 	// 见 hookTrustStore）。**必须共享同一实例**：信任判定发生在每次派发时，面板的
 	// hooks_trust 写的就是它 —— 否则新信任要重建会话才生效（契约 §5.5 要求即刻生效）。
@@ -4804,6 +4808,7 @@ func (m *manager) dispatch(c command) {
 			m.stopFileWatches() // 进程级：停编辑器目录监听（等 goroutine 退出）
 			m.stopSurfaceWatch()
 			m.previewSweeper.stop() // 进程级：停预览缓存的周期清扫（等 goroutine 退出）
+			m.orphanSweeper.Stop()  // 进程级：停逃逸者兜底清扫（等 goroutine 退出）
 		}
 		m.resp(c, true, "", nil)
 
@@ -4904,6 +4909,8 @@ func (m *manager) shutdownAll() {
 	sandbox.Shutdown()
 	// 预览缓存的周期清扫协程收尾（进程级）。
 	m.previewSweeper.stop()
+	// 逃逸者兜底清扫协程收尾（进程级）。
+	m.orphanSweeper.Stop()
 	// 进程级单例的显式收尾（IM 连接不随工作区关闭而停，只能在这里停一次）
 	m.closeIMPlugin()
 	// Session Mesh 远程网关关闭（mesh 常驻 manager 级，不随工作区）
@@ -7455,6 +7462,9 @@ func serve() error {
 	// 运行期周期清扫（2026-11-18 第 3 步）：启动那一次扫完就**再也不扫**⇒
 	// 512MiB 的预算在运行期从不生效 ⇒ 桌面端连开一天，磁盘只增不减。
 	m.previewSweeper = startPreviewCacheSweeper(m.sweepPreviewCache)
+	// 逃逸者兜底清扫（第 5 步）：setsid / 双重 fork 逃出进程组的残留 ⇒ 组杀够不着
+	// ⇒ 靠「执行标记 + 父进程已死」认领并收掉（周期 60s）。
+	m.orphanSweeper = sandbox.StartOrphanSweeper()
 	go m.warmOfficeKit()     // R08d：kit 可用时预热一次（空转换，把 3–6s 冷启挪出首次转换）
 	// Browser 引擎开关：启动时读 settings.json 顶层 browser_engine（mcp|ego）。
 	m.refreshBrowserEngine()
