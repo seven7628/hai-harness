@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -187,22 +188,121 @@ func (m *manager) ptyCloseCmd(c command) {
 
 // —— ptyManager ——
 
-func (pm *ptyManager) create(workspace, sessionID string, cols, rows uint16) (*ptySession, error) {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		for _, cand := range []string{"/bin/zsh", "/bin/bash", "/bin/sh"} {
-			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-				shell = cand
-				break
+// resolveLoginShell 选「用户系统上的那个 shell」，而不是写死 /bin/zsh。
+//
+// 三级取值，与真终端一致：
+//  1. `$SHELL` —— 登录会话导出的用户 shell（最快，也最贴近 iTerm2 的行为）；
+//  2. `dscl . -read /Users/<user> UserShell` —— GUI 启动的应用常常**没有** SHELL
+//     （launchd 的默认环境很干净），而用户实际登录 shell 仍记录在目录服务里；
+//  3. 依次探测 /bin/zsh → /bin/bash → /bin/sh（都存在才用，最后才退到 sh）。
+//
+// 只有前三步都拿不到可用路径时才报错 —— 也就是「用户系统上没有 shell」这种极端情况。
+func resolveLoginShell() (string, error) {
+	candidates := make([]string, 0, 4)
+	if sh := strings.TrimSpace(os.Getenv("SHELL")); sh != "" {
+		candidates = append(candidates, sh)
+	}
+	if user := os.Getenv("USER"); user != "" {
+		// dscl 输出形如 `UserShell: /bin/zsh`；失败就跳过（不是每台机器都有 dscl）。
+		if out, err := exec.Command("dscl", ".", "-read", "/Users/"+user, "UserShell").Output(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if i := strings.Index(line, "UserShell:"); i >= 0 {
+					candidates = append(candidates, strings.TrimSpace(line[i+len("UserShell:"):]))
+				}
 			}
 		}
 	}
-	if shell == "" {
-		return nil, errors.New("找不到可用 shell")
+	candidates = append(candidates, "/bin/zsh", "/bin/bash", "/bin/sh")
+	for _, cand := range candidates {
+		if cand == "" {
+			continue
+		}
+		st, err := os.Stat(cand)
+		if err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return cand, nil
+		}
 	}
-	cmd := exec.Command(shell, "-i")
+	return "", errors.New("找不到可用 shell（$SHELL / dscl UserShell / /bin/{zsh,bash,sh} 均不可用）")
+}
+
+// termEnv 组出「像真终端那样」的环境变量。
+//
+// 为什么不能只 `append(os.Environ(), ...)`：Electron 是 GUI 进程，环境比终端里干净得多。
+// 实测缺三样东西，恰好都是 shell 配置最依赖的：
+//
+//	· PATH 没有 Homebrew（/opt/homebrew/bin）⇒ `brew`、`starship`、`zoxide` 全部 command not found，
+//	  .zshrc 里的 `eval "$(starship init zsh)"` 静默失败 ⇒ 看起来就是「没加载用户配置」；
+//	· LANG/LC_CTYPE 可能为空 ⇒ zsh 进非 UTF-8 模式，中文与 Nerd 图标变问号；
+//	· SHELL 缺失 ⇒ 某些 rc 脚本里 `exec $SHELL`、`$SHELL -l` 这类写法直接崩。
+//
+// 只**补缺**，不覆盖用户已有的值（用户显式设了 LANG=zh_CN.UTF-8 就尊重他）。
+func termEnv(shell string) []string {
+	env := os.Environ()
+	has := func(k string) (string, bool) {
+		prefix := k + "="
+		for _, kv := range env {
+			if strings.HasPrefix(kv, prefix) {
+				return strings.TrimPrefix(kv, prefix), true
+			}
+		}
+		return "", false
+	}
+	set := func(k, v string) {
+		prefix := k + "="
+		for i, kv := range env {
+			if strings.HasPrefix(kv, prefix) {
+				env[i] = prefix + v
+				return
+			}
+		}
+		env = append(env, prefix+v)
+	}
+
+	// 空串等同缺失：`SHELL=` 这种形态在 GUI 进程里很常见（launchd 默认环境）。
+	if v, ok := has("SHELL"); !ok || v == "" {
+		set("SHELL", shell)
+	}
+	set("TERM", "xterm-256color")
+	set("COLORTERM", "truecolor")
+	// 终端身份：让 rc 里 `[[ $TERM_PROGRAM == iTerm.app ]]` 这类判断走 else 分支，
+	// 而不是被误判成 iTerm2（我们不是 iTerm2，冒充会引出它家的 shell integration）。
+	if v, ok := has("TERM_PROGRAM"); !ok || v == "" {
+		set("TERM_PROGRAM", "hai-desktop")
+	}
+	for _, k := range []string{"LANG", "LC_CTYPE"} {
+		if v, ok := has(k); !ok || v == "" {
+			set(k, "en_US.UTF-8")
+		}
+	}
+	// PATH 补仓：只在缺失时前置，保持用户原有顺序与优先级。
+	if p, ok := has("PATH"); !ok || p == "" {
+		set("PATH", "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	} else {
+		extra := []string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"}
+		add := make([]string, 0, len(extra))
+		for _, dir := range extra {
+			if !strings.Contains(":"+p+":", ":"+dir+":") {
+				add = append(add, dir)
+			}
+		}
+		if len(add) > 0 {
+			set("PATH", strings.Join(add, ":")+":"+p)
+		}
+	}
+	return env
+}
+
+func (pm *ptyManager) create(workspace, sessionID string, cols, rows uint16) (*ptySession, error) {
+	shell, err := resolveLoginShell()
+	if err != nil {
+		return nil, err
+	}
+	// `-l -i`：**登录 + 交互**，与 iTerm2 的默认「Login shell」一致。
+	// 只 `-i` 会跳过 /etc/zprofile 与 ~/.zprofile（Homebrew shellenv 常写在那里），
+	// 于是 PATH 少了 /opt/homebrew/bin —— 用户看到的就是「配置没加载」。
+	cmd := exec.Command(shell, "-l", "-i")
 	cmd.Dir = workspace
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	cmd.Env = termEnv(shell)
 
 	mf, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})
 	if err != nil {

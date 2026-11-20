@@ -142,7 +142,13 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(host)
+    // 必须显式聚焦：xterm 的输入走内部 textarea，不聚焦时按键**全部丢弃**（不报错、不提示）。
+    // 2026-11-20 用户报「开了终端不能打字」就是这个：面板画得出来、提示符也在，但输不进去。
+    term.focus()
     termRef.current = term
+    // 点到面板任何空白处（含滚动条区域、覆盖层之外的边距）也回到输入态。
+    const onMouseDown = () => term.focus()
+    host.addEventListener('mousedown', onMouseDown)
 
     const writer = terminalWriter((data: Uint8Array, done: () => void) => term.write(data, done))
 
@@ -220,7 +226,10 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
       sendRef.current = (d) => {
         if (sock.readyState === WebSocket.OPEN) sock.send(d)
       }
-      sock.onopen = () => apply({ t: 'ws-open' })
+      sock.onopen = () => {
+        apply({ t: 'ws-open' })
+        term.focus() // 建连期间焦点可能被别处抢走，连上再收一次
+      }
       sock.onmessage = (ev) => {
         const { ctrl, data } = decodeFrame(ev.data)
         if (ctrl) {
@@ -267,6 +276,7 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
       ro.disconnect()
       offTheme()
       host.removeEventListener('keydown', onKeyDown)
+      host.removeEventListener('mousedown', onMouseDown)
       writer.clear()
       sockRef.current?.close()
       sockRef.current = null
@@ -334,6 +344,35 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
             }}
           >
             {t('term.menu.screen')}
+          </button>
+          <div className="term-menu-sep" role="separator" />
+          <button
+            role="menuitem"
+            onClick={() => {
+              setMenu(null)
+              // 诊断「我们这条 PTY 到底加载了什么」：答案只能在 shell 内部取（登录/交互标志、
+              // 是否读到 rc、PATH 里有没有 brew、Nerd 字体是否可用），所以在当前会话里直接跑。
+              // 输出留在终端里，用户可以直接选中引给 Agent。
+              const q = (s: string) => `$([ -${s} ] && echo yes || echo no)`
+              const script = [
+                'echo "── 终端环境诊断 ──"',
+                'echo "shell      : $0"',
+                `echo "login      : ${q('o login')}   interactive: ${q('o interactive')}"`,
+                'echo "TERM       : $TERM   COLORTERM: $COLORTERM"',
+                'echo "LANG/CTYPE : $LANG / $LC_CTYPE"',
+                'echo "TERM_PROGRAM: $TERM_PROGRAM"',
+                'echo "PATH       : $PATH"',
+                'echo "brew/git   : $(command -v brew || echo 缺失) / $(command -v git || echo 缺失)"',
+                'echo ".zshrc     : $([ -r ~/.zshrc ] && echo 存在 || echo 缺失)   .zprofile: $([ -r ~/.zprofile ] && echo 存在 || echo 缺失)"',
+                'echo ".p10k.zsh  : $([ -r ~/.p10k.zsh ] && echo 存在 || echo 缺失)   ZSH_THEME: ${ZSH_THEME:-（未设置）}"',
+                'echo "p10k 已加载: $(typeset -f p10k >/dev/null 2>&1 && echo yes || echo no)"',
+                'echo "字体(私用区): \\uE0B0 \\uF126 （若显示为方框=缺 Nerd Font）"',
+                'echo "── 完 ──"',
+              ].join('; ')
+              sendRef.current(script + '\n')
+            }}
+          >
+            {t('term.menu.diag')}
           </button>
           <div className="term-menu-sep" role="separator" />
           <button
