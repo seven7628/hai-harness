@@ -26,7 +26,7 @@ type ContextDescriber interface {
 // 每个工具单独看都"对"）。
 //
 // ⚠️ 这是**装配断言**用的接口，不是业务接口：业务上工具之间不靠它通信
-//（通信走 ctx 上的分区键，见 workdir.KeyFrom）。
+// （通信走 ctx 上的分区键，见 workdir.KeyFrom）。
 type WorkdirAware interface {
 	WorkdirState() *workdir.State
 }
