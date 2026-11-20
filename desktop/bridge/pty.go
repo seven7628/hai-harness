@@ -408,7 +408,21 @@ func (s *ptyServer) handlePty(w http.ResponseWriter, r *http.Request) {
 	// 握手：hello 不改变前端状态、无副作用（paneMachine.ts case "hello"）。
 	_ = c.Write(ctx, websocket.MessageBinary, encodeCtrl(map[string]any{"t": "hello"}))
 
-	// 已退出的会话：直接补一条 exit 控制帧再关。
+	// reset **必须发**，且必须在第一个数据帧之前（TERMINAL_BRIDGE_SPEC §4：
+	// `hello → (gap)? → reset → 历史输出… → 实时输出`）。
+	//
+	// 2026-11-20 修：此前只发了 hello，漏了 reset。前端的 paneMachine 里
+	// `connecting --reset--> replaying --output--> live` 是唯一通往 live 的路径，
+	// 所以缺这一帧的后果是：PTY 建好了、shell 起来了、字节也在回流，面板却**永远**
+	// 停在「正在启动 shell…」（state 卡在 connecting）。这条链路后端无法自证，
+	// 是用户报「一直启动中」后才反查出来的。
+	//
+	// 本实现没有环形回放缓冲（不带历史），reset 对用户是无可感知的清屏空操作；
+	// 将来加 pty_history 时，它正好就是「回放前清屏」的原位插入点。
+	_ = c.Write(ctx, websocket.MessageBinary, encodeCtrl(map[string]any{"t": "reset"}))
+
+	// 已退出的会话：补一条 exit 控制帧再关。顺序同样在 reset 之后 —— 前端只有在
+	// replaying/live 才认 exit，先 reset 才能让它进入可接收状态。
 	sess.mu.Lock()
 	exited, code := sess.exited, sess.exitCode
 	sess.mu.Unlock()

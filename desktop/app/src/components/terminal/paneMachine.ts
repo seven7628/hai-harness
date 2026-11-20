@@ -97,7 +97,10 @@ export function next(state: PaneState, ev: PaneEvent): { state: PaneState; fx: P
       if (state.s === 'replaying') return { state: { s: 'live', ptyId: state.ptyId }, fx: [{ k: 'show' }] }
       break
     case 'exit':
-      if (state.s === 'live') {
+      // replaying 也认：已退出的会话在**建连时**就会收到 `hello → reset → exit`
+      //（后端的退出分支，见 pty.go handlePty）。只认 live 的话，这种会话会停在
+      // replaying=「正在恢复历史…」，又是一个永久的假加载态。
+      if (state.s === 'live' || state.s === 'replaying') {
         return { state: { s: 'exited', ptyId: state.ptyId, code: ev.code }, fx: [{ k: 'close-socket' }] }
       }
       break

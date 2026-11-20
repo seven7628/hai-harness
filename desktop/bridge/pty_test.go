@@ -5,8 +5,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 func TestPtyCtrlFrameRoundTrip(t *testing.T) {
@@ -140,4 +143,57 @@ func TestPtyLiveEcho(t *testing.T) {
 		}
 	}
 	t.Fatalf("未在 PTY 输出中看到回显标记，已收 %d 字节: %q", len(seen), string(seen))
+}
+// TestPtyHandshakeFrameOrder 钉住 WS 建连后的**控制帧顺序**：
+//
+//	hello → reset →（数据帧…）
+//
+// 为什么值得一条独立用例：前端的 paneMachine 里 `connecting --reset--> replaying
+// --output--> live` 是通往 live 的**唯一**路径。后端漏发 reset 时，PTY 建得好、字节也在
+// 回流，面板却永远停在「正在启动 shell…」—— 2026-11-20 线上就是这个症状（后端此前只发
+// hello）。这条断言把「契约要求发」变成「构建会红」。
+func TestPtyHandshakeFrameOrder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("跳过真实 PTY 用例（-short）")
+	}
+	pm := &ptyManager{sessions: map[string]*ptySession{}, tickets: map[string]ptyTicket{}}
+	defer pm.shutdown()
+	sess, err := pm.create(t.TempDir(), "", 80, 24)
+	if err != nil {
+		t.Skipf("本机无法分配 PTY，跳过: %v", err)
+	}
+	srv, err := pm.ensureServer()
+	if err != nil {
+		t.Fatalf("起 WS 服务器: %v", err)
+	}
+	tk, err := pm.issueTicket(sess.id)
+	if err != nil {
+		t.Fatalf("发票: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws://"+srv.addr+"/pty?ticket="+tk, nil)
+	if err != nil {
+		t.Fatalf("拨号: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	want := []string{"hello", "reset"}
+	for i, w := range want {
+		typ, data, rerr := c.Read(ctx)
+		if rerr != nil {
+			t.Fatalf("读第 %d 帧: %v", i+1, rerr)
+		}
+		if typ != websocket.MessageBinary {
+			t.Fatalf("第 %d 帧应为二进制，实得 %v", i+1, typ)
+		}
+		ctrl, _ := decodeFrame(data)
+		if ctrl == nil {
+			t.Fatalf("第 %d 帧应为控制帧，实得 %q", i+1, string(data))
+		}
+		if got := asString(ctrl["t"]); got != w {
+			t.Fatalf("第 %d 帧应为 %q，实得 %q", i+1, w, got)
+		}
+	}
 }

@@ -143,3 +143,9 @@ test('纯函数：任何转移都不改入参', () => {
   next(connecting, { t: 'close' })
   assert.deepEqual(connecting, snapshot)
 })
+
+test('replaying + exit → exited（建连时才发现会话已退出）', () => {
+  const r = next(replaying, { t: 'exit', code: 3 })
+  assert.deepEqual(r.state, { s: 'exited', ptyId: 'p1', code: 3 })
+  assert.deepEqual(r.fx, [{ k: 'close-socket' }])
+})
