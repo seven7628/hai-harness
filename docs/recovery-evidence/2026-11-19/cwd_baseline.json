@@ -1,0 +1,10 @@
+{
+  "sessions": 500,
+  "bash_total": 494015,
+  "cd_prefix": 357202,
+  "cd_compound": 356083,
+  "redundant_cd": 299403,
+  "cd_prefix_ratio": 0.7230590164266267,
+  "cd_compound_ratio": 0.7207939030191391,
+  "redundant_cd_ratio": 0.606060544720302
+}

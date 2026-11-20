@@ -22,7 +22,69 @@ _重建于 2026-11-20 01:10。_
 | 技术方案 · 代码级改动 | ✅ 177 段代码块 | 补丁脚本 rep() |
 | 评估 · 依赖选型 / Review 清单 | ✅ 表格 + 全文 | §21.14 / §24 |
 | 测试 · CodeMode / 选区 | ✅ 全文 | §22.8 / §23.8 |
-| 调研对比（元文档） | ❌ 【待补】 | 你手上的元文档 |
+| 调研对比（元文档） | ✅ 元设计 + 对照表 | `ARTIFACTS_META_DESIGN.md` + §0.2 |
+
+---
+
+---
+
+# 第零部分 · 元设计基线（调研与通用设计）
+
+> 来源：用户提供的元文档《Agent 产物系统完整设计：预览、判定、选区改稿与画布》
+> （全文见同目录 `ARTIFACTS_META_DESIGN.md`，355 行）。它是不依赖本项目的通用设计，
+> 下面只摘出与本项目落地直接相关的骨架，并给出**逐条对照**。
+
+## 0.1 元文档的核心结论（摘录）
+
+| 主题 | 元文档结论 |
+|---|---|
+| 变更检测 | **钩子负责归因，快照 diff 负责完整性**；以快照结果为准 |
+| 产物判定 | 四层：**工具声明是契约 → 目录约定覆盖 bash/Python → 规则评分兜底 → 用户纠正** |
+| 产物定义 | **产物 = 入口 + 依赖闭包**；生成脚本不是产物但记 provenance |
+| 协议分层 | A Agent Tools / B 页面协议 / C 生命周期钩子 / D 上下文注入，四类各有传输与是否进模型 |
+| 选区 | **服务时注入 `data-src`**，磁盘源码保持干净；选区必须带 versionId |
+| 安全 | 选中页面文本是**不可信数据**，必须放 `<selection>` 并声明为数据 |
+| 守卫 | 选区任务激活时，范围守卫挂在 `beforeToolCall`，不只校验 `artifact.edit` |
+| 存储 | SQLite + 内容哈希；版本只存 path → hash |
+| 落点规则 | 样式来源决定落点（inline / class / tailwind / token / 媒体查询） |
+| 降级 | 有 nid → 有 data-src → selector+指纹 → CDP，四级降级 |
+
+## 0.2 元文档 → 本项目落地对照
+
+> 依据来自恢复出的 §21（文件布局/改动点）、§22（CodeMode）、§23（选区协议）与 177 段代码块。
+> 「落地」列的每一项都能在恢复材料中找到出处。
+
+| # | 元文档设计 | 本项目落地 | 一致/偏离 | 证据 |
+|---|---|---|---|---|
+| 1 | `artifact.publish` 工具 | `artifact_publish`（**线上名一律下划线**） | 一致（命名改了下划线） | §22.1 |
+| 2 | `artifact.promote` / `edit` / `export` | 同名工具，同样下划线 | 一致 | 工具替换表 |
+| 3 | `artifact.edit` 必带 `base_version` | `base.version(…)/base.lock(id)/base.readVersionFile` | 一致（做成公共能力） | 工具替换表 |
+| 4 | 预览服务：本地只读 + 随机令牌 + 校验 Host | `artifactPageRef{Workspace,SessionID,ArtifactID,Version}` + 路径带签名 `h.sign(id,version)` | 一致（改为签名路径而非 cookie） | `patch_ws.py` 代码块 |
+| 5 | 路径安全：realpath 后比对前缀 | 见「路径里必须带 wsKey」——artifact id 与 version **都不是全局唯一**，只按 id+version 建索引会让大文件跨工作区串读 | **本项目更严**（这正是元文档没提到的坑） | `patch_ws.py` |
+| 6 | 变更检测：钩子 + 快照 diff | `agents/agent_loop.go-5`：**收尾合并快照 + 声明 + 分类** | 一致 | §21 标题 |
+| 7 | 产物判定四层 | `filterNoiseArtifacts`（**有死代码待清理**）+ `subagent/subagent.go` 产物声明表**继承** | 一致 + 新增「子 agent 继承声明表」 | §21.16 / 散文行 |
+| 8 | 选区协议 `selection.commit` | `desktop/bridge/selection_refs.go`（新增全文）+ `selection_guard.go` | 一致 | §23.2 |
+| 9 | 8 种引用类型（节点/区域/整体） | element / elements / text / comment / region / page / artifact / file | 一致（元文档为设计稿，本项目定型为 8 种） | §23.1b 表格 |
+| 10 | `<selection>` 是数据不是指令 | §23.3 同名章节：`<user_instruction>` 才是指令 | 一致 | §23.3 |
+| 11 | 守卫挂 `beforeToolCall` | `newSelectionScope()` **常驻安装**（active=false 时零成本放行），避免「先发消息再点选区」的窗口期 | **本项目更严** | `patch_doc.py` 代码块 |
+| 12 | 失效与漂移：用 fingerprint 重定位 | §23.5 失效与漂移 | 一致 | §23.5 |
+| 13 | `designsystem.get` 按需取 | `designsystem_get` 读的是**当前**工作区设计系统，**不是某个版本内** | 一致 + 显式澄清作用域 | 工具替换表 |
+| 14 | 页面协议：MessageChannel + 来源校验 | `artifact_embed.go`：`//go:embed artifact_inspector.js` 注入 + `artifact_commands.go`(~230 行) | 实现方式不同（embed 注入而非 CDP） | N14 / N14b |
+| 15 | 通信：JSON-RPC 2.0 | 本项目走 **command_registry + IPC 命令**（`CmdAsk`/`CmdAskBatch` 等），非 JSON-RPC | **明确偏离** | §21.10 |
+| 16 | 导出：PDF/PNG/PPTX/Markdown | `artifact_export`，基于 version 快照 | 一致 | 工具替换表 |
+| 17 | CodeMode 下工具可编排 | §22 全文：9 个工具在脚本内可调、结构化结果、per-artifact 串行、目录预算 | **元文档未覆盖，本项目新增** | §22 |
+| 18 | `autoOpen: always/ask/never` | 恢复材料中未出现 | 【待补】 | — |
+| 19 | 流式预览（parse5 + morphdom） | 恢复材料中未出现 | 【待补】 | — |
+| 20 | 画布与多 artboard | 恢复材料中未出现（元文档列为 Type 层能力） | 【待补】 | — |
+
+## 0.3 由对照得出的三条结论
+
+1. **主体一致**：协议分层、判定四层、选区即数据、守卫挂 beforeToolCall —— 本项目与元文档同构，
+   说明当初就是照这份元设计落地的。
+2. **两处本项目更严**：多工作区路径必须带 `wsKey`（否则跨工作区串读）；选区守卫常驻安装（消除窗口期）。
+   这两条是元文档没有、实践踩出来的。
+3. **一处明确偏离**：通信层没有采用 JSON-RPC 2.0，而是复用既有 `command_registry` + IPC。
+4. **两处本项目独有**：CodeMode 工具编排（§22 全节）；子 agent 产物声明表继承（§21.16）。
 
 ---
 
