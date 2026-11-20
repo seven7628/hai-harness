@@ -15,3 +15,4 @@ function TerminalTab({ tabId }) {
   }
   return /* @__PURE__ */ (0, import_jsx_runtime30.jsx)("div", { className: "term-pane", "data-state": "loading", children: /* @__PURE__ */ (0, import_jsx_runtime30.jsx)("div", { className: "term-overlay loading", role: "status", children: /* @__PURE__ */ (0, import_jsx_runtime30.jsx)("span", { className: "term-overlay-text", children: t4("term.starting") }) }) });
 }
+

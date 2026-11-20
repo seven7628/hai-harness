@@ -19,3 +19,4 @@ function decodeFrame(buf) {
     return { data: bytes };
   }
 }
+

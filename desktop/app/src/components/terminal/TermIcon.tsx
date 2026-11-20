@@ -6,3 +6,4 @@ function TermIcon({ size: size4 = 12 }) {
     /* @__PURE__ */ (0, import_jsx_runtime31.jsx)("path", { d: "M8.5 9.8h3", stroke: "currentColor", strokeWidth: "1.2", strokeLinecap: "round" })
   ] });
 }
+

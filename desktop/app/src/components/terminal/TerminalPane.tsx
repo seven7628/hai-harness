@@ -256,3 +256,4 @@ function TerminalPane({ tabId, ptyId }) {
     ] })
   ] });
 }
+
