@@ -204,7 +204,9 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
     void (async () => {
       const r = await getTransport().ptyTicket(ptyId)
       if (disposed) return
-      if (!r.ok || !r.url || !r.ticket) {
+      // 形状校验在 transport（ptyTicket 已经把 data 收窄成 {url, ticket, expiresIn}），
+      // 所以这里只判 ok —— 回译前的 `!r.url || !r.ticket` 是同一件事的更啰嗦写法。
+      if (!r.ok) {
         apply({
           t: 'error',
           error: r.error ?? tRef.current('term.failed').replace('{error}', 'ticket'),
@@ -233,7 +235,9 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
               term.writeln(`\x1b[2m${tRef.current('term.truncated')}\x1b[0m`)
               break
             case 'exit':
-              apply({ t: 'exit', code: ctrl.code })
+              // ctrl 是 JSON 直通的 Record：exit_code 只在 status=exited 的 pty_changed 里有，
+              // WS 的 exit 帧带 code（可能是 null）→ 只认数字，其余当「码未知」。
+              apply({ t: 'exit', code: typeof ctrl.code === 'number' ? ctrl.code : undefined })
               break
             default:
               break
