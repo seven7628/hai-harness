@@ -4,8 +4,32 @@ import (
 	"context"
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/events"
+	"github.com/seven7628/hai-harness/workdir"
 	"time"
 )
+
+// ContextDescriber 允许工具按**调用方上下文**给出描述。
+//
+// 用途：bash 工具的描述里要输出**该调用方当前的工作目录**
+// —— 主 agent 与子 agent 各有自己的 cwd 分区 ⇒ 静态 Description() 给不出正确的值。
+//
+// 引擎侧：ToolParams(ctx) 优先用 DescribeFor(ctx)，没有则退回 Description()。
+// （schema 每请求重建 ⇒ 描述里的 cwd 每次都是当前值。）
+type ContextDescriber interface {
+	DescribeFor(ctx context.Context) string
+}
+
+// WorkdirAware 工具可暴露其**会话级 cwd 状态**。
+//
+// 用途：装配层要能证明「同一引擎里的 bash / 文件工具 / run_python 用的是**同一个**
+// workdir.State」—— 否则它们的「当前目录」可能各走各的（静默错位，且行为层测不出来：
+// 每个工具单独看都"对"）。
+//
+// ⚠️ 这是**装配断言**用的接口，不是业务接口：业务上工具之间不靠它通信
+//（通信走 ctx 上的分区键，见 workdir.KeyFrom）。
+type WorkdirAware interface {
+	WorkdirState() *workdir.State
+}
 
 type Tool interface {
 	Name() string
