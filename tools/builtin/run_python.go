@@ -194,6 +194,9 @@ func NewRunPythonToolWithWorkdir(wd *workdir.State, py PythonRuntime, sbx sandbo
 	return t
 }
 
+// WorkdirState 暴露本工具使用的会话级 cwd 状态（tools.WorkdirAware）。
+func (t *RunPythonTool) WorkdirState() *workdir.State { return t.wd }
+
 // cwd 脚本工作目录（会话级）：有 workdir 状态时按调用方分区取；否则 = 构造时的目录。
 func (t *RunPythonTool) cwd(ctx context.Context) string {
 	if t.wd != nil {
