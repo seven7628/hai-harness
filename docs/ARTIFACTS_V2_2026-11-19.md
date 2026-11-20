@@ -12,7 +12,10 @@
 > - `【调研】` 通用调研设计的结论
 > - `【方案】` 本文的决策（含对前两者的修订）
 >
-> **版本** v2.1 · 2026-11-19 · 状态：待评审冻结
+> **版本** v2.2 · 2026-11-19 · 状态：决策已定
+>
+> **三项关键决策（§24）**：存储 = 文件 + 三层索引（不是 SQLite）；传输 = 统一 HTTP（不做自定义协议双通道）；
+> 编辑落盘 = Phase 1 仅静态资源，`.tsx/.jsx` 明确返回 `UNSUPPORTED`。
 
 ---
 
@@ -46,7 +49,7 @@
   21. 实施计划
   22. 风险登记册
   23. 兼容与迁移
-  24. 待拍板事项
+  24. 决策记录（存储/传输/编辑已定）
   25. 术语表
 
 ---
@@ -298,13 +301,69 @@ type ArtifactVersion struct {
 
 ```
 <ws>/.artifacts/
-  index.json                      # ArtifactID → Artifact 元信息
-  <artifactID>/v<N>/manifest.json # ArtifactVersion
-  blobs/<前2位>/<sha256>          # 内容寻址，跨版本/跨产物去重
+  index.json                         # 快照：全局索引（周期性压缩产物）
+  index.journal                      # 追加日志：每次写入一行，启动时回放
+  idx/
+    bypath/<sha1(rel)%256>.json      # 反向索引分片：产物区相对路径 → ArtifactID
+  <artifactID>/
+    meta.json                        # Artifact 元信息（单产物单文件，读写隔离）
+    v1/manifest.json                 # ArtifactVersion
+    v2/manifest.json
+  blobs/<h[0:2]>/<h>                 # 内容寻址（前 2 位十六进制分片）
+  scratch/                           # 草稿区索引（不进版本快照，7 天 GC）
 ```
 
 > **常见误解**：把产物区写成隐藏目录会让"目录约定"这一判定层失效——因为"路径即意图"依赖
 > 用户和模型都能看见并遵守 `artifacts/`。版本库隐藏是为了不干扰工作区浏览。
+
+### 5.6 索引与检索性能（**文件存储不能慢在这里**）
+
+文件存储最容易踩的坑是"每次查询都 `filepath.Walk`"。本设计用**三层**规避：
+
+| 层 | 结构 | 复杂度 | 用途 |
+|---|---|---|---|
+| L1 内存索引 | `map[ArtifactID]*Artifact` + `map[wsKey][]ArtifactID` + `map[relPath]ArtifactID` | **O(1)** | 所有热路径查询（列表、按路径找产物、按 wsKey 过滤） |
+| L2 反向索引分片 | `idx/bypath/<sha1(rel)%256>.json` | O(1) 文件读 | 冷启动/跨进程只查单个分片，**不扫全目录** |
+| L3 追加日志 | `index.journal`（每行一条 JSON） | O(1) append | 写放大恒定；启动时「快照 + 回放」重建 L1 |
+
+**写入路径**（publish / promote / 新版本）：
+
+```
+1. 写 blobs/（内容寻址，同 hash 已存在则跳过写入）
+2. 写 <id>/v<N>/manifest.json（原子：tmp + rename）
+3. append index.journal 一行（fsync 批量：每 200ms 或 64 条一次）
+4. 更新 L1 内存索引（同进程立即可见）
+5. 若 journal 行数 > 4096 → 后台异步压缩成 index.json 快照并清空 journal
+```
+
+**读取路径**（预览、导出、卡片）：
+
+| 查询 | 路径 | 耗时量级 |
+|---|---|---|
+| 按 `ArtifactID` 取 meta | L1 命中 → 否则读 `<id>/meta.json` | O(1)，~0.1ms |
+| 列某 wsKey 产物 | L1 `map[wsKey][]ArtifactID` | O(k)（k=产物数） |
+| 按产物区路径找产物 | L1 `map[relPath]` → 否则读 1 个分片 | O(1) |
+| 取某版本文件 | `<id>/v<N>/manifest.json` → `blobs/<h[0:2]>/<h>` | 2 次磁盘读 |
+| 预览热资源 | 内存 LRU（**64MB**，按 blob hash 缓存） | 命中 0 磁盘读 |
+
+**明确的禁令**（写进代码评审清单）：
+
+1. **禁止**在请求路径上调用 `filepath.Walk` / `os.ReadDir` 递归。
+2. **禁止**把 `blobs/` 放进任何"列目录"实现（10 万 blob 会让目录枚举退化）。
+3. **禁止**每次写都重写 `index.json`（O(n) 写放大）——只追加 journal。
+4. **禁止**在 HTTP handler 里做 GC 或压缩；GC/压缩一律后台 goroutine、单次 ≤200ms 预算、可中断。
+
+**规模预估**（验证不会慢）：
+
+| 项 | 1,000 产物 | 10,000 产物 |
+|---|---|---|
+| `index.json` 快照 | ~200KB | ~2MB |
+| L1 内存 | ~1MB | ~10MB |
+| 启动加载（快照+回放 4k 行） | ~30ms | ~120ms |
+| 单次 publish 写放大 | ≤ 3 个小文件 + 1 行 append | 同左（**与总量无关**） |
+
+> 结论：文件方案在 1 万产物量级下，启动 ≤150ms、查询 O(1)、写入恒定写放大——
+> 满足"检索不能慢"，且无 SQLite 的依赖与迁移成本（见 §24 D1）。
 
 ### 5.4 选区引用
 
@@ -522,14 +581,35 @@ func previewSig(secret []byte, wsKey, id string, v int, p string) string {
 | `data-src` | 每个元素起始标签 | `data-src="<relPath>:<line>:<col>"`，行号由 tokenizer `Offset()` 换算 |
 | `base href` | `<head>` 内首个元素前 | `<base href="/<wsKey>/<id>/<v>/<sig>/">`（解决页面里 `/style.css` 的问题） |
 
-### 10.4 双通道（Electron 内嵌 vs 浏览器/移动）
+### 10.4 统一走 HTTP（**单一通道，已定**）
 
-| 场景 | 传输 | 理由 |
+桌面内嵌 WebView、右侧浏览器标签、移动端 WebView **全部**走
+`http://127.0.0.1:<port>/…`，不再维护 `artifact://` 自定义协议。
+
+**为什么放弃双通道**：
+
+| 理由 | 说明 |
+|---|---|
+| 一条代码路径 | 双通道意味着两套 URL 生成、两套调试、两套失效排查；而这个功能的收益全在"稳定能开" |
+| 移动端本来就用不了自定义协议 | 手机连的是 bridge 的 `/api/cmd` 面，只有 HTTP 可用 → 双通道里有一半永远是死代码 |
+| HTTP 的能力短板可以补 | 独立 origin、无 Host 校验这些"自定义协议的天然优势"，用下面的加固措施等价实现 |
+
+**加固措施（逐条，缺一不可）**：
+
+| # | 措施 | 实现位置 |
 |---|---|---|
-| 桌面内嵌 WebView | 自定义协议 `artifact://<wsKey>/<id>/<v>/<sig>/…` | 独立 origin 天然隔离；无端口、无 Host 校验问题 |
-| 浏览器 / 移动端 | `http://127.0.0.1:<port>/…` | 浏览器无法注册自定义协议；移动端连 bridge 的 `/api/cmd` 面 |
+| 1 | 只监听 `127.0.0.1`，端口进程内随机 | `preview_host.go` `net.Listen("tcp","127.0.0.1:0")` |
+| 2 | 校验 `Host` 头必须为 `127.0.0.1:<port>` 或 `localhost:<port>` | HTTP 中间件，不匹配 → 403 |
+| 3 | 路径签名 HMAC-SHA256，**签名含 wsKey** | `previewSig()`（§10.1） |
+| 4 | 签名 TTL 10 分钟，每次取预览 URL 重签 | `CmdArtifactPreview` 返回短期 URL |
+| 5 | 响应头 `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` | 固定 |
+| 6 | 预览页 CSP：`default-src 'self' data: blob:` | 注入 `<meta http-equiv>` |
+| 7 | 内嵌时用**沙箱 iframe / WebContentsView**（`sandbox=1`、`allow-scripts` 不含 `allow-same-origin`） | 前端 `embed.ts` |
+| 8 | Inspector 走 MessageChannel + nonce（不依赖 origin 隔离） | §7.1 |
 
-两套 URL 由同一个构造函数生成，签名算法一致，只是 scheme 不同。
+> 第 7 条是自定义协议"独立 origin"的等价物：`sandbox` 无 `allow-same-origin` 时，
+> iframe 获得**不透明 origin**，同样无法读写宿主 DOM/存储。
+> 代价：不透明 origin 下 `localStorage` 不可用——这正好符合"预览页不持久化任何东西"的定位。
 
 ---
 
@@ -1209,18 +1289,24 @@ sticky/fixed 元素：   先判 position，fixed 直接用视口坐标，不叠�
 | token（CSS 变量） | 优先替换为已有 token，不新增硬编码 |
 | 响应式 | 写入 `viewport.w` 对应媒体查询，除非用户选「所有断点」 |
 
-### 14.7 React / TSX 的落盘规则（**不能用字符串替换**）
+### 14.7 React / TSX 的落盘规则（**Phase 1 不支持，明确拒绝**）
 
 | 情形 | 做法 |
 |---|---|
-| 入口为 `.html` / `.css` | `old_str/new_str` 唯一匹配替换 |
-| 入口为 `.tsx/.jsx` | **AST 改写**（`ts-morph` 或 Babel）：定位 JSX 字面量或 className，改节点后回写 |
-| `instances > 1`（map 列表 / 复用组件） | 默认改源码作用于全部实例；同时提供「仅此实例」→ 改数据或加条件 |
-| `dynamic: true` | 改数据源，**不改 JSX 字面量** |
-| 组件被多处引用 | 返回「该组件在 N 处使用」，让模型决定改定义处还是调用处 |
+| 入口为 `.html` / `.css` / `.js` / `.svg` / `.md` | `old_str/new_str` 唯一匹配替换（**Phase 1 支持**） |
+| 入口为 `.tsx` / `.jsx` | **返回 `UNSUPPORTED`**，提示"请直接编辑源码"（Phase 1 不支持） |
+| `instances > 1`（map 列表 / 复用组件） | Phase 1 不涉及（仅静态资源） |
+| `dynamic: true` | Phase 1 不涉及 |
+| 组件被多处引用 | Phase 1 不涉及 |
 
-> 字符串替换在 TSX 上会破坏格式化、注释与用户手改，且 `old_str` 极易命中多处 —— 这不是风格问题，
-> 是正确性问题。
+**为什么 Phase 1 直接拒绝而不是"尽力替换"**：
+
+字符串替换在 TSX 上会破坏格式化、注释与用户手改，且 `old_str` 极易命中多处 ——
+这是**正确性**问题，不是体验问题。半成品实现比明确拒绝更糟：用户会以为改成功了。
+AST 改写（`ts-morph`：定位 JSX 字面量/className，改节点后回写）列为 **P8**，届时再开放。
+
+> 拒绝时返回的帮助信息必须包含：文件路径、建议工具（源码面板 / `edit_file`）、
+> 以及"该入口类型需 Phase 2 才支持"。
 
 ### 14.8 改后验证与回滚
 
@@ -1494,15 +1580,33 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 
 ---
 
-## 24. 待拍板事项（3 项，影响 P0/P1）
+## 24. 决策记录（已定，不再待拍）
 
-| # | 决策 | 选项 A | 选项 B | 建议 | 影响 |
-|---|---|---|---|---|---|
-| D1 | 存储 | 文件目录 + 内容寻址 | SQLite + 内容哈希 | **A** | 仓库无 SQLite 依赖；引入驱动+迁移+事务成本高；产物量级（<1GB）文件足够 |
-| D2 | 传输 | 一律本地 HTTP | Electron 用 `artifact://`，浏览器/移动用 HTTP | **B** | 自定义协议自带独立 origin，无端口与 Host 校验问题 |
-| D3 | 编辑落盘 | 统一字符串替换 | HTML 替换 / TSX AST 改写 | **B** | 字符串替换在 TSX 上会破坏格式化与用户手改 |
+| # | 决策项 | 结论 | 理由与补偿 |
+|---|---|---|---|
+| **D1** | 存储 | **文件 + 内容寻址**（不用 SQLite） | 仓库无 SQLite 依赖，引入驱动/迁移/事务成本高；用 §5.6 的三层索引保证"检索不慢"：L1 内存 O(1)、L2 按 sha1 分片的反向索引、L3 追加日志（写放大恒定）；1 万产物量级启动 ≤150ms |
+| **D2** | 传输 | **统一 HTTP**（单一通道） | 一份代码路径；移动端本就用不了自定义协议；用 §10.4 的 8 条加固（127.0.0.1 + 随机端口 + Host 校验 + 含 wsKey 的 HMAC + 10min TTL + CSP + 沙箱 iframe 的不透明 origin + MessageChannel nonce）等价实现隔离 |
+| **D3** | 编辑落盘 | **Phase 1 只支持静态资源**：`.html/.css/.js/.svg/.md` 走 `old_str` 唯一匹配替换；**`.tsx/.jsx` 返回 `UNSUPPORTED`**（引导改用源码编辑） | 字符串替换在 TSX 上会破坏格式化、注释与用户手改，且 `old_str` 极易命中多处 —— 这是正确性问题，不能用"能跑就算"掩盖。AST 改写（`ts-morph`）列为 P8，届时再开放 |
 
-> 三项不拍板，P0/P1 会返工。建议在评审会上一次性确认。
+### 24.1 其他已定方案（本文直接决定，避免实施期再讨论）
+
+| 项 | 结论 | 理由 |
+|---|---|---|
+| 索引形态 | 内存 L1 + 分片 L2 + 追加日志 L3（§5.6） | 免全目录扫描；写放大恒定 |
+| journal 压缩阈值 | 行数 > 4096 触发 | 启动回放 ≤ 4k 行（~120ms 上限） |
+| blob 分片 | 前 2 位十六进制（256 目录） | 单目录条目数可控，避免大目录枚举退化 |
+| 预览缓存 | 内存 LRU **64MB**，按 blob hash | 热刷新零磁盘读 |
+| 版本保留 | 最近 **10** 版 + 被选区引用的版本；GC 后台、单次 ≤200ms、可中断 | 空间与可回滚性平衡 |
+| 草稿区 TTL | **7 天** | 足够复核，不至于堆积 |
+| 签名 TTL | **10 分钟**，每次取预览 URL 重签 | 短窗口 + 不落日志 |
+| 自检闭环 | 默认开启；最多 **2** 轮；总预算 **25s**；失败**不阻断**交付，只带 `warnings` | 自愈但绝不卡住 run 收尾 |
+| 打开策略 | 默认 `ask`（不自动开浏览器）；一次运行最多自动开 **1** 个标签 | 避免打断用户当前阅读 |
+| 判分阈值 | `score >= 3` 为候选，候选**不自动打开** | 降低误报代价 |
+| 依赖解析 | `golang.org/x/net/html` tokenizer | 属性可无引号/跨行、`url()`/`@import` 形态多，正则必漏 |
+| 产物区 | `artifacts/<name>/`（可见） | "路径即意图"，对 bash/脚本同样有效 |
+| 版本库 | `<ws>/.artifacts/`（隐藏） | 不干扰工作区浏览 |
+
+> 需要变更上述任一项时，走评审并在本表更新；实现与本文不一致处必须回写本文。
 
 ---
 
