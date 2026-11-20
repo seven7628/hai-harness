@@ -1248,9 +1248,12 @@ func (m *manager) dispatchArtifact(c command) bool {
 | F9 | `Composer.tsx:1549` | 改渲染 | `data-selection-chip` | F5 |
 | F10 | `i18n.ts:821/3218` | 各 +5 key | `composer.selection.*` | — |
 | F11 | `surfaces/types.ts:9` | 改联合 | `BuiltinKind` + `'artifact'` | D4 |
+| F11b | `surfaces/registry.ts:19` | 改集合 | `BUILTIN_KINDS` + `'artifact'`（漏则启动崩） | F11 |
 | F12 | `useAppStore.ts:97` | 改联合 | `RightTab` + `'artifact'` | F11 |
 | F13 | `useAppStore.ts:128` | 改联合 | `ArtifactTabInstance` | F12 |
 | F14 | `useAppStore.ts:1867` | 加分支 | `sanitizePersistedTab`（丢 url） | F13 |
+| F14a | `useAppStore.ts:1808` | 加分支 | `toPersistedTab`（漏则整条不持久化） | F13 |
+| F14b | `useAppStore.ts:1850` | 加分支 | `fromPersistedTab` 对称还原 | F13 |
 | F15 | `RightPanel.tsx:144` | 加 case | `SurfaceHost kind="artifact"` | F18 |
 | F17 | `lib/rightPanel.ts:65` | 加分支 | `selectRightTab` 认 artifact | F12 |
 | F18 | `surfaces/artifact/index.tsx`（新增） | 新增 | Surface 注册 | F11 |
@@ -1580,39 +1583,56 @@ Composer 里已经有一套"外部面板把一段文本引用进草稿"的机制
 > 为什么选"自动展开"：publish 的语义就是"我给用户看这个"。不展开等于把成果藏起来，
 > 用户还得自己去找。但**只在应用内展开**，不碰外部浏览器（§19.4）。
 
-#### 14.11.1 落点：`kind:"artifact"` 是**第 5 个内置 kind**，且必须注册成 Surface
+#### 14.11.1 落点：`kind:"artifact"` 是**第 6 个内置 kind**，且必须注册成 Surface
 
-右栏的标签是「kind 判别联合 + Surface 注册表」，现状**明确钉死 4 个内置 kind**：
+> ⚠️ **合并顺序前提**：`terminal-panel` 分支已经把内置 kind 从 4 个扩到 5 个（`+ 'term'`，
+> 见 `surfaces/registry-test.ts:71` 的用例名「五个内置 kind」）。产物落地时**不能再按 4→5 算**，
+> 否则两边各自把 `BUILTIN_KINDS` 改成自己那一版、后合并的一方静默覆盖先合并的一方。
+> 下表的行号标注了两种情况：`[主]` = 当前 `main`，`[+term]` = 合入终端分支后。
+
+右栏的标签是「kind 判别联合 + Surface 注册表 + 持久化双写」，钉死点共 **7 处**：
 
 ```
-surfaces/types.ts:8   /** 内置 kind 保持 4 个：文档/媒体不是 kind，是 file{mode:'preview'} 的渲染器（D-I） */
-surfaces/types.ts:9   export type BuiltinKind = 'activity' | 'git' | 'file' | 'web'
-store/useAppStore.ts:97   export type RightTab = 'activity' | 'git' | 'file' | 'web'
-store/useAppStore.ts:111  export type TabKind = RightTab   // e2e 断言与 i18n key（rp.tab.*）都按它走
-store/useAppStore.ts:162  export const TABS_MAX_VISIBLE = 5
-surfaces/registry-test.ts:71  test('四个内置 kind 全部通过（与 BuiltinKind 联合逐项对齐）', …)
+[主] surfaces/types.ts:8-9        /** 内置 kind 保持 4 个 … */  export type BuiltinKind = 'activity'|'git'|'file'|'web'
+[+term] surfaces/types.ts:13      export type BuiltinKind = 'activity'|'git'|'file'|'web'|'term'
+[主] surfaces/registry.ts:19      export const BUILTIN_KINDS = new Set(['activity','git','file','web'])
+[主] store/useAppStore.ts:97      export type RightTab = 'activity'|'git'|'file'|'web'
+[主] store/useAppStore.ts:111     export type TabKind = RightTab
+[主] store/useAppStore.ts:128     export type TabInstance = activity|git|FileTabInstance|WebTabInstance
+[主] store/useAppStore.ts:1808    toPersistedTab   ← 写侧
+[主] store/useAppStore.ts:1850    fromPersistedTab ← 读侧
+[主] store/useAppStore.ts:1867    sanitizePersistedTab ← 校验
+[主] components/RightPanel.tsx:60 const ADDABLE_KINDS: TabKind[] = ['activity','git','web']
+[主] surfaces/registry-test.ts:71 test('四个内置 kind 全部通过', …)  ← 见 F19
 ```
 
-**决策**：新增第 5 个内置 kind `artifact`。**这不违反 D-I** —— D-I 说的是"文档/媒体不是 kind"
+**决策**：新增内置 kind `artifact`（合入终端后即第 6 个）。**这不违反 D-I** —— D-I 说的是"文档/媒体不是 kind"
 （因为它们是工作区文件的渲染形态，能被文件树浏览到）；产物不是工作区文件、不该出现在文件树里、
 身份是 `(artifactId, version)` 而非路径，还带版本/选区/URL 重签 —— 它没有 `file` 标签能承载的身份。
 
 | # | 文件:行 | 现状 | 改为 |
 |---|---|---|---|
-| F11 | `surfaces/types.ts:9` | `BuiltinKind` 4 个 + 上一行注释「保持 4 个」 | 加 `\| 'artifact'`；注释改为「5 个：artifact 有独立版本身份，不是 file 的渲染器（D4）」 |
-| F12 | `store/useAppStore.ts:97` | `RightTab = 'activity' \| 'git' \| 'file' \| 'web'` | 加 `\| 'artifact'`（`:111 TabKind` 自动跟随） |
-| F13 | `store/useAppStore.ts:128` | `TabInstance` = activity \| git \| `FileTabInstance` \| `WebTabInstance` | 加 `ArtifactTabInstance = { id: string; kind: 'artifact'; artifactId: string; version?: number; view?: 'preview' \| 'source' \| 'history'; dismissed?: boolean }` |
-| F14 | `store/useAppStore.ts:1867` | `sanitizePersistedTab` 逐字段校验 | 新增分支：`kind:'artifact'` 只认 `artifactId`（非空字符串）+ `version`（正整数）+ `view`（三值枚举），**`url` 字段一律丢弃**（每次重签，落盘即失效） |
-| F15 | `components/RightPanel.tsx:144` | `switch`: `case 'web': return <WebTab …/>` | 加 `case 'artifact': return <SurfaceHost kind="artifact" tab={tab} scope={scope} fallback={<ArtifactPreviewTab tab={tab} />} />`（与 `:946` 的 file 分支同形） |
-| F16 | `components/RightPanel.tsx:33/39` | `primaryTabs` / `secondaryTabs` 固定列表 | **artifact 不进固定标签条**（它是按需出现的实例标签，性质同 `file` 多实例）；`secondaryTabs` 不加 `rp.tab.artifact` |
-| F17 | `lib/rightPanel.ts:65` | `selectRightTab` 把激活标签映射成 `SurfaceKind` | 加 `artifact` 分支（否则 `undefined` → 右栏工具栏按"未知面板"退化） |
+| F11 | `surfaces/types.ts:9`[主] / `:13`[+term] + 前置注释 | 联合 4（或 5）个取值 | 加 `\| 'artifact'`；注释改为「6 个：artifact 有独立版本身份，不是 file 的渲染器（D4）」 |
+| F11b | `surfaces/registry.ts:19` | `BUILTIN_KINDS` 集合 | **加 `'artifact'`** —— 不加则 `registerSurface` 直接 `throw 未知的内置 kind`，应用起不来（`registry.ts:50`） |
+| F12 | `store/useAppStore.ts:97` | `RightTab = 4 取值` | 加 `\| 'artifact'`（`:111 TabKind` 自动跟随） |
+| F13 | `store/useAppStore.ts:128` | `TabInstance` = activity\|git\|File\|Web | 加 `ArtifactTabInstance = { id: string; kind: 'artifact'; artifactId: string; version?: number; view?: 'preview' \| 'source' \| 'history'; dismissed?: boolean }` |
+| F14a | `store/useAppStore.ts:1808` | `toPersistedTab` 按 kind 分支 | **加 `kind:'artifact'` 分支，只写 `{id, kind, artifactId, version, view}`**。⚠️ 漏这里会落进 web 分支 → `webUrlSnapshot` 为 `undefined` → **整条标签不被持久化**（重启后产物标签消失，且不报错） |
+| F14b | `store/useAppStore.ts:1850` | `fromPersistedTab` 按 kind 还原 | 加对称分支 |
+| F14c | `store/useAppStore.ts:1867` | `sanitizePersistedTab` 逐字段校验 | 加分支：`artifactId` 非空字符串、`version` 正整数、`view` 三值枚举；**任何 `url` 字段一律丢弃**（每次重签，落盘即失效） |
+| F15 | `components/RightPanel.tsx:144` | `case 'web': return <WebTab …/>` | 加 `case 'artifact': return <SurfaceHost kind="artifact" tab={tab} scope={scope} fallback={<ArtifactPreviewTab tab={tab} />} />`（与 `:946` 的 file 分支同形） |
+| F16 | `components/RightPanel.tsx:33/39/60` | `primaryTabs`/`secondaryTabs`/`ADDABLE_KINDS` | **三处都不加 artifact**：它不是用户从「＋」菜单新增的标签（唯一的产生方式是 publish），加了会出现"手动开一个空产物标签"的无意义路径 |
+| F17 | `lib/rightPanel.ts:65` | `selectRightTab` 映射成 `SurfaceKind` | 加 `artifact` 分支（否则返回 `undefined` → 右栏工具栏按"未知面板"退化） |
 | F18 | `surfaces/artifact/index.tsx`（新增） | —— | Surface 注册：`kind:'artifact'`、`group:'content'`、`scope:'session'`、`weight:'heavy'`、`capability:'view'` |
-| F19 | `surfaces/registry-test.ts:71` | 用例名与断言都写死"四个" | **改为五个并加 `'artifact'`** —— 这是规格变更导致的**预期**断言更新，不是"为通过而改断言"；同时新增反例（`'artifact2'`、`'plugin:artifact'` 必须为 false） |
-| F20 | `i18n.ts`（中/英双份） | `rp.tab.*` 仅 4 个 | 加 `rp.tab.artifact`（仅用于无障碍名与标签 tooltip，不参与标签条渲染） |
+| F19 | `surfaces/registry-test.ts:71/75/76` | 三处：用例名「四个/五个内置 kind」、`assert.deepEqual([...BUILTIN_KINDS].sort(), [...])`、遍历数组 | **三处同步**改成含 `'artifact'` 的集合 —— 规格变更导致的**预期**断言更新，不是"为通过而改断言"；同时补反例（`'artifact2'`、`'plugin:artifact'` 必须为 false）。⚠️ `deepEqual` 是全等断言：只改 title 不改数组，用例照样红；只改数组不改 title，用例名会说谎 |
+| F20 | `i18n.ts`（中 `:821` 区 / 英 `:3218` 区双份） | `rp.tab.*` 无 artifact | 加 `rp.tab.artifact`（仅用于无障碍名与 tooltip，不参与标签条渲染） |
 
-> 这一格是最容易"看着能跑、实际漏一处"的地方：`BuiltinKind` 是**类型联合**，漏改 `selectRightTab`
-> 或 `sanitizePersistedTab` 都能编译通过（前者返回 `undefined`，后者把标签静默丢掉），
-> 只有重启后"标签没了"或"右栏工具栏空了"才会暴露。所以上面 5 个文件必须**同一次改动**落地。
+
+
+> 这里是最容易"看着能跑、实际漏一处"的地方，三种漏法都能编译通过：
+> ① 漏 `registry.ts` 的 `BUILTIN_KINDS` → **启动即崩**（`registerSurface` 抛错），最响但会让人以为改动错了方向；
+> ② 漏 `toPersistedTab` → 标签落进 web 分支、`webUrlSnapshot` 为 `undefined` → **整条不持久化**，重启后消失且无报错；
+> ③ 漏 `selectRightTab` → 返回 `undefined`，右栏工具栏按"未知面板"退化。
+> 所以上表 7 个文件必须**同一次改动**落地；`BuiltinKind` 是纯类型联合，前两种漏法 tsc 一声不响。
 
 #### 14.11.2 自动展开的落点
 
@@ -1991,7 +2011,7 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 | **D2** | 传输 | **统一 HTTP**（单一通道） | 一份代码路径；移动端本就用不了自定义协议；用 §10.4 的 8 条加固（127.0.0.1 + 随机端口 + Host 校验 + 含 wsKey 的 HMAC + 10min TTL + CSP + 沙箱 iframe 的不透明 origin + MessageChannel nonce）等价实现隔离 |
 | **D3** | 编辑落盘 | **Phase 1 只支持静态资源**：`.html/.css/.js/.svg/.md` 走 `old_str` 唯一匹配替换；**`.tsx/.jsx` 返回 `UNSUPPORTED`**（引导改用源码编辑） | 字符串替换在 TSX 上会破坏格式化、注释与用户手改，且 `old_str` 极易命中多处 —— 这是正确性问题，不能用"能跑就算"掩盖。AST 改写（`ts-morph`）列为 P8，届时再开放 |
 
-| **D4** | 右栏承载形态 | **新增第 5 个内置 kind `artifact`**，并注册为 Surface（`surfaces/artifact/`）；不复用 `file{mode:'preview'}` | §14.11.1 的逐点落点表。**为什么不用 file{mode:'preview'}**：D-I 的前提是"内容是工作区里能被文件树浏览到的文件"，而产物住在 `.artifacts/`（不应出现在文件树）、身份是 `(artifactId, version)` 而非路径、还要承载版本切换/选区引用/URL 重签 —— 三条 file 标签都给不了。**代价**：`BuiltinKind`/`RightTab`/`TabInstance`/`sanitizePersistedTab`/`selectRightTab`/`registry-test` 六处必须同一次改完（漏改能编译通过但运行期静默丢标签）。**被否决的替代**：① 复用 `file{mode:'preview'}`（身份丢失，版本切换无处存）；② 做成 `plugin:artifact`（伪插件，绕开内置能力的类型检查） |
+| **D4** | 右栏承载形态 | **新增内置 kind `artifact`**（合入 `terminal-panel` 后为第 6 个，`term` 是第 5 个），并注册为 Surface（`surfaces/artifact/`）；不复用 `file{mode:'preview'}` | §14.11.1 的逐点落点表。**为什么不用 file{mode:'preview'}**：D-I 的前提是"内容是工作区里能被文件树浏览到的文件"，而产物住在 `.artifacts/`（不应出现在文件树）、身份是 `(artifactId, version)` 而非路径、还要承载版本切换/选区引用/URL 重签 —— 三条 file 标签都给不了。**代价**：`BuiltinKind` / `BUILTIN_KINDS` / `RightTab` / `TabInstance` / `toPersistedTab` / `fromPersistedTab` / `sanitizePersistedTab` / `selectRightTab` / `registry-test` 九处必须同一次改完（三种漏法都能编译通过）。**被否决的替代**：① 复用 `file{mode:'preview'}`（身份丢失，版本切换无处存）；② 做成 `plugin:artifact`（伪插件，绕开内置能力的类型检查） |
 
 ### 24.1 其他已定方案（本文直接决定，避免实施期再讨论）
 
@@ -2018,6 +2038,20 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 > 需要变更上述任一项时，走评审并在本表更新；实现与本文不一致处必须回写本文。
 
 ---
+
+### 24.2 分支协作约束（当前有两个并行 worktree 同时改右栏标签）
+
+`terminal-panel` 与产物（本方案）**改的是同一组文件**：`BuiltinKind` / `BUILTIN_KINDS` /
+`RightTab` / `TabInstance` / `toPersistedTab` / `fromPersistedTab` / `sanitizePersistedTab` /
+`registry-test.ts`。已发生的实例：终端分支把内置 kind 从 4 个扩到 5 个（`+ 'term'`），
+并把 `registry-test.ts:71` 的用例名改成「五个内置 kind」、`assert.deepEqual` 的数组补了 `'term'`。
+
+| 约束 | 内容 |
+|---|---|
+| 合并顺序 | **先合 `terminal-panel`，再落产物**。反序会让 `BUILTIN_KINDS` 被后提交的一方覆盖成缺 `'term'` 的版本 → 终端标签在重启恢复时被 `sanitizePersistedTab` 当坏数据丢弃（本分支已实测过这个失败模式） |
+| 断言 | 后合的一方**必须同步** `registry-test.ts` 的用例名、`deepEqual` 数组、遍历数组三处；`deepEqual` 是全等，只改一处必红 |
+| 禁止事项 | 不要在任何一方"顺手把对方那格补上"再各自提交 —— 两处相同改动会在 merge 时产生"看起来一样的冲突"（identical-conflict），必须人工确认取哪边 |
+| 验收 | 合并后跑 `test:surface-registry`、`test:right-tabs`、`test:builtin-surfaces` 三个脚本；任何一项的断言数比合并前少，说明有测试被覆盖 |
 
 ## 25. 术语表
 
@@ -2051,6 +2085,7 @@ _文档结束。实现与本文不一致处，必须回写本文对应章节。_
 | v2.2 | 决策落定：D1 文件存储（新增 §5.6 三层索引）、D2 统一 HTTP（§10.4 八条加固）、D3 Phase 1 仅静态资源；另定 13 项实施参数（§24.1） | 用户拍板 |
 | v2.3 | **自审修复 10 处**（见下表） | 「再来一次 Review，确保细节到位」 |
 | v2.4 | **四类交互闭环**：新增 §14.10.1（选区 chip 复用 Composer 既有 `composer.quote` 通道，F5–F10）、§14.11.1/14.11.2（`kind:"artifact"` 落点 F11–F20 + 自动展开链路）、§14.13（用户侧 11 项交互与 2 条否决）、§14.14（Agent→页面 6 项反向能力）；工具 9→11（+`artifact_refs_get`/`preview_locate`）；新增决策 **D4** | 「与用户交互也要考虑好；与 Agent 的交互要支持元素/文本/框选/点击引用到 Chat；publish 自动展开右栏；新工具支持 CodeMode」 |
+| v2.5 | **落地核验后的修正**：D4 与 §14.11.1 从「第 5 个 kind / 5 个文件」订正为「第 6 个 kind（`term` 已占第 5）/ 7 个文件 9 处」；补 `BUILTIN_KINDS`(`registry.ts:19`)、`toPersistedTab`(`:1808`)、`fromPersistedTab`(`:1850`) 三个此前漏掉的写/读侧落点；新增 §24.2 分支协作约束（合并顺序、三处断言同步、identical-conflict 禁止事项） | 实读 `terminal-panel` 分支代码：`BuiltinKind` 已含 `'term'`、`registry-test.ts:71` 已改名「五个内置 kind」且用 `deepEqual` 全等断言 |
 
 | v2.4 | **补齐四类交互契约**：① 用户交互（§14.9 八种选择方式矩阵 + §14.10 引用到 Chat 全链路 + §14.12 标签状态机 + §19.5 反馈）；② 与 Agent 交互（8 种选择 → 8 类 kind 的映射与快捷键/触控手势）；③ publish 自动展开右栏（§14.11 + §19.4 区分应用内/外部）；④ 新工具全部可进 CodeMode（§11.4 逐工具形态 + 四条硬约束） | 用户追加要求 |
 
@@ -2073,6 +2108,7 @@ _文档结束。实现与本文不一致处，必须回写本文对应章节。_
 ### 26.2 结论
 
 - **一致性**：章节编号无重复；交叉引用（§5.5/§5.6/§10.4/§13.4/§15.1/§24）均存在；无「待拍板」「待评审冻结」等悬空状态。
+- **落地核验**：§14.11.1 的每个 `文件:行` 都在真实源码里核对过（`surfaces/types.ts` / `registry.ts` / `registry-test.ts:71,75,76` / `useAppStore.ts:97,111,128,1808,1850,1867` / `RightPanel.tsx:60,144` / `lib/rightPanel.ts:65`），并据此发现了"第 5 → 第 6 个 kind"与"漏 `toPersistedTab` 则整条不持久化"两个此前的错/漏；与 `terminal-panel` 的交叉改动已收进 §24.2。
 - **可实施性**：§12 每条改动均给出 `文件:行 → 现状 → 改为`，新增文件给可编译骨架（含索引与 journal 的崩溃恢复算法）。
 - **已知剩余风险**：性能数字（启动 ≤150ms、写放大 ≤3 文件）是按结构推导的量级估算，**未做压测**；
   P0 落地后应以真实 1k/1w 产物数据集复测，若偏差 > 2 倍则回到本节记录并调整索引策略。
