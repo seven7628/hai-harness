@@ -1006,4 +1006,611 @@ func (t *artifactEditTool) Call(ctx context.Context, _ string, args string) (str
 | 段落级论证 | 只有单行散文 |
 | 实现代码 | 文档内嵌代码块在，工作区代码未提交 |
 
+---
 
+# 附录 C · 整节恢复（脚本内联撰写的正文，逐字）
+
+> 有 21 节（13,901 字节）不是通过 `rep(原块,新块)` 修订的，而是脚本用
+> `lines.insert(...)` / `L[i] = '''…'''` **整节写入**的。上一轮只提取了 `rep()` 的两个参数，
+> 因此这批内容被漏掉——现已补齐。以下按节号排序，标题即原文标题，正文逐字。
+
+> 来源：`patch6.py` · 26 字节
+
+### 21.1 新增文件（24 项，含测试与脚本）
+
+> 来源：`patch_final.py` · 68 字节
+
+### 21.10 `desktop/bridge/main.go`（11 处）+ `command_registry.go`（1 处）
+
+> 来源：`patch_ref2.py` · 68 字节
+
+### 21.10 `desktop/bridge/main.go`（12 处）+ `command_registry.go`（1 处）
+
+> 来源：`patch14.py` · 60 字节
+
+### 21.11 前端 store（`checkpoint.ts` 2 处、`useAppStore.ts` 6 处）
+
+> 来源：`patch_review2.py` · 835 字节
+
+### 21.16 `subagent/subagent.go`（1 处，产物声明表继承）
+
+**定位**：`subagent/subagent.go:243-258`（`opts := &agents.RunOptions{Depth: childDepth, Name: name}` 与 `tc.Hooks` 继承块）。
+
+```go
+	opts := &agents.RunOptions{Depth: childDepth, Name: name}
+	// …既有字段…
+	if tc := events.ToolContextFrom(ctx); tc != nil {
+		// 既有：hooks 继承（DisableHookInherit 可关）
+		if tc.Hooks != nil && !t.spec.DisableHookInherit {
+			opts.PreToolUse = tc.Hooks.PreToolUse
+			opts.PostToolBatch = tc.Hooks.PostToolBatch
+			opts.PreCompact = tc.Hooks.PreCompact
+		}
++		// 产物声明表必须继承：否则子 agent 的 artifact_publish 拿到 nil，
++		// 声明直接丢弃（子卡片永远没有产物包）。与 Hooks 不同，它不受
++		// DisableHookInherit 影响 —— 那是「用户 hooks 不要传染给子 agent」，
++		// 而声明表是**同一次交付**的一部分。
++		opts.ArtifactRun = tc.ArtifactRun
+	}
+```
+
+> 子 run 的 `AgentEnd` 带着自己的 `RunId`，`Take(subRunId)` 取到的是它自己的声明；
+> 父 run 的声明不受影响（表按 RunId 分桶）。
+
+> 来源：`patch_review2.py` · 32 字节
+
+## 22. CodeMode 支持（脚本内调用这 9 个工具）
+
+> 来源：`add_kinds.py` · 1,900 字节
+
+### 23.1b 引用类型：节点级 / 区域级 / 整体级（8 种）
+
+「引用」不是只有「点一个元素」。按**选择粒度**分三层，共 8 种 `kind`——每一种都对应
+设计稿 §「选择与改稿技术规范」里的一个交互，只是这里只取「引用」这一半（不直接改稿）。
+
+| 层 | kind | 用户动作 | 选择范围 | payload 关键字段 | 模型拿到什么 |
+|---|---|---|---|---|---|
+| **节点级** | `element` | 点选一个元素 | 单个节点（语义提升后） | `selector, tag, text(≤300), html(≤2KB), rect, styles, viewport, theme` | 一个节点 + 它长什么样 |
+| | `elements` | Shift 追加 / 框选 | 2–20 个节点（LCA 判断成组） | `selector, items[{selector,tag,text,rect}], truncated` | 一组节点 + 共同祖先 |
+| | `text` | 选中文字 → 「引用」 | 一个 `Range` | `anchor{selector,tag}, text, range{start,end}, context{before,after}` | 一段文字 + 它属于哪个节点 |
+| | `comment` | 批注 pin + 写意见 | 锚点（节点或矩形） | `anchor{selector|rect}, text` | 一条意见 + 锚点位置 |
+| **区域级** | `region` | 拖矩形 / 截图上画框 | 一块屏幕区域（**不要求有 DOM**） | `rect{x,y,w,h}, elements[{selector,tag}](≤8), shot_id?, viewport` | 区域坐标 + 区域内采样到的候选元素；**没有单一节点** |
+| **整体级** | `page` | 「引用整页」 | 当前版本的一整页 | `entry, title, viewport, shot_id?` | 整个页面（入口 + 版本） |
+| | `artifact` | 从产物卡 / 列表引用 | 整个交付物（可多文件） | `entry, files[≤50], latest_version` | 「这一版交付了什么」 |
+| | `file` | 源码面板 / 文件树引用 | 一个源文件或行区间 | `path, line_range?, sha256?` | 源码位置，不经过预览 |
+
+**边界与降级**（决定「用户选不到元素时会发生什么」）：
+
+| 场景 | 结果 |
+|---|---|
+| canvas 内部、跨域 iframe、closed shadow DOM | `element` 选不到 → 自动落到 `region`（rect + `elementsFromPoint` 采样） |
+| 框选跨多个组件 | `elements`（≤20，超出截断并 `truncated:true`）；不猜「组件边界」 |
+| 用户只选了半行文字 | `text`（带 `range`）；**不**升级成整节点 |
+| 页面还没打开预览（只有版本库） | `page` / `artifact` / `file` 仍可引用（不需要渲染） |
+| 预览是旧版本 | ref 里带 `version`；发送时校验，过期走 §23.5 |
+
+**明确不引用**（避免把上下文撑爆，也避免把不可信内容当指令）：
+
+- 完整 `outerHTML` 树、全部 computed styles、console 日志、整页截图本体（只存 `shot_id`，
+  模型需要时调 `preview_screenshot`）；
+- `region` 的截图**不进消息**：它只是「空间提示」，真正的像素由工具按需取。
+
+**与「整体」有关的两个易混点**：
+
+- `page` ≠ `artifact`：前者是**渲染结果**（一个版本的一页），后者是**交付物**（可能多文件、
+  多入口）。引用 `page` 时模型会去读入口源码；引用 `artifact` 时模型先看文件清单。
+- `file` 可以脱离预览：用户在源码面板里引用 `styles.css:40-60` 也是合法的对话引用，
+  此时不需要 `artifact_open`。
+
+> 来源：`add_inspector.py` · 3,719 字节
+
+### 23.1c Inspector：四种取选模式（对 §8.5 的增量）
+
+§8.5 的 inspector 只做了「点选单个元素」。要支撑 §23.1b 的 8 种 kind，浮动条上需要
+**四个模式**（其中两个是自动的）：
+
+| 模式 | 进入方式 | 产出 kind |
+|---|---|---|
+| 元素（默认） | 直接点 | `element`；Shift 点 = `elements` |
+| 区域 | 工具条「区域」或按住 `R` 拖 | `region` |
+| 文字 | 直接拖选文本（自动，无需切模式） | `text` |
+| 整页 | 工具条「整页」 | `page` |
+
+**增量代码**（接在 §8.5 的 `infoOf` / 事件绑定之后；保持同样的 `post()` 与 Shadow DOM 高亮层）：
+
+```js
+// —— 模式状态：'element' | 'region'；text 由 selectionchange 自动识别 ——
+let mode = 'element'
+let picked = []          // Shift 多选：按点选顺序（语义提升后的节点）
+let dragRect = null      // 区域拖拽中的矩形（视口坐标）
+
+// 工具条追加两个按钮与一个提示位（沿用 .bar 的样式）
+const tools = document.createElement('div')
+tools.className = 'row'
+tools.innerHTML = '<button class="ghost" data-mode="element">元素</button>' +
+  '<button class="ghost" data-mode="region">区域</button>' +
+  '<button class="ghost" data-mode="page">整页</button>' +
+  '<span class="hint"></span>'
+bar.prepend(tools)
+tools.addEventListener('click', (e) => {
+  const m = e.target && e.target.getAttribute('data-mode')
+  if (m === 'page') { void post('selection.commit', commitPayload('page', pagePayload())) ; return }
+  if (m) { mode = m; tools.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.getAttribute('data-mode') === m)) }
+})
+
+// 元素点选：Shift 追加；普通点选清空重来
+document.addEventListener('click', (e) => {
+  if (mode !== 'element') return
+  const el = lift(e.target)
+  if (!el) return
+  e.preventDefault(); e.stopPropagation()
+  if (e.shiftKey) {
+    if (!picked.includes(el) && picked.length < 20) picked.push(el)
+  } else {
+    picked = [el]
+  }
+  drawPicked(picked)
+  showBar(picked[picked.length - 1])
+})
+
+// 区域拖拽：mousedown 记起点，mousemove 画框，mouseup 收口。
+// 用 pointer 事件而不是 mouse：触控板/触屏一致。
+addEventListener('pointerdown', (e) => {
+  if (mode !== 'region' || e.button !== 0) return
+  dragRect = { x: e.clientX, y: e.clientY, w: 0, h: 0 }
+  e.preventDefault()
+}, true)
+addEventListener('pointermove', (e) => {
+  if (!dragRect) return
+  dragRect.w = e.clientX - dragRect.x
+  dragRect.h = e.clientY - dragRect.y
+  drawRect(dragRect)
+}, true)
+addEventListener('pointerup', (e) => {
+  if (!dragRect) return
+  const r = normalizeRect(dragRect)
+  dragRect = null
+  if (r.w < 8 || r.h < 8) return // 误触：忽略
+  current = { __region: r, __elements: elementsIn(r) }
+  showBar(null)
+  void post('selection.changed', regionPayload(r))
+}, true)
+
+// 文字选区：selectionchange 非折叠时提示「引用这段文字」。
+document.addEventListener('selectionchange', () => {
+  const sel = getSelection()
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) return
+  const range = sel.getRangeAt(0)
+  const anchor = lift(range.startContainer.parentElement)
+  textPick = { text: sel.toString().slice(0, 300), anchor, range: rangeOf(range), context: contextOf(range) }
+  tools.querySelector('.hint').textContent = '引用这段文字？点「引用」'
+})
+
+// —— payload 构造：每种 kind 只带 §23.1b 列出的字段，绝不多带 ——
+function payloadFor(kind) {
+  if (kind === 'region') return regionPayload(current.__region)
+  if (kind === 'page') return pagePayload()
+  if (kind === 'text') return { ...textPick, anchor: infoOf(textPick.anchor) }
+  if (kind === 'elements') return { selector: selectorOf(picked[0]), items: picked.map(infoOf), truncated: picked.length >= 20 }
+  return infoOf(picked[0])
+}
+
+// 提交：两个动作都带 kind；「引用」= reference，「发送」= edit
+function commitPayload(kind, payload) {
+  return { kind, artifact_id: ARTIFACT_ID, version: VERSION, selection: payload,
+           mode: mode === 'region' ? 'reference' : 'reference' }
+}
+```
+
+> 高亮层与 `selectorOf` / `infoOf` 全部复用 §8.5，不新写一套。`drawPicked` 只是把
+> 多个高亮框一起画；`drawRect` 画区域框。
+>
+> **`document.addEventListener('click')` 要保留 capture 阶段的 `preventDefault`**
+>（设计稿要求「点选不触发页面自己的跳转/提交」）：上面的示例省略了 `true` 参数是为了可读，
+> 实现时必须与原 §8.5 的那一版合并成**一个** listener，不要绑两次。
+
+> 来源：`add_inspector.py` · 58 字节
+
+### 23.2 服务端选区引用表（`desktop/bridge/selection_refs.go`，新增全文）
+
+> 来源：`add_handler.py` · 3,572 字节
+
+### 23.2b 命令入口：`handleArtifactSelection`
+
+**定位**：`desktop/bridge/artifact_commands.go`（§8.7 的命令族），由 `main.go` 的
+`case CmdArtifactSelection:` 调用。
+
+```go
+// handleArtifactSelection 预览页的两种提交：
+//   mode=reference → 只存一条引用，返回 refId（前端放 chip）；
+//   mode=edit      → 校验空闲 → 激活写守卫 → 立刻 Ask 一条改稿任务。
+//
+// 为什么两种模式都先落 ref：直接改也要能被 Composer 记住（用户在等模型时可以再引用一次）；
+// 引用表是**唯一**的选区事实源，页面/渲染层都不保留副本。
+func (m *manager) handleArtifactSelection(c command, ws, sid string) {
+	bs := m.get(ws, sid)
+	if bs == nil {
+		m.respCode(c, false, "session not found", "session_not_found", nil)
+		return
+	}
+	id := str(c.Payload, "artifact_id")
+	version := str(c.Payload, "version")
+	if id == "" || version == "" {
+		m.resp(c, false, "artifact_id and version are required", nil)
+		return
+	}
+	sel, err := json.Marshal(c.Payload["selection"])
+	if err != nil || len(sel) == 0 || len(sel) > selectionRefMaxBytes {
+		m.resp(c, false, "selection payload missing or too large", nil)
+		return
+	}
+	// 版本必须真实存在：页面是模型生成的，它报的 version 不可信；这也是「过期引用」
+	// 唯一能确定性拒绝的地方（版本被清理 → 这里 404，而不是发出去让模型猜）。
+	v, err := m.artifacts.Version(ws, id, version)
+	if err != nil {
+		m.respCode(c, false, "selection target version not found", "selection_ref_stale",
+			map[string]any{"artifact_id": id})
+		return
+	}
+	ref := &selectionRef{
+		WS: ws, SID: sid, Artifact: id, Version: version, Entry: v.Manifest.Entry,
+		Payload: sel, Label: selectionLabel(id, v.Manifest.Entry, sel),
+	}
+	refID, err := m.selectionRefs.Put(ref)
+	if err != nil {
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	mode := str(c.Payload, "mode")
+	if mode == "" || mode == "reference" {
+		m.resp(c, true, "", map[string]any{
+			"ref_id": refID, "label": ref.Label, "artifact_id": id,
+			"version": version, "selector": selectorOf(sel),
+		})
+		return
+	}
+	if mode != "edit" {
+		m.resp(c, false, "unknown mode: "+mode, nil)
+		return
+	}
+	// 直接改：忙就拒绝（scope 是会话级，激活会把正在跑的 run 一起拦掉，见 §24 R18）。
+	if bs.s.IsRunning() {
+		m.respCode(c, false, "session is busy; wait for the current run to finish",
+			"session_busy", nil)
+		return
+	}
+	// 顺序不能换：先 set（守卫生效）→ 再 Ask。反过来会留一个「run 已启动、守卫还没生效」的窗口。
+	bs.selectionScope.set(id, v.Manifest.Entry, manifestPaths(v))
+	instruction := strings.TrimSpace(str(c.Payload, "instruction"))
+	if instruction == "" {
+		instruction = "Apply the requested change to the selected element."
+	}
+	if err := bs.s.Ask(context.Background(), buildSelectionMessage(instruction, []*selectionRef{ref})); err != nil {
+		bs.selectionScope.clear()
+		m.resp(c, false, err.Error(), nil)
+		return
+	}
+	m.resp(c, true, "", map[string]any{"ref_id": refID, "started": true})
+}
+
+// manifestPaths 版本内全部文件路径（顺序稳定）：写守卫的允许集合。
+func manifestPaths(v *artifactVersion) []string {
+	out := make([]string, 0, len(v.Manifest.Files))
+	for _, f := range v.Manifest.Files {
+		out = append(out, f.Path)
+	}
+	return out
+}
+
+// selectorOf / selectionLabel 只从已裁剪的 selection JSON 里取展示字段，不解析 DOM。
+func selectorOf(raw json.RawMessage) string {
+	var s struct {
+		Selector string `json:"selector"`
+	}
+	_ = json.Unmarshal(raw, &s)
+	return s.Selector
+}
+
+func selectionLabel(id, entry string, raw json.RawMessage) string {
+	var s struct {
+		Tag  string `json:"tag"`
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(raw, &s)
+	tag := s.Tag
+	if tag == "" {
+		tag = filepath.Base(entry)
+	}
+	t := strings.TrimSpace(s.Text)
+	if len([]rune(t)) > 24 {
+		t = string([]rune(t)[:24]) + "…"
+	}
+	if t == "" {
+		return fmt.Sprintf("%s · %s", id, tag)
+	}
+	return fmt.Sprintf("%s · %s「%s」", id, tag, t)
+}
+```
+
+> `selection.changed`（悬停/点选）**不**落 ref：它每次点选都发，落表会把 20 条上限瞬间打满。
+> 只有 `selection.commit`（用户按了「引用」或「直接改」）才进表。
+
+> 来源：`add_handler.py` · 37 字节
+
+### 23.3 发送时注入：`<selection>` 是数据，不是指令
+
+> 来源：`patch_ref2.py` · 1,094 字节
+
+#### E-main.go-12：`CmdAsk` / `CmdAskBatch` 解析 `selection_refs`
+
+**定位**：`desktop/bridge/main.go:3250`（`case CmdAsk:` 的 `text := str(c.Payload, "text")` 之后）
+与 `3273`（`CmdAskBatch` 同形）。
+
+```go
+	case CmdAsk:
+		// …既有 get/忙检查…
+		text := str(c.Payload, "text")
+		refs, err := m.selectionRefs.Resolve(ws, sid, strSlice(c.Payload, "selection_refs"))
+		if err != nil {
+			m.respCode(c, false, err.Error(), "selection_ref_invalid", nil)
+			return
+		}
+		// 有引用时：指令在前、选区在后，拼成**一条**用户消息（§23.3）。
+		msg := buildSelectionMessage(text, refs)
+		if err := bs.s.Ask(ctx, msg); err != nil { … }
+```
+
+`strSlice` 是既有 payload 取值族的补充（`command_registry.go` 或 `main.go` 的 str/int/bool 旁边）：
+
+```go
+// strSlice 读 payload 里的字符串数组；缺失/类型不符一律返回 nil（调用方按「没传」处理）。
+func strSlice(p map[string]any, key string) []string {
+	raw, ok := p[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+```
+
+> `CmdAskBatch` 的 payload 是 `messages` 数组：**第一条**消息带引用（用户一次只能选一次），
+> 其余消息不带。不要给每条都拼同一份选区（模型会以为用户选了多次）。
+
+> 来源：`patch14.py` · 1,049 字节
+
+#### E-main.go-9：`emit` 清选区作用域（AgentEnd）
+
+**定位**：`desktop/bridge/main.go:764-800` 的 `switch ev := e.(type)` 里 `case *events.AgentEnd:`
+分支（`bs.resetLive()` 之后）。
+
+```go
+	case *events.AgentEnd:
+		bs.resetLive()
++		// 选区任务结束：恢复常规写面。放在 emit（而不是 publishArtifactBundles）里，
++		// 因为它必须对所有结束路径生效：正常完成 / 中断 / 失败 / 子运行收尾。
++		if bs.selectionScope != nil {
++			bs.selectionScope.clear()
++		}
+```
+
+#### E-main.go-10：`CmdAsk` / `CmdAskBatch` 清选区作用域
+
+**定位**：`desktop/bridge/main.go:3600` 一带（`case CmdAsk:` 与 `case CmdAskBatch:` 两个分支）。
+
+```go
+	case CmdAsk:
+		bs := m.get(ws, sid)
+		if bs == nil {
+			m.resp(c, false, "session not found", nil)
+			return
+		}
++		// 用户手动发消息 = 离开选区任务：恢复常规写面（否则 bash 会被一直拦着）。
++		// 放在 m.ask 之前：Ask 入队后 run 可能立刻开始，这里晚一步就有一个窗口。
++		if bs.selectionScope != nil {
++			bs.selectionScope.clear()
++		}
+		m.ask(bs, core.Message{Role: "user", Content: text}, ...)
+```
+
+> 两个分支都要加（`CmdAskBatch` 同形）。这就是「选区守卫激活晚于 `Ask`」那条修法的落点：
+> 激活必须**先于** `Ask`（在 `onArtifactPageMessage` 的 commit 分支里 `set` →
+> `buildSelectionPrompt` → `Ask`），清除必须**先于**任何新的 `Ask`。
+
+> 来源：`patch13.py` · 603 字节
+
+#### E-bridge.ts-1：渲染进程的 IPC 封装
+
+**定位**：`desktop/app/src/lib/bridge.ts` 末尾（与 `embedOpenTarget` 同族）。
+
+```ts
+// 产物预览/自检：渲染进程只拿 URL 与结果，不碰 Chromium。
+export const artifactVerify = (url: string) =>
+  window.hai.artifact.verify({ url, sid: useAppStore.getState().activeSessionId ?? '' })
+export const artifactScreenshot = (url: string, opts?: { fullPage?: boolean }) =>
+  window.hai.artifact.screenshot({ url, opts })
+export const artifactInspect = (url: string, selector: string) =>
+  window.hai.artifact.inspect({ url, selector })
+```
+
+> `embed.ts` **不改**：`createEntry` / `openEmbedTarget` 已有 `srcPath` 去重语义
+
+> 来源：`patch_final.py` · 567 字节
+
+#### E-main.go-11：会话删除时清两张表
+
+**定位**：`desktop/bridge/main.go:4773-4785`（`case CmdDeleteSession:` 调 `m.deleteSession` 处）
+或 `deleteSession` 函数体末尾（二选一，**不要两处都加**）。
+
+```go
+		m.deleteSession(ws, sid)
++		// 两张 per-session 表必须跟着删：长跑 bridge 会按会话无限增长。
++		//   - artifactRuns：产物声明表（key = ws + "\x00" + sid）
++		//   - selectionRefs：选区引用（30 分钟 TTL 之外还有会话级上限）
++		m.artifactRuns.Delete(ws + "\x00" + sid)
++		if m.selectionRefs != nil {
++			m.selectionRefs.Drop(ws, sid)
++		}
+```
+
+> 为什么不在 `bridgeSession` 上挂 finalizer/GC：Go 的 sync.Map 没有弱引用语义，
+> 「会话对象没人引用」不会自动清 map 条目；显式删是唯一确定的做法。
+
+> 来源：`patch2.py` · 46 字节
+
+#### E-agents/agent_loop.go-5：收尾合并快照 + 声明 + 分类
+
+> 来源：`patch16.py` · 42 字节
+
+#### E-ArtifactsBlock.tsx-1：`bundles` prop
+
+> 来源：`patch16.py` · 38 字节
+
+#### E-Narrative.tsx-1：把 bundles 传进产出卡
+
+> 来源：`patch11.py` · 34 字节
+
+#### E-command_registry.go-1：命令名常量
+
+> 来源：`patch16.py` · 32 字节
+
+#### E-ArtifactsBlock.tsx-2：渲染位置
+
+> 来源：`patch11.py` · 21 字节
+
+#### E-main.go-7：命令分发
+
+---
+
+# 附录 D · 无标题片段索引（121, 30 KB）
+
+> 这些是零散的代码/散文块（不含标题），全文见 `ARTIFACT_SECTIONS_EXTRA.md`。
+
+| # | 来源脚本 | 字节 | 首行 |
+|---|---|---|---|
+| 1 | `patch_kind2.py` | 1,384 | `kind := str(c.Payload, "kind")` |
+| 2 | `patch_drag.py` | 1,007 | `// 拖拽：元素模式 = 框选（→ elements），区域模式 = 区域（→ region）。` |
+| 3 | `patch4.py` | 921 | ````diff` |
+| 4 | `patch_kind2.py` | 839 | `id := str(c.Payload, "artifact_id")` |
+| 5 | `add_mig.py` | 835 | `**§9 各工具要跟着改的段落**（不改这些，base 就是死代码）：` |
+| 6 | `patch2.py` | 789 | `artifacts, artifactsTruncated := collector.collect()` |
+| 7 | `patch_pub.py` | 780 | `start := time.Now()` |
+| 8 | `patch_guard.py` | 733 | `case "bash", "run_python":` |
+| 9 | `patch_drag.py` | 719 | `// 区域拖拽：mousedown 记起点，mousemove 画框，mouseup 收口。` |
+| 10 | `patch3.py` | 710 | `**同一文件、同一函数**，在 `buildLoop` 组装系统提示处（`main.go:6483-6501`，`sysPrompt` 拼完` |
+| 11 | `patch16.py` | 706 | `if (b.kind === 'artifacts') {` |
+| 12 | `patch11.py` | 681 | `// —— 产物（预览/版本/选区/导出）——` |
+| 13 | `fix_nested.py` | 663 | `sel, err := json.Marshal(c.Payload["selection"])` |
+| 14 | `patch_review2.py` | 632 | `激活前必须确认会话**空闲**（否则会把正在跑的那条 run 一起拦掉）：` |
+| 15 | `patch_iface.py` | 599 | ````go` |
+| 16 | `patch_doc.py` | 594 | `func (m *manager) newSession(ws *workspaceRuntime, id, restoreID strin` |
+| 17 | `patch_doc.py` | 586 | `// 位置：desktop/app/electron/main.ts，`embed:open-target` 注册之后（同一注册区）。` |
+| 18 | `fix_nested.py` | 569 | `// file 可以脱离 artifact（源码面板引用工作区文件）；其余类型必须有版本 ——` |
+| 19 | `patch_review2.py` | 556 | `\| R16 \| **P2** \| §22 \| 工具名/结果形状没有 CodeMode 契约 \| 新增 §22 整章 \|` |
+| 20 | `patch5.py` | 544 | ````diff` |
+| 21 | `patch_ref2.py` | 531 | `// Resolve 取一组 refId（发送时调用）：逐条校验属主/过期，并保持用户点选的顺序。` |
+| 22 | `patch11.py` | 528 | `case CmdArtifactOpen:` |
+| 23 | `patch_chip.py` | 502 | `type SelectionKind = 'element' \| 'elements' \| 'text' \| 'comment' \| 're` |
+| 24 | `patch17.py` | 460 | `// 只有 bundle、没有文件清单的一轮（publish 了此前已存在且本轮没改的入口）也必须画：` |
+| 25 | `patch_final.py` | 432 | `\| S11 \| N19 + E-session guard（已在 S4）+ E-main.go-7 的 selection 分支 + N16` |
+| 26 | `patch4.py` | 418 | ````diff` |
+| 27 | `patch16.py` | 417 | `export function ArtifactsBlock({` |
+| 28 | `patch5.py` | 407 | `**改法**：在 §6.9 的 `artifactPromptContract` 常量**末尾**（最后一条 bullet 之后、反引号之前` |
+| 29 | `patch_chip.py` | 402 | `\| `TestSelectionRefDedup` \| 同 artifact+selector+version 两次引用 → 一枚 chip` |
+| 30 | `patch_kind2.py` | 388 | `func selectionLabel(kind, id, entry string, raw json.RawMessage) strin` |
+| 31 | `patch4.py` | 374 | `const artifactPromptContract = `## Artifacts` |
+| 32 | `patch8.py` | 355 | `- 标「全文」的代码块是可直接落盘的完整文件（新文件为主）；` |
+| 33 | `patch_kind2.py` | 352 | `for _, r := range refs {` |
+| 34 | `patch10.py` | 346 | `// 产物归档必须在 reducer.Apply 之前：AgentEnd 进 checkpoint 时 bundle 必须已带` |
+| 35 | `patch_doc.py` | 344 | `@@ -341,6 +341,10 @@ type bridgeSession struct {` |
+| 36 | `patch_meta.py` | 327 | `\| 协作（分享/评论/共编） \| **后置到 Phase D，且先做 handoff 包** \| 本仓是本地单机优先；实时共编需要服务端与 ` |
+| 37 | `patch10.py` | 324 | `// 产物归档必须在 reducer.Apply 之前：AgentEnd 进 checkpoint 时 bundle 必须已带` |
+| 38 | `patch_iface.py` | 316 | ````go` |
+| 39 | `patch_final.py` | 305 | `\| N14c \| `desktop/bridge/artifact_toolbase.go` \| `artifactToolBase` / ` |
+| 40 | `patch_kind2.py` | 298 | `for _, r := range refs {` |
+| 41 | `patch_final.py` | 278 | `// Drop 会话删除时清掉它的全部引用（引用是会话级状态，没有跨会话价值）。` |
+| 42 | `patch_guard.py` | 248 | `if s.files[p] {` |
+| 43 | `patch_pub.py` | 241 | `// artifactSweeper 版本库周期清扫（启动 + 每小时；见 artifact_sweep.go）。` |
+| 44 | `patch16.py` | 233 | `return (` |
+| 45 | `patch_final.py` | 231 | `// artifactNotified 最近一次推给预览页的版本（key = refKey(wsKey,id)）：` |
+| 46 | `patch7.py` | 223 | ````` |
+| 47 | `patch7.py` | 199 | `@@` |
+| 48 | `patch_drag.py` | 199 | `> **分期**：Phase B1 支持 `element / elements / text / region / page / arti` |
+| 49 | `patch8.py` | 198 | `- 标「全文」的代码块是可直接落盘的完整文件（新文件为主）；` |
+| 50 | `patch_chip.py` | 196 | `<span className="sel-kind">{KIND_LABEL[s.kind]}</span>` |
+| 51 | `patch_doc.py` | 193 | `// 这一行是**单行字面量**（main.go 现长度 ~600 字符）：按字段名插入，不要重排。` |
+| 52 | `patch9.py` | 182 | `m.registerOfficeTools(eng, ws.path)` |
+| 53 | `patch_drag.py` | 172 | `document.addEventListener('click', (e) => {` |
+| 54 | `patch_kind2.py` | 170 | `func selectionLabel(id, entry string, raw json.RawMessage) string {` |
+| 55 | `patch_meta.py` | 166 | `\| `go.mod` / `go.sum` \| +1 模块 \| A1 \| §21.14 \|` |
+| 56 | `patch11.py` | 164 | `+	CmdArtifactSelection Command = "artifact_selection" // 选区任务激活/取消（Pha` |
+| 57 | `patch4.py` | 160 | `const artifactPromptContract = `## Artifacts` |
+| 58 | `patch_meta.py` | 158 | `> 计数口径：**只算生产文件**（不含 `_test.go` / e2e / 评估脚本，那些在 §17 单列）。` |
+| 59 | `patch9.py` | 154 | `m.registerOfficeTools(eng, ws.path)` |
+| 60 | `patch_guard.py` | 153 | `case "bash", "run_python":` |
+| 61 | `patch_drag.py` | 147 | `\| 元素（默认） \| 直接点；Shift 点追加；**拖框** \| `element` / `elements`（拖框 = 框选，按 LCA` |
+| 62 | `patch_final.py` | 144 | `// artifactNotified 最近一次推给预览页的版本（key = refKey(wsKey,id)）：` |
+| 63 | `patch_final.py` | 140 | `\| S11 \| N19 + E-session guard（已在 S4）+ E-main.go-7 的 selection 分支 + N16` |
+| 64 | `patch11.py` | 139 | `\| N14b \| `desktop/bridge/artifact_commands.go` \| `handleArtifactOpen/L` |
+| 65 | `patch_guard.py` | 136 | `if s.files[p] {` |
+| 66 | `patch_chip.py` | 135 | `type SelectionRefItem = {` |
+| 67 | `patch_pub.py` | 133 | `start := time.Now()` |
+| 68 | `patch_final.py` | 123 | `m.artifactPreview = newArtifactPreviewHost(m.artifacts, m.onArtifactPa` |
+| 69 | `patch_chip.py` | 119 | `<span className="doc-chip-name">{s.label}</span>` |
+| 70 | `patch11.py` | 114 | `+	case CmdArtifactSelection:` |
+| 71 | `patch_doc.py` | 98 | `func (m *manager) newSession(ws *workspaceRuntime, id, restoreID strin` |
+| 72 | `patch11.py` | 96 | `\| N14 \| `desktop/bridge/artifact_embed.go` \| `//go:embed artifact_insp` |
+| 73 | `patch_pub.py` | 96 | `// artifactSweeper 版本库周期清扫（启动 + 每小时；见 artifact_sweep.go）。` |
+| 74 | `patch_drag.py` | 90 | `let dragRect = null      // 区域拖拽中的矩形（视口坐标）` |
+| 75 | `patch_drag.py` | 86 | `\| 元素（默认） \| 直接点 \| `element`；Shift 点 = `elements` \|` |
+| 76 | `patch_meta.py` | 86 | `> 状态：**方案定稿，待评审**（2026-11-19；v2 增 §21 代码变更全集；v3 增 §22 CodeMode、§23 选区引` |
+| 77 | `patch_meta.py` | 85 | `\| 协作（分享/评论/共编） \| **后置到 Phase D，且先做 handoff 包** \| 本仓是本地单机优先；实时共编需要服务端与 ` |
+| 78 | `patch17.py` | 83 | `**定位**：`components/runtime/artifacts/ArtifactsBlock.tsx:108-121`（组件签名与` |
+| 79 | `patch_final.py` | 81 | `m.artifactPreview = newArtifactPreviewHost(m.artifacts, m.onArtifactPa` |
+| 80 | `patch11.py` | 80 | `+	CmdHostReply      Command = "host_reply"      // 宿主 RPC 回包（preview.s` |
+| 81 | `patch17.py` | 79 | `**定位**：同文件两处 —— `:126`（空判）与 `:150`（卡片根节点）。两处都要改，**只改渲染会让「本轮只有 bundle」的` |
+| 82 | `patch_drag.py` | 76 | `document.addEventListener('click', (e) => {` |
+| 83 | `add_mig.py` | 75 | `每个工具改一行：`Call` 的返回从 `fmt.Sprintf(...)` 换成 `return t.emit(ctx, result, ` |
+| 84 | `patch_chip.py` | 72 | `\| `TestSelectionRefDedup` \| 同 artifact+selector+version 两次引用 → 一枚 chip` |
+| 85 | `patch3.py` | 65 | `+	// selectionScope 当前选区任务的作用域（nil = 无选区任务；见 selection_guard.go）。` |
+| 86 | `patch3.py` | 62 | `// selectionScope 选区写范围守卫（nil = 未启用）。emit 的 AgentEnd 与 Ask 入口` |
+| 87 | `patch3.py` | 61 | `selectionScope *selectionScope // 并发安全由 selectionScope.mu 负责` |
+| 88 | `patch_doc.py` | 59 | `+	// selectionScope 选区改稿的写范围守卫（nil = 未启用）。与 Session 共享同一对象：` |
+| 89 | `patch_review2.py` | 59 | `\| R16 \| **P2** \| §22 \| 工具名/结果形状没有 CodeMode 契约 \| 新增 §22 整章 \|` |
+| 90 | `patch3.py` | 58 | `// selectionScope 当前选区任务的作用域（nil = 无选区任务）。emit 的 AgentEnd` |
+| 91 | `patch_meta.py` | 58 | `\| A 基座（检测/判定/版本/预览/产出卡） \| 18 \| 17 \| ~4,600 行 \| 是（4 个 PR） \|` |
+| 92 | `patch_final.py` | 57 | `// Sweep 周期清理（挂在 revisit 清扫器上，与 artifact_sweep 同一个 tick）。` |
+| 93 | `patch_meta.py` | 57 | `> 计数口径：**只算生产文件**（不含 `_test.go` / e2e / 评估脚本，那些在 §17 单列）。` |
+| 94 | `patch3.py` | 55 | `+	// selectionScope 选区写范围守卫（nil = 未启用）；并发安全由它自己的 mu 负责。` |
+| 95 | `patch6.py` | 53 | `-	bs = &bridgeSession{id: id, runtime: ws, s: s, ...}` |
+| 96 | `patch8.py` | 52 | `2. 每一处改动的**完整代码**（新文件全文；旧文件逐处「定位 / 原文 / 变更后」，见 §21）；` |
+| 97 | `patch_final.py` | 52 | `\| `desktop/bridge/main.go` \| 11 \| A3/A4/B \| §21.10 \|` |
+| 98 | `patch_ref2.py` | 52 | `\| `desktop/bridge/main.go` \| 12 \| A3/A4/B \| §21.10 \|` |
+| 99 | `patch3.py` | 49 | `**同一文件、同一函数**，在构造 `RunOptions` 的地方（不是 loop）加系统提示：` |
+| 100 | `patch6.py` | 49 | `-	bs = &bridgeSession{id: id, runtime: ws, s: s,` |
+| 101 | `patch8.py` | 49 | `> 状态：**方案定稿，待评审**（2026-11-19；同日 v2 增 §21「代码变更全集」）` |
+| 102 | `patch_final.py` | 48 | `\| N14b \| `desktop/bridge/artifact_commands.go` \|` |
+| 103 | `patch3.py` | 47 | `+	selectionScope atomic.Pointer[selectionScope]` |
+| 104 | `patch6.py` | 47 | `@@ -512,6 +512,9 @@ type bridgeSession struct {` |
+| 105 | `patch3.py` | 46 | `selectionScope atomic.Pointer[selectionScope]` |
+| 106 | `patch_doc.py` | 45 | `bridgeSession{id: id, runtime: ws, s: s, ...}` |
+| 107 | `add_handler.py` | 44 | `docs/ARTIFACT_SYSTEM_TECH_PLAN_2026-11-19.md` |
+| 108 | `patch11.py` | 44 | `+	case CmdHostReply:` |
+| 109 | `patch8.py` | 42 | `2. 每一处改动的**完整代码**（新文件全文 + 旧文件逐 hunk diff）；` |
+| 110 | `patch_drag.py` | 42 | `let dragRect = null      // 区域拖拽中的矩形（视口坐标）` |
+| 111 | `patch_meta.py` | 41 | `\| B 选区改稿 \| 5 \| 9 \| ~1,800 行 \| 是（3 个 PR） \|` |
+| 112 | `patch_meta.py` | 41 | `\| B 选区改稿 \| 6 \| 9 \| ~2,000 行 \| 是（3 个 PR） \|` |
+| 113 | `patch_ref2.py` | 40 | `// Drop 会话删除时清掉它的全部引用（引用是会话级状态，没有跨会话价值）。` |
+| 114 | `patch6.py` | 38 | `// 与 Ask 入口都会清（见 selection_guard.go）。` |
+| 115 | `patch9.py` | 34 | `+	if m.artifactsEnabled(ws.path) {` |
+| 116 | `patch_drag.py` | 33 | `**明确不引用**（避免把上下文撑爆，也避免把不可信内容当指令）：` |
+| 117 | `patch_review2.py` | 33 | `AgentEnd 清 scope（`bs.emit` diff）：` |
+| 118 | `patch3.py` | 32 | `+	selectionScope *selectionScope` |
+| 119 | `patch6.py` | 30 | `// 都会清（见 selection_guard.go）。` |
+| 120 | `patch8.py` | 29 | `> 状态：**方案定稿，待评审**（2026-11-19）` |
+| 121 | `patch9.py` | 27 | `+	if m.artifactsEnabled() {` |
