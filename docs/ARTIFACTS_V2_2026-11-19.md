@@ -1247,17 +1247,17 @@ func (m *manager) dispatchArtifact(c command) bool {
 | F8 | `Composer.tsx:1196` | 改历史快照 | 加 `quotes` | F5 |
 | F9 | `Composer.tsx:1549` | 改渲染 | `data-selection-chip` | F5 |
 | F10 | `i18n.ts:821/3218` | 各 +5 key | `composer.selection.*` | — |
-| F11 | `surfaces/types.ts:9` | 改联合 | `BuiltinKind` + `'artifact'` | D4 |
-| F11b | `surfaces/registry.ts:19` | 改集合 | `BUILTIN_KINDS` + `'artifact'`（漏则启动崩） | F11 |
-| F12 | `useAppStore.ts:97` | 改联合 | `RightTab` + `'artifact'` | F11 |
-| F13 | `useAppStore.ts:128` | 改联合 | `ArtifactTabInstance` | F12 |
-| F14 | `useAppStore.ts:1867` | 加分支 | `sanitizePersistedTab`（丢 url） | F13 |
-| F14a | `useAppStore.ts:1808` | 加分支 | `toPersistedTab`（漏则整条不持久化） | F13 |
-| F14b | `useAppStore.ts:1850` | 加分支 | `fromPersistedTab` 对称还原 | F13 |
-| F15 | `RightPanel.tsx:144` | 加 case | `SurfaceHost kind="artifact"` | F18 |
+| F11 | `surfaces/types.ts:13` | 改联合 | `BuiltinKind` + `'artifact'` | D4 |
+| F11b | `surfaces/registry.ts:19` | 改白名单 | `BUILTIN_KINDS` + `'artifact'`（漏则启动崩） | F11 |
+| F12 | `useAppStore.ts:100` | 改联合 | `RightTab` + `'artifact'` | F11 |
+| F13 | `useAppStore.ts:133` | 改联合 | `ArtifactTabInstance` | F12 |
+| F14c | `useAppStore.ts:1882` | 加分支 | `sanitizePersistedTab`（丢 url） | F13 |
+| F14a | `useAppStore.ts:1821` | 加分支 | `toPersistedTab`（漏则整条不持久化） | F13 |
+| F14b | `useAppStore.ts:1865` | 加分支 | `fromPersistedTab` 对称还原 | F13 |
+| F15 | `RightPanel.tsx:147` | 加 case | `SurfaceHost kind="artifact"` | F18 |
 | F17 | `lib/rightPanel.ts:65` | 加分支 | `selectRightTab` 认 artifact | F12 |
 | F18 | `surfaces/artifact/index.tsx`（新增） | 新增 | Surface 注册 | F11 |
-| F19 | `surfaces/registry-test.ts:71` | **改断言** | 四 → 五（规格变更） | F11 |
+| F19 | `surfaces/registry-test.ts:71/75` | **改断言** | 五 → 六（规格变更，两处同步） | F11 |
 | F20 | `i18n.ts` | 各 +1 key | `rp.tab.artifact` | F11 |
 
 > F16（`RightPanel.tsx:33/39` 固定标签条**不加** artifact）是"确认不改"项，列在此处仅为留痕。
@@ -1585,54 +1585,53 @@ Composer 里已经有一套"外部面板把一段文本引用进草稿"的机制
 
 #### 14.11.1 落点：`kind:"artifact"` 是**第 6 个内置 kind**，且必须注册成 Surface
 
-> ⚠️ **合并顺序前提**：`terminal-panel` 分支已经把内置 kind 从 4 个扩到 5 个（`+ 'term'`，
-> 见 `surfaces/registry-test.ts:71` 的用例名「五个内置 kind」）。产物落地时**不能再按 4→5 算**，
-> 否则两边各自把 `BUILTIN_KINDS` 改成自己那一版、后合并的一方静默覆盖先合并的一方。
-> 下表的行号标注了两种情况：`[主]` = 当前 `main`，`[+term]` = 合入终端分支后。
+> ⚠️ **前提已成立**：`terminal-panel` 已于 2026-11-20 合入 `main`（`0c0edda`），内置 kind 现为 5 个
+> （`+ 'term'`）。下表行号**全部按合并后的 `main` 实测**（`7ad8452` 之后），不再是预估。
 
-右栏的标签是「kind 判别联合 + Surface 注册表 + 持久化双写」，钉死点共 **7 处**：
+右栏的标签是「kind 判别联合 + Surface 白名单 + 持久化三处（写/读/校验）」，钉死点共 **9 处**：
 
 ```
-[主] surfaces/types.ts:8-9        /** 内置 kind 保持 4 个 … */  export type BuiltinKind = 'activity'|'git'|'file'|'web'
-[+term] surfaces/types.ts:13      export type BuiltinKind = 'activity'|'git'|'file'|'web'|'term'
-[主] surfaces/registry.ts:19      export const BUILTIN_KINDS = new Set(['activity','git','file','web'])
-[主] store/useAppStore.ts:97      export type RightTab = 'activity'|'git'|'file'|'web'
-[主] store/useAppStore.ts:111     export type TabKind = RightTab
-[主] store/useAppStore.ts:128     export type TabInstance = activity|git|FileTabInstance|WebTabInstance
-[主] store/useAppStore.ts:1808    toPersistedTab   ← 写侧
-[主] store/useAppStore.ts:1850    fromPersistedTab ← 读侧
-[主] store/useAppStore.ts:1867    sanitizePersistedTab ← 校验
-[主] components/RightPanel.tsx:60 const ADDABLE_KINDS: TabKind[] = ['activity','git','web']
-[主] surfaces/registry-test.ts:71 test('四个内置 kind 全部通过', …)  ← 见 F19
+surfaces/types.ts:13          export type BuiltinKind = 'activity'|'git'|'file'|'web'|'term'
+surfaces/registry.ts:19       export const BUILTIN_KINDS = new Set([...])   // 白名单，缺则启动抛错
+store/useAppStore.ts:100      export type RightTab = 'activity'|'git'|'file'|'web'|'term'
+store/useAppStore.ts:114      export type TabKind = RightTab
+store/useAppStore.ts:133      export type TabInstance = activity|git|TermTabInstance|FileTabInstance|WebTabInstance
+store/useAppStore.ts:1821     toPersistedTab      ← 写侧
+store/useAppStore.ts:1865     fromPersistedTab    ← 读侧
+store/useAppStore.ts:1882     sanitizePersistedTab← 校验
+components/RightPanel.tsx:63  const ADDABLE_KINDS: TabKind[] = ['activity','git','web','term']
+components/RightPanel.tsx:147 case 'web': return <WebTab …/>          ← 分发 switch
+components/RightPanel.tsx:949 <SurfaceHost kind="file" …/>            ← Surface 宿主用法参考
+lib/rightPanel.ts:65          export function selectRightTab(s): SurfaceKind | undefined
+surfaces/registry-test.ts:71  test('五个内置 kind 全部通过', …)
+surfaces/registry-test.ts:75  assert.deepEqual([...BUILTIN_KINDS].sort(), ['activity','file','git','term','web'])
 ```
 
-**决策**：新增内置 kind `artifact`（合入终端后即第 6 个）。**这不违反 D-I** —— D-I 说的是"文档/媒体不是 kind"
+**决策**：新增内置 kind `artifact`（即第 6 个）。**这不违反 D-I** —— D-I 说的是"文档/媒体不是 kind"
 （因为它们是工作区文件的渲染形态，能被文件树浏览到）；产物不是工作区文件、不该出现在文件树里、
 身份是 `(artifactId, version)` 而非路径，还带版本/选区/URL 重签 —— 它没有 `file` 标签能承载的身份。
 
-| # | 文件:行 | 现状 | 改为 |
+| # | 文件:行（合并后实测） | 现状 | 改为 |
 |---|---|---|---|
-| F11 | `surfaces/types.ts:9`[主] / `:13`[+term] + 前置注释 | 联合 4（或 5）个取值 | 加 `\| 'artifact'`；注释改为「6 个：artifact 有独立版本身份，不是 file 的渲染器（D4）」 |
-| F11b | `surfaces/registry.ts:19` | `BUILTIN_KINDS` 集合 | **加 `'artifact'`** —— 不加则 `registerSurface` 直接 `throw 未知的内置 kind`，应用起不来（`registry.ts:50`） |
-| F12 | `store/useAppStore.ts:97` | `RightTab = 4 取值` | 加 `\| 'artifact'`（`:111 TabKind` 自动跟随） |
-| F13 | `store/useAppStore.ts:128` | `TabInstance` = activity\|git\|File\|Web | 加 `ArtifactTabInstance = { id: string; kind: 'artifact'; artifactId: string; version?: number; view?: 'preview' \| 'source' \| 'history'; dismissed?: boolean }` |
-| F14a | `store/useAppStore.ts:1808` | `toPersistedTab` 按 kind 分支 | **加 `kind:'artifact'` 分支，只写 `{id, kind, artifactId, version, view}`**。⚠️ 漏这里会落进 web 分支 → `webUrlSnapshot` 为 `undefined` → **整条标签不被持久化**（重启后产物标签消失，且不报错） |
-| F14b | `store/useAppStore.ts:1850` | `fromPersistedTab` 按 kind 还原 | 加对称分支 |
-| F14c | `store/useAppStore.ts:1867` | `sanitizePersistedTab` 逐字段校验 | 加分支：`artifactId` 非空字符串、`version` 正整数、`view` 三值枚举；**任何 `url` 字段一律丢弃**（每次重签，落盘即失效） |
-| F15 | `components/RightPanel.tsx:144` | `case 'web': return <WebTab …/>` | 加 `case 'artifact': return <SurfaceHost kind="artifact" tab={tab} scope={scope} fallback={<ArtifactPreviewTab tab={tab} />} />`（与 `:946` 的 file 分支同形） |
-| F16 | `components/RightPanel.tsx:33/39/60` | `primaryTabs`/`secondaryTabs`/`ADDABLE_KINDS` | **三处都不加 artifact**：它不是用户从「＋」菜单新增的标签（唯一的产生方式是 publish），加了会出现"手动开一个空产物标签"的无意义路径 |
-| F17 | `lib/rightPanel.ts:65` | `selectRightTab` 映射成 `SurfaceKind` | 加 `artifact` 分支（否则返回 `undefined` → 右栏工具栏按"未知面板"退化） |
+| F11 | `surfaces/types.ts:13` | 5 个取值 | 加 `\| 'artifact'`；`:12` 的注释「内置 kind 保持 4 个」改成「6 个：artifact 有独立版本身份，不是 file 的渲染器（D4）」 |
+| F11b | `surfaces/registry.ts:19` | `BUILTIN_KINDS` 白名单（现 5 项，含 `'term'`） | **加 `'artifact'`** —— 不加则 `registerSurface` 直接 `throw 未知的内置 kind`，应用起不来（该文件 `:50`） |
+| F12 | `store/useAppStore.ts:100` | `RightTab` 5 取值 | 加 `\| 'artifact'`（`:114 TabKind` 自动跟随，注释「复用 5 个既有取值」同步改 6） |
+| F13 | `store/useAppStore.ts:133` | `TabInstance` = activity\|git\|term\|file\|web | 加 `ArtifactTabInstance = { id: string; kind: 'artifact'; artifactId: string; version?: number; view?: 'preview' \| 'source' \| 'history' }` |
+| F14a | `store/useAppStore.ts:1821` | `toPersistedTab` 按 kind 分支 | **加 `kind:'artifact'` 分支，只写 `{id, kind, artifactId, version, view}`**。⚠️ 漏这里会落进 web 分支 → `webUrlSnapshot` 为 `undefined` → **整条标签不被持久化**（重启后产物标签消失，且不报错） |
+| F14b | `store/useAppStore.ts:1865` | `fromPersistedTab` 按 kind 还原 | 加对称分支 |
+| F14c | `store/useAppStore.ts:1882` | `sanitizePersistedTab` 逐字段校验 | 加分支：`artifactId` 非空字符串、`version` 正整数、`view` 三值枚举；**任何 `url` 字段一律丢弃**（每次重签，落盘即失效） |
+| F15 | `components/RightPanel.tsx:147` | `case 'web': return <WebTab …/>` | 加 `case 'artifact': return <SurfaceHost kind="artifact" tab={tab} scope={scope} fallback={<ArtifactPreviewTab tab={tab} />} />`（照 `:949` 的 file 分支写法） |
+| F16 | `components/RightPanel.tsx:33/39/63` | `primaryTabs`/`secondaryTabs`/`ADDABLE_KINDS` | **三处都不加 artifact**：它不是用户从「＋」菜单新增的标签（唯一产生方式是 publish），加了会出现"手动开一个空产物标签"的无意义路径 |
+| F17 | `lib/rightPanel.ts:65` | `selectRightTab` 映射成 `SurfaceKind \| undefined` | 加 `artifact` 分支（否则返回 `undefined` → 右栏工具栏按"未知面板"退化） |
 | F18 | `surfaces/artifact/index.tsx`（新增） | —— | Surface 注册：`kind:'artifact'`、`group:'content'`、`scope:'session'`、`weight:'heavy'`、`capability:'view'` |
-| F19 | `surfaces/registry-test.ts:71/75/76` | 三处：用例名「四个/五个内置 kind」、`assert.deepEqual([...BUILTIN_KINDS].sort(), [...])`、遍历数组 | **三处同步**改成含 `'artifact'` 的集合 —— 规格变更导致的**预期**断言更新，不是"为通过而改断言"；同时补反例（`'artifact2'`、`'plugin:artifact'` 必须为 false）。⚠️ `deepEqual` 是全等断言：只改 title 不改数组，用例照样红；只改数组不改 title，用例名会说谎 |
+| F19 | `surfaces/registry-test.ts:71/75` | 用例名「五个内置 kind」+ `deepEqual(['activity','file','git','term','web'])` | **两处同步**改成含 `'artifact'` 的集合 —— 规格变更导致的**预期**断言更新，不是"为通过而改断言"；同时补反例（`'artifact2'`、`'plugin:artifact'` 必须为 false）。⚠️ `deepEqual` 是全等：只改数组不改用例名，名字会说谎；只改名字不改数组，用例照样红 |
 | F20 | `i18n.ts`（中 `:821` 区 / 英 `:3218` 区双份） | `rp.tab.*` 无 artifact | 加 `rp.tab.artifact`（仅用于无障碍名与 tooltip，不参与标签条渲染） |
 
-
-
 > 这里是最容易"看着能跑、实际漏一处"的地方，三种漏法都能编译通过：
-> ① 漏 `registry.ts` 的 `BUILTIN_KINDS` → **启动即崩**（`registerSurface` 抛错），最响但会让人以为改动错了方向；
-> ② 漏 `toPersistedTab` → 标签落进 web 分支、`webUrlSnapshot` 为 `undefined` → **整条不持久化**，重启后消失且无报错；
-> ③ 漏 `selectRightTab` → 返回 `undefined`，右栏工具栏按"未知面板"退化。
-> 所以上表 7 个文件必须**同一次改动**落地；`BuiltinKind` 是纯类型联合，前两种漏法 tsc 一声不响。
+> ① 漏 `registry.ts:19` 白名单 → **启动即崩**（`registerSurface` 抛错），最响但会让人以为改错了方向；
+> ② 漏 `toPersistedTab:1821` → 标签落进 web 分支、`webUrlSnapshot` 为 `undefined` → **整条不持久化**，重启后消失且无报错；
+> ③ 漏 `selectRightTab:65` → 返回 `undefined`，右栏工具栏按"未知面板"退化。
+> 所以上表 8 个文件必须**同一次改动**落地；`BuiltinKind` 是纯类型联合，三种漏法 tsc 一声不响。
 
 #### 14.11.2 自动展开的落点
 
@@ -2072,6 +2071,11 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 `p8-host-seams-entry.tsx`，与合并前同数）；`vite build` ✓ 6.9s，`.xterm` 与 `term-host` 样式进了
 `dist/assets/main-*.css`；前端 9 个测试脚本全 exit=0（`test:right-tabs` 238 项断言、`test:host-seams` 57、
 `test:terminal` 68/68、其余 PASS）。
+
+**Go 全量**：`go test ./... -count=1` → 27 包 ok，失败 **11 条**，与合并前 `feat+agent-cwd` 分支在
+干净基线上复现出的名单**逐条同名**（`TestMediaProbe*` 6 条、`TestHubEngineSandboxRootsAtAgentHome`、
+`TestExecSandboxForWorkPersonaRunPython`、`TestRunPythonSeatbeltProtectsGoCodeConfig`、`TestMCPWatchDebounce`、
+`TestSubagentStateStoreWritesSessionFormat`），归因均为**本机沙箱/fsnotify 受限**，**合并未引入新失败**。
 
 ## 25. 术语表
 
