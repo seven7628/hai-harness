@@ -6,7 +6,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { encodeCtrl, decodeFrame } from './frame'
+import { encodeCtrl, decodeFrame, encodeData } from './frame'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -60,4 +60,28 @@ test('ArrayBuffer 与 Uint8Array 两种入参等价', () => {
   const fromBuf = decodeFrame(ab)
   const fromU8 = decodeFrame(frame)
   assert.deepEqual(fromBuf.ctrl, fromU8.ctrl)
+})
+
+// —— 2026-11-20 新增：数据帧编码 ——
+//
+// 背景是真 bug：发送侧直接 `sock.send(string)`，浏览器发成 **text frame**，而 Go 的 handlePty
+// 只处理 MessageBinary（`if typ != websocket.MessageBinary { continue }`），每一次按键都被
+// 静默丢弃：前端 onData 有日志、WS 没有报错、shell 就是不回显。下面三条把这个约定钉死。
+
+test('数据帧：原样 UTF-8 字节，不带控制帧的 0x00 前缀', () => {
+  const b = encodeData('ls -la')
+  assert.deepEqual(Array.from(b), Array.from(enc.encode('ls -la')))
+  assert.notEqual(b[0], 0, '数据帧不能以 0x00 开头，否则会被当成控制帧')
+})
+
+test('数据帧：中文字符按 UTF-8 多字节编码（IME 输入直通）', () => {
+  const b = encodeData('撒打算')
+  assert.equal(b.length, 9) // 3 个字符 × 3 字节
+  assert.equal(dec.decode(b), '撒打算')
+})
+
+test('数据帧与控制帧可被同一个 decodeFrame 区分', () => {
+  assert.equal(decodeFrame(encodeData('abc')).ctrl, undefined)
+  assert.deepEqual(Array.from(decodeFrame(encodeData('abc')).data ?? []), Array.from(enc.encode('abc')))
+  assert.equal(decodeFrame(encodeCtrl({ t: 'hello' })).ctrl?.t, 'hello')
 })

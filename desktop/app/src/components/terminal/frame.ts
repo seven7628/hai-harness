@@ -34,6 +34,23 @@ export function encodeCtrl(c: CtrlFrame): Uint8Array {
   return out
 }
 
+/**
+ * 数据帧编码：**原样 UTF-8 字节，不加任何前缀**。
+ *
+ * 为什么必须有这个函数（2026-11-20 的真 bug）：发送侧原本直接 `sock.send(d)`（d 是 string），
+ * 浏览器会把 string 发成 **text frame**，而服务端 `handlePty` 只收 binary：
+ * `if typ != websocket.MessageBinary { continue }` —— 于是每一次按键都被**静默丢弃**：
+ * 前端 onData 有日志、WS 也不报错、shell 就是不回显。这类「两端都正常、中间约定不一致」
+ * 的问题只能靠把编码点收敛成一个函数来防：调用方拿不到「顺手发个字符串」的机会。
+ *
+ * 与 encodeCtrl 的分界：首字节 0x00 是控制帧（见 CTRL_BYTE），所以数据帧**不能**以 0x00 开头。
+ * 终端数据里出现 0x00 时（Ctrl+@ / 二进制输出），服务端 decodeFrame 会因为「JSON 解析失败」
+ * 或「t 缺失」把它退回成数据帧，语义仍然是正确的。
+ */
+export function encodeData(text: string): Uint8Array {
+  return encoder.encode(text)
+}
+
 /** 帧解码。入参兼容 WebSocket 的 ArrayBuffer 与 Uint8Array 两种形态。 */
 export function decodeFrame(buf: Uint8Array | ArrayBuffer): DecodedFrame {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)

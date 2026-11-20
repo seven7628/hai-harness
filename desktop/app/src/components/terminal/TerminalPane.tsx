@@ -19,7 +19,7 @@ import { emitUI } from '../../lib/uiBus'
 import { copyText } from '../../lib/clipboard'
 import { next, type PaneState, type PaneEvent } from './paneMachine'
 import { terminalWriter } from './writer'
-import { encodeCtrl, decodeFrame } from './frame'
+import { encodeCtrl, decodeFrame, encodeData } from './frame'
 import { formatSelection } from './formatSelection'
 import { readTermTheme, watchTheme } from './theme'
 
@@ -205,12 +205,9 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
       term.options.theme = readTermTheme()
     })
 
-    term.onData((d) => {
-      // 埋点：这一行出现 ⇒ 键盘事件确实进了 xterm（问题在 socket 侧）；
-      // 不出现 ⇒ 焦点/键盘被别处吃掉（问题在 xterm 之前）。
-      console.log('[term] onData', JSON.stringify(d))
-      sendRef.current(d)
-    })
+    // 不在这里打日志：这是**每次按键**都走的路径，留日志会把控制台刷满。
+    // 键盘→xterm 这一跳是否通，看 focus 埋点（activeElement 是不是 xterm 的 textarea）即可。
+    term.onData((d) => sendRef.current(d))
     term.onSelectionChange(() => setSelection(term.getSelection()))
 
     term.attachCustomKeyEventHandler((e) => {
@@ -249,7 +246,9 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
       sock.binaryType = 'arraybuffer'
       sockRef.current = sock
       sendRef.current = (d) => {
-        if (sock.readyState === WebSocket.OPEN) sock.send(d)
+        // 必须发**二进制**帧：服务端只认 MessageBinary，发 string 会被整段丢弃（见 frame.ts 的
+        // encodeData 注释）。这条曾经让「键盘有反应、shell 不回显」查了很久。
+        if (sock.readyState === WebSocket.OPEN) sock.send(encodeData(d))
       }
       sock.onopen = () => {
         console.log('[term] ws open')
