@@ -2435,3 +2435,67 @@ func TestToolParamsPrefersContextDescriber(t *testing.T) {
 	}
 }
 ```
+
+---
+
+## 18. 恢复补全记录（2026-11-20，第二轮）
+
+> 背景：§16 的 11 个提交随 2026-11-19 22:12 的误删全部丢失（从未推送）。
+> 第一轮恢复提交 `ad777a7` 只覆盖了 S1/S2/S3/S5/S7b 的工具层与装配层；
+> 本轮按 `/private/tmp` 的幸存补丁脚本 + `main.go.bak3` + 本文件 §11/§12/§14/§15/§17
+> 把**其余改动**补上。原则：能从证据逐字恢复的逐字恢复；证据不足的按方案实现并标注。
+
+### 18.1 本轮补上的改动
+
+| # | 改动 | 证据 | 性质 |
+|---|---|---|---|
+| 1 | `cdPrefixRe` → `(?s)^cd\s+([^\n]+)`；`splitCd` 把第一行之后的正文接回 rest | §14.1（R1）、§16.3 #1/#2 | 逐字（方案） |
+| 2 | 后台意图识别提前到 cd 拆分之前（后台命令不改会话 cwd） | §14.5（R5）、§16.3 #3 | 逐字（方案） |
+| 3 | cd 越界 ⇒ 重置回根 + 回执；连续越界只提示一次 | §15.3、§16.6、§17.5 | **推断**（节流实现） |
+| 4 | cd 生效的回执 `Working directory is now …` 追加在 spill 之后 | §15.3、§12.4 断言 | 逐字（措辞取自断言） |
+| 5 | `tools.ContextDescriber` + `Engine.ToolParams` 优先 `DescribeFor(ctx)` | §15.2 ①②、patch_s4.py | 逐字（脚本） |
+| 6 | bash 描述固定输出 `Working directory: <cwd>`（按分区） | §15.2 ⑤、patch_s4.py 3a–3c | 逐字（脚本） |
+| 7 | `AgentContext.workKey` + `toolSchemas(workdir.WithKey(...))` | §15.2 ④、patch_s4.py 4a/4c | 逐字（脚本） |
+| 8 | 同步子运行分区键 `sync:<runid>:<depth>` | §14.6（R6）、§16.3 #4、patch_s4.py 4b | 逐字（语义）；抽成纯函数为**推断** |
+| 9 | `git_worktree` 的 `enter`/`exit`；`create` 后切目录；`remove` 当前目录则回根 | §11.6、§12.7、patch_p1.py | 骨架逐字；API 适配为**推断** |
+| 10 | `tools.WorkdirAware` + 三个实现方 | §16.2 D6、patch_s6.py | 逐字（脚本） |
+| 11 | 既有 `bash_cwd_test.go` 两例的 cd 目标改到根内子目录 | §16.3 #6 | 逐字（方案描述） |
+
+### 18.2 与 patch 脚本的差异（API 口径）
+
+`patch_p1.py` 假设的 `workdir` API 与真实实现不符，**不是记忆偏差而是脚本早于实现**：
+
+| patch_p1.py 假设 | 真实实现 |
+|---|---|
+| `wd.Set(key, dir)` → `(old, changed, err)` | `Set(key, dir)` 无返回值 |
+| `wd.Reset(key)` → 旧值 | `Reset(key)` 无返回值 |
+| `workdir.Notice(old, cur)` / `workdir.NoticeReset(root)` | **不存在**；回执在 `tools/builtin` 内拼 |
+| `wd.Contains(abs)` | **不存在**；边界判据是 `wd.Root()` + 前缀比较 |
+
+⇒ `enter`/`exit`/回执全部按真实 API 重写（`cwdChangeNotice` / `cwdResetNotice` /
+`pathWithinRoot` / `switchTo`），语义与 §11.6 一致。
+
+### 18.3 本轮明确**未做**的部分
+
+| 项 | 状态 | 理由 |
+|---|---|---|
+| 文件工具 / run_python 的 cwd 回执（§16.6 提到"工具结果多了 cwd 回执一行"） | 未做 | 只有 bash 的代码与断言可考；文件工具不改 cwd，回执无信息量 ⇒ 需人工判断 |
+| §12.3 的 `TestCwdResetOutsideRoot`（文件工具维度） | 未做 | 新语义下 cd 越界已被重置回根，"文件工具在越界 cwd 下被拒"不可达；等价覆盖见 `TestBashCwdOutsideRootResetsToProjectRoot` + `resolveFor` 的逃逸检查 |
+| §12.5（rebuildLoop 保留 cwd）、§12.6（重放一致性） | 未做新测试 | 已有 `TestSessionCwdSurvivesRebuildLoop` 覆盖前者；重放一致性由既有 events↔checkpoint 测试覆盖 |
+| §14.11 T5（Env.IsGitRepo）/ T6（gitignore 锚点） | 不适用 / 未做 | T5 随 D2（Env 快照砍掉）消失；T6 行为未变（R4 结论就是"不改"） |
+| §14.11 T7（hub_workspace 不跟随会话 cwd） | 结构性成立，无测试 | `hub_workspace.go` 用 `NewFileTools(dir)`（不带 wd）⇒ 天然独立；未加断言 |
+| §16.5 的 R13/R14/评估复测/部署验证 | 未做 | 原方案即"留到后续" |
+
+### 18.4 验证（本轮）
+
+```
+go build ./...                                  ✅
+go vet ./workdir/ ./tools/builtin/ ./desktop/bridge/ ./tools/ ./agents/   ✅
+go test ./workdir/ ./tools/ ./agents/           ✅
+go test ./tools/builtin/ -run 'Workdir|Cwd|Partition|SplitCd|DescribeFor|Background|GitWorktree'  ✅
+go test ./desktop/bridge/ -run 'Workdir|Cwd|Assembly|Session'           ✅（除两条既有环境失败）
+```
+
+既有的两条失败与本改动无关（在 `git archive HEAD` 的干净副本上同样失败）：
+`TestRunPythonSeatbeltProtectsGoCodeConfig`（沙箱拒绝读 `~/.go-code/settings.json`）、
+`TestSubagentStateStoreWritesSessionFormat`（适配器方法齐备断言）。
