@@ -2499,3 +2499,90 @@ go test ./desktop/bridge/ -run 'Workdir|Cwd|Assembly|Session'           ✅（�
 既有的两条失败与本改动无关（在 `git archive HEAD` 的干净副本上同样失败）：
 `TestRunPythonSeatbeltProtectsGoCodeConfig`（沙箱拒绝读 `~/.go-code/settings.json`）、
 `TestSubagentStateStoreWritesSessionFormat`（适配器方法齐备断言）。
+
+## 19. 收尾补全（2026-11-20，第三轮）
+
+> 背景：§18 收尾后仍有 5 处「只有单元级覆盖 / 判为证据不足未做」的悬空项。
+> 本轮把它们全部落成**可证伪的断言**或**明确的判断**，并跑完 `go test ./...`。
+> 原则不变：不臆造；能用证据的用证据，不能用证据的写进「不确定」。
+
+### 19.1 本轮补上的五件事
+
+| # | 事 | 测试 / 实现 | 为什么在这一层 |
+|---|---|---|---|
+| 1 | 多 agent **并发**分区隔离 | `desktop/bridge/workdir_concurrency_test.go`<br>`TestCwdIsolationAcrossConcurrentCallers` | 单元级（`TestBashCwdIsolatedPerCaller`）只证明「工具内部按 key 分区」；会踩的是**装配**——一个会话只装一套 `tools.Engine`、工具实例共享。走 `bs.eng` + `workdir.WithKey` + `eng.ToolParams` 才是生产链路（`agents.runTools` / `agents.toolSchemas` 用的就是这两个入口）。两个 caller 真并发各 cd、各写相对路径、各读自己的 schema 描述；主分区全程不动。 |
+| 2 | checkpoint / replay 不受 cwd 影响（V5） | `desktop/bridge/workdir_checkpoint_test.go`<br>`TestCheckpointBytesIndependentOfCwdState` | 走生产的重放入口 `migrateLegacyToCheckpoint`（events.jsonl → reducer → `commitSync` → `record.ViewCheckpoint`），两个会话喂同一份事件流、只在内存 cwd 上不同（一个 `wd.Set` 到哨兵目录）。断言：①两次重放 checkpoint **逐字节相同**；②哨兵路径**不出现**在 checkpoint / reducer 视图里（`workdir.State` 纯内存）；③**对照**：事件流里的内容（`a.txt`）确实在 checkpoint 里，证明②不是在空字节上空转。 |
+| 3 | rebuildLoop 后**每个 workKey** 的 cwd 保留（Q4 / V4） | `desktop/bridge/workdir_session_test.go`<br>`TestSessionCwdSurvivesRebuildLoopPerPartition` | 既有 `TestSessionCwdSurvivesRebuildLoop` 只钉主分区；rebuildLoop 若误传 `wd.Root()` 新建 State 或只搬主分区，那条仍绿。本条同时持有主分区 + 子分区，断言 `bs.wd` **指针不变**、两个分区的 cwd 不变、新引擎七件里四件（bash/read_file/write_file/run_python）的 `WorkdirState()` 仍是那一份、schema 描述按分区正确。 |
+| 4 | 越界重置的**等价**覆盖（§12.3 `TestCwdResetOutsideRoot` 不可达） | `tools/builtin/cwd_escape_test.go`<br>`TestCwdResetOutsideRootKeepsFileToolsBounded` | 旧断言测的是「文件工具在**越界 cwd** 下被拒」，新语义下 cd 越界当场重置 ⇒ 那个状态不可达，断言永远绿。换成的三步链：①根内 cd 后相对路径锚到子目录（前提取到）；②越界 cd 后 `Current()` 立刻回根、相对路径**重新锚根**；③`../escape.txt` 仍被拒且**磁盘上没有**越界文件（反向对照：根内写成功）。 |
+| 5 | `run_python` 的 cwd 可见性 | `tools/builtin/run_python.go`（`runPythonDescribe` / `DescribeFor` / 文案改准）<br>`tools/builtin/run_python_describe_test.go`<br>`TestRunPythonDescribeIncludesWorkingDirPerCaller`、`TestRunPythonOutputsAnchorAtCwd` | 见 §19.2 |
+
+**§18.3 里被本轮取代的三行**：文件工具/run_python 回执（→ §19.2）、
+§12.3 `TestCwdResetOutsideRoot`（→ 本轮第 4 项）、§12.5/§12.6 新测试（→ 本轮第 2/3 项）。
+其余行（T5–T7、R13/R14、评估复测、部署验证）状态不变。
+
+### 19.2 第 5 项判断：**不加一次性回执，加「每请求重算」的 cwd 行**
+
+证据（不是偏好）：
+
+1. `run_python` 的 `outputs` 与 `script_path` 的相对锚点是**会话 cwd**（`declaredOutputs`
+   → `ft.resolveAt` → `FileTools.cwd(ctx)`），但描述里原文写着
+   "up to 10 **workspace-relative** … paths" / "workspace-relative like out/report.xlsx"
+   —— **cd 之后这句话就是假话**。所以这里缺的不是「再一次的落盘回执」，而是
+   「锚点到底是什么」这件事本身没说。
+2. 载体取舍沿用 §15 已定的口径：**工具描述（D'）**每请求重算、压缩后仍在、恢复后重算；
+   而一次性回执只在「声明了 outputs 的那一次」出现，覆盖不到「模型没声明产物却在算路径」
+   （而那恰恰是写错目录的主因）。bash 已经用这个载体，run_python 没有理由用另一个。
+3. 因此实现为：`runPythonDescribe(cwd)` = `"Working directory: <cwd>\n" + 描述正文`，
+   `RunPythonTool.DescribeFor(ctx)` 按**调用方分区**取 cwd（与 bash 同款），
+   `Description()` 静态版回退到构造目录；cwd 为空（无工作区退化装配）时不输出那一行，
+   免得给模型一条空的 `Working directory:`。同时把两处 "workspace-relative" 改成
+   "resolved against the current working directory"。
+4. 测试同时钉住「描述没说谎」：`declaredOutputs` 把 `out/report.xlsx` 解析到
+   `<cwd>/out/report.xlsx`（cd 前后各一次），绝对路径不被重锚。
+
+**顺带影响**：run_python 现在也实现 `tools.ContextDescriber` ⇒ 装配层第 1/3 项的
+schema 断言顺带覆盖了它；`tools.WorkdirAware` 的七件工具断言不变。
+
+### 19.3 本轮验证
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 构建 | `go build ./...` | ✅ |
+| 静态检查 | `go vet ./...` | ✅ |
+| 本轮新增用例 | `go test ./desktop/bridge/ -run 'TestCwdIsolationAcrossConcurrentCallers\|TestCheckpointBytesIndependentOfCwdState\|TestSessionCwdSurvivesRebuildLoop'` | ✅ |
+| 本轮新增用例 | `go test ./tools/builtin/ -run 'TestCwdResetOutsideRootKeepsFileToolsBounded\|TestRunPythonDescribe\|TestRunPythonOutputsAnchorAtCwd'` | ✅ |
+| 全量回归 | `go test ./... -count=1` | 27 个包 ok；**11 条失败，全部在干净基线上同样失败**（见下） |
+
+**变异验证（证明新断言能证伪，不是永远绿）**：
+
+| 注入的缺陷 | 变红的用例 | 现象 |
+|---|---|---|
+| `workdir.WithKey` 退化成「不写 ctx」（所有 caller 共用主分区） | `TestCwdIsolationAcrossConcurrentCallers` | 分区 cwd 停在根、`pwd` 报 `cd: agent-b: No such file or directory` |
+| `bash.go` 越界分支删掉 `t.resetCurrentCwd(ctx)` | `TestCwdResetOutsideRootKeepsFileToolsBounded` | `越界后 cwd = …/sub，want 回到根` |
+
+（两次变异都只改一行、跑完立刻还原，`git diff` 已确认工作树回到当前状态。）
+
+**全量失败清单与归因**（`git archive HEAD | tar -x -C /tmp/agentcwd-baseline` 的干净副本
+上 `go test ./... -count=1` 得到**逐条相同**的 11 条）：
+
+| 失败 | 归因（环境，非本改动） |
+|---|---|
+| `TestMediaProbeParsesFFprobeOutput` / `FailedIsNotAnError` / `TimeoutIsFailedNotError` / `CacheByPathSizeMtime` / `RejectsBadPaths` / `RejectsUnopenedWorkspace`（6 条） | 本机 seatbelt 不可用：`seatbelt 策略探测失败 … exit status 71` ⇒ `sandbox_status=degraded`，用例期望 `ok:true` |
+| `TestHubEngineSandboxRootsAtAgentHome`、`TestExecSandboxForWorkPersonaRunPython` | 同上（"hub sandbox should be available on this host" / "应构造沙箱"） |
+| `TestRunPythonSeatbeltProtectsGoCodeConfig` | 沙箱拒绝读 `~/.go-code/settings.json`：`operation not permitted` |
+| `TestMCPWatchDebounce` | fsnotify 受限：`watch add: operation not permitted` |
+| `TestSubagentStateStoreWritesSessionFormat` | 「适配器三方法齐备」断言（与本改动无关，基线上同样失败） |
+
+`desktop/bridge` 与 `tools/builtin` 两个包因上述既有失败整体标 FAIL，但**包内其余用例全绿**
+（含本轮新增 5 条）。没有为通过而修改任何既有断言。
+
+### 19.4 仍不确定 / 未做（明确列出）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| §14.11 T5（`Env.IsGitRepo`）/ T6（gitignore 锚点） | 不适用 / 未做 | 同 §18.3：T5 随 D2 消失；T6 结论就是「不改」 |
+| §14.11 T7（`hub_workspace` 不跟随会话 cwd） | 结构性成立，仍无测试 | `hub_workspace.go` 用 `NewFileTools(dir)`（不带 wd）⇒ 天然独立 |
+| 真实 bridge E2E（§12.9 人工验收清单） | 未做 | 需要真实 LLM 会话与桌面端点击验收，自动化无法替代 |
+| `TestCwdIsolationAcrossConcurrentCallers` 的 bash 路径 | 已覆盖但非 TTY | 用例直调 `bash.Call`（绕过审批/UI），真实的审批闸门交互不在覆盖面内 |
+| `run_python` 描述里的 cwd 行对**上下文长度**的影响 | 未量化 | 每个 schema 多一行绝对路径（与 bash 同类）；未做 token 实测 |
+| §16.5 的 R13/R14 / 评估脚本复测 / 部署验证 | 未做 | 原方案即「留到后续」，本轮不动 |
