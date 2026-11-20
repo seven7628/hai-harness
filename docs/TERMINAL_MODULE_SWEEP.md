@@ -117,13 +117,86 @@ term.fontMissing（源码注释提到，文案未见）
 | 16 个终端独立模块 | ✅ 已还原（本分支），并补 `// [recovered]` 来源头 |
 | `termSurface.tsx` | ✅ 已还原 |
 | `terminal.css` | ⚠️ 原文丢失，已按契约+截图**重建** |
-| `transport/host.ts` 三条 pty | ❌ 上游缺失，切片已定位（§3.1），**未改**（避免动大文件） |
-| `useAppStore.ts` term 切片 | ❌ 上游缺失，切片已定位（§3.2–3.4），**未改** |
-| `transport/{mock,electron,mobile}` pty | ❌ 同上（§3.3） |
-| `i18n.ts` term.* | ❌ 上游缺失（§3.5） |
-| `index.ts` 注册 termSurface | ❌ 上游缺失（§3.6） |
-| `@xterm/xterm` + `@xterm/addon-fit` | ❌ 不在 `package.json`，需安装 |
+| `transport/host.ts` 三条 pty | ✅ 已落地（见 §5.1 —— 本仓 `host.ts` 是纯注册缝，实现落在 `transport/electron.ts`） |
+| `useAppStore.ts` term 切片 | ✅ 已落地（§5.2） |
+| `transport/{mock,electron,mobile}` pty | ✅ 已落地（§5.1） |
+| `i18n.ts` term.* | ✅ 已落地（§5.3：`rp.tab.term` + 17 条 `term.*`） |
+| `index.ts` 注册 termSurface | ✅ 已落地（§5.3） |
+| `@xterm/xterm` + `@xterm/addon-fit` | ✅ 已装（`^6.0.0` / `^0.11.0`） |
 | Go 侧 pty 桥 | ✅ 已按契约实现（`pty.go`，见 `TERMINAL_BACKEND_RECOVERY.md`） |
 
 > 这些是**下一步集成清单**，不是恢复失败：切片都在 bundle 里，可逐字搬。
 > 本次因「不改大文件 / 时间」未落进 `useAppStore.ts` 等，故**前端尚不能直接运行**（Go 侧已可运行）。
+
+---
+
+## 5. 集成落地记录（2026-11，本分支）
+
+§4 的缺口已全部补齐。**逐条对应**（每条都注明"恢复"还是"实现"）：
+
+### 5.1 transport 层（控制面三条）
+
+| 文件 | 改动 | 来源 |
+|---|---|---|
+| `src/transport/types.ts` | 新增 `PtyInfo` / `PtyCreateInput` / `PtyCreateResult` / `PtyTicketResult` / `PtyCloseResult` + `Transport` 上三个方法 | 恢复（§3 切片推出的形状）+ Go 侧字段名（`pty.go`） |
+| `src/transport/electron.ts` | `ptyCreate` / `ptyTicket` / `ptyClose` 三条映射 + `ptyInfoOf` 形状校验（**不抛**） | 逐字恢复 §3.1 |
+| `src/transport/mock.ts` | 三条一律 `{ok:false, error:"终端仅在桌面端可用"}` | 逐字恢复 §3.3 |
+| `src/mobile/transport/mobile.ts` | 同上（手机端显式给原因，不靠 Proxy 兜 `unsupported:`） | 逐字恢复 §3.3 |
+| `electron/main.ts` + `electron/preload.ts` + `src/lib/bridge.ts` | `pty:create` / `pty:ticket` / `pty:close` 三个 IPC，走 `sendBridgeRequest`（主进程直发，能把 `data` 带回渲染层） | **实现**（依据 §3.1 的 `d.ptyCreate` 用法 + 既有 xlsx/docx/pptx 直发口径） |
+
+> **与 §3.1 的偏差（必须说明）**：§3.1 说切片在 `src/transport/host.ts`。本仓的 `host.ts`
+> 是 P8-01b 的**纯注册缝**（`setHostTransport` / `getHubTransport`，没有实现体），
+> 把三条 pty 塞进去只会得到一段没人调用的死代码。切片真正的宿主是 `electron.ts`
+> （`const d = bridge!` 那一层），故实现落在那里 —— 保存缝不变，`Transport` 接口是它分发的类型。
+
+### 5.2 store 层（运行时表 + 两个动作 + 事件分发 + 标签持久化）
+
+`src/store/useAppStore.ts`：
+
+- `RightTab` / `TabKind` 加 `'term'`；`TabInstance` 加 `TermTabInstance = {id, kind:'term'}`。
+- `PersistedTab` 的 `{id, kind:'activity'|'git'}` 扩成 `|'term'`，`toPersistedTab` /
+  `fromPersistedTab` 两侧都加了 `case 'term'`。**这两处漏一个就是"重启后终端标签消失"**
+  （`toPersistedTab` 漏 → 落到 web 分支 → `webUrlSnapshot` 为 undefined → 整条不持久化）。
+- 新增 `export interface TermRuntime` 与 `AppState.term: Record<tabId, TermRuntime>`（初始 `{}`）。
+- 新增动作 `termEnsure` / `termClose`（逐字恢复 §3.2，含 40 次退避重试与
+  `/bridge\s*(启动中|未运行)/` 判定；常量 `BRIDGE_NOT_READY_RE`、`TERM_CREATE_MAX_ATTEMPTS`）。
+- `closeTabNow` 里加 `if (gone.kind === 'term') get().termClose(gone.id)`。
+- `dispatchEvent` 新增 `case 'pty_changed'`：**只更新 `term` 表**（不建视图、不进 checkpoint、
+  不落盘），按 `pty_id → tabId` 反查，查不到（已关标签的迟到事件）直接丢弃。
+
+### 5.3 文案 / 注册 / 入口
+
+- `src/i18n.ts`：`rp.tab.term` + 17 条 `term.*`（中英各一份，文案逐字取自 §3.5 / 设计 §6）。
+- `src/surfaces/types.ts`：`BuiltinKind` 加 `'term'`；`src/surfaces/registry.ts`：
+  `BUILTIN_KINDS` 加 `'term'`（不加则注册即抛、恢复时标签被当坏数据丢掉）。
+- `src/surfaces/builtin/index.ts`：`import './termSurface'`（副作用注册，§3.6）。
+- `src/components/RightPanel.tsx`：`ADDABLE_KINDS` 加 `'term'` —— **推断项**（文档未覆盖）：
+  终端没有别的入口（file 由点文件产生、web 由内嵌页面同步），不进＋菜单则功能不可达。
+
+### 5.4 组件接线（"能跑起来"的关键）
+
+三个小文件是编译形态且依赖 bundle 内联变量（`registerSurface` / `TerminalTab` / `TermIcon` /
+`import_jsx_runtime`），**在源码里必然 ReferenceError**，因此按 `TerminalPane.tsx` 同一口径
+回译为 TSX 并补真实 import：`TermIcon.tsx`、`TerminalTab.tsx`、`termSurface.tsx`。
+六个纯模块（frame / writer / paneMachine / theme / formatSelection / commandContext）原先
+**没有任何 `export`**，已补导出名与类型并移除 `@ts-nocheck`。
+
+### 5.5 验证（本机真实输出）
+
+```
+npx tsc --noEmit          → 8 行错误，全部在 src/p8-host-seams-entry.tsx（本次改动前就有，见 §5.6）
+npx vite build            → ✓ built in ~6s（xterm 进 main chunk，terminal.css 已 @import）
+npm run test:terminal     → 68 tests / 68 pass / 0 fail
+go build ./...            → 通过
+go test -run TestPty ./desktop/bridge/ → 7 PASS + 1 SKIP（TestPtyLiveEcho 因本机沙箱不允许分配 PTY 而跳过）
+```
+
+### 5.6 已知遗留
+
+- `src/p8-host-seams-entry.tsx` 是上一次恢复遗留的 **bundle 输出**（105 行，含 license 尾巴，
+  没有任何代码 import 它；`scripts/test-host-seams.mjs` 只是把自己的虚拟入口 *命名为* 这个名字）。
+  `tsc --noEmit` 的 8 条错误全在这里，**本次改动前就有**（基线 16 条 = 这 8 条 + 8 条终端相关）。
+  按"不删文件"的约定没有动它；清理方式是把它删掉或回译成真正的探针入口。
+- 真实 PTY 分配（`forkpty`）在本机沙箱里 `operation not permitted`，`TestPtyLiveEcho` 走
+  `t.Skipf` 跳过。因此"起真 shell → 回显"这条链**未在本机验证**；帧编解码、票据一次性/过期、
+  未知会话拒绝等 7 条契约有测试覆盖。
