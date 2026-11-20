@@ -45,6 +45,9 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
 
   const apply = useCallback((ev: PaneEvent) => {
     const { state: ns, fx } = next(stateRef.current, ev)
+    // 埋点：状态机每次转移都留一行。终端「不动了」时，只看这一串就能知道卡在哪一跳
+    //（User → xterm → socket → shell 四段，每段都有各自的日志前缀）。
+    if (ns !== stateRef.current) console.log('[term] state', (stateRef.current as { s: string }).s, '→', ns.s, '<-', ev.t)
     stateRef.current = ns
     for (const f of fx) {
       if (f.k === 'reset-term') termRef.current?.reset()
@@ -144,10 +147,27 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
     term.open(host)
     // 必须显式聚焦：xterm 的输入走内部 textarea，不聚焦时按键**全部丢弃**（不报错、不提示）。
     // 2026-11-20 用户报「开了终端不能打字」就是这个：面板画得出来、提示符也在，但输不进去。
-    term.focus()
+    //
+    // 两次聚焦是必要的：第一次在 open 之后（此时容器尺寸可能还是 0，xterm 内部会重排），
+    // 下一帧再聚焦一次兜住「布局定型把焦点打掉」的情况。focus() 是幂等的。
+    const focusTerm = (why: string) => {
+      try {
+        term.focus()
+      } catch (e) {
+        console.warn('[term] focus 失败', why, e)
+      }
+      console.log(
+        '[term] focus(' + why + ') → active=',
+        document.activeElement?.tagName,
+        (document.activeElement as HTMLElement | null)?.className,
+        '| textarea=', !!term.textarea,
+      )
+    }
+    focusTerm('open')
+    requestAnimationFrame(() => { if (!disposed) focusTerm('raf') })
     termRef.current = term
     // 点到面板任何空白处（含滚动条区域、覆盖层之外的边距）也回到输入态。
-    const onMouseDown = () => term.focus()
+    const onMouseDown = () => focusTerm('mousedown')
     host.addEventListener('mousedown', onMouseDown)
 
     const writer = terminalWriter((data: Uint8Array, done: () => void) => term.write(data, done))
@@ -185,7 +205,12 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
       term.options.theme = readTermTheme()
     })
 
-    term.onData((d) => sendRef.current(d))
+    term.onData((d) => {
+      // 埋点：这一行出现 ⇒ 键盘事件确实进了 xterm（问题在 socket 侧）；
+      // 不出现 ⇒ 焦点/键盘被别处吃掉（问题在 xterm 之前）。
+      console.log('[term] onData', JSON.stringify(d))
+      sendRef.current(d)
+    })
     term.onSelectionChange(() => setSelection(term.getSelection()))
 
     term.attachCustomKeyEventHandler((e) => {
@@ -227,8 +252,15 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
         if (sock.readyState === WebSocket.OPEN) sock.send(d)
       }
       sock.onopen = () => {
+        console.log('[term] ws open')
         apply({ t: 'ws-open' })
-        term.focus() // 建连期间焦点可能被别处抢走，连上再收一次
+        focusTerm('ws-open') // 建连期间焦点可能被别处抢走，连上再收一次
+      }
+      sock.onerror = () => {
+        console.warn('[term] ws error')
+        if (!disposed) {
+          apply({ t: 'error', error: tRef.current('term.failed').replace('{error}', 'socket') })
+        }
       }
       sock.onmessage = (ev) => {
         const { ctrl, data } = decodeFrame(ev.data)
@@ -258,11 +290,7 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
           apply({ t: 'output' })
         }
       }
-      sock.onerror = () => {
-        if (!disposed) {
-          apply({ t: 'error', error: tRef.current('term.failed').replace('{error}', 'socket') })
-        }
-      }
+      // onerror 的埋点已在上方绑定（同一事件）；这里只做状态收敛。
       sock.onclose = () => {
         if (disposed) return
         if (stateRef.current.s === 'exited') return
