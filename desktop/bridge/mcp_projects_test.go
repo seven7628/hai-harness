@@ -403,7 +403,7 @@ func TestMCPProjectSetHotApply(t *testing.T) {
 		t.Fatalf("有运行态时应重建会话 loop（工具面变化）")
 	}
 	// 3) 端到端：从活管理器建引擎，项目层服务器真的连上并列出工具
-	eng, _ := newSessionEngine(ws, "s-proj-hot", nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
+	eng, _ := newSessionEngine(ws, "s-proj-hot", nil, nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
 		string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() },
 		subagent.NewRegistry(), events.NewQuestionWaiter(0), buildSkillsRegistry(ws),
 		buildSubagentRegistry(t.TempDir()), wsRT.mcp, wsRT.plugins, profiles["code"], nil, nil, nil, nil, nil)

@@ -220,7 +220,7 @@ func TestSessionEngineMCPTools(t *testing.T) {
 	reg := subagent.NewRegistry()
 	qw := events.NewQuestionWaiter(0)
 	sk := buildSkillsRegistry(ws)
-	eng, _ := newSessionEngine(ws, "", nil, m.provCfg, "deepseek", m.provCfg.defaultModel(), string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() }, reg, qw, sk, buildSubagentRegistry(t.TempDir()), m.runtime(ws).mcp, m.runtime(ws).plugins, profiles["code"], nil, nil, nil, nil, nil)
+	eng, _ := newSessionEngine(ws, "", nil, nil, m.provCfg, "deepseek", m.provCfg.defaultModel(), string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() }, reg, qw, sk, buildSubagentRegistry(t.TempDir()), m.runtime(ws).mcp, m.runtime(ws).plugins, profiles["code"], nil, nil, nil, nil, nil)
 
 	// MCP 工具已注册（连接真实子进程并列出 echo）
 	tool, err := eng.GetTool(context.Background(), "mcp__e2e__echo")

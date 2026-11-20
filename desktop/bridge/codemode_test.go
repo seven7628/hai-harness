@@ -65,7 +65,7 @@ func newTestSessionEngine(t *testing.T, ws, sid string, profile personaProfile, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, _ := newSessionEngine(ws, sid, nil, loadProviderConfig(), "deepseek",
+	eng, _ := newSessionEngine(ws, sid, nil, nil, loadProviderConfig(), "deepseek",
 		loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow),
 		func() context.Context { return context.Background() }, subagent.NewRegistry(),
 		events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()),

@@ -86,7 +86,7 @@ func codeAgentHostCases() []struct {
 		{hostExploreLoop, func(t *testing.T, baseURL string, _ func(t *testing.T)) *agents.AgentLoop {
 			ws := t.TempDir()
 			pc := c7ProbeProviderConfig(baseURL)
-			return buildExploreLoop(ws, "c7-explore", pc, "deepseek", c7ProbeModel, "low", nil)
+			return buildExploreLoop(ws, nil, "c7-explore", pc, "deepseek", c7ProbeModel, "low", nil)
 		}},
 	}
 }

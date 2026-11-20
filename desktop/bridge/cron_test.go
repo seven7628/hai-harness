@@ -111,7 +111,7 @@ func TestCronToolsGatedBySettings(t *testing.T) {
 	cfg := loadProviderConfig()
 
 	build := func() *tools.Engine {
-		eng, _ := newSessionEngine(t.TempDir(), "s1", cs, cfg, "deepseek", cfg.defaultModel(),
+		eng, _ := newSessionEngine(t.TempDir(), "s1", nil, cs, cfg, "deepseek", cfg.defaultModel(),
 			string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["code"], nil, nil, nil, nil, nil)
 		return eng
 	}

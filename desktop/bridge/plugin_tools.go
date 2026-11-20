@@ -27,6 +27,7 @@ import (
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/subagent"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/workdir"
 )
 
 // pluginToolDenyExact 插件虚拟 Project 里**绝不注册/绝不可调用**的工具名（09 §7.2 + D11）。
@@ -112,7 +113,7 @@ func applyPluginToolPolicy(eng *tools.Engine) []string {
 // 返回的 effortRef 与主 loop 共享（切档时子智能体同档）。**cron / mesh 传 nil**：
 // 分流表第 6 点要求「全部跳过」—— 光靠 denylist 会让工具先被注册再从引擎里撤下，
 // 而这两族工具的构造本身就要拿宿主级 Store / Hub（不该出现在虚拟 Project 的装配里）。
-func (m *manager) buildPluginEngine(ws *workspaceRuntime, sid, prov, model, effort string, reg *subagent.Registry, qw *events.QuestionWaiter, bgCtx func() context.Context) (*tools.Engine, *subagentEffortRef) {
+func (m *manager) buildPluginEngine(ws *workspaceRuntime, sid, prov, model, effort string, wd *workdir.State, reg *subagent.Registry, qw *events.QuestionWaiter, bgCtx func() context.Context) (*tools.Engine, *subagentEffortRef) {
 	if ws == nil {
 		return tools.NewToolEngine(), newSubagentEffortRef(provider.ReasoningEffortLevelLow)
 	}
@@ -121,7 +122,7 @@ func (m *manager) buildPluginEngine(ws *workspaceRuntime, sid, prov, model, effo
 	}
 	eng, effortRef := newSessionEngineAt(
 		ws.sessionsRoot(),
-		ws.path, sid,
+		ws.path, sid, wd,
 		nil, // cron：分流点 6 —— 插件会话不注册定时任务工具
 		m.provCfg, prov, model, effort,
 		bgCtx, reg, qw,

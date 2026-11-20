@@ -14,6 +14,7 @@ import (
 	"github.com/seven7628/hai-harness/core"
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/workdir"
 	"io"
 	"os"
 	"path/filepath"
@@ -27,6 +28,17 @@ import (
 type FileTools struct {
 	root string
 	sbx  sandbox.Sandbox // bash 执行后端（nil = NoSandbox 进程隔离直通）
+
+	// wd 会话级 cwd 状态（nil = **没有**会话级状态，相对路径恒定锚工作区根）。
+	//
+	// 为什么需要它：改造前文件工具的相对路径恒定锚在工作区根，而 bash 记着自己的 cd
+	// ⇒ 模型 `cd sub` 之后 read_file("a.txt") 仍在根目录找 ⇒ file not found。
+	// 接上 workdir.State 后，相对路径锚到**调用方分区的当前目录**，与 bash / run_python
+	// 同一份真相（见 workdir 包的包注释）。
+	//
+	// nil 保留（NewFileTools）：库默认行为一字不变 —— 不接状态就没有"会话级 cwd"
+	// 这件事，既有调用方（测试、独立使用）行为完全一致。
+	wd *workdir.State
 
 	// binaryHint 可选钩子：read_file 判出「二进制、不可解码为文本/图片」时，产出错误
 	// 提示末尾的「下一步怎么办」句（参数 = 文件路径，宿主可按扩展名细分格式）。宿主按
@@ -113,12 +125,33 @@ func (f *FileTools) WithBinaryHint(fn func(path string) string) *FileTools {
 const defaultBinaryHint = "Use bash for other formats (e.g. `file`, `ffmpeg`, `sips`, `unzip -l`)"
 
 // NewFileTools 创建文件工具集；root 为工作区根目录（绝对路径，不存在不报错）。
+//
+// **不接会话级 cwd 状态**：相对路径恒定锚在工作区根（库默认行为，既有调用方不变）。
+// 需要会话级 cwd（bash / 文件工具 / run_python 同一份目录真相）时用
+// NewFileToolsWithWorkdir。
 func NewFileTools(root string) *FileTools {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = filepath.Clean(root)
 	}
 	return &FileTools{root: filepath.Clean(abs)}
+}
+
+// NewFileToolsWithWorkdir 创建**接会话级 cwd 状态**的文件工具集。
+//
+// wd = 会话级 cwd 状态（workdir.State）：工作区根取 wd.Root()，相对路径锚到
+// **调用方分区**的当前目录（bash 的 cd 会同步反映到这里，因为两者共用同一个 State）。
+//
+// 为什么走"同一个 State"而不是"把 cwd 传进来"：cwd 是**运行期状态**（模型随时 cd），
+// 装配期冻结的常量立刻过期 ⇒ 必须是同一个可变的、被两个工具共享的对象。
+//
+// wd 为 nil ⇒ 退化成 NewFileTools(wd.Root()) 的行为（恒定锚根目录），不 panic：
+// 装配期传 nil 不该让整条链路炸掉。
+func NewFileToolsWithWorkdir(wd *workdir.State) *FileTools {
+	if wd == nil {
+		return NewFileTools("")
+	}
+	return &FileTools{root: wd.Root(), wd: wd}
 }
 
 // Tools 返回工作区工具集（read_file / write_file / edit_file / grep / glob / bash）。
@@ -137,8 +170,19 @@ func (f *FileTools) Tools() []tools.Tool {
 		// cwd 传 f.root：bash 初始目录 = 工作区根（每条命令独立进程、从工作区出发；
 		// AI 可在单条命令内 cd 切换，下条命令回到工作区起点——对齐 Claude Code 语义）。
 		// appAllow 参数已弃用（2026-09：open 全放行），传 nil。
-		NewBashTool(f.root, 0, f.sbx, nil),
+		//
+		// 接了会话级 cwd 状态时：bash 与文件工具**共用同一个 workdir.State**
+		// ⇒ bash 的 cd 立刻反映到文件工具（相对路径锚点），反之亦然。
+		f.bashTool(),
 	}
+}
+
+// bashTool 造本工具集里的 bash 工具：有会话级 cwd 状态时与文件工具共用它。
+func (f *FileTools) bashTool() tools.Tool {
+	if f.wd != nil {
+		return NewBashToolWithWorkdir(f.wd, 0, f.sbx, nil)
+	}
+	return NewBashTool(f.root, 0, f.sbx, nil)
 }
 
 // Register 把文件工具集注册进引擎。
@@ -169,9 +213,18 @@ func (f *FileTools) Register(e *tools.Engine) {
 // 相对路径按工作区根解析且不得逃逸，要写工作区外的文件就用绝对路径。
 //
 // 这是工具契约的描述修正，不是新机制：行为一个字没改，schema 终于与实现一致。
-const pathParamDesc = "File path. A relative path is resolved against the workspace root " +
-	"and may not escape it (a leading ../ is rejected); use an absolute path for files " +
-	"outside the workspace."
+//
+// # 2026-11（会话级 cwd）：锚点从"工作区根"改成"当前工作目录"
+//
+// 接上 workdir.State 之后，相对路径锚到**调用方分区的当前目录**（模型 cd 之后
+// 就是那个目录），不再是恒定的工作区根。文案跟着改，否则又是一条"说明与行为
+// 不符"——模型按文案以为相对路径永远从根解析，cd 到子目录后就找不到文件。
+//
+// 边界语义**没变**：相对路径不得逃出**工作区根**（安全边界仍是工作区，不是锚点）。
+// 不接会话级 cwd 状态时（NewFileTools）锚点恒为工作区根 ⇒ 与旧文案逐字同义。
+const pathParamDesc = "File path. A relative path is resolved against the current working " +
+	"directory (the workspace root until the session changes it) and may not escape the " +
+	"workspace root; use an absolute path for files outside the workspace."
 
 // resolve 校验并解析路径为绝对路径（问题十六：与沙箱/审批统一治理）。
 //   - 相对路径 → 锚定 workspace root（既有行为；`..` 逃逸仍拒绝——相对语义下
@@ -192,28 +245,61 @@ const pathParamDesc = "File path. A relative path is resolved against the worksp
 // 而绝对路径那条路（`/workspace/cfg/settings.json`）是被拦的——同一个文件只因写法
 // 不同而结论相反。根因是"路径从哪来"被当成了"路径到哪去"的判据，而 deny 的本职是
 // 后者：Join 之后两条分支产出的都是绝对路径，就该受同一套判定。
-func (f *FileTools) resolve(raw string) (string, error) { return f.resolveFor(raw, PathRead) }
+//
+// 无 ctx 版本（锚点 = 工作区根）：给**没有会话级 cwd 状态**的调用方与测试用；
+// 生产路径一律走 resolveAt（锚点 = 调用方分区的当前目录）。
+func (f *FileTools) resolve(raw string) (string, error) {
+	return f.resolveFor(context.Background(), raw, PathRead)
+}
+
+// resolveAt 按**调用方**解析路径（会话级 cwd 口径）。
+//
+// 相对路径锚到该调用方分区的当前目录（f.wd 为 nil 时 = 工作区根，与 resolve 同）。
+func (f *FileTools) resolveAt(ctx context.Context, raw string) (string, error) {
+	return f.resolveFor(ctx, raw, PathRead)
+}
 
 // resolveWrite 写意图的路径解析（write_file / edit_file）：与 resolve 逐字同源，
 // 只多一条「只读子树拒绝」。**必须共用同一份实现**，否则读写两条路的拒绝理由会漂。
-func (f *FileTools) resolveWrite(raw string) (string, error) { return f.resolveFor(raw, PathWrite) }
+func (f *FileTools) resolveWrite(raw string) (string, error) {
+	return f.resolveFor(context.Background(), raw, PathWrite)
+}
 
-func (f *FileTools) resolveFor(raw string, op PathOp) (string, error) {
+// resolveWriteAt 写意图的路径解析（按调用方锚点，见 resolveAt）。
+func (f *FileTools) resolveWriteAt(ctx context.Context, raw string) (string, error) {
+	return f.resolveFor(ctx, raw, PathWrite)
+}
+
+func (f *FileTools) resolveFor(ctx context.Context, raw string, op PathOp) (string, error) {
 	if raw == "" {
 		return "", errors.New("path is required")
 	}
 	base := ""
 	if !filepath.IsAbs(raw) {
-		base = f.root
+		base = f.cwd(ctx)
 	}
 	p := filepath.Clean(filepath.Join(base, raw))
-	if base != "" && p != base && !strings.HasPrefix(p, base+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path %q escapes workspace root %q", raw, base)
+	// 边界：相对路径不得逃出**工作区根**。
+	//
+	// 注意判据是 root 而不是 base（锚点）：锚点现在可能是工作区里的子目录
+	//（模型 cd 过），而"工作区"才是安全边界 —— 相对路径可以走出锚点（cd 到
+	// sub/ 后读 ../a.txt 是工作区内的正常操作），但不能走出工作区。
+	// 没接会话级 cwd 状态时 base == root ⇒ 与改造前逐字同义。
+	if base != "" && f.root != "" && p != f.root && !strings.HasPrefix(p, f.root+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path %q escapes workspace root %q", raw, f.root)
 	}
 	if err := denyHarnessConfigPath(p, op); err != nil {
 		return "", err
 	}
 	return p, nil
+}
+
+// cwd 当前工作目录（**会话级**）：有 workdir 状态时按调用方分区取；否则 = 工作区根。
+func (f *FileTools) cwd(ctx context.Context) string {
+	if f.wd != nil {
+		return f.wd.Current(CwdKey(ctx))
+	}
+	return f.root
 }
 
 // denyHarnessConfigPath 拒绝 go-code 自身配置/密钥路径（~/.go-code）：settings.json
@@ -457,7 +543,7 @@ func newReadFileTool(f *FileTools) *readFileTool {
 	return &readFileTool{
 		BaseTool: tools.BaseTool{
 			Name_:        "read_file",
-			Description_: "Read a text file and return numbered lines. path is required and relative to the workspace root. start_line and end_line are optional 1-based inclusive integers. Omit both for the first 200 lines; if only start_line is given, read up to 200 lines from there. If both are given in reverse order, the tool normalizes them to the ascending range and reports the normalization. Reading an image file (png/jpeg/gif) returns the image itself for direct viewing (do not pass start_line/end_line for images). Use glob to locate files and grep to search content.",
+			Description_: "Read a text file and return numbered lines. path is required and relative to the current working directory (the workspace root until the session changes it). start_line and end_line are optional 1-based inclusive integers. Omit both for the first 200 lines; if only start_line is given, read up to 200 lines from there. If both are given in reverse order, the tool normalizes them to the ascending range and reports the normalization. Reading an image file (png/jpeg/gif) returns the image itself for direct viewing (do not pass start_line/end_line for images). Use glob to locate files and grep to search content.",
 			Params_: tools.Obj(map[string]any{
 				"path":       tools.Str(pathParamDesc),
 				"start_line": tools.Map{"type": "integer", "minimum": 1, "default": 1, "description": "First line, 1-based; omit for line 1"},
@@ -533,7 +619,7 @@ func (t *readFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	p, err := t.resolve(a.Path)
+	p, err := t.resolveAt(ctx, a.Path)
 	if err != nil {
 		return "", err
 	}
@@ -940,7 +1026,7 @@ func (t *writeFileTool) Call(ctx context.Context, _, arguments string) (string, 
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	p, err := t.resolveWrite(a.Path)
+	p, err := t.resolveWriteAt(ctx, a.Path)
 	if err != nil {
 		return "", err
 	}
@@ -1116,7 +1202,7 @@ func (t *editFileTool) Call(ctx context.Context, _, arguments string) (string, e
 	if err := json.Unmarshal([]byte(arguments), &a); err != nil {
 		return "", err
 	}
-	p, err := t.resolveWrite(a.Path)
+	p, err := t.resolveWriteAt(ctx, a.Path)
 	if err != nil {
 		return "", err
 	}

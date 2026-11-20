@@ -205,7 +205,7 @@ func TestSpawnAgentToolRegistered(t *testing.T) {
 	m, _ := testManager(t)
 	ws := t.TempDir()
 	writeBridgeSubagent(t, ws, "code-reviewer", "审查代码变更", "你是资深代码审查员")
-	eng, _ := newSessionEngine(ws, "s1", nil, m.provCfg, "deepseek", m.provCfg.defaultModel(), string(provider.ReasoningEffortLevelLow),
+	eng, _ := newSessionEngine(ws, "s1", nil, nil, m.provCfg, "deepseek", m.provCfg.defaultModel(), string(provider.ReasoningEffortLevelLow),
 		func() context.Context { return context.Background() }, subagent.NewRegistry(), events.NewQuestionWaiter(0), buildSkillsRegistry(ws), buildSubagentRegistry(ws), nil, nil, profiles["code"], nil, nil, nil, nil, nil)
 	tool, err := eng.GetTool(context.Background(), "agent_spawn")
 	if err != nil {
@@ -286,7 +286,7 @@ func TestAgentToolsPoolWiring(t *testing.T) {
 	m, _ := testManager(t)
 	ws := t.TempDir()
 	reg := subagent.NewRegistry()
-	eng, _ := newSessionEngine(ws, "s1", nil, m.provCfg, "deepseek", m.provCfg.defaultModel(), string(provider.ReasoningEffortLevelLow),
+	eng, _ := newSessionEngine(ws, "s1", nil, nil, m.provCfg, "deepseek", m.provCfg.defaultModel(), string(provider.ReasoningEffortLevelLow),
 		func() context.Context { return context.Background() }, reg, events.NewQuestionWaiter(0), buildSkillsRegistry(ws), buildSubagentRegistry(ws), nil, nil, profiles["code"], nil, nil, nil, nil, nil)
 
 	spawnTool, err := eng.GetTool(context.Background(), "agent_spawn")

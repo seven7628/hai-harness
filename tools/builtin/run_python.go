@@ -9,6 +9,7 @@ import (
 	"github.com/seven7628/hai-harness/runtime"
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/workdir"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,9 +56,16 @@ type RunPythonTool struct {
 	tools.BaseTool
 	Timeout time.Duration // 单次脚本默认超时（模型未传 timeout 时兜底；<=0 → 2 分钟）
 	Cwd     string        // 脚本工作目录（= 工作区根，见 NewRunPythonTool）
-	py      PythonRuntime // 受管运行时（nil = 未装配 → 调用时报明确错误）
-	ft      *FileTools    // 仅用于 script_path 的路径解析（与文件工具同口径：工作区锚定 + ~/.go-code 保护）
-	sbx     sandbox.Sandbox
+
+	// wd 会话级 cwd 状态（nil = 脚本恒定跑在工作区根，见 NewRunPythonTool）。
+	//
+	// 为什么脚本也要接：脚本里的相对路径（open("out.csv")）写在**脚本工作目录**下，
+	// 而脚本工作目录若恒为工作区根，模型 cd 到子目录后写出的产物就落在根上 ——
+	// 与 bash / 文件工具各说各话。接上之后三者同一份真相。
+	wd  *workdir.State
+	py  PythonRuntime // 受管运行时（nil = 未装配 → 调用时报明确错误）
+	ft  *FileTools    // 仅用于 script_path 的路径解析（与文件工具同口径：工作区锚定 + ~/.go-code 保护）
+	sbx sandbox.Sandbox
 
 	// spill 落盘仓库（完整输出落盘；见 spill.go）。
 	spill *spillStore
@@ -145,15 +153,15 @@ func NewRunPythonTool(workspace string, py PythonRuntime, sbx sandbox.Sandbox) *
 		BaseTool: tools.BaseTool{
 			Name_: "run_python",
 			Description_: "Execute a Python script and return its output (stdout+stderr merged). This is the execution channel for office documents and data work: python-docx, openpyxl, python-pptx, pypdf, pypdfium2 and mammoth are preinstalled. " +
-				"The interpreter is fixed (you cannot choose a binary or command-line switches) and the script runs inside the OS sandbox with the working directory set to the workspace root; under the default policy the workspace, $HOME and /tmp are writable, go-code's own config directory (~/.go-code, except its managed plugins/ and runtime/ subtrees) is denied for read and write, and writes to any other host path are rejected — but that policy does not cover credential files under $HOME (e.g. ~/.ssh/.aws) unless the user listed them in sandbox.sensitive_paths, so never read or copy them. Obviously destructive literals (wiping the workspace, home or root itself) are rejected before execution. " +
+				"The interpreter is fixed (you cannot choose a binary or command-line switches) and the script runs inside the OS sandbox with the working directory set to the session's current working directory (the workspace root until the session changes it); under the default policy the workspace, $HOME and /tmp are writable, go-code's own config directory (~/.go-code, except its managed plugins/ and runtime/ subtrees) is denied for read and write, and writes to any other host path are rejected — but that policy does not cover credential files under $HOME (e.g. ~/.ssh/.aws) unless the user listed them in sandbox.sensitive_paths, so never read or copy them. Obviously destructive literals (wiping the workspace, home or root itself) are rejected before execution. " +
 				"Network access must not be assumed: outbound connections follow the same host policy as bash (currently allowed), but nothing guarantees reachability — do not design a task around downloads, and do not run pip install on your own. Python can still call subprocess internally, so treat this as a policy boundary rather than a hard isolation. " +
 				"PROCESS LIFETIME: processes the script leaves behind (including subprocesses) are killed when it finishes; for anything that must keep running, start it from bash with run_in_background. " +
-				"Provide exactly one of script (source) or script_path (a .py file in the workspace). script is written to a temporary file that is deleted after the run, so write outputs with paths relative to the working directory (the workspace), not next to the script. " +
+				"Provide exactly one of script (source) or script_path (a .py file in the workspace). script is written to a temporary file that is deleted after the run, so write outputs with paths relative to the working directory (the current one), not next to the script. " +
 				"Declare what the script writes in outputs (up to 10 workspace-relative or absolute paths, most important first): the declared files that exist after the run are reported to the user as this run's artifacts, and the result tells you which declared paths did not materialize. List only files this call writes — not inputs, not files you merely read. " +
 				"The first call can take minutes while the managed runtime installs itself (tens of MB, one time only; the venv measures about 70 MB).",
 			Params_: tools.Obj(map[string]any{
 				"script":      tools.Str("Python source code to execute (provide exactly one of script / script_path)"),
-				"script_path": tools.Str("Path to a Python script: relative to the workspace root, or absolute (provide exactly one of script / script_path)"),
+				"script_path": tools.Str("Path to a Python script: relative to the current working directory (the workspace root until the session changes it), or absolute (provide exactly one of script / script_path)"),
 				"timeout":     tools.Map{"type": "number", "minimum": 1, "maximum": 3600, "default": 120, "description": "Script timeout in seconds (optional); default 120, range 1-3600"},
 				"outputs": tools.Map{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": maxRunPythonOutputs,
 					"description": "Files this script writes, most important first (up to 10; workspace-relative like out/report.xlsx, or absolute). Declared paths that exist after the run show up as this run's artifacts for the user; a line in the result reports the ones that did not materialize. List only files this call writes."},
@@ -168,6 +176,30 @@ func NewRunPythonTool(workspace string, py PythonRuntime, sbx sandbox.Sandbox) *
 		sbx:     sbx,
 		spill:   newSpillStore(runPythonSpillDirPrefix),
 	}
+}
+
+// NewRunPythonToolWithWorkdir 创建**接会话级 cwd 状态**的 run_python 工具。
+//
+// wd = 会话级 cwd 状态（workdir.State）：脚本的**工作目录**取调用方分区的当前目录，
+// script_path 的相对锚点同样跟着它 ⇒ 与 bash / 文件工具同一份真相。
+//
+// wd 为 nil ⇒ 退化成 NewRunPythonTool（工作区根），不 panic。
+func NewRunPythonToolWithWorkdir(wd *workdir.State, py PythonRuntime, sbx sandbox.Sandbox) *RunPythonTool {
+	if wd == nil {
+		return NewRunPythonTool("", py, sbx)
+	}
+	t := NewRunPythonTool(wd.Root(), py, sbx)
+	t.wd = wd
+	t.ft = NewFileToolsWithWorkdir(wd)
+	return t
+}
+
+// cwd 脚本工作目录（会话级）：有 workdir 状态时按调用方分区取；否则 = 构造时的目录。
+func (t *RunPythonTool) cwd(ctx context.Context) string {
+	if t.wd != nil {
+		return t.wd.Current(CwdKey(ctx))
+	}
+	return t.Cwd
 }
 
 // ToolTimeout 实现 tools.ToolTimeoutProvider：脚本默认时限 + bootstrap 余量（见常量注释）。
@@ -305,7 +337,7 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 	//   - script_path → 解析为工作区内绝对路径（与文件工具同锚 + ~/.go-code 保护），
 	//     直接执行该文件以保留 __file__/相对导入语义、traceback 指向用户真实文件。
 	// 先解析的意义：参数错/文件不存在/高危脚本都在**触发 bootstrap（下载 ~42MB）之前**失败。
-	src, scriptPath, err := t.resolveScript(a)
+	src, scriptPath, err := t.resolveScript(ctx, a)
 	if err != nil {
 		return "", err
 	}
@@ -352,7 +384,7 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 	// ⑥ 产物声明：**执行前**快照「此前是否存在」（Created 判定源 —— 覆盖与新建只能在这一刻
 	//   区分，脚本跑完就无从得知；同 write_file 的 lock==nil）。失败声明不阻塞执行，见
 	//   declaredOutputs 注释；无 outputs 声明时这里零 IO。
-	outs := t.declaredOutputs(a.Outputs)
+	outs := t.declaredOutputs(ctx, a.Outputs)
 	// 运行中的输出尾巴（tail -f，**只给人看**）：与 bash 同一条链路（同一个节流发射器 +
 	// 同一个事件类型）。无事件出口（直调工具 / 脚本路径里的嵌套调用）时 OnOutput 保持 nil
 	// —— 执行层走历史路径，零开销。模型侧完全无感：本工具照旧阻塞到脚本结束才返回。
@@ -367,7 +399,7 @@ func (t *RunPythonTool) Call(ctx context.Context, _, arguments string) (string, 
 	spillPath := t.spill.reserve(ctx)
 	out, err := sbx.Run(ctx, sandbox.ExecSpec{
 		Command:          cmdline,
-		Cwd:              t.Cwd,
+		Cwd:              t.cwd(ctx),
 		Timeout:          scriptTimeout,
 		OnOutput:         spec0OnOutput(tailer),
 		ExitCode:         &exitCode,
@@ -442,7 +474,7 @@ type runPythonOutput struct {
 //   - 解析失败不报错：resolve 只管路径合法性（越出工作区/~/.go-code），这条路径只是
 //     「不会成为产物」—— 由 summarizeOutputs 的显式告知让模型自我纠正，而不是让整次
 //     执行失败（脚本本身可能完全成功，产物也确实写到了别处）。
-func (t *RunPythonTool) declaredOutputs(outputs []string) []runPythonOutput {
+func (t *RunPythonTool) declaredOutputs(ctx context.Context, outputs []string) []runPythonOutput {
 	if len(outputs) == 0 {
 		return nil
 	}
@@ -453,7 +485,7 @@ func (t *RunPythonTool) declaredOutputs(outputs []string) []runPythonOutput {
 			continue
 		}
 		o := runPythonOutput{declared: raw}
-		if abs, err := t.ft.resolve(raw); err == nil {
+		if abs, err := t.ft.resolveAt(ctx, raw); err == nil {
 			o.abs = abs
 			if _, err := os.Stat(abs); err == nil {
 				o.existed = true
@@ -557,11 +589,11 @@ func (t *RunPythonTool) outputPath(abs string) string {
 
 // resolveScript 解析脚本来源：返回（源码, 已就位的绝对路径（script 形态为空）, error）。
 // script_path 形态会顺带完成路径解析/存在性/类型校验——错误都是可恢复的（引导 glob/read_file）。
-func (t *RunPythonTool) resolveScript(a runPythonArgs) (string, string, error) {
+func (t *RunPythonTool) resolveScript(ctx context.Context, a runPythonArgs) (string, string, error) {
 	if strings.TrimSpace(a.ScriptPath) == "" {
 		return a.Script, "", nil
 	}
-	p, err := t.ft.resolve(a.ScriptPath)
+	p, err := t.ft.resolveAt(ctx, a.ScriptPath)
 	if err != nil {
 		return "", "", recoveryError("invalid_arguments", "correct_arguments", err.Error(),
 			"Pass a path inside the workspace (or an absolute path outside go-code's own config directory), then retry.")

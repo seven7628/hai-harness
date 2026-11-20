@@ -636,7 +636,7 @@ func TestPluginToolDenylist(t *testing.T) {
 
 	reg, qw, sk := pluginToolsFixture(t)
 	bg := func() context.Context { return context.Background() }
-	eng, _ := m.buildPluginEngine(ws, "s-plugin-deny", m.provCfg.providerName(), m.provCfg.defaultModel(), "", reg, qw, bg)
+	eng, _ := m.buildPluginEngine(ws, "s-plugin-deny", m.provCfg.providerName(), m.provCfg.defaultModel(), "", nil, reg, qw, bg)
 
 	// 可见工具面 = 模型真正能看到的清单（Hidden 的工具仍在 Tools() 里但不可调用，
 	// 见 applyPluginToolPolicy 的两条防线）。断言用 VisibleTools。
@@ -678,7 +678,7 @@ func TestPluginToolDenylist(t *testing.T) {
 	if proj == nil {
 		t.Fatal("项目 runtime 为 nil")
 	}
-	projEng, _ := newSessionEngine(proj.path, "s-proj-deny", nil, m.provCfg, m.provCfg.providerName(), m.provCfg.defaultModel(), "", bg, reg, qw, sk, proj.subagents, proj.mcp, proj.plugins, profiles["code"], nil, nil, nil, nil, nil)
+	projEng, _ := newSessionEngine(proj.path, "s-proj-deny", nil, nil, m.provCfg, m.provCfg.providerName(), m.provCfg.defaultModel(), "", bg, reg, qw, sk, proj.subagents, proj.mcp, proj.plugins, profiles["code"], nil, nil, nil, nil, nil)
 	projNames := map[string]bool{}
 	for _, tl := range projEng.VisibleTools() {
 		projNames[tl.Name()] = true
@@ -919,7 +919,7 @@ func TestPluginSkipsMeshCronAndAutoEnable(t *testing.T) {
 	}
 	// ③ cron / mesh 工具不注册（即使两个开关都开着）
 	reg, qw, _ := pluginToolsFixture(t)
-	eng, _ := m.buildPluginEngine(ws, sid, m.provCfg.providerName(), m.provCfg.defaultModel(), "", reg, qw, func() context.Context { return context.Background() })
+	eng, _ := m.buildPluginEngine(ws, sid, m.provCfg.providerName(), m.provCfg.defaultModel(), "", nil, reg, qw, func() context.Context { return context.Background() })
 	for _, name := range []string{"session_send", "session_list", "CronCreate", "CronList", "CronUpdate", "CronDelete"} {
 		if tl, gerr := eng.GetTool(context.Background(), name); gerr == nil && tl != nil {
 			t.Errorf("插件引擎里有 %s（分流点 6 应跳过）", name)

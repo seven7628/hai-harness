@@ -80,6 +80,7 @@ import (
 	"github.com/seven7628/hai-harness/tools"
 	"github.com/seven7628/hai-harness/tools/builtin"
 	"github.com/seven7628/hai-harness/tools/question"
+	"github.com/seven7628/hai-harness/workdir"
 )
 
 const (
@@ -312,6 +313,18 @@ func (o *out) flushTick() {
 // bridgeSession：一个会话 + 常驻 run goroutine（消费队列，队列空即返回）
 type bridgeSession struct {
 	id string
+	// wd 是**会话级**的 cwd 状态（workdir.State）。
+	//
+	// 为什么挂在会话上而不是引擎上：引擎（连同工具集）会随 **rebuildLoop** 重建
+	//（切模型 / 切人格 / 切 provider）⇒ 状态若在引擎里，切一次模型就丢 cwd
+	//（模型于是又开始每次 `cd X && ...`）。挂在会话上 ⇒ 跨重建存活。
+	wd *workdir.State
+	// eng 本会话当前的工具引擎（rebuildLoop 会换）。
+	//
+	// 为什么留着：工具引擎持有**会话级 cwd 状态**（workdir.State）⇒ 想回答
+	// 「这个会话现在的工作目录是哪个」只能问引擎（工具描述里就带着它）。
+	// 留着引用也让「重建后 cwd 是否还在」这类不变量**可被测试直接断言**。
+	eng *tools.Engine
 	// runtime 本会话所属的工作区运行态（rebuildLoop 用它取技能/插件/MCP/子代理）。
 	// nil = 旧会话（按 bs.workspace 兜底 re-resolve）。
 	runtime *workspaceRuntime
@@ -2427,16 +2440,18 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	var skillCaps *skills.Capabilities
 	var hubEng *tools.Engine
 	var eng *tools.Engine
+	// 会话级 cwd 状态（跨 rebuildLoop 存活；见 bridgeSession.wd 的注释）。
+	wd := workdir.New(wsPath)
 	if opts.hub != nil {
 		// Hub 智能体：工具面 + 提示词都按 Profile 装配（§6.2），与项目会话共用内核。
 		var eRef *subagentEffortRef
-		eng, eRef = m.buildHubEngine(ws, id, opts.hub, reg, qw, func() context.Context { return s.Context() })
+		eng, eRef = m.buildHubEngine(ws, id, opts.hub, wd, reg, qw, func() context.Context { return s.Context() })
 		loop = m.buildHubLoop(ws, id, opts.hub, eng)
 		effortRef = eRef
 		skillCaps = skillCapabilitiesFor(m.provCfg, opts.hub.Agent.Provider, opts.hub.Agent.Model, eng)
 		hubEng = eng
 	} else {
-		loop, effortRef, skillCaps, eng = m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort,
+		loop, effortRef, skillCaps, eng = m.buildLoop(ws, id, m.provCfg.providerName(), m.preferredModel(), effort, wd,
 			func() context.Context { return s.Context() }, reg, qw, sk, profiles["code"], &sandboxReleaseGate{m: m, ws: wsPath, id: id}) // 默认 Persona = code
 	}
 	startupLog("A6.buildLoop", loopStart)
@@ -2500,7 +2515,7 @@ func (m *manager) createIn(ws *workspaceRuntime, id, effort string, opts session
 	}
 	startupLog("A6.NewSession", nsStart)
 	ctx, cancel := context.WithCancel(context.Background())
-	bs = &bridgeSession{id: id, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubBudgetCheck: m.hubBudgetCheck, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }, hubTaskRunning: func(runID string) { m.markHubTaskRunning(bs, runID) }}
+	bs = &bridgeSession{id: id, wd: wd, eng: eng, runtime: ws, s: s, loop: loop, effort: effort, subagentEffort: effortRef, skillCaps: skillCaps, model: m.preferredModel(), provider: m.provCfg.providerName(), persona: "code", ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), out: m.out, workspace: wsPath, metrics: m.metrics, eventsDir: eventsDir, questions: qw, mobile: m.mobileHub(), hubPumpQueue: m.scheduleHubPump, hubBudgetCheck: m.hubBudgetCheck, hubFinishTask: func(ae *events.AgentEnd) { m.finishHubTask(bs, ae) }, hubTaskRunning: func(runID string) { m.markHubTaskRunning(bs, runID) }}
 	bs.hubInterrupt = func() { bs.s.Interrupt() }
 	bs.hubNeed = func(e events.Event) { m.recordHubNeed(bs, e) }
 	bs.hubExpireNeeds = func() { m.scheduleHubExpire(bs) }
@@ -6075,13 +6090,21 @@ var exploreAllowedTools = []string{"read_file", "grep", "glob", "bash"}
 // exploreToolEngine Explore 子 agent 的窄工具集（read_file/grep/glob/bash + load_skill）。
 // caps 由调用方按**本会话模型 + 本窄工具集**算好传入（能力面与清单必须同源，
 // 见 skill_capability.go）。sk == nil 时不注册 load_skill。
-func exploreToolEngine(workspace string, sk *skills.Registry, caps *skills.Capabilities) *tools.Engine {
+func exploreToolEngine(workspace string, wd *workdir.State, sk *skills.Registry, caps *skills.Capabilities) *tools.Engine {
+	// wd 为 nil 时（独立/测试用法）退化为「按本引擎新建」：与 newSessionEngineAt 同款兜底。
+	// 不兜底的话，下面的 NewFileToolsWithWorkdir(nil) 会把文件工具锚到**进程 cwd**
+	//（而不是本 explore 的工作区）⇒ 相对路径解析到别处。
+	if wd == nil {
+		wd = workdir.New(workspace)
+	}
 	allowed := make(map[string]bool, len(exploreAllowedTools))
 	for _, n := range exploreAllowedTools {
 		allowed[n] = true
 	}
 	eng := tools.NewToolEngine(tools.WithSpillDir(toolSpillDir("")))
-	for _, t := range builtin.NewFileTools(workspace).Tools() {
+	// 与主会话**共用**同一个 workdir.State ⇒ explore 子 agent 的 cd 落在
+	// **自己的分区**（分区键 = 它的 task id）⇒ 不影响主 agent。
+	for _, t := range builtin.NewFileToolsWithWorkdir(wd).Tools() {
 		if allowed[t.Name()] {
 			eng.RegisterTool(context.Background(), t)
 		}
@@ -6093,7 +6116,7 @@ func exploreToolEngine(workspace string, sk *skills.Registry, caps *skills.Capab
 // buildExploreLoop Explore 子 agent 运行时（subagent_explore 的执行器）：独立 SystemPrompt +
 // 受限工具集（read_file / grep / bash / glob + load_skill，仅分析不落写变更）。model/effort
 // 复用主会话当前配置。sk 为技能注册表（与主会话同一实例）：注入技能发现清单（渐进披露）。
-func buildExploreLoop(workspace, sid string, pc *providerConfig, prov, model, effort string, sk *skills.Registry) *agents.AgentLoop {
+func buildExploreLoop(workspace string, wd *workdir.State, sid string, pc *providerConfig, prov, model, effort string, sk *skills.Registry) *agents.AgentLoop {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -6106,7 +6129,7 @@ func buildExploreLoop(workspace, sid string, pc *providerConfig, prov, model, ef
 		agents.WithProvider(pc.newProvider(prov)),
 		agents.WithProviderName(prov),
 		agents.WithModel(model),
-		agents.WithToolEngine(exploreToolEngine(workspace, sk, exploreSkillCaps)),
+		agents.WithToolEngine(exploreToolEngine(workspace, wd, sk, exploreSkillCaps)),
 		agents.WithReasoningEffort(provider.ReasoningEffortLevel(effort)),
 		// 2026-09-18 统一超时/重试策略（与主 loop 一致）：首字预算 30s（agents 层），
 		// HTTP 层 60s 次级兜底 + 不限
@@ -6271,14 +6294,14 @@ func wireAgentResume(bs *bridgeSession, eng *tools.Engine) {
 //
 // 插件虚拟 Project 走 newSessionEngineAt（sessionsRoot 由 runtime 提供，见 09 §4.3 第 3 点）；
 // 本函数是它的薄包装，保持既有 ~16 处调用点逐字不变。
-func newSessionEngine(workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
-	return newSessionEngineAt(wsSessionsDir(workspace), workspace, sid, cs, pc, prov, model, effort, bgCtx, reg, qw, sk, subagentsReg, mcpm, plg, profile, sbx, hub, pyRT, egoOnLoad, egoBashBeforeExec, memCfg...)
+func newSessionEngine(workspace, sid string, wd *workdir.State, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
+	return newSessionEngineAt(wsSessionsDir(workspace), workspace, sid, wd, cs, pc, prov, model, effort, bgCtx, reg, qw, sk, subagentsReg, mcpm, plg, profile, sbx, hub, pyRT, egoOnLoad, egoBashBeforeExec, memCfg...)
 }
 
 // newSessionEngineAt 同 newSessionEngine，但会话子树根（journal / codemode store）由调用方给：
 // 项目 / Hub 传 wsSessionsDir(workspace)（= ws.sessionsRoot()），插件虚拟 Project 传
 // plugin-sessions/<id>/sessions。空值回退 wsSessionsDir(workspace)（测试/旧调用兜底）。
-func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
+func newSessionEngineAt(sessionsRoot, workspace, sid string, wd *workdir.State, cs *cron.Store, pc *providerConfig, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, subagentsReg *subagent.DefinitionRegistry, mcpm *mcp.Manager, plg *plugin.Registry, profile personaProfile, sbx sandbox.Sandbox, hub *session.Hub, pyRT *goruntime.Runtime, egoOnLoad func(string), egoBashBeforeExec func(string), memCfg ...memory.Config) (*tools.Engine, *subagentEffortRef) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -6292,7 +6315,16 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 	// 会话一死，最后一次清扫永远不发生（实测 72 个会话目录 / 43MB 永久留下）。
 	sweepSpillResources()
 	eng := tools.NewToolEngine(tools.WithSpillDir(toolSpillDir(sid)))
-	ft := builtin.NewFileTools(workspace)
+	// 会话级 cwd 状态（唯一真值源）：bash / 文件工具 / run_python **共用**它
+	// ⇒ 三者的「当前目录」永远是同一个值，不会各走各的。
+	// 分区键 = 子 agent 的 task id ⇒ 主/子 agent 的目录互不干扰。
+	//
+	// wd 由**会话**持有（bridgeSession.wd）⇒ 跨 rebuildLoop（切模型/切人格）存活；
+	// 这里传 nil 时（独立/测试用法）退化为「按本引擎新建」。
+	if wd == nil {
+		wd = workdir.New(workspace)
+	}
+	ft := builtin.NewFileToolsWithWorkdir(wd)
 	// Project Memory 的 Step 4 钩子：记忆文件由模型用标准 write_file / edit_file
 	// 写入，官方规定写入时补 `modified`，没有别的入口。宿主钩子在**写成功之后**触发。
 	// 闸门（开关 / 路径是否记忆 / 目录解析）全在宿主侧，工具层不认识"记忆"这个概念。
@@ -6349,7 +6381,7 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 	// 不经 FileTools.Tools() 注册：那份清单被多处复用（Explore 白名单、schema 巡检、
 	// 测试断言），往里加会让 Explore 子 agent 也拿到执行通道。
 	if pyRT != nil {
-		eng.RegisterTool(context.Background(), builtin.NewRunPythonTool(workspace, pyRT, sbx))
+		eng.RegisterTool(context.Background(), builtin.NewRunPythonToolWithWorkdir(wd, pyRT, sbx))
 	}
 	if profile.withAgent {
 		// Spawn 子 agent 继承主 Agent 的全部工具：共享同一 ToolEngine 实例（而非独立只读
@@ -6382,7 +6414,7 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 		}
 		// Explore 子 agent：专职用户问题分析，仅 read_file/grep/bash/glob 四个工具。
 		// Slots = 注册表辅池（只读子 agent 独立上限）：explore 占满不饿死主池的 agent_spawn。
-		exploreLoop := buildExploreLoop(workspace, sid, pc, prov, model, effort, sk)
+		exploreLoop := buildExploreLoop(workspace, wd, sid, pc, prov, model, effort, sk)
 		effortRef.track(exploreLoop) // 主 loop 切档时同步
 		eng.RegisterTool(context.Background(), subagent.NewBackgroundTool(subagent.Spec{
 			Name: "subagent_explore", Description: exploreToolDescription, Loop: exploreLoop, Background: true,
@@ -6393,7 +6425,7 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 	// Git Worktree 工具：仅在 Code 模式（withBash）引入；worktree 统一放 {workspace}/.go-code/worktrees，
 	// 目录自动创建，创建时需指定 worktree 名字（name）。
 	if profile.withBash {
-		eng.RegisterTool(context.Background(), builtin.NewGitWorktreeTool(workspace))
+		eng.RegisterTool(context.Background(), builtin.NewGitWorktreeToolWithWorkdir(wd))
 	}
 	// memory_dream：记忆盘点的证据与执行。模型负责判断，宿主负责护栏与落盘。
 	// 不在 FileTools.Tools() 里注册（那份清单被 Explore 白名单与 schema 巡检复用），
@@ -6450,7 +6482,7 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 	// 默认关闭（对齐 pi defaultActive:false）。**完全不注册**而不是注册成 hidden —— 见
 	// codemode.go 文件头。沙箱/解释器/store/工具表都在 registerCodemode 里接（与 bash、
 	// run_python 同一个 sbx 实例、同一个工作区锚）。开关热更新走 reload_settings（rebuildAll）。
-	registerCodemode(eng, workspace, sessionsRoot, sid, sbx, loadCodemodeSettingsQuiet())
+	registerCodemode(eng, workspace, sessionsRoot, sid, sbx, wd, loadCodemodeSettingsQuiet())
 	// load_skill：技能渐进披露激活。**放在最后**——它的能力面（skillCapabilitiesFor）
 	// 要读 eng 的完整工具集，提前注册会漏掉 MCP/插件/codemode/cron/mesh 工具，
 	// 于是声明 requires.tools 的技能会被误判不可用。
@@ -6468,7 +6500,7 @@ func newSessionEngineAt(sessionsRoot, workspace, sid string, cs *cron.Store, pc 
 // buildLoop 用**调用方给的 runtime** 装配 loop（方案 §6.1.2）：技能/插件/MCP/子代理
 // 全部取 ws 上的实例，绝不按路径再查一次 —— m.runtime(ws.path) 在 Hub 智能体的 home
 // 上会造出一个「项目 kind」的运行时，把项目层重新读进来（P0-08 复审的设计要点）。
-func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort string, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities, *tools.Engine) {
+func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort string, wd *workdir.State, bgCtx func() context.Context, reg *subagent.Registry, qw *events.QuestionWaiter, sk *skills.Registry, profile personaProfile, gate sandbox.ReleaseGate) (*agents.AgentLoop, *subagentEffortRef, *skills.Capabilities, *tools.Engine) {
 	if effort == "" {
 		effort = string(provider.ReasoningEffortLevelLow)
 	}
@@ -6520,9 +6552,9 @@ func (m *manager) buildLoop(ws *workspaceRuntime, sid, prov, model, effort strin
 	if ws.kind == runtimePlugin {
 		// 分流点 3 + 工具面（09 §4.3 / §7）：journal/codemode 落 plugin-sessions/<id>/sessions，
 		// 工具面 = 全局层 + denylist（cron/mesh 传 nil，surface/ui 不注册）。
-		eng, effortRef = m.buildPluginEngine(ws, sid, prov, model, effort, reg, qw, bgCtx)
+		eng, effortRef = m.buildPluginEngine(ws, sid, prov, model, effort, wd, reg, qw, bgCtx)
 	} else {
-		eng, effortRef = newSessionEngineAt(ws.sessionsRoot(), workspace, sid, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
+		eng, effortRef = newSessionEngineAt(ws.sessionsRoot(), workspace, sid, wd, m.cron, m.provCfg, prov, model, effort, bgCtx, reg, qw, sk, ws.subagents, ws.mcp, ws.plugins, profile, sbx, m.hub, pyRT, m.loadSkillOnLoadHook(), m.bashEgoBeforeExec(), m.memoryConfig())
 		// 办公组件验收工具（R08d）：kit 不可用则不注册（注册必然失败的工具只白耗轮次）。
 		// 放在 newSessionEngine 之后是为了不改那条 20 参数的签名 —— 工具需要的是宿主能力
 		// （缓存/信号量/受管运行时），不是引擎装配的一部分。
@@ -6684,10 +6716,12 @@ func (m *manager) rebuildLoop(bs *bridgeSession) {
 		return
 	}
 	prov, model, effort := bs.modelCfg()
-	loop, effortRef, caps, eng := m.buildLoop(ws, bs.id, prov, model, effort,
+	// 传 bs.wd ⇒ **cwd 跨重建存活**（切模型/切人格不该把工作目录清零）。
+	loop, effortRef, caps, eng := m.buildLoop(ws, bs.id, prov, model, effort, bs.wd,
 		func() context.Context { return bs.s.Context() }, bs.s.Registry(), bs.questions, ws.skills, profile, &sandboxReleaseGate{m: m, ws: bs.workspace, id: bs.id})
 	bs.s.SetLoop(loop)
 	bs.loop = loop
+	bs.eng = eng
 	bs.subagentEffort = effortRef // 子 agent 档位持有者随新引擎换代（旧引擎的 loop 已废弃）
 	bs.skillCaps = caps           // 与本次 loop 注入清单的**同一对象**（skills 命令读它）
 	wireAgentResume(bs, eng)

@@ -34,7 +34,7 @@ func prodEngine(t *testing.T, ws string, memCfg ...memory.Config) *tools.Engine 
 	t.Helper()
 	m, _ := testManager(t)
 	reg := subagent.NewRegistry()
-	eng, _ := newSessionEngine(ws, "", nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
+	eng, _ := newSessionEngine(ws, "", nil, nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
 		string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() },
 		reg, events.NewQuestionWaiter(0), buildSkillsRegistry(ws), buildSubagentRegistry(t.TempDir()),
 		m.runtime(ws).mcp, m.runtime(ws).plugins, profiles["code"], nil, nil, nil, nil, nil,

@@ -425,12 +425,12 @@ func TestPluginToolsInEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, _ := newSessionEngine(t.TempDir(), "", nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, plg, profiles["code"], nil, nil, nil, nil, nil)
+	eng, _ := newSessionEngine(t.TempDir(), "", nil, nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, plg, profiles["code"], nil, nil, nil, nil, nil)
 	if _, err := eng.GetTool(context.Background(), "fakebrowser_tool"); err != nil {
 		t.Fatalf("插件工具未注册: %v", err)
 	}
 	// 未启用的插件工具不注册
-	eng2, _ := newSessionEngine(t.TempDir(), "", nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, plugin.NewRegistry(&fakePluginCap{id: "off"}), profiles["code"], nil, nil, nil, nil, nil)
+	eng2, _ := newSessionEngine(t.TempDir(), "", nil, nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, plugin.NewRegistry(&fakePluginCap{id: "off"}), profiles["code"], nil, nil, nil, nil, nil)
 	if _, err := eng2.GetTool(context.Background(), "off_tool"); err == nil {
 		t.Fatalf("未启用插件工具不应注册")
 	}

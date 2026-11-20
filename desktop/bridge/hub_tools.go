@@ -22,6 +22,7 @@ import (
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/subagent"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/workdir"
 )
 
 // hubSessionSpec 一次 Hub 会话的装配输入。字段随 P1 逐项补齐（记忆/群组/scope）。
@@ -110,14 +111,14 @@ func (m *manager) hubGroupDailyBudgetHook() func(context.Context, agenthub.Group
 
 // buildHubEngine 装配智能体的工具引擎，并按 Profile 应用工具开关。
 // 返回的 effortRef 与主 loop 共享（切档时子智能体同档）。
-func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSessionSpec, reg *subagent.Registry, qw *events.QuestionWaiter, bgCtx func() context.Context) (*tools.Engine, *subagentEffortRef) {
+func (m *manager) buildHubEngine(ws *workspaceRuntime, sid string, spec *hubSessionSpec, wd *workdir.State, reg *subagent.Registry, qw *events.QuestionWaiter, bgCtx func() context.Context) (*tools.Engine, *subagentEffortRef) {
 	if ws == nil || spec == nil {
 		return tools.NewToolEngine(), newSubagentEffortRef(provider.ReasoningEffortLevelLow)
 	}
 	p := spec.Agent
 	effort := string(p.Effort)
 	eng, effortRef := newSessionEngine(
-		ws.path, sid, m.cron, m.provCfg, p.Provider, p.Model, effort,
+		ws.path, sid, wd, m.cron, m.provCfg, p.Provider, p.Model, effort,
 		bgCtx, reg, qw, ws.skills, ws.subagents, ws.mcp, ws.plugins,
 		hubPersonaProfile(), m.hubSandbox(ws.path, p.Tools, p.Policy),
 		nil, // 不传 mesh Hub：session_send/session_list 由 Hub 自己的工具提供（§6.3.1）

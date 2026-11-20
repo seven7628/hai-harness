@@ -114,7 +114,7 @@ func (t *grepTool) Call(ctx context.Context, _, arguments string) (string, error
 	if start == "" {
 		start = "."
 	}
-	root, err := t.resolve(start)
+	root, err := t.resolveAt(ctx, start)
 	if err != nil {
 		return "", err
 	}

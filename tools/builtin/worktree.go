@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/workdir"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,19 @@ type GitWorktreeTool struct {
 	// 每次都付一次进程启动 + git 二进制加载，~15–50 ms）。
 	gitOnce sync.Once
 	gitErr  error
+}
+
+// NewGitWorktreeToolWithWorkdir 创建**接会话级 cwd 状态**的 git_worktree 工具。
+//
+// wd = 会话级 cwd 状态（workdir.State）：只用它的**工作区根**（worktree 统一放在
+// {workspace}/.go-code/worktrees 下，是工作区级约定，不随 cd 变）。
+//
+// wd 为 nil ⇒ 退化成 NewGitWorktreeTool("")，不 panic。
+func NewGitWorktreeToolWithWorkdir(wd *workdir.State) *GitWorktreeTool {
+	if wd == nil {
+		return NewGitWorktreeTool("")
+	}
+	return NewGitWorktreeTool(wd.Root())
 }
 
 // NewGitWorktreeTool 创建 git_worktree 工具；root 为工作区根目录（绝对路径）。

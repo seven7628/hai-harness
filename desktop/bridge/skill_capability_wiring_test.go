@@ -64,7 +64,7 @@ func TestSkillCapabilitiesForReadsModelInputs(t *testing.T) {
 // TestSkillCapabilitiesForReadsTools 工具集来自引擎实况（不是硬编码清单）。
 func TestSkillCapabilitiesForReadsTools(t *testing.T) {
 	pc := pcForTest(t)
-	eng := exploreToolEngine(t.TempDir(), nil, nil) // 窄工具集
+	eng := exploreToolEngine(t.TempDir(), nil, nil, nil) // 窄工具集
 	caps := skillCapabilitiesFor(pc, "zhipu", "glm-5v-turbo", eng)
 	for _, name := range exploreAllowedTools {
 		if !caps.HasTool(name) {
@@ -104,8 +104,8 @@ func TestExploreLoopFiltersByModel(t *testing.T) {
 		return 0
 	}
 
-	textChars := skillsChars(buildExploreLoop(ws, "s-text", pc, "zhipu", "glm-4.6", "low", reg))
-	visionChars := skillsChars(buildExploreLoop(ws, "s-vision", pc, "zhipu", "glm-5v-turbo", "low", reg))
+	textChars := skillsChars(buildExploreLoop(ws, nil, "s-text", pc, "zhipu", "glm-4.6", "low", reg))
+	visionChars := skillsChars(buildExploreLoop(ws, nil, "s-vision", pc, "zhipu", "glm-5v-turbo", "low", reg))
 
 	// 视觉模型能看到 3 个技能，纯文本只能看到 1 个（visual-ui）→ 清单字节必然更大。
 	// 用字节数而不是逐条名字：清单文本是 loop 内部产物，没有导出接口；
@@ -130,7 +130,7 @@ func TestExploreLoopLoadSkillSharesCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	caps := skillCapabilitiesForTools(pc, "zhipu", "glm-4.6", exploreAllowedTools)
-	eng := exploreToolEngine(t.TempDir(), reg, caps)
+	eng := exploreToolEngine(t.TempDir(), nil, reg, caps)
 
 	tool, err := eng.GetTool(nil, "load_skill")
 	if err != nil {
@@ -156,7 +156,7 @@ func TestMainLoopLoadSkillRegisteredLast(t *testing.T) {
 	m := &manager{}
 	pc := pcForTest(t)
 
-	eng, _ := newSessionEngine(ws, "s-order", nil, pc, "zhipu", "glm-5v-turbo",
+	eng, _ := newSessionEngine(ws, "s-order", nil, nil, pc, "zhipu", "glm-5v-turbo",
 		string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() },
 		subagent.NewRegistry(), events.NewQuestionWaiter(0), sk,
 		buildSubagentRegistry(ws), nil, nil, profiles["code"], nil, nil, nil, nil, nil)

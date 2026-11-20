@@ -113,6 +113,13 @@ type Options struct {
 
 	// Cwd 脚本工作目录（"" = 执行器默认，通常即工作区根，与 bash/run_python 同锚）。
 	Cwd string
+
+	// CwdFunc 按**调用方**解析脚本工作目录（nil = 用 Cwd 字段）。
+	//
+	// 为什么需要函数而不是常量：脚本工作目录要跟着会话的**当前工作目录**走
+	//（模型 cd 之后），而"当前目录"是**运行期状态** ⇒ 装配时冻结成常量会立刻过期
+	//（与 bash/run_python 的新口径就不一致了）。
+	CwdFunc func(ctx context.Context) string
 }
 
 // Tool codemode 工具。

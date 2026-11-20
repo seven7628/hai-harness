@@ -55,7 +55,7 @@ func systemTextOf(req *provider.StreamRequest) string {
 
 func hubLoopFor(t *testing.T, m *manager, ws *workspaceRuntime, spec *hubSessionSpec) *provider.StreamRequest {
 	t.Helper()
-	eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, subagent.NewRegistry(),
+	eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, nil, subagent.NewRegistry(),
 		events.NewQuestionWaiter(0), func() context.Context { return context.Background() })
 	return captureHubLoopRun(t, m.hubLoopOptions(ws, "s-hub-loop", spec, eng))
 }
@@ -149,7 +149,7 @@ func TestHubLoopMemoryAndCompress(t *testing.T) {
 	}
 	// compress_threshold 是行为级可观测的（AgentLoop.CompressThreshold），
 	// 不能只靠「选项构造时传了」——那和没测一样（P1-02 复核）。
-	eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, subagent.NewRegistry(),
+	eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, nil, subagent.NewRegistry(),
 		events.NewQuestionWaiter(0), func() context.Context { return context.Background() })
 	if got := m.buildHubLoop(ws, "s-hub-loop", spec, eng).CompressThreshold(); got != 0.7 {
 		t.Fatalf("compress threshold = %v, want 0.7", got)
@@ -163,7 +163,7 @@ func TestHubLoopMemoryAndCompress(t *testing.T) {
 		spec := &hubSessionSpec{Agent: agenthub.AgentProfile{
 			ID: "ag_th", Provider: "deepseek", Model: "deepseek-v4-flash", CompressThreshold: tc.in,
 		}}
-		eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, subagent.NewRegistry(),
+		eng, _ := m.buildHubEngine(ws, "s-hub-loop", spec, nil, subagent.NewRegistry(),
 			events.NewQuestionWaiter(0), func() context.Context { return context.Background() })
 		if got := m.buildHubLoop(ws, "s-hub-loop", spec, eng).CompressThreshold(); got != tc.want {
 			t.Fatalf("compress threshold(%v) = %v, want %v", tc.in, got, tc.want)

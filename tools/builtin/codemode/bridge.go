@@ -120,6 +120,16 @@ func parseInput(args string) (input, error) {
 	return in, nil
 }
 
+// cwd 解析脚本工作目录（优先按调用方现取 ⇒ 跟着会话的当前工作目录走）。
+func (t *Tool) cwd(ctx context.Context) string {
+	if t.opts.CwdFunc != nil {
+		if d := t.opts.CwdFunc(ctx); d != "" {
+			return d
+		}
+	}
+	return t.opts.Cwd
+}
+
 // Call 工具主流程（八步见文件头）。
 func (t *Tool) Call(ctx context.Context, _ string, args string) (string, error) {
 	// 1) 输入。
@@ -183,7 +193,7 @@ func (t *Tool) Call(ctx context.Context, _ string, args string) (string, error) 
 
 	res, err := t.executor().ExecuteScript(runCtx, execproc.ScriptOpts{
 		Script:   code,
-		Cwd:      t.opts.Cwd,
+		Cwd:      t.cwd(ctx),
 		Timeout:  -1, // 不限时：墙钟由上面的 clock 管（见 §7.1-2）
 		Init:     br.initPayload(st.Values()),
 		Scaffold: scaffoldSource,

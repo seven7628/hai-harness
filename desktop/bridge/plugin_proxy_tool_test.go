@@ -131,7 +131,7 @@ func toolDeclWith(name, desc string, readOnly bool, timeoutMS int) map[string]an
 func buildPluginEngineFor(t *testing.T, m *manager, ws *workspaceRuntime, sid string) *tools.Engine {
 	t.Helper()
 	reg, qw, _ := pluginToolsFixture(t)
-	eng, _ := m.buildPluginEngine(ws, sid, m.provCfg.providerName(), m.provCfg.defaultModel(), "",
+	eng, _ := m.buildPluginEngine(ws, sid, m.provCfg.providerName(), m.provCfg.defaultModel(), "", nil,
 		reg, qw, func() context.Context { return context.Background() })
 	if eng == nil {
 		t.Fatal("buildPluginEngine 返回 nil")
@@ -328,7 +328,7 @@ func TestPluginProxyToolRegistrationMatrix(t *testing.T) {
 	}
 	reg, qw, sk := pluginToolsFixture(t)
 	bg := func() context.Context { return context.Background() }
-	projEng, _ := newSessionEngine(proj.path, "s-p2a-proj", nil, m.provCfg, m.provCfg.providerName(),
+	projEng, _ := newSessionEngine(proj.path, "s-p2a-proj", nil, nil, m.provCfg, m.provCfg.providerName(),
 		m.provCfg.defaultModel(), "", bg, reg, qw, sk, proj.subagents, proj.mcp, proj.plugins,
 		profiles["code"], nil, nil, nil, nil, nil)
 	if len(toolNames(projEng)) == 0 {

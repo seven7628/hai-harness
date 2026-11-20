@@ -784,7 +784,7 @@ func TestSessionEngineRegistersAllTools(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, _ := newSessionEngine(t.TempDir(), "", nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["code"], nil, nil, testPythonRuntime(t), nil, nil)
+	code, _ := newSessionEngine(t.TempDir(), "", nil, nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["code"], nil, nil, testPythonRuntime(t), nil, nil)
 	for _, name := range []string{
 		"read_file", "write_file", "edit_file", "grep", "bash", // 文件工具
 		"run_python",              // 办公执行通道（受管 Python 运行时）
@@ -800,7 +800,7 @@ func TestSessionEngineRegistersAllTools(t *testing.T) {
 	}
 
 	// work 也注册 run_python（办公执行通道不是 code 专属；对 work 而言它是唯一执行通道）
-	work, _ := newSessionEngine(t.TempDir(), "", nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["work"], nil, nil, testPythonRuntime(t), nil, nil)
+	work, _ := newSessionEngine(t.TempDir(), "", nil, nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["work"], nil, nil, testPythonRuntime(t), nil, nil)
 	for _, name := range []string{"read_file", "write_file", "edit_file", "grep", "run_python", "todo_add", "todo_update", "load_skill"} {
 		if _, err := work.GetTool(context.Background(), name); err != nil {
 			t.Fatalf("work profile: 工具 %s 未注册: %v", name, err)
@@ -814,7 +814,7 @@ func TestSessionEngineRegistersAllTools(t *testing.T) {
 
 	// 未装配受管运行时（pyRT=nil，如 SDK 层用法）→ 不注册 run_python：
 	// 注册一个必然失败的工具只会让模型白耗轮次。
-	noRT, _ := newSessionEngine(t.TempDir(), "", nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["code"], nil, nil, nil, nil, nil)
+	noRT, _ := newSessionEngine(t.TempDir(), "", nil, nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), bg, reg, events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["code"], nil, nil, nil, nil, nil)
 	if _, err := noRT.GetTool(context.Background(), "run_python"); err == nil {
 		t.Fatal("未装配受管运行时（pyRT=nil）时 run_python 不应注册")
 	}
@@ -828,7 +828,7 @@ func TestExploreToolEngineRestricted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("skills registry: %v", err)
 	}
-	eng := exploreToolEngine(t.TempDir(), sk, nil)
+	eng := exploreToolEngine(t.TempDir(), nil, sk, nil)
 	for _, name := range []string{"read_file", "grep", "glob", "bash", "load_skill"} {
 		if _, err := eng.GetTool(context.Background(), name); err != nil {
 			t.Fatalf("explore toolset should include %s: %v", name, err)
@@ -849,7 +849,7 @@ func TestPlanSubmitNotRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, _ := newSessionEngine(t.TempDir(), "", nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() }, subagent.NewRegistry(), events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["code"], nil, nil, nil, nil, nil)
+	code, _ := newSessionEngine(t.TempDir(), "", nil, nil, loadProviderConfig(), "deepseek", loadProviderConfig().defaultModel(), string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() }, subagent.NewRegistry(), events.NewQuestionWaiter(0), sk, buildSubagentRegistry(t.TempDir()), nil, nil, profiles["code"], nil, nil, nil, nil, nil)
 	if _, err := code.GetTool(context.Background(), "plan_submit"); err == nil {
 		t.Fatal("plan_submit must not be registered")
 	}

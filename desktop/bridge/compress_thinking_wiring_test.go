@@ -41,7 +41,7 @@ func TestSubagentLoopsShareHostRegistryForCompressThinking(t *testing.T) {
 	const forcedModel = "glm-5.3"
 
 	spawn := buildSpawnLoop(nil, t.TempDir(), "s-comp", pc, "opencode", forcedModel, "low", nil)
-	explore := buildExploreLoop(t.TempDir(), "s-comp", pc, "opencode", forcedModel, "low", nil)
+	explore := buildExploreLoop(t.TempDir(), nil, "s-comp", pc, "opencode", forcedModel, "low", nil)
 
 	for name, comp := range map[string]agents.Compressor{
 		"spawn":   spawn.Compressor(),

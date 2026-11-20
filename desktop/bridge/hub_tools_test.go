@@ -21,7 +21,7 @@ func hubEngineFor(t *testing.T, m *manager, ws *workspaceRuntime, policy agenthu
 	spec := &hubSessionSpec{Agent: agenthub.AgentProfile{
 		ID: "ag_engine", Provider: "deepseek", Model: "deepseek-v4-flash", Tools: policy,
 	}}
-	eng, _ := m.buildHubEngine(ws, "s-hub-engine", spec, subagent.NewRegistry(),
+	eng, _ := m.buildHubEngine(ws, "s-hub-engine", spec, nil, subagent.NewRegistry(),
 		events.NewQuestionWaiter(0), func() context.Context { return context.Background() })
 	t.Cleanup(func() { _ = eng })
 	return eng

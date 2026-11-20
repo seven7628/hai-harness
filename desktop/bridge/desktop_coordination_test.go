@@ -26,7 +26,7 @@ func TestSubLoopsCopyContextWindowAndCompressor(t *testing.T) {
 	}
 	const model = "deepseek-v4-flash"
 
-	main := buildExploreLoop(t.TempDir(), "s-test", pc, "opencode", model, "low", nil)
+	main := buildExploreLoop(t.TempDir(), nil, "s-test", pc, "opencode", model, "low", nil)
 	spawn := buildSpawnLoop(nil, t.TempDir(), "s-test", pc, "opencode", model, "low", nil)
 
 	if main.ContextWindow() != pc.windowForIn("opencode", model) {
@@ -44,7 +44,7 @@ func TestSubLoopsCopyContextWindowAndCompressor(t *testing.T) {
 	//（此前 windowFor 按 pc.active 取表，编辑其它 Provider 会把 1M 会话打回 128k）。
 	prevActive := pc.active
 	pc.active = "deepseek" // deepseek 表无此模型 → 若误用 active 解析将回退 128k
-	mainX := buildExploreLoop(t.TempDir(), "s-test", pc, "opencode", model, "low", nil)
+	mainX := buildExploreLoop(t.TempDir(), nil, "s-test", pc, "opencode", model, "low", nil)
 	pc.active = prevActive
 	if mainX.ContextWindow() != 1000000 {
 		t.Fatalf("跨 Provider 归属解析失效: got %d, want 1000000", mainX.ContextWindow())

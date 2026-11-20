@@ -31,7 +31,7 @@ func TestMeshToolsRegisteredWhenEnabled(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	hub := session.NewHub("node-test")
-	eng, _ := newSessionEngine(t.TempDir(), "s1", nil, loadProviderConfig(), "deepseek",
+	eng, _ := newSessionEngine(t.TempDir(), "s1", nil, nil, loadProviderConfig(), "deepseek",
 		loadProviderConfig().defaultModel(), string(providerReasoningEffortLow()),
 		func() context.Context { return context.Background() }, subagent.NewRegistry(),
 		events.NewQuestionWaiter(0), mustSkillsReg(t), buildSubagentRegistry(t.TempDir()),
@@ -52,7 +52,7 @@ func TestMeshToolsNotRegisteredWhenDisabled(t *testing.T) {
 	assertNoUserPrices(t)
 	t.Setenv("HOME", t.TempDir()) // 无 settings.json → 默认全关
 	hub := session.NewHub("node-test")
-	eng, _ := newSessionEngine(t.TempDir(), "s1", nil, loadProviderConfig(), "deepseek",
+	eng, _ := newSessionEngine(t.TempDir(), "s1", nil, nil, loadProviderConfig(), "deepseek",
 		loadProviderConfig().defaultModel(), string(providerReasoningEffortLow()),
 		func() context.Context { return context.Background() }, subagent.NewRegistry(),
 		events.NewQuestionWaiter(0), mustSkillsReg(t), buildSubagentRegistry(t.TempDir()),

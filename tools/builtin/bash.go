@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/seven7628/hai-harness/core"
-	"github.com/seven7628/hai-harness/events"
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/workdir"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,6 +50,13 @@ type BashTool struct {
 	// 不跨会话串扰；子 agent 共享主 loop engine 的 bash → cd 也共享（同 shell 语义）。
 	mu     sync.Mutex
 	curCwd map[string]string // 当前工作目录，**按调用方分区**（见 cwdKey）；cd 命令成功后更新
+
+	// wd 会话级 cwd 状态（nil = 用上面的实例内 curCwd，见 NewBashToolWithWorkdir）。
+	//
+	// 为什么两套并存：wd != nil（生产装配）时 cwd 记忆放在**共享**的状态里 ⇒
+	// bash / 文件工具 / run_python 同一份真相；wd == nil（库默认 / 独立使用）时
+	// 保持实例内记忆，行为一字不变。
+	wd *workdir.State
 
 	// spill 落盘目录与序号（惰性建目录，见 ensureSpillDir）。
 	//
@@ -135,6 +142,24 @@ func NewBashTool(cwd string, timeout time.Duration, sbx sandbox.Sandbox, appAllo
 		curCwd:   map[string]string{},
 		spill:    newSpillStore(bashSpillDirPrefix),
 	}
+	return t
+}
+
+// NewBashToolWithWorkdir 创建**接会话级 cwd 状态**的 bash 工具。
+//
+// wd = 会话级 cwd 状态（workdir.State）：命令的**起始目录**取调用方分区的当前目录，
+// cd 成功时也写回同一份状态 ⇒ 文件工具 / run_python 立刻看到同一个目录。
+//
+// 为什么不是"bash 记一份、别的工具再抄一份"：cwd 是运行期状态（模型随时 cd），
+// 两份各记的必然漂移 —— 改造前 bash 与文件工具对不上账正是这么来的。
+//
+// wd 为 nil ⇒ 退化成 NewBashTool（工作区根），不 panic。
+func NewBashToolWithWorkdir(wd *workdir.State, timeout time.Duration, sbx sandbox.Sandbox, appAllow []string) *BashTool {
+	if wd == nil {
+		return NewBashTool("", timeout, sbx, appAllow)
+	}
+	t := NewBashTool(wd.Root(), timeout, sbx, appAllow)
+	t.wd = wd
 	return t
 }
 
@@ -501,26 +526,19 @@ func (t *BashTool) startBackground(ctx context.Context, sbx sandbox.Sandbox, cmd
 		proc.Pid(), logPath, logPath, proc.Pid()), nil
 }
 
-// cwdKey 调用方的 cwd 记忆分区键。
-//
-// **为什么分区**：工具实例在注册表里共享 —— 主 agent 与后台子 agent 共用同一个
-// ToolEngine（desktop/bridge）⇒ 改造前 cwd 存在实例字段上 ⇒
-// **子 agent 的 `cd` 会改掉主 agent 后续命令的工作目录**（两个 agent 互相踩）。
-//
-// 键取 TaskId（后台任务 id）：子 agent = 它的任务 id（跨轮稳定 ✓），
-// 主 agent 直调 = ""（跨轮稳定 ✓ ⇒ 「cd 跨调用记忆」这个特性对主 agent 照常工作 ✓）。
-func cwdKey(ctx context.Context) string {
-	if tc := events.ToolContextFrom(ctx); tc != nil {
-		return tc.TaskId
-	}
-	return ""
-}
+// cwdKey 调用方的 cwd 记忆分区键（实现与理由见同包的 workdir.go）：
+// 分区键 = 子 agent 的 task id（跨轮稳定 ✓），主 agent = workdir.MainKey（跨轮稳定 ✓）。
 
 // currentCwd 返回当前工作目录（本调用方分区内跨调用记忆；初始 = 构造 cwd）。
 func (t *BashTool) currentCwd(ctx context.Context) string {
+	key := cwdKey(ctx)
+	if t.wd != nil {
+		// 会话级状态：与文件工具 / run_python 共用同一份真相（见 workdir.go）。
+		return t.wd.Current(key)
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if dir := t.curCwd[cwdKey(ctx)]; dir != "" {
+	if dir := t.curCwd[key]; dir != "" {
 		return dir
 	}
 	return t.Cwd
@@ -528,9 +546,14 @@ func (t *BashTool) currentCwd(ctx context.Context) string {
 
 // setCurrentCwd 更新本调用方分区的 cwd（cd 目标存在且为目录时调用）。
 func (t *BashTool) setCurrentCwd(ctx context.Context, dir string) {
+	key := cwdKey(ctx)
+	if t.wd != nil {
+		t.wd.Set(key, dir)
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.curCwd[cwdKey(ctx)] = dir
+	t.curCwd[key] = dir
 }
 
 // cdPrefixRe 匹配命令开头的 cd：`cd <target>`（target 可带引号/空格）。

@@ -44,7 +44,9 @@ import (
 	"github.com/seven7628/hai-harness/sandbox"
 	"github.com/seven7628/hai-harness/session"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/tools/builtin"
 	"github.com/seven7628/hai-harness/tools/builtin/codemode"
+	"github.com/seven7628/hai-harness/workdir"
 )
 
 const (
@@ -316,7 +318,7 @@ func inlineBudgetFunc(v int) func() int {
 //
 // 只在这里注册一次：profile 不参与门控（与 run_python 同款口径 —— 它是执行通道而不是
 // shell，Work 档也要能编排）；真正的门是用户显式打开的 codemode.enabled。
-func registerCodemode(eng *tools.Engine, workspace, sessionsRoot, sid string, sbx sandbox.Sandbox, cfg codemodeSettings) bool {
+func registerCodemode(eng *tools.Engine, workspace, sessionsRoot, sid string, sbx sandbox.Sandbox, wd *workdir.State, cfg codemodeSettings) bool {
 	if eng == nil || !cfg.Enabled {
 		return false
 	}
@@ -344,6 +346,14 @@ func registerCodemode(eng *tools.Engine, workspace, sessionsRoot, sid string, sb
 		Store:      st,
 		Exec:       execproc.New(sbx, codemodeNodeRuntime),
 		Cwd:        workspace,
+		// 脚本工作目录跟着会话的**当前工作目录**走（模型 cd 之后）——
+		// 与 bash / run_python / 文件工具同一口径。
+		CwdFunc: func(ctx context.Context) string {
+			if wd == nil {
+				return workspace // 没接会话级状态 ⇒ 沿用工作区根（与 Cwd 同口径）
+			}
+			return wd.Current(builtin.CwdKey(ctx))
+		},
 	}))
 	return true
 }

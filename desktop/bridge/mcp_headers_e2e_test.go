@@ -60,7 +60,7 @@ func TestSessionEngineMCPHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, _ := newSessionEngine(ws, "", nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
+	eng, _ := newSessionEngine(ws, "", nil, nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
 		string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() },
 		subagent.NewRegistry(), events.NewQuestionWaiter(0), buildSkillsRegistry(ws),
 		buildSubagentRegistry(t.TempDir()), m.runtime(ws).mcp, m.runtime(ws).plugins, profiles["code"], nil, nil, nil, nil, nil)
@@ -106,7 +106,7 @@ func TestSessionEngineMCPHeadersMissingFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, _ := newSessionEngine(ws, "", nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
+	eng, _ := newSessionEngine(ws, "", nil, nil, m.provCfg, "deepseek", m.provCfg.defaultModel(),
 		string(provider.ReasoningEffortLevelLow), func() context.Context { return context.Background() },
 		subagent.NewRegistry(), events.NewQuestionWaiter(0), buildSkillsRegistry(ws),
 		buildSubagentRegistry(t.TempDir()), m.runtime(ws).mcp, m.runtime(ws).plugins, profiles["code"], nil, nil, nil, nil, nil)
