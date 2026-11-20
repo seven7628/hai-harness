@@ -94,7 +94,10 @@ export { selectRightTab }
 // 差别只有「结果会回推到主会话」。因此它住在左栏会话树里，点开就是子会话视图，
 // 不需要也不应该在右栏再有一份平铺列表。审批/压缩因此改为**按当前查看的 session 分域**
 // 渲染（见 components/SessionScope 与 ApprovalPanel / AgentSessionView）。
-export type RightTab = 'activity' | 'git' | 'file' | 'web'
+// 'term'（2026-11，右栏终端，docs/TERMINAL_DESIGN.md §4）：单个 kind、**多实例**
+//（一个工作区可以开多个终端标签）。它的面板内容不在 React 树里（xterm + WS 自己画），
+// 运行时状态在 AppState.term（按 tabId 索引），不在 SessionView 里 —— 见 termEnsure 注释。
+export type RightTab = 'activity' | 'git' | 'file' | 'web' | 'term'
 
 // —— 右侧栏标签模型（docs/RIGHT_PANEL_TABS_PLAN.md 阶段 1）——
 //
@@ -125,9 +128,12 @@ export type FileTabInstance = { id: string; kind: 'file'; path?: string; mode?: 
 //   · 待重建的（重启恢复出来的）：**没有**池身份，只有 url 快照 —— 池身份是运行时 id
 //     （主进程 't'+自增序号，重启后从 t1 重来），存下来只会指向另一个页面。
 export type WebTabInstance = { id: string; kind: 'web'; viewId?: string; pageId?: number; srcPath?: string; url?: string }
+// term 标签**没有持久化字段**：ptyId 归 AppState.term（运行时），标签本身只有身份。
+export type TermTabInstance = { id: string; kind: 'term' }
 export type TabInstance =
   | { id: string; kind: 'activity' }
   | { id: string; kind: 'git' }
+  | TermTabInstance
   | FileTabInstance
   | WebTabInstance
 export interface TabSet {
@@ -1732,6 +1738,12 @@ const PLUGIN_KIND_RE = /^plugin:[a-z][a-z0-9-]{1,40}$/
 // 写侧整条不持久化，读侧只丢 params。两者不是笔误。
 const TABS_PERSIST_PARAMS_MAX = 4096
 
+// 右栏终端（docs/TERMINAL_DESIGN.md §8）：termEnsure 的退避重试口径。
+// 只对「桥还没就绪」这一类失败重试 —— 20 次 × 最长 3s ≈ 100 秒，足够覆盖 Electron 冷启动
+// + bridge 自举；超时后写 failed，面板显示原文（用户能自己判断是不是要重开）。
+const BRIDGE_NOT_READY_RE = /bridge\s*(启动中|未运行)/
+const TERM_CREATE_MAX_ATTEMPTS = 40
+
 /** 序列化后的**字节数**（不是字符数：一个中文字符 3 字节，用 length 会放过 3 倍大的东西）。 */
 function jsonByteSize(v: unknown): number | undefined {
   try {
@@ -1766,7 +1778,8 @@ const TABS_PERSIST_DEBOUNCE_MS = 300
 // 老版本读不到也只有「被白名单丢弃」这一种结果 —— 两个方向都天然兼容，故 TABS_PERSIST_VERSION
 // 仍是 1（升版本会让所有老用户的标签集被整体丢弃，代价与收益不成比例）。
 type PersistedTab =
-  | { id: string; kind: 'activity' | 'git' }
+  // term 与 activity/git 同形：只存身份（ptyId 是运行时，重启后由 termEnsure 重新建进程）。
+  | { id: string; kind: 'activity' | 'git' | 'term' }
   | { id: string; kind: 'file'; path?: string; mode?: FileTabMode; toolId?: string; startLine?: number }
   | { id: string; kind: 'web'; url: string; srcPath?: string }
   | { id: string; kind: `plugin:${string}`; params?: Record<string, unknown> }
@@ -1824,7 +1837,9 @@ function toPersistedTab(t: TabInstance, s: AppState): PersistedTab | undefined {
     return { id: t.id, kind: t.kind, params }
   }
   switch (t.kind) {
-    case 'activity': case 'git':
+    case 'activity': case 'git': case 'term':
+      // term：只存 {id, kind}。漏了这一支会落到下面的 default（web 分支），
+      // snap 为 undefined → 整条标签不持久化 → 症状是「重启后终端标签消失」。
       return { id: t.id, kind: t.kind }
     case 'file':
       // openSeq **不存**：它是「每次打开回默认视图」的触发器，恢复时从 1 起（见 fromPersistedTab）。
@@ -1849,7 +1864,7 @@ function toPersistedTab(t: TabInstance, s: AppState): PersistedTab | undefined {
 // plugin → 带 params 的插件实例（provider 缺失时由 RightPanel 渲染墓碑，见 unavailableReason）。
 function fromPersistedTab(p: PersistedTab, id: string): TabInstance {
   switch (p.kind) {
-    case 'activity': case 'git':
+    case 'activity': case 'git': case 'term':
       return { id, kind: p.kind }
     case 'file':
       return { id, kind: 'file', ...(p.path ? { path: p.path } : {}), ...(p.mode ? { mode: p.mode } : {}), ...(p.toolId ? { toolId: p.toolId } : {}), ...(p.startLine != null ? { startLine: p.startLine } : {}), openSeq: 1 }
@@ -3191,6 +3206,24 @@ export function applySessionPrefs(path: string, sid: string): void {
   if (Object.keys(patch).length > 0) useAppStore.setState(patch)
 }
 
+/**
+ * 右栏终端的**运行时**状态（docs/TERMINAL_DESIGN.md §8）：按**标签 id** 索引。
+ *
+ * 为什么不进 SessionView、不落盘（三条都是刻意的）：
+ *   · ptyId 是**进程级**身份（Go 桥重启后全变），存下来只会指向一个不存在的 PTY；
+ *   · 右栏是「看一眼」的运行时表面，重启后由 termEnsure 重新 fork 一个 shell —— 恢复一个
+ *     死进程的标签是更糟的承诺（永远点不开）；
+ *   · SessionView 有 LRU 淘汰（VIEW_CACHE_MAX），把终端塞进去会随会话切走被删掉，
+ *     而 Pty 进程还在 —— 表与进程从此不同步。
+ * 结论：标签身份（{id, kind}）进持久化，进程状态只活在这张表里。
+ */
+export interface TermRuntime {
+  status: 'creating' | 'running' | 'failed' | 'exited'
+  ptyId?: string
+  exitCode?: number
+  error?: string
+}
+
 export interface AppState {
   bridgeStatus: 'idle' | 'starting' | 'running' | 'stopped' | 'error'
   bridgeError?: string
@@ -3206,6 +3239,8 @@ export interface AppState {
   // 右侧栏标签集（阶段 1）：按 scope 归属（会话 id；无会话时 = 工作区路径）。
   // **刻意不放进 SessionView**：views 有 LRU 淘汰（VIEW_CACHE_MAX=10），标签集会随会话切走被删掉。
   tabsByScope: Record<ScopeKey, TabSet>
+  // 右栏终端的运行时表（见 TermRuntime）：key = 标签 id。**不是持久化字段**，也不进 views。
+  term: Record<string, TermRuntime>
 
   leftExpanded: boolean
   leftPinned: boolean
@@ -3693,6 +3728,12 @@ export interface AppState {
   activateTab(id: string): void // 激活指定标签（切 scope 内的显示）
   closeTab(id: string): void // 关闭（激活项顺延到右邻居，无则左邻居）；**dirty 编辑标签先弹确认**
   closeTabNow(id: string): void // 真关（确认框/批量关闭用；跳过 dirty 守卫）
+  // —— 右栏终端（docs/TERMINAL_DESIGN.md §8）——
+  // termEnsure：确保这个标签有一个活着的 PTY（幂等：creating/running 直接返回）。
+  //   失败要区分「可恢复的桥未就绪」（40 次退避重试）与「真失败」（写 failed 让面板显示）。
+  termEnsure(tabId: string): void
+  // termClose：关掉 PTY（有 ptyId 才发命令）并从运行时表删除该标签的记录。
+  termClose(tabId: string): void
   reopenTab(id?: string): void // 重开最近关闭的一个（给 id 则重开指定的那个）
   syncTabsToRightTab(): void // 该 scope 还没有标签集时建默认集（+ 清恢复标记）；不碰已有集合
   // 阶段 5：把防抖窗口里的标签集立即落盘（e2e/L1 断言与关窗前收尾用；正常路径靠订阅防抖写）。
@@ -5326,6 +5367,30 @@ export function dispatchEvent(raw: AnyEvent): void {
       // （替代「任意 command response 猜测」；保留 command_response 兜底）。
       embedBridgeAlive = true
       break
+
+    // 终端进程状态（右栏终端，docs/TERMINAL_DESIGN.md §5.1 / TERMINAL_MODULE_SWEEP.md §3.2）：
+    // **只更新运行时表** —— 不建会话视图、不进 checkpoint、不落盘。
+    // pty_id 反查 tabId（一个 PTY 只属于一条标签）；查不到就是「已关掉的标签的迟到事件」，
+    // 直接丢掉（不 set，避免无谓重渲染）。
+    case 'pty_changed': {
+      const ptyId = typeof raw.pty_id === 'string' ? raw.pty_id : ''
+      if (!ptyId) break
+      const status: TermRuntime['status'] = raw.status === 'exited' ? 'exited' : raw.status === 'failed' ? 'failed' : 'running'
+      const exitCode = typeof raw.exit_code === 'number' ? raw.exit_code : undefined
+      const error = typeof raw.error === 'string' && raw.error ? raw.error : undefined
+      setState((s) => {
+        const hit = Object.entries(s.term).find(([, v]) => v.ptyId === ptyId)
+        if (!hit) return {}
+        const [tabId, prev] = hit
+        return {
+          term: {
+            ...s.term,
+            [tabId]: { ...prev, status, ...(exitCode !== undefined ? { exitCode } : {}), ...(error ? { error } : {}) },
+          },
+        }
+      })
+      break
+    }
 
     case 'git_snapshot': {
       const sid = getSid(raw, getState().activeSessionId)
@@ -10328,6 +10393,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   views: {},
   // 阶段 5：重启恢复的标签集（模块加载时同步读 localStorage，见 loadPersistedTabs）。
   tabsByScope: initTabsByScope,
+  term: {},
   filePreviews: {},
   dirtyTabs: {},
   recentSessions: initRecent,
@@ -12448,6 +12514,56 @@ export const useAppStore = create<AppState>((set, get) => ({
         get().closeBrowserPage(gone.pageId)
       }
     }
+    // term 标签 → 连 PTY 进程一起收（否则关掉标签只关了个视图，shell 还挂着）。
+    if (gone.kind === 'term') get().termClose(gone.id)
+  },
+  // —— 右栏终端（docs/TERMINAL_DESIGN.md §8）——
+  // [recovered] 逐字还原自 bundle `src/store/useAppStore.ts`（见 docs/TERMINAL_MODULE_SWEEP.md §3.2）：
+  //   · 已有 creating/running 的记录 → 直接返回（**幂等**：RightPanel/TerminalTab 每次挂载都会调）；
+  //   · 没有工作区 → failed（不是静默不做事：「没有工作区」是用户能看懂、也能自己修的状态）；
+  //   · 失败文案命中 `/bridge\s*(启动中|未运行)/` → 20 次退避重试（1s 起、每次 +250ms、封顶 3s）。
+  //     **只重试这一种**：桥刚起来时 PTY 命令必然失败，而用户不会为此去重启标签；
+  //     其它失败（目录不存在、fork 失败）重试 40 次也只是把同一句话延迟 100 秒才说出。
+  termEnsure: (tabId) => {
+    const s = get()
+    const cur = s.term[tabId]
+    if (cur && (cur.status === 'creating' || cur.status === 'running')) return
+    // 工作区优先取「会话所属项目」的路径（会话可能属于另一个项目），再退到当前工作区。
+    const ws = sessionWorkspaceOf(s, s.activeSessionId ?? '') || s.workspace || ''
+    if (!ws) {
+      set({ term: { ...s.term, [tabId]: { status: 'failed', error: '没有工作区，无法确定终端目录' } } })
+      return
+    }
+    set({ term: { ...s.term, [tabId]: { ...cur, status: 'creating', error: undefined } } })
+    let attempt = 0
+    const create = (): void => {
+      void getTransport()
+        .ptyCreate({ workspace: ws, session_id: s.activeSessionId, cols: 80, rows: 24 })
+        .then((r) => {
+          const cur2 = get().term[tabId]
+          if (!cur2) return // 标签已关（termClose 删了记录）：结果无处可写，丢掉
+          if (!r.ok) {
+            if (BRIDGE_NOT_READY_RE.test(r.error) && attempt < TERM_CREATE_MAX_ATTEMPTS) {
+              attempt += 1
+              setTimeout(create, Math.min(1000 + attempt * 250, 3000))
+              return
+            }
+            set((st) => ({ term: { ...st.term, [tabId]: { ...cur2, status: 'failed', error: r.error } } }))
+            return
+          }
+          set((st) => ({ term: { ...st.term, [tabId]: { ...cur2, ptyId: r.pty.pty_id, status: 'running' } } }))
+        })
+    }
+    create()
+  },
+  termClose: (tabId) => {
+    const cur = get().term[tabId]
+    if (cur?.ptyId) void getTransport().ptyClose(cur.ptyId)
+    set((st) => {
+      const next = { ...st.term }
+      delete next[tabId]
+      return { term: next }
+    })
   },
   reopenTab: (id) => {
     const s = get()
