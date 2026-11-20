@@ -73,9 +73,40 @@ test('builtin/index 的副作用注册了 web provider，且元数据符合 03 �
 })
 
 test('web 与 file 同属 content 组，按 order 排在 file 之后；git 仍在 workflow 组最前', () => {
-  // 注册 web 不该把它挤到别处，也不该撑破 registry 的「内置 kind 仅 4 个」白名单。
+  // 注册 web 不该把它挤到别处，也不该撑破 registry 的内置 kind 白名单。
   // R07 起 activity（content/order 30）排在 web 之后 —— 四个内置 kind 至此全部注册。
-  assert.deepEqual(listSurfaces().map((p) => p.kind), ['git', 'file', 'web', 'activity'])
+  // 2026-11 起加入第五个：term（workflow/order 15，docs/TERMINAL_DESIGN.md §4）——
+  // 它**刻意**排在 git(20) 之前（终端是「随手要开」的），所以 workflow 组内的顺序变成
+  // term → git。这条断言的职责是「组内 order 与跨组次序都被钉住」，加 kind 就该跟着改。
+  assert.deepEqual(listSurfaces().map((p) => p.kind), ['term', 'git', 'file', 'web', 'activity'])
+})
+
+// —— 2026-11：term provider（右栏终端，docs/TERMINAL_DESIGN.md §4）——
+// 与 web/activity 两条同构：元数据逐条钉死 + 渲染委派到 TerminalTab（props 只有 tabId）。
+// 这些字段不是装饰：fullBleed=true 决定 RP 不给 10px 内边距（否则 xterm 的列宽围着内边距算，
+// 右侧永远留一条空带）；capabilities=['write'] 是「终端能改进程状态」的显式声明。
+test('builtin/index 的副作用注册了 term provider，且元数据符合 TERMINAL_DESIGN §4', () => {
+  const p = getSurface('term')
+  assert.ok(p, 'term provider 未注册（builtin/index.ts 少了一行副作用 import？）')
+  assert.equal(p.kind, 'term')
+  assert.equal(p.namespace, 'builtin')
+  assert.equal(p.group, 'workflow')
+  assert.equal(p.order, 15)
+  assert.equal(p.singleton, true)
+  assert.equal(p.fullBleed, true)
+  assert.equal(p.scope, 'session')
+  assert.equal(p.weight, 'heavy')
+  assert.deepEqual(p.capabilities, ['write'])
+  assert.deepEqual(p.defaultSpec?.({} as never), { kind: 'term' })
+  const tTerm = (k: string) => (k === 'rp.tab.term' ? '终端' : k)
+  assert.equal(p.title({ id: 't1', kind: 'term' }, tTerm), '终端')
+  assert.equal(typeof p.render, 'function')
+  const el = p.render({ tab: { id: 't1', kind: 'term' }, scope: 's' }) as unknown as {
+    type: unknown
+    props: Record<string, unknown>
+  }
+  // 只传 tabId：终端面板自己从 store 取 term[tabId]（进程身份不经过 props，避免两份真相）
+  assert.deepEqual(el.props, { tabId: 't1' })
 })
 
 // —— 元数据委派的**行为等价**证明 ——

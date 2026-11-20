@@ -57,7 +57,10 @@ function secondaryTabs(t: (k: string) => string): { key: RightTab; label: string
 // （blocks 尾部最后一条 kind==='compression'）。不新建第二套活动状态。
 // 「+」菜单里**没有** file：文件标签需要路径，由点文件产生（阶段 2 起是**多实例**：
 // 一个文件一个标签，同一文件的 diff / source 各一个 —— 见 store.openTab 的幂等键）。
-const ADDABLE_KINDS: TabKind[] = ['activity', 'git', 'web']
+// term（2026-11，右栏终端，docs/TERMINAL_DESIGN.md §4）：终端**没有**独立入口（不像 file 由
+// 点文件产生、web 由内嵌页面同步），用户唯一能开它的地方就是这个「＋」菜单 —— 不加进来
+// 等于功能不可达。位置排在 web 之后：前三个是「看」，终端是「做」。
+const ADDABLE_KINDS: TabKind[] = ['activity', 'git', 'web', 'term']
 /**
  * 标签 / 菜单 / 空态面板共用的**一个**图标取值点：provider 是唯一真相。
  *

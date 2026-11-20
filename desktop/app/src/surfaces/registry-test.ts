@@ -68,9 +68,12 @@ test('未知内置 kind 被拒', () => {
 // PR-11 把它提升为 store 的 loadPersistedTabs 也读的**唯一白名单**（替换掉 store 自己那份
 // TAB_KINDS）。它一旦被改宽（例如把 plugin: 放进来），症状是「重启后一个没有 provider 的
 // 幽灵标签复活」，而 store 侧看不见这个常量 —— 所以口径钉在它定义的地方。
-test('四个内置 kind 全部通过（与 BuiltinKind 联合逐项对齐）', () => {
-  assert.deepEqual([...BUILTIN_KINDS].sort(), ['activity', 'file', 'git', 'web'])
-  for (const k of ['activity', 'git', 'file', 'web'] as const) {
+test('五个内置 kind 全部通过（与 BuiltinKind 联合逐项对齐）', () => {
+  // 2026-11：加入第五个内置 kind `term`（右栏终端，docs/TERMINAL_DESIGN.md §4）。
+  // 这条断言刻意**逐字列举**而不是从 BuiltinKind 反射：列举是白名单的独立副本，
+  // 悄悄放宽（例如把 plugin: 漏进来）会在这一行先红。
+  assert.deepEqual([...BUILTIN_KINDS].sort(), ['activity', 'file', 'git', 'term', 'web'])
+  for (const k of ['activity', 'git', 'file', 'web', 'term'] as const) {
     assert.equal(isBuiltinKind(k), true, `${k} 必须被认作内置 kind`)
   }
 })

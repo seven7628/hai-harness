@@ -21,10 +21,14 @@ export const BUILTIN_KINDS: ReadonlySet<SurfaceKind> = new Set<SurfaceKind>([
   'git',
   'file',
   'web',
+  // term（2026-11，右栏终端，docs/TERMINAL_DESIGN.md §4）：**必须是白名单成员**，否则
+  // ① termSurface 的副作用注册会在 assertProvider 里抛「未知的内置 kind」；
+  // ② 持久化的终端标签会在 sanitizePersistedTab 里被当坏数据丢掉（症状＝重启后标签消失）。
+  'term',
 ])
 
 /**
- * 「这个 kind 是内置的四类之一吗」—— store 的 loadPersistedTabs 用它过滤持久化里的标签。
+ * 「这个 kind 是内置的五类之一吗」—— store 的 loadPersistedTabs 用它过滤持久化里的标签。
  *
  * 为什么是谓词而不是让 store 直接 `BUILTIN_KINDS.has(r.kind)`：持久化里的 kind 是 `unknown`
  * （来自 localStorage 的 JSON），`Set<SurfaceKind>.has` 收窄不了它 —— 那样调用方只能写

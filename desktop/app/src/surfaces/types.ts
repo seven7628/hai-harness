@@ -4,8 +4,13 @@ import type { ReactNode } from 'react'
 import type { AppState, TabInstance } from '../store/useAppStore'
 import type { SurfaceCommandReply, SurfaceEvent } from '../transport/types'
 
-/** 内置 kind 保持 4 个：文档/媒体不是 kind，是 file{mode:'preview'} 的渲染器（D-I） */
-export type BuiltinKind = 'activity' | 'git' | 'file' | 'web'
+/**
+ * 内置 kind 5 个：文档/媒体不是 kind，是 file{mode:'preview'} 的渲染器（D-I）;
+ * term（2026-11，右栏终端，docs/TERMINAL_DESIGN.md §4）是**唯一**一个「内容不由 React 渲染」
+ * 的 kind —— 它仍然走同一套 surface 契约（标题/图标/默认 spec 都在 provider 里），
+ * 只有 render 内部换成 xterm（见 builtin/termSurface.tsx）。
+ */
+export type BuiltinKind = 'activity' | 'git' | 'file' | 'web' | 'term'
 export type SurfaceKind = BuiltinKind | `plugin:${string}`
 
 export type SurfaceGroup = 'workflow' | 'content' | 'plugin'
