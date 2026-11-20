@@ -405,7 +405,7 @@ func versionID(files map[string]string) string {
 
 ## 6. A 层：Agent Tool 协议
 
-### 6.1 工具清单（9 个；Phase 1 交付 8 个）
+### 6.1 工具清单（11 个；Phase 1 交付 10 个）
 
 | 工具 | 读写 | 挂载条件 | 入参 | 成功返回 | 失败码 |
 |---|---|---|---|---|---|
@@ -413,14 +413,18 @@ func versionID(files map[string]string) string {
 | `artifact_promote` | 写 | 文件系统模式 | `{from, title}` | 同上 | `NOT_IN_SCRATCH` `TARGET_EXISTS` |
 | `artifact_edit` | 写 | 总是 | `{artifact_id, base_version, scope?, edits[]}` | `{ok, version, version_id}` | `VERSION_CONFLICT` `OLD_STR_NOT_UNIQUE` `EDITS_TOO_MANY` |
 | `artifact_export` | 读 | 总是 | `{artifact_id, version?, format}` | `{ok, path, warnings[]}` | `UNSUPPORTED` `TOO_LARGE` `VERSION_GONE` |
-| `source_get` | 读 | 有选区时 | `{path, line, context_lines≤20}` | `{ok, snippet}` | `OUT_OF_RANGE` |
+| `artifact_refs_get` | 读 | 总是 | `{}` | `{ok, refs[{artifact_id, version_id, kind, selector?, text?, created_at}]}` | — |
+| `source_get` | 读 | 有选区时 | `{path, line, context_lines≤20}` | `{ok, snippet}` | `OUT_OF_RANGE` `VERSION_GONE` |
 | `source_find` | 读 | 有选区时 | `{query}` | `{ok, candidates[≤5]}` | — |
+| `preview_locate` | 读（只动视图） | 预览标签已打开 | `{artifact_id, selector, version?}` | `{ok, found}` | `NO_PREVIEW` `NODE_GONE` `VERSION_GONE` |
 | `preview_screenshot` | 读 | 总是 | `{artifact_id, version?, viewport}` | `{ok, blob_ref, bytes≤1MB}` | `RENDER_TIMEOUT` |
 | `preview_inspect` | 读 | 有选区时 | `{selector, want_outer_html≤8KB}` | `{ok, node}` | `NODE_GONE` |
 | `designsystem_get` | 读 | Design type | `{name}` | `{ok, token\|component}` | `NOT_FOUND` |
 
-> 表中 9 行是因为 `designsystem_get` 只在 Design type 挂载；**Phase 1 实际交付 8 个**（不含它），
-> 与历史设计「CodeMode 下 9 个工具」的差 1 即此。
+> 11 行里 `designsystem_get` 只在 Design type 挂载；**Phase 1 实际交付 10 个**。
+> `artifact_refs_get` 与 `preview_locate` 是 §14.14「Agent → 页面」方向的必需件：
+> 没有前者 Agent 读不到用户选区，没有后者 Agent 只能盲改、无法把用户的注意力引到它改的那一处。
+> `preview_locate` 标「读」是因为它只改视图状态，不改任何文件/版本 —— 这决定了它能进只读工具白名单。
 
 ### 6.2 三条通用约定
 
@@ -703,6 +707,8 @@ CodeMode 脚本内可直接调用下列工具。**脚本拿到的是对象，不
 | `artifact_export` | `artifact_export` | `{path, warnings[]}` | 单次 ≤ 50MB；不支持 Range | `UNSUPPORTED` 抛 `ExportError` |
 | `source_get` | `source_get` | `{snippet}` | `context_lines ≤ 20` | `OUT_OF_RANGE` 抛错 |
 | `source_find` | `source_find` | `{candidates[]}` | 最多 5 条 | 返回空数组，不抛 |
+| `artifact_refs_get` | `artifact_refs_get` | `{refs[]}` | 最多 20 条，无原文全文 | 返回空数组，不抛 |
+| `preview_locate` | `preview_locate` | `{found}` | 只在该产物标签已打开时生效；**绝不擅自开标签** | `NO_PREVIEW` 抛错 |
 | `preview_screenshot` | `preview_screenshot` | `{blob_ref, bytes, width, height}` | **降级为元信息**（脚本里不返回二进制，只给 `blob_ref` 与尺寸） | 超时抛 `RenderTimeout` |
 | `preview_inspect` | `preview_inspect` | `{node}` | `outer_html ≤ 8KB` | `NODE_GONE` 抛错 |
 
@@ -1235,6 +1241,25 @@ func (m *manager) dispatchArtifact(c command) bool {
 | F2 | `ArtifactCard.tsx:149` | 改分支 | 主按钮 | F1 |
 | F3 | `ArtifactCard.tsx` 按钮区 | 新增 2 按钮 | 用户纠正 | M8 |
 | F4 | `lib/bridge.ts` | 新增 3 声明 | IPC 封装 | M8 |
+| F5 | `Composer.tsx:73` | 加可选字段 | `DraftQuote.ref` | F13 |
+| F6 | `Composer.tsx:575` | 改去重键 | 选区 chip 身份 | F5 |
+| F7 | `Composer.tsx:1003` | 改发送拼接 | chip → `<selection>` 块 | F5 |
+| F8 | `Composer.tsx:1196` | 改历史快照 | 加 `quotes` | F5 |
+| F9 | `Composer.tsx:1549` | 改渲染 | `data-selection-chip` | F5 |
+| F10 | `i18n.ts:821/3218` | 各 +5 key | `composer.selection.*` | — |
+| F11 | `surfaces/types.ts:9` | 改联合 | `BuiltinKind` + `'artifact'` | D4 |
+| F12 | `useAppStore.ts:97` | 改联合 | `RightTab` + `'artifact'` | F11 |
+| F13 | `useAppStore.ts:128` | 改联合 | `ArtifactTabInstance` | F12 |
+| F14 | `useAppStore.ts:1867` | 加分支 | `sanitizePersistedTab`（丢 url） | F13 |
+| F15 | `RightPanel.tsx:144` | 加 case | `SurfaceHost kind="artifact"` | F18 |
+| F17 | `lib/rightPanel.ts:65` | 加分支 | `selectRightTab` 认 artifact | F12 |
+| F18 | `surfaces/artifact/index.tsx`（新增） | 新增 | Surface 注册 | F11 |
+| F19 | `surfaces/registry-test.ts:71` | **改断言** | 四 → 五（规格变更） | F11 |
+| F20 | `i18n.ts` | 各 +1 key | `rp.tab.artifact` | F11 |
+
+> F16（`RightPanel.tsx:33/39` 固定标签条**不加** artifact）是"确认不改"项，列在此处仅为留痕。
+> F19 是本清单里**唯一一处需要改动既有断言**的地方：它钉的是 `BuiltinKind` 的基数，
+> 而 D4 明确把基数从 4 改成 5 —— 这是规格变更的预期结果；同时必须补反例断言，防止"改成五"变成"什么都能进"。
 
 ---
 
@@ -1515,7 +1540,27 @@ AST 改写（`ts-morph`：定位 JSX 字面量/className，改节点后回写）
 | 引用超 2KB 被裁剪 | chip 尾部标「已裁剪」，hover 显示原始大小 |
 
 > 为什么用 chip 而不是"在输入框里插入文本"：文本插入会让用户误以为可以编辑选区内容，
-> 而选区是**不可编辑的数据**；chip 的"不可编辑、可删除"语义更准确（沿用终端引用同一套组件）。
+> 而选区是**不可编辑的数据**；chip 的"不可编辑、可删除"语义更准确。
+
+#### 14.10.1 落点：复用**已存在**的插件引用通道，不新建组件
+
+Composer 里已经有一套"外部面板把一段文本引用进草稿"的机制（`composer.quote`，09-agent-bridge §6.2 / D7）。
+选区引用**扩展它**，而不是另造一套 —— 否则会出现两套 chip、两套去重、两套发送拼接。
+
+| # | 文件:行 | 现状 | 改为 |
+|---|---|---|---|
+| F5 | `components/Composer.tsx:73` | `type DraftQuote = { key: string; title: string; text: string }` | 加可选字段：`ref?: SelectionRef`（有 `ref` 即「产物选区」chip，无 `ref` 保持原插件引用行为，**向后兼容**） |
+| F6 | `components/Composer.tsx:575` | 去重键 `key = \`${src?.id ?? ''}\u0000${body}\`` | 选区 chip 的 `key = \`${artifact_id}\u0000${version_id}\u0000${kind}\u0000${selector|range|rect}\`` —— 与 §14.9「去重键」一一对应 |
+| F7 | `components/Composer.tsx:1003` | 发送时把 `docRefs` 拼成 `@路径`；`quotes` 走正文插入 | 选区 chip **不进正文**：发送时按 `created_at` 升序拼 `<selection>` 块，前置到 `<user_instruction>`（§14.10 第 ⑤ 步） |
+| F8 | `components/Composer.tsx:1196` | 输入历史快照 = 正文 + `refs` + 图片指纹 | 快照加 `quotes`（否则 `↑` 回填会丢 chip；`HistoryDraft`/`HistoryShown` 两个类型同步加） |
+| F9 | `components/Composer.tsx:1549` | `className="attach-chip doc-chip quote-chip"` + `data-quote-chip={q.title}` | 选区 chip 渲染同壳，`data-selection-chip={kind}`，左侧图标按 §14.9 的 8 类 kind 取 |
+| F10 | `i18n.ts:821-824`（中）/ `:3218-3221`（英） | `composer.quote.source/hint/remove` | 新增 `composer.selection.*`：`element/elements/region/text/comment/page` 的 chip 标签、`expired`（版本失效）、`trimmed`（已裁剪）、`max8`（超过 8 个） |
+
+**chip 上限与裁剪**在 Composer 侧执行（不是 Inspector 侧）：单次发送 ≤ 8 个，单 chip payload ≤ 2KB；
+超限只影响**本次发送**，不阻止用户继续选（继续选就替换最早的一个，并 toast）。
+
+**为什么上限放在发送时而不是选择时**：用户可能在预览里连选 12 个再回头删 —— 选择时拒绝会让
+"手滑就报错"；发送时按 `created_at` 取最新 8 个 + toast，才是用户能理解的行为。
 
 ### 14.11 右栏自动展开（publish 触发）
 
@@ -1534,6 +1579,49 @@ AST 改写（`ts-morph`：定位 JSX 字面量/className，改节点后回写）
 
 > 为什么选"自动展开"：publish 的语义就是"我给用户看这个"。不展开等于把成果藏起来，
 > 用户还得自己去找。但**只在应用内展开**，不碰外部浏览器（§19.4）。
+
+#### 14.11.1 落点：`kind:"artifact"` 是**第 5 个内置 kind**，且必须注册成 Surface
+
+右栏的标签是「kind 判别联合 + Surface 注册表」，现状**明确钉死 4 个内置 kind**：
+
+```
+surfaces/types.ts:8   /** 内置 kind 保持 4 个：文档/媒体不是 kind，是 file{mode:'preview'} 的渲染器（D-I） */
+surfaces/types.ts:9   export type BuiltinKind = 'activity' | 'git' | 'file' | 'web'
+store/useAppStore.ts:97   export type RightTab = 'activity' | 'git' | 'file' | 'web'
+store/useAppStore.ts:111  export type TabKind = RightTab   // e2e 断言与 i18n key（rp.tab.*）都按它走
+store/useAppStore.ts:162  export const TABS_MAX_VISIBLE = 5
+surfaces/registry-test.ts:71  test('四个内置 kind 全部通过（与 BuiltinKind 联合逐项对齐）', …)
+```
+
+**决策**：新增第 5 个内置 kind `artifact`。**这不违反 D-I** —— D-I 说的是"文档/媒体不是 kind"
+（因为它们是工作区文件的渲染形态，能被文件树浏览到）；产物不是工作区文件、不该出现在文件树里、
+身份是 `(artifactId, version)` 而非路径，还带版本/选区/URL 重签 —— 它没有 `file` 标签能承载的身份。
+
+| # | 文件:行 | 现状 | 改为 |
+|---|---|---|---|
+| F11 | `surfaces/types.ts:9` | `BuiltinKind` 4 个 + 上一行注释「保持 4 个」 | 加 `\| 'artifact'`；注释改为「5 个：artifact 有独立版本身份，不是 file 的渲染器（D4）」 |
+| F12 | `store/useAppStore.ts:97` | `RightTab = 'activity' \| 'git' \| 'file' \| 'web'` | 加 `\| 'artifact'`（`:111 TabKind` 自动跟随） |
+| F13 | `store/useAppStore.ts:128` | `TabInstance` = activity \| git \| `FileTabInstance` \| `WebTabInstance` | 加 `ArtifactTabInstance = { id: string; kind: 'artifact'; artifactId: string; version?: number; view?: 'preview' \| 'source' \| 'history'; dismissed?: boolean }` |
+| F14 | `store/useAppStore.ts:1867` | `sanitizePersistedTab` 逐字段校验 | 新增分支：`kind:'artifact'` 只认 `artifactId`（非空字符串）+ `version`（正整数）+ `view`（三值枚举），**`url` 字段一律丢弃**（每次重签，落盘即失效） |
+| F15 | `components/RightPanel.tsx:144` | `switch`: `case 'web': return <WebTab …/>` | 加 `case 'artifact': return <SurfaceHost kind="artifact" tab={tab} scope={scope} fallback={<ArtifactPreviewTab tab={tab} />} />`（与 `:946` 的 file 分支同形） |
+| F16 | `components/RightPanel.tsx:33/39` | `primaryTabs` / `secondaryTabs` 固定列表 | **artifact 不进固定标签条**（它是按需出现的实例标签，性质同 `file` 多实例）；`secondaryTabs` 不加 `rp.tab.artifact` |
+| F17 | `lib/rightPanel.ts:65` | `selectRightTab` 把激活标签映射成 `SurfaceKind` | 加 `artifact` 分支（否则 `undefined` → 右栏工具栏按"未知面板"退化） |
+| F18 | `surfaces/artifact/index.tsx`（新增） | —— | Surface 注册：`kind:'artifact'`、`group:'content'`、`scope:'session'`、`weight:'heavy'`、`capability:'view'` |
+| F19 | `surfaces/registry-test.ts:71` | 用例名与断言都写死"四个" | **改为五个并加 `'artifact'`** —— 这是规格变更导致的**预期**断言更新，不是"为通过而改断言"；同时新增反例（`'artifact2'`、`'plugin:artifact'` 必须为 false） |
+| F20 | `i18n.ts`（中/英双份） | `rp.tab.*` 仅 4 个 | 加 `rp.tab.artifact`（仅用于无障碍名与标签 tooltip，不参与标签条渲染） |
+
+> 这一格是最容易"看着能跑、实际漏一处"的地方：`BuiltinKind` 是**类型联合**，漏改 `selectRightTab`
+> 或 `sanitizePersistedTab` 都能编译通过（前者返回 `undefined`，后者把标签静默丢掉），
+> 只有重启后"标签没了"或"右栏工具栏空了"才会暴露。所以上面 5 个文件必须**同一次改动**落地。
+
+#### 14.11.2 自动展开的落点
+
+| 环节 | 文件:行 | 做法 |
+|---|---|---|
+| 收事件 | `store/useAppStore.ts` 的 bridge 事件分发（`artifact.ready` 分支） | 新增订阅；`artifact.autoOpenPanel` 开关默认 `true` |
+| 开/切标签 | `store/useAppStore.ts`（新增动作 `openArtifactTab(artifactId, version, opts)`） | 按 `artifactId` 查已有标签：有则原地更新 `version` 并激活；无则新建（`TABS_MAX_VISIBLE=5` 淘汰最久未用的**非 artifact** 标签） |
+| 展开 | `useAppStore.ts:12226 setRightExpanded` | 调 `setRightExpanded(true)`；`App.tsx:75/231-243` 的折叠同步逻辑无需改（它只观察布尔值） |
+| 不抢焦点 | 现有行为 | 不调 `focusAgent`、不调 `scrollIntoView`（与 `Composer.tsx:163 focusAgent` 隔离） |
 
 ### 14.12 预览标签的状态机与兜底
 
@@ -1554,6 +1642,53 @@ live 的子状态：
 | `failed` | 错误文案 + 「重试」+ 「在浏览器打开」 | 重试重签 URL；仍失败提供导出源码路径 |
 | `inspector-blocked` | 页面 + 底部条 + 选区按钮置灰 | 提示改用 `source_get` 或源码面板 |
 | `stale` | 页面 + 角标 | 点角标或等 SSE 自动刷新 |
+
+### 14.13 用户侧其它交互（产物卡片 / 版本 / 历史 / 导出）
+
+publish 之后用户看到的不是"一张网页"，而是一整块可操作对象。逐项定死：
+
+| # | 交互 | 触发 | 行为 | 落点 |
+|---|---|---|---|---|
+| 1 | **卡片主按钮** | 点卡片主体 | 打开/切到该产物的 artifact 标签（等价 §14.11 的展开，但**不改变** `autoOpenPanel` 偏好） | `ArtifactCard.tsx:149` 分支（F2 已列） |
+| 2 | **新版本角标** | 有新版本未看 | 卡片右上角小点；点开即清（按 `artifactId+version` 记 `seenVersion`，本地持久化） | 新增 store slice `artifactSeen` |
+| 3 | **版本切换** | 标签内下拉「v3 ▾」 | 只换 `version`，**不新建标签**；`view` 保持（在 `source` 视图切版本也留在 `source`） | `ArtifactTabInstance.version` |
+| 4 | **版本对比** | 下拉里「与上一版对比」 | 双栏 diff（文本类）／并排双 iframe（可视类，`sandbox` 同 §10.4）；**不提供三方合并** | 新增 `ArtifactDiffTab`（P3） |
+| 5 | **源码视图** | 标签工具栏「源码」 | `view:'source'`：左文件列表 + 右只读代码；与预览共用同一版本 | `view` 枚举 |
+| 6 | **导出** | 工具栏「导出」 | 走 `artifact_export`；成功 toast 显示**绝对路径**并提供「在访达/资源管理器显示」 | §16.2 第 8 条 |
+| 7 | **在浏览器打开** | 工具栏/失败兜底 | 用临时签名 URL 开外部浏览器；**仅用户主动点击**才发生 | 与 §19.4 一致 |
+| 8 | **删除产物** | 卡片右键「删除」 | 软删（`manifest.deleted=true` + journal），`blobs` 由 GC 回收；被选区引用的版本只标不删 | §5.6 版本保留策略 |
+| 9 | **重命名/改标题** | 卡片右键 | 只改 `title`，**`artifactId` 不变**（改名 = 同一个产物换展示名，与 R15「入口改名 = 新产物」区分开） | `manifest.title` |
+| 10 | **搜索** | 产物列表顶部 | 前端过滤（`title` + `entry` 子串），**不做全文检索**（P0 不引倒排索引） | 列表页本地 state |
+| 11 | **空态** | 无产物 | 一句话说明 + 指向 `artifact_publish` 的文档链接，不是空白页 | 列表页 |
+
+**两条否决**（避免实施期自行发明）：
+
+- **不做"从产物反向写回工作区源码"**：产物是发布物，反向覆盖源码会让"用户手改的文件被 Agent 产物悄悄替换"，
+  这是数据丢失级的风险。要改源码走正常编辑工具（`source_get` / `artifact_edit` 限定在产物目录内）。
+- **不做"产物内富文本编辑"**：Phase 1 的编辑路径只有 §14.5 的两条（选区改样式/文本 → `artifact_edit`）。
+  在预览里直接 contenteditable 会立刻与"文件是唯一真相"冲突（改完往哪写、和 Agent 并发怎么办都无解）。
+
+### 14.14 Agent → 页面的反向交互（不只是用户单向引用）
+
+前面 §14.9–14.10 是「用户 → Agent」。反向同样要定死，否则 Agent 只能"盲改"：
+
+| # | 能力 | 工具/事件 | 行为 | 约束 |
+|---|---|---|---|---|
+| 1 | **读取用户当前选区** | `artifact_refs_get` | 返回本次会话里**未发送**的 chips（`artifact_id/version_id/kind/selector`） | 只读、不含 `outer_html` 全文（≤2KB 截断同 §14.9） |
+| 2 | **主动定位** | `preview_locate` | 在用户正开着的预览里高亮并滚动到某 selector | 只在**该产物标签已打开**时生效；未打开则返回 `NO_PREVIEW`，**不擅自开标签**（开标签是 publish 的语义，不是 locate 的） |
+| 3 | **截图回来** | `preview_screenshot` | 返回 `blob_ref` + 尺寸（CodeMode 内降级，见 §11.4） | 单次 ≤ 4MB；不支持整页超长截图（> 20000px 截断并告警） |
+| 4 | **请求用户选** | Agent 输出约定块 `<!-- ask-select: selector[,selector] -->` | 前端渲染成「请选择一个元素」的引导条；用户点选后 chip 自动进 Composer，Agent 下一轮通过 #1 读到 | **不阻塞** run：超时 120s 或用户继续打字即丢弃引导条，Agent 收到 `ASK_TIMEOUT` |
+| 5 | **引用回流到 Chat** | `artifact.refs_changed` 事件 | 用户增删 chip 时广播（节流 200ms），Agent 若在跑可通过 #1 拉到最新 | 事件不携带原文，只带元信息 |
+| 6 | **版本过期处理** | `preview_inspect` / `source_get` 带 `version` | 版本已被 GC 或用户已切版本 → 返回 `VERSION_GONE{current}`，Agent 据此重定位 | 绝不静默按"最新版本"返回（会让 Agent 以为改的是它看到的那版） |
+
+> 与 CodeMode 的关系：#1/#2/#3/#6 都是**普通 Agent 工具**，因此自动具备 §11.4 的 CodeMode 形态 ——
+> 脚本里可直接 `artifact_refs_get()` 拿到对象、`preview_locate(selector=...)` 批量高亮。
+> 唯一例外是 #4（`ask-select`）：它是**输出约定块**不是工具调用，脚本里无法"等用户"，
+> 因此 CodeMode 下调 `ask-select` 为 no-op 并在结果里加 `warnings: ["ask-select ignored in codemode"]`。
+
+**为什么 #4 做成输出约定块而不是工具**：工具调用会占一轮 LLM 往返并阻塞在等用户上，
+在长任务里等于把整个 run 挂在人的反应速度上。约定块让"请求选择"变成一条**可被丢弃的 UI 提示**，
+Agent 天然可以继续干活 —— 这也是它必须在 CodeMode 下降级的原因（脚本没有"继续"的概念）。
 
 
 
@@ -1856,6 +1991,8 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 | **D2** | 传输 | **统一 HTTP**（单一通道） | 一份代码路径；移动端本就用不了自定义协议；用 §10.4 的 8 条加固（127.0.0.1 + 随机端口 + Host 校验 + 含 wsKey 的 HMAC + 10min TTL + CSP + 沙箱 iframe 的不透明 origin + MessageChannel nonce）等价实现隔离 |
 | **D3** | 编辑落盘 | **Phase 1 只支持静态资源**：`.html/.css/.js/.svg/.md` 走 `old_str` 唯一匹配替换；**`.tsx/.jsx` 返回 `UNSUPPORTED`**（引导改用源码编辑） | 字符串替换在 TSX 上会破坏格式化、注释与用户手改，且 `old_str` 极易命中多处 —— 这是正确性问题，不能用"能跑就算"掩盖。AST 改写（`ts-morph`）列为 P8，届时再开放 |
 
+| **D4** | 右栏承载形态 | **新增第 5 个内置 kind `artifact`**，并注册为 Surface（`surfaces/artifact/`）；不复用 `file{mode:'preview'}` | §14.11.1 的逐点落点表。**为什么不用 file{mode:'preview'}**：D-I 的前提是"内容是工作区里能被文件树浏览到的文件"，而产物住在 `.artifacts/`（不应出现在文件树）、身份是 `(artifactId, version)` 而非路径、还要承载版本切换/选区引用/URL 重签 —— 三条 file 标签都给不了。**代价**：`BuiltinKind`/`RightTab`/`TabInstance`/`sanitizePersistedTab`/`selectRightTab`/`registry-test` 六处必须同一次改完（漏改能编译通过但运行期静默丢标签）。**被否决的替代**：① 复用 `file{mode:'preview'}`（身份丢失，版本切换无处存）；② 做成 `plugin:artifact`（伪插件，绕开内置能力的类型检查） |
+
 ### 24.1 其他已定方案（本文直接决定，避免实施期再讨论）
 
 | 项 | 结论 | 理由 |
@@ -1871,6 +2008,10 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 | 打开策略 | 默认 `ask`（不自动开浏览器）；一次运行最多自动开 **1** 个标签 | 避免打断用户当前阅读 |
 | 判分阈值 | `score >= 3` 为候选，候选**不自动打开** | 降低误报代价 |
 | 依赖解析 | `golang.org/x/net/html` tokenizer | 属性可无引号/跨行、`url()`/`@import` 形态多，正则必漏 |
+| 选区 chip 上限 | 单次发送 **≤8 个**、单 chip **≤2KB**；超限替换最早的一个 + toast | 选择时拒绝会让"手滑就报错"；发送时裁剪才是用户能理解的行为 |
+| 选区 chip 存储 | Composer 的 `draftQuotes`（按 `draftKey` 分域），**不落盘** | 引用属于那份草稿；落盘会让"重启后又冒出来" |
+| 版本过期 | 一律返回 `VERSION_GONE{current}`，**绝不静默降级到最新版** | 否则 Agent 以为改的是它看到的那版 |
+| `ask-select` | 输出约定块 `<!-- ask-select: … -->`，**不是工具**；120s 超时或用户继续打字即丢弃；CodeMode 下 no-op + warning | 工具会占一轮往返并阻塞等人，长任务里等于挂在人的反应速度上 |
 | 产物区 | `artifacts/<name>/`（可见） | "路径即意图"，对 bash/脚本同样有效 |
 | 版本库 | `<ws>/.artifacts/`（隐藏） | 不干扰工作区浏览 |
 
@@ -1908,7 +2049,8 @@ _文档结束。实现与本文不一致处，必须回写本文对应章节。_
 | v2.0 | 首版：五硬伤、架构、协议 A/B/C/D、判定四层、P0–P8 | 初始需求 |
 | v2.1 | 收敛为唯一文档：吸收元设计、历史 §21–§24、实施清单、代码片段；补自检闭环 / 导出规范 / 画布与 Design type / 两条修改路径 / 落点表 / React 规则；§12 改为文件:行级 | 「只保留 V2 一份」+「不要含糊、要文件行号」 |
 | v2.2 | 决策落定：D1 文件存储（新增 §5.6 三层索引）、D2 统一 HTTP（§10.4 八条加固）、D3 Phase 1 仅静态资源；另定 13 项实施参数（§24.1） | 用户拍板 |
-| v2.3 | **本轮自审修复 10 处**（见下表） | 「再来一次 Review，确保细节到位」 |
+| v2.3 | **自审修复 10 处**（见下表） | 「再来一次 Review，确保细节到位」 |
+| v2.4 | **四类交互闭环**：新增 §14.10.1（选区 chip 复用 Composer 既有 `composer.quote` 通道，F5–F10）、§14.11.1/14.11.2（`kind:"artifact"` 落点 F11–F20 + 自动展开链路）、§14.13（用户侧 11 项交互与 2 条否决）、§14.14（Agent→页面 6 项反向能力）；工具 9→11（+`artifact_refs_get`/`preview_locate`）；新增决策 **D4** | 「与用户交互也要考虑好；与 Agent 的交互要支持元素/文本/框选/点击引用到 Chat；publish 自动展开右栏；新工具支持 CodeMode」 |
 
 | v2.4 | **补齐四类交互契约**：① 用户交互（§14.9 八种选择方式矩阵 + §14.10 引用到 Chat 全链路 + §14.12 标签状态机 + §19.5 反馈）；② 与 Agent 交互（8 种选择 → 8 类 kind 的映射与快捷键/触控手势）；③ publish 自动展开右栏（§14.11 + §19.4 区分应用内/外部）；④ 新工具全部可进 CodeMode（§11.4 逐工具形态 + 四条硬约束） | 用户追加要求 |
 
@@ -1917,7 +2059,7 @@ _文档结束。实现与本文不一致处，必须回写本文对应章节。_
 | # | 问题 | 严重度 | 修复 |
 |---|---|---|---|
 | 1 | **L1/L2 索引键只有 `relPath`** | 🔴 真 bug | 改为 `wsKey + "\x00" + relPath`（同一进程多工作区会串台，是 R1 的进程内形态） |
-| 2 | 工具清单标题写「8 个」但表内 9 行 | 🟠 不一致 | 标题改「9 个；Phase 1 交付 8 个」 |
+| 2 | 工具清单标题写「8 个」但表内 9 行 | 🟠 不一致 | 标题与实际行数对齐；引入 §14.14 的两个反向工具后为「11 个；Phase 1 交付 10 个」 |
 | 3 | 自检缺**文字对比度**（元设计明确要求） | 🟠 漏项 | 加为第 6 项（告警级，不阻断），共 7 项 |
 | 4 | P0 未包含索引/日志与崩溃回放 | 🔴 计划缺口 | P0 加「L1/L2/L3 + journal 回放与压缩」，验收加「崩溃回放、写放大不随总量增长」，3d→4d |
 | 5 | `artifact_publish` 重复调用会刷版本号 | 🟠 语义缺失 | 加步骤 3.5 幂等短路（同 `VersionID` 直接返回现有版本） |
