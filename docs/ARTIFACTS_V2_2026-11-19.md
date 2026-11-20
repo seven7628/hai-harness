@@ -2065,10 +2065,9 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 **合并后必须做的一步（容易漏，会造成假故障）**：`node_modules/` 不在版本库里，所以 `git merge` 之后
 `desktop/app` 缺 `@xterm/xterm` 与 `@xterm/addon-fit`，`npx tsc --noEmit` 会冒出 **6 条**
 「找不到模块 'xterm' / 'addon-fit'」的错——这**不是代码问题**，在 `desktop/app` 跑一次
-`npm install`（实测 3 个包、2 秒）即回落到既有的 8 条 `p8-host-seams-entry.tsx` 错误。
+`npm install`（实测 3 个包、2 秒）即回落到当时仅剩的 8 条 `p8-host-seams-entry.tsx` 错误（该文件已删除，见下）。
 
-**合并后验收（实测）**：`go build ./...`/`go vet` 通过；`tsc --noEmit` = 8 条（全部在既有
-`p8-host-seams-entry.tsx`，与合并前同数）；`vite build` ✓ 6.9s，`.xterm` 与 `term-host` 样式进了
+**合并后验收（实测）**：`go build ./...`/`go vet` 通过；`vite build` ✓，`.xterm` 与 `term-host` 样式进了
 `dist/assets/main-*.css`；前端 9 个测试脚本全 exit=0（`test:right-tabs` 238 项断言、`test:host-seams` 57、
 `test:terminal` 68/68、其余 PASS）。
 
@@ -2076,6 +2075,12 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 干净基线上复现出的名单**逐条同名**（`TestMediaProbe*` 6 条、`TestHubEngineSandboxRootsAtAgentHome`、
 `TestExecSandboxForWorkPersonaRunPython`、`TestRunPythonSeatbeltProtectsGoCodeConfig`、`TestMCPWatchDebounce`、
 `TestSubagentStateStoreWritesSessionFormat`），归因均为**本机沙箱/fsnotify 受限**，**合并未引入新失败**。
+
+**tsc 归零（2026-11-20 收尾）**：`desktop/app/src/p8-host-seams-entry.tsx` 已删除，`tsc --noEmit` 从
+8 条 → **0 条**（exit=0）。判定依据：该文件是 esbuild 打包产物的**尾巴**（`t2`/`import_server`/`module.exports`
+标注 + license 尾巴），真正的 probe 入口在 `scripts/test-host-seams.mjs` 的内联 `ENTRY`（`stdin.contents`），
+`sourcefile` 只是 esbuild 的显示名；删后 `test:host-seams` 仍是 **57 项 PASS**，9 个前端脚本全 exit=0，
+`vite build` ✓、`tsc -p tsconfig.electron.json` exit=0。内容可从 `git show cf86725:desktop/app/src/p8-host-seams-entry.tsx` 取回。
 
 ## 25. 术语表
 
