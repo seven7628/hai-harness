@@ -1742,7 +1742,9 @@ const TABS_PERSIST_PARAMS_MAX = 4096
 // 只对「桥还没就绪」这一类失败重试 —— 20 次 × 最长 3s ≈ 100 秒，足够覆盖 Electron 冷启动
 // + bridge 自举；超时后写 failed，面板显示原文（用户能自己判断是不是要重开）。
 const BRIDGE_NOT_READY_RE = /bridge\s*(启动中|未运行)/
-const TERM_CREATE_MAX_ATTEMPTS = 40
+// 8 次、末次间隔 3s ⇒ 最坏 ~15s 出结论（原来是 40 次 ≈ 2 分钟，用户会以为卡死）。
+// bridge 正常启动在 1~2s 内，「十几秒还没起来」就是真故障，该报错而不是继续等。
+const TERM_CREATE_MAX_ATTEMPTS = 8
 
 /** 序列化后的**字节数**（不是字符数：一个中文字符 3 字节，用 length 会放过 3 倍大的东西）。 */
 function jsonByteSize(v: unknown): number | undefined {
@@ -12521,9 +12523,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   // [recovered] 逐字还原自 bundle `src/store/useAppStore.ts`（见 docs/TERMINAL_MODULE_SWEEP.md §3.2）：
   //   · 已有 creating/running 的记录 → 直接返回（**幂等**：RightPanel/TerminalTab 每次挂载都会调）；
   //   · 没有工作区 → failed（不是静默不做事：「没有工作区」是用户能看懂、也能自己修的状态）；
-  //   · 失败文案命中 `/bridge\s*(启动中|未运行)/` → 20 次退避重试（1s 起、每次 +250ms、封顶 3s）。
+  //   · 失败文案命中 `/bridge\s*(启动中|未运行)/` → 8 次退避重试（1s 起、每次 +250ms、封顶 3s）。
   //     **只重试这一种**：桥刚起来时 PTY 命令必然失败，而用户不会为此去重启标签；
-  //     其它失败（目录不存在、fork 失败）重试 40 次也只是把同一句话延迟 100 秒才说出。
+  //     其它失败（目录不存在、fork 失败）重试再多次也只是把同一句话延迟到底才说出。
   termEnsure: (tabId) => {
     const s = get()
     const cur = s.term[tabId]
@@ -12536,6 +12538,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ term: { ...s.term, [tabId]: { ...cur, status: 'creating', error: undefined } } })
     let attempt = 0
+    // 失败要**落到 failed**，绝不能停在 creating：面板停在「正在启动 shell…」时用户没有任何
+    // 可操作项，也看不到原因。所以两条失败路径（reject / 解析异常）都显式收敛到 failed。
+    const fail = (msg: string): void => {
+      const cur2 = get().term[tabId]
+      if (!cur2) return // 标签已关（termClose 删了记录）：结果无处可写，丢掉
+      set((st) => ({ term: { ...st.term, [tabId]: { ...cur2, status: 'failed', error: msg } } }))
+    }
     const create = (): void => {
       void getTransport()
         .ptyCreate({ workspace: ws, session_id: s.activeSessionId, cols: 80, rows: 24 })
@@ -12543,15 +12552,26 @@ export const useAppStore = create<AppState>((set, get) => ({
           const cur2 = get().term[tabId]
           if (!cur2) return // 标签已关（termClose 删了记录）：结果无处可写，丢掉
           if (!r.ok) {
-            if (BRIDGE_NOT_READY_RE.test(r.error) && attempt < TERM_CREATE_MAX_ATTEMPTS) {
+            if (BRIDGE_NOT_READY_RE.test(r.error ?? '') && attempt < TERM_CREATE_MAX_ATTEMPTS) {
               attempt += 1
               setTimeout(create, Math.min(1000 + attempt * 250, 3000))
               return
             }
-            set((st) => ({ term: { ...st.term, [tabId]: { ...cur2, status: 'failed', error: r.error } } }))
+            fail(r.error || 'pty_create 失败（未返回原因）')
             return
           }
-          set((st) => ({ term: { ...st.term, [tabId]: { ...cur2, ptyId: r.pty.pty_id, status: 'running' } } }))
+          // 形状兜底：transport 已校验一次，这里再挡一次 —— 没有 pty_id 就没有 WS 可连，
+          // 直接当 running 会让面板停在空白 xterm 上（比报错更难查）。
+          const ptyId = r.pty?.pty_id
+          if (!ptyId) { fail('pty_create 返回缺少 pty_id'); return }
+          set((st) => ({ term: { ...st.term, [tabId]: { ...cur2, ptyId, status: 'running' } } }))
+        })
+        .catch((e: unknown) => {
+          // 未捕获的 reject 就是「永远停在正在启动」的根因（IPC 无 handler / preload 未更新 /
+          // 主进程处理器抛错都会走到这里）。把原始信息带出来，用户与日志都能定位。
+          const msg = e instanceof Error ? e.message : String(e)
+          console.error('[term] ptyCreate 失败', e)
+          fail(`无法创建终端会话：${msg}`)
         })
     }
     create()

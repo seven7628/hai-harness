@@ -10,8 +10,6 @@ import type { FileActivityStatus } from '../lib/fileStatus'
 import { GitBranch } from './icons'
 import { UnifiedDiff } from './ui'
 import ConfirmModal from './ConfirmModal'
-const GIT_STALE_MS = 30_000 // 变更 tab 打开时工作区级快照的 stale 阈值
-const GIT_POLL_MS = 10_000 // 变更 tab 打开时的快照轮询周期（确认是仓库后才启动）
 const GIT_GRAPH_COLORS = ['var(--running)', 'var(--success)', 'var(--warning)', 'var(--danger)', 'var(--text-2)']
 
 // git log --graph 图示前缀按列着色（泳道感）；空格原样占位
@@ -82,26 +80,18 @@ export function ChangesTab() {
   const [branchOpen, setBranchOpen] = useState(false) // 分支切换弹层（点开才拉清单；不占常驻空间）
   const [secOpen, setSecOpen] = useState({ files: true, history: true }) // 分区折叠（空间有限时按需收起）
 
-  // 挂载/stale 重拉：工作区级快照缺失或超过 30s → 重拉 snapshot + history
+  // 挂载即刷新（2026-11-20 用户要求「唤醒时刷新一次」）：标签挂载 = 打开或切回本面板，
+  // 就是一次「唤醒」。会话态与工作区态都**无条件**重拉，不再按 30s stale 阈值跳过 ——
+  // 阈值会让「刚在终端提交完，切回来还是旧快照」看起来像没刷新。
   useEffect(() => {
     if (hasSession) { refresh(); loadHistory(); return }
-    const st = useAppStore.getState()
-    if (st.wsGitAt == null || Date.now() - st.wsGitAt > GIT_STALE_MS) { loadWsGit(); loadWsGitHistory() }
+    loadWsGit(); loadWsGitHistory()
   }, [hasSession, refresh, loadHistory, loadWsGit, loadWsGitHistory])
 
-  // 定时刷新（仅确认是仓库后启动；no-git / 未识别时不轮询）：
-  // 10s 快照轮询；切 session / 切 workspace 由既有触发链（setActiveSession / setActiveWorkspace）覆盖，
-  // tick 内经 getState() 取当前数据源，切换后的下一次 tick 自然路由到新目标。
-  useEffect(() => {
-    if (!git.is_repo) return
-    const timer = setInterval(() => {
-      if (document.hidden) return // 窗口不可见时跳过，省电省 git 调用
-      const st = useAppStore.getState()
-      if (st.activeSessionId) st.refreshGit()
-      else st.loadWsGit()
-    }, GIT_POLL_MS)
-    return () => clearInterval(timer)
-  }, [git.is_repo])
+  // 定时轮询已移除（2026-11-20 用户要求：不要自动刷新）。
+  // 原 10s 轮询会在用户没看变更面板时也一直调 git，且刷新造成列表跳动、选中行丢失。
+  // 现在只有三个刷新时机：① 挂载/切回本标签（上面那个 effect）② 窗口重新可见/聚焦（下面）
+  // ③ 用户点右上角 ↻（refreshAll）。git 操作成功后的局部重拉由 store 的动作自己负责，不走这里。
 
   // HEAD 变化（新提交/切换分支/checkout）→ 重拉提交历史；unborn HEAD（head 为空）不触发
   const lastHeadRef = useRef<string | undefined>(undefined)

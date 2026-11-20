@@ -5,6 +5,7 @@ import type { FileTabInstance, RightTab, TabKind, TabInstance, TabSpec } from '.
 import { Activity, GitBranch, FileIcon, Globe, PanelRight, ChevronDown, Plus, MaximizeIcon, RestoreIcon } from './icons'
 import { ChangesTab } from './ChangesTab'
 import { WebTab } from './WebTab'
+import { TermIcon } from './terminal/TermIcon'
 import { ActivityTab } from './ActivityTab'
 import { FilePreviewTab } from './FilePreview'
 import { EditorConfirm } from './EditorConfirm'
@@ -40,6 +41,10 @@ function secondaryTabs(t: (k: string) => string): { key: RightTab; label: string
   return [
     { key: 'file', label: t('rp.tab.file'), icon: <FileIcon /> },
     { key: 'web', label: t('rp.tab.web'), icon: <Globe /> },
+    // 终端（2026-11-20 用户反馈）：之前只有「＋」菜单一个入口，折叠态 rail 上根本看不见，
+    // 用户找不到。它与 file/web 同性质 —— 都是「点一下就要有」的常驻面板，所以放进 rail。
+    // 位置排最后：前三个是「看」（链路/变更/文件/网页），终端是「做」。
+    { key: 'term', label: t('rp.tab.term'), icon: <TermIcon size={14} /> },
   ]
 }
 

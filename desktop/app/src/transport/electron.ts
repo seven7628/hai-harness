@@ -108,12 +108,18 @@ export function electronTransport(): Transport {
     // 右栏终端（docs/TERMINAL_DESIGN.md §5.1）：控制面三条。这里只做「桥 data → 结构化
     // 结果」的映射；**不抛** —— 形状不对与业务失败对面板来说是同一件事。
     ptyCreate: async (input) => {
+      // 能力探测（老 preload / 只更新了渲染层）：缺方法时 d.ptyCreate 是 undefined，
+      // 直接调用会抛 TypeError → 调用方若不 catch 就永远停在「正在启动」。这里先归成业务错误。
+      if (typeof d.ptyCreate !== 'function') {
+        return { ok: false, error: '当前应用版本不支持终端（preload 未更新，请重启应用）' }
+      }
       const r = await d.ptyCreate(input)
       if (!r.ok) return { ok: false, error: r.error ?? 'pty_create 失败' }
       const pty = ptyInfoOf(r.data)
       return pty ? { ok: true, pty } : { ok: false, error: 'pty_create 返回形状异常' }
     },
     ptyTicket: async (ptyId) => {
+      if (typeof d.ptyTicket !== 'function') return { ok: false, error: '当前应用版本不支持终端（preload 未更新，请重启应用）' }
       const r = await d.ptyTicket({ pty_id: ptyId })
       if (!r.ok) return { ok: false, error: r.error ?? 'pty_ticket 失败' }
       const data = r.data
@@ -128,6 +134,7 @@ export function electronTransport(): Transport {
       return { ok: true, url: data.url, ticket: data.ticket, expiresIn: data.expires_in }
     },
     ptyClose: async (ptyId) => {
+      if (typeof d.ptyClose !== 'function') return { ok: false, error: '当前应用版本不支持终端（preload 未更新，请重启应用）' }
       const r = await d.ptyClose({ pty_id: ptyId })
       return { ok: r.ok, error: r.error }
     },

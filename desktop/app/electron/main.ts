@@ -1989,6 +1989,9 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
       cols: Number(input?.cols ?? 80) || 80,
       rows: Number(input?.rows ?? 24) || 24,
     })
+    // 诊断日志（一行一手）：终端「一直启动中」这类问题此前在主进程侧**零痕迹**，只能靠猜。
+    // pty 创建是低频动作（每标签一次），留一行不吵。
+    if (!response.ok || !response.data) console.warn('[pty] create 失败', workspace, response.error || '无 data')
     return { ok: response.ok, error: response.error, data: response.data }
   })
   ipcMain.handle('pty:ticket', async (e, p: { pty_id?: string } = {}) => {
