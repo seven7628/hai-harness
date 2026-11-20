@@ -2053,6 +2053,26 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 | 禁止事项 | 不要在任何一方"顺手把对方那格补上"再各自提交 —— 两处相同改动会在 merge 时产生"看起来一样的冲突"（identical-conflict），必须人工确认取哪边 |
 | 验收 | 合并后跑 `test:surface-registry`、`test:right-tabs`、`test:builtin-surfaces` 三个脚本；任何一项的断言数比合并前少，说明有测试被覆盖 |
 
+### 24.2.1 合并执行记录（2026-11-20，已完成）
+
+按上面「先终端后产物」的顺序执行，两个分支**零冲突**合入 `main`：
+
+| 步骤 | 结果 |
+|---|---|
+| 备份 ref | `backup/main-premerge-20261120`（纯加指针，未改任何提交） |
+| `git merge --no-ff terminal-panel` | `0c0edda`，无冲突；新增 `desktop/bridge/pty.go`(569)+`pty_test.go`、`src/components/terminal/`(16 模块)、`surfaces/builtin/termSurface.tsx`、8 份 `docs/TERMINAL_*.md` |
+| `git merge --no-ff feat+agent-cwd` | `30b6517`，无冲突；`workdir/`、`tools/builtin/{bash,run_python,worktree}.go`、`docs/AGENT_CWD_DESIGN_2026-11-19.md` |
+
+**合并后必须做的一步（容易漏，会造成假故障）**：`node_modules/` 不在版本库里，所以 `git merge` 之后
+`desktop/app` 缺 `@xterm/xterm` 与 `@xterm/addon-fit`，`npx tsc --noEmit` 会冒出 **6 条**
+「找不到模块 'xterm' / 'addon-fit'」的错——这**不是代码问题**，在 `desktop/app` 跑一次
+`npm install`（实测 3 个包、2 秒）即回落到既有的 8 条 `p8-host-seams-entry.tsx` 错误。
+
+**合并后验收（实测）**：`go build ./...`/`go vet` 通过；`tsc --noEmit` = 8 条（全部在既有
+`p8-host-seams-entry.tsx`，与合并前同数）；`vite build` ✓ 6.9s，`.xterm` 与 `term-host` 样式进了
+`dist/assets/main-*.css`；前端 9 个测试脚本全 exit=0（`test:right-tabs` 238 项断言、`test:host-seams` 57、
+`test:terminal` 68/68、其余 PASS）。
+
 ## 25. 术语表
 
 | 术语 | 含义 |
