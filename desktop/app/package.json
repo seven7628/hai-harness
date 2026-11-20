@@ -22,6 +22,7 @@
     "test:e2e-safety": "node --test e2e/safe_cleanup.test.mjs",
     "test:builtin-surfaces": "esbuild src/surfaces/builtin/index-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/builtin-surfaces.test.cjs --loader:.svg=text --loader:.png=dataurl --loader:.md=text --loader:.css=text --loader:.ttf=dataurl --loader:.woff=dataurl --loader:.woff2=dataurl --loader:.jpg=dataurl --loader:.jpeg=dataurl --loader:.gif=dataurl && node --test /tmp/builtin-surfaces.test.cjs",
     "test:viewbudget": "esbuild src/store/viewBudget-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/view-budget.test.cjs && node --test /tmp/view-budget.test.cjs",
+    "test:terminal": "rm -rf /tmp/term-tests && esbuild src/components/terminal/frame-test.ts src/components/terminal/writer-test.ts src/components/terminal/paneMachine-test.ts src/components/terminal/formatSelection-test.ts src/components/terminal/commandContext-test.ts --bundle --platform=node --format=cjs --outdir=/tmp/term-tests --out-extension:.js=.cjs && node --test /tmp/term-tests/*.cjs",
     "test:webtab": "esbuild src/lib/webTab-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/web-tab.test.cjs && node --test /tmp/web-tab.test.cjs",
     "test:rightpanel-select": "esbuild src/lib/rightPanel-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/rightpanel-select.test.cjs && node --test /tmp/rightpanel-select.test.cjs",
     "test:layout": "esbuild src/lib/layout-test.ts --bundle --platform=node --format=cjs --outfile=/tmp/layout.test.cjs && node --test /tmp/layout.test.cjs",
@@ -254,7 +255,9 @@
     "protocols": [
       {
         "name": "Agent Hub Deep Link",
-        "schemes": ["hub"]
+        "schemes": [
+          "hub"
+        ]
       }
     ],
     "files": [
@@ -341,6 +344,8 @@
     }
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "github-slugger": "^2.0.0",
     "hast-util-from-html": "^2.0.3",
     "hast-util-sanitize": "^5.0.2",
