@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/term-context.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 function feed(chunks, start = emptyCommandLine) {
   let state = start;
   const submitted = [];

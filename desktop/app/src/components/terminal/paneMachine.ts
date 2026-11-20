@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/builtin-surfaces.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 var TIMEOUT = {
   create: "\u521B\u5EFA\u7EC8\u7AEF\u8D85\u65F6",
   connect: "\u8FDE\u63A5\u7EC8\u7AEF\u8D85\u65F6"

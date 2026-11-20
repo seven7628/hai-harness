@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/builtin-surfaces.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 function readVar(name2) {
   if (typeof window === "undefined") return "";
   const v3 = getComputedStyle(document.documentElement).getPropertyValue(name2);

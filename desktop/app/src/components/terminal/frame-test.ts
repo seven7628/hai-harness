@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/term-frame.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 var enc = new TextEncoder();
 var dec = new TextDecoder();
 (0, import_node_test.default)("\u63A7\u5236\u5E27\uFF1A0x00 \u5F00\u5934 + JSON\uFF0C\u5F80\u8FD4\u4E00\u81F4", () => {

@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/term-pane.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 var idle = { s: "idle" };
 var creating = { s: "creating" };
 var connecting = { s: "connecting", ptyId: "p1" };

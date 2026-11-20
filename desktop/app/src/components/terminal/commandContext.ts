@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/term-context.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 var emptyCommandLine = { line: "", dirty: false };
 function trackCommandLine(state, data) {
   let line = state.line;

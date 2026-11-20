@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/term-format.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 var bytesOf = (text) => new TextEncoder().encode(text).length;
 (0, import_node_test.default)("\u5355\u884C\u3001\u4E0D\u542B\u53CD\u5F15\u53F7 \u2192 \u4E00\u5BF9\u53CD\u5F15\u53F7\u5305\u8D77\u6765", () => {
   import_strict.default.equal(formatSelection("git status"), "`git status`");

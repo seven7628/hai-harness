@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/term-writer.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 var bytes = (text) => new TextEncoder().encode(text);
 function sink() {
   const calls = [];

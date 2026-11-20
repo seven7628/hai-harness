@@ -1,3 +1,7 @@
+// [recovered] from /private/tmp/builtin-surfaces.test.cjs
+// 编译产物（esbuild `// src/...` 模块切片），依赖由 bundle 注入，未回译。
+// @ts-nocheck
+/* eslint-disable */
 var import_jsx_runtime32 = __toESM(require_jsx_runtime());
 var termSurface = {
   kind: "term",

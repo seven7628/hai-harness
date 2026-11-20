@@ -1,4 +1,6 @@
 @import 'tailwindcss';
+/* [reconstructed] 右栏终端样式（原始 CSS 丢失，按契约+截图重建；见该文件头）。 */
+@import './components/terminal/terminal.css';
 
 /* ═══════════ 本地字体（离线可用，消除 Google Fonts 首帧阻塞） ═══════════
  * IBM Plex Sans 是变量字体（单文件覆盖 400/500/600）；Mono 按字重分文件。

@@ -1,259 +1,387 @@
-var import_jsx_runtime29 = __toESM(require_jsx_runtime());
-var RESIZE_DEBOUNCE_MS = 100;
-function TerminalPane({ tabId, ptyId }) {
-  const t4 = useT();
-  const tRef = (0, import_react27.useRef)(t4);
-  tRef.current = t4;
-  const hostRef = (0, import_react27.useRef)(null);
-  const termRef = (0, import_react27.useRef)(null);
-  const sockRef = (0, import_react27.useRef)(null);
-  const sendRef = (0, import_react27.useRef)(() => {
-  });
-  const stateRef = (0, import_react27.useRef)({ s: "connecting", ptyId });
-  const [state4, setState] = (0, import_react27.useState)(stateRef.current);
-  const [selection2, setSelection] = (0, import_react27.useState)("");
-  const [inserted, setInserted] = (0, import_react27.useState)(false);
-  const [menu2, setMenu] = (0, import_react27.useState)(null);
-  const apply5 = (0, import_react27.useCallback)((ev) => {
-    const { state: ns, fx } = next4(stateRef.current, ev);
-    stateRef.current = ns;
-    for (const f2 of fx) {
-      if (f2.k === "reset-term") termRef.current?.reset();
-      if (f2.k === "close-socket") {
-        sockRef.current?.close();
-        sockRef.current = null;
+// [recovered] from /private/tmp/builtin-surfaces.test.cjs —— 回译（back-translation）：
+// 原文件是 esbuild 产出的 `jsxDEV(...)` 编译形态；本文件按同一逻辑回译成更接近原始 TSX 的写法，
+// **不改变任何行为**。仅此一个文件回译，其余同级模块仍保留编译形态（顶部标「未回译」）。
+//
+// 注意：同级 ./frame ./writer ./paneMachine ./theme ./formatSelection 目前仍是编译产物，
+// 其导出名是 bundle 内联的（next/terminalWriter/encodeCtrl/decodeFrame/...）。下面 import 的名字
+// 是据其逻辑推出的**期望导出名**，属「推断」；若后续把这些模块也回译，以此为准对齐即可。
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import type { Terminal as XTerm } from '@xterm/xterm'
+import '@xterm/xterm/css/xterm.css'
+
+import { useT } from '../../i18n'
+import { useAppStore } from '../../store/useAppStore'
+import { getTransport } from '../../transport'
+import { emitUI } from '../../lib/uiBus'
+import { copyText } from '../../lib/clipboard'
+import { next, type PaneState, type PaneEvent } from './paneMachine'
+import { terminalWriter } from './writer'
+import { encodeCtrl, decodeFrame } from './frame'
+import { formatSelection } from './formatSelection'
+import { readTermTheme, watchTheme } from './theme'
+
+const RESIZE_DEBOUNCE_MS = 100
+
+type MenuPos = { x: number; y: number }
+
+export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string }) {
+  const t = useT()
+  const tRef = useRef(t)
+  tRef.current = t
+
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const termRef = useRef<XTerm | null>(null)
+  const sockRef = useRef<WebSocket | null>(null)
+  const sendRef = useRef<(data: string) => void>(() => {})
+
+  const stateRef = useRef<PaneState>({ s: 'connecting', ptyId })
+  const [state, setState] = useState<PaneState>(stateRef.current)
+  const [selection, setSelection] = useState('')
+  const [inserted, setInserted] = useState(false)
+  const [menu, setMenu] = useState<MenuPos | null>(null)
+
+  const apply = useCallback((ev: PaneEvent) => {
+    const { state: ns, fx } = next(stateRef.current, ev)
+    stateRef.current = ns
+    for (const f of fx) {
+      if (f.k === 'reset-term') termRef.current?.reset()
+      if (f.k === 'close-socket') {
+        sockRef.current?.close()
+        sockRef.current = null
       }
     }
-    setState(ns);
-  }, []);
-  const quote = (0, import_react27.useCallback)((raw2) => {
-    const text13 = formatSelection(raw2).slice(0, 8 << 10);
-    if (!text13) return false;
-    emitUI("composer_quote", { text: text13, source: { id: `term:${tabId}`, title: tRef.current("term.quoteSource") } });
-    setInserted(true);
-    window.setTimeout(() => setInserted(false), 800);
-    return true;
-  }, [tabId]);
-  const quoteSelection = (0, import_react27.useCallback)(() => quote(termRef.current?.getSelection() ?? ""), [quote]);
-  const quoteScreen = (0, import_react27.useCallback)(() => {
-    const term = termRef.current;
-    if (!term) return false;
-    const buf = term.buffer.active;
-    const lines = [];
-    for (let i2 = 0; i2 < term.rows; i2++) lines.push(buf.getLine(buf.viewportY + i2)?.translateToString(true) ?? "");
-    while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
-    return quote(lines.join("\n"));
-  }, [quote]);
-  const quoteSmart = (0, import_react27.useCallback)(() => {
-    if (!quoteSelection()) quoteScreen();
-  }, [quoteSelection, quoteScreen]);
-  const openMenu = (0, import_react27.useCallback)((e) => {
-    e.preventDefault();
-    setMenu({ x: e.clientX, y: e.clientY });
-  }, []);
-  const paste = (0, import_react27.useCallback)(async () => {
-    try {
-      const text13 = await navigator.clipboard.readText();
-      if (text13) termRef.current?.paste(text13);
-    } catch {
+    setState(ns)
+  }, [])
+
+  const quote = useCallback(
+    (raw: string) => {
+      const text = formatSelection(raw).slice(0, 8 << 10)
+      if (!text) return false
+      emitUI('composer_quote', {
+        text,
+        source: { id: `term:${tabId}`, title: tRef.current('term.quoteSource') },
+      })
+      setInserted(true)
+      window.setTimeout(() => setInserted(false), 800)
+      return true
+    },
+    [tabId],
+  )
+
+  const quoteSelection = useCallback(
+    () => quote(termRef.current?.getSelection() ?? ''),
+    [quote],
+  )
+
+  const quoteScreen = useCallback(() => {
+    const term = termRef.current
+    if (!term) return false
+    const buf = term.buffer.active
+    const lines: string[] = []
+    for (let i = 0; i < term.rows; i++) {
+      lines.push(buf.getLine(buf.viewportY + i)?.translateToString(true) ?? '')
     }
-  }, []);
-  (0, import_react27.useEffect)(() => {
-    if (!menu2) return;
-    const close4 = () => setMenu(null);
-    const onKey = (e) => {
-      if (e.key === "Escape") setMenu(null);
-    };
-    window.addEventListener("mousedown", close4);
-    window.addEventListener("wheel", close4, { passive: true });
-    window.addEventListener("keydown", onKey);
+    while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+    return quote(lines.join('\n'))
+  }, [quote])
+
+  const quoteSmart = useCallback(() => {
+    if (!quoteSelection()) quoteScreen()
+  }, [quoteSelection, quoteScreen])
+
+  const openMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setMenu({ x: e.clientX, y: e.clientY })
+  }, [])
+
+  const paste = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) termRef.current?.paste(text)
+    } catch {
+      /* 剪贴板不可用：静默 */
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null)
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('wheel', close, { passive: true })
+    window.addEventListener('keydown', onKey)
     return () => {
-      window.removeEventListener("mousedown", close4);
-      window.removeEventListener("wheel", close4);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [menu2]);
-  (0, import_react27.useEffect)(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    let disposed = false;
-    const term = new import_xterm.Terminal({
-      // Nerd Font 优先（p10k 的 powerline/图标都在私用区，见 §6.6）；没装就退到等宽字体，
-      // 提示符会出现方框 —— 那是字体问题，不是终端坏了（i18n 有 term.fontMissing 提示位）。
-      fontFamily: "'MesloLGL Nerd Font Mono','Meslo LG L','JetBrains Mono','IBM Plex Mono',monospace",
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('wheel', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menu])
+
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    let disposed = false
+
+    const term = new Terminal({
+      // Nerd Font 优先（p10k 的 powerline/图标都在私用区）；没装则退等宽字体。
+      fontFamily:
+        "'MesloLGL Nerd Font Mono','Meslo LG L','JetBrains Mono','IBM Plex Mono',monospace",
       fontSize: 12,
-      // powerline 分隔符要上下无缝：1.0 是唯一正确的行高（1.2 会露出接缝）
-      lineHeight: 1,
+      lineHeight: 1, // powerline 分隔符要上下无缝
       letterSpacing: 0,
       scrollback: 5e3,
       cursorBlink: true,
       allowProposedApi: true,
-      theme: readTermTheme()
-    });
-    const fit3 = new import_addon_fit.FitAddon();
-    term.loadAddon(fit3);
-    term.open(host);
-    termRef.current = term;
-    const writer = terminalWriter((data6, done) => term.write(data6, done));
+      theme: readTermTheme(),
+    })
+    const fit = new FitAddon()
+    term.loadAddon(fit)
+    term.open(host)
+    termRef.current = term
+
+    const writer = terminalWriter((data: Uint8Array, done: () => void) => term.write(data, done))
+
     const doFit = () => {
-      if (!host.clientWidth || !host.clientHeight) return;
+      if (!host.clientWidth || !host.clientHeight) return
       try {
-        fit3.fit();
+        fit.fit()
       } catch {
+        /* 容器尺寸为 0 时 fit 会抛，忽略 */
       }
-    };
-    doFit();
+    }
+    doFit()
     void document.fonts?.ready?.then(() => {
-      if (!disposed) doFit();
-    });
-    let timer3 = null;
+      if (!disposed) doFit()
+    })
+
+    let timer: ReturnType<typeof setTimeout> | null = null
     const scheduleFit = () => {
-      if (timer3) clearTimeout(timer3);
-      timer3 = setTimeout(() => {
-        timer3 = null;
-        if (disposed) return;
-        doFit();
-        const sock = sockRef.current;
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        if (disposed) return
+        doFit()
+        const sock = sockRef.current
         if (sock && sock.readyState === WebSocket.OPEN) {
-          sock.send(encodeCtrl({ t: "resize", cols: term.cols, rows: term.rows }));
+          sock.send(encodeCtrl({ t: 'resize', cols: term.cols, rows: term.rows }))
         }
-      }, RESIZE_DEBOUNCE_MS);
-    };
-    const ro = new ResizeObserver(scheduleFit);
-    ro.observe(host);
+      }, RESIZE_DEBOUNCE_MS)
+    }
+    const ro = new ResizeObserver(scheduleFit)
+    ro.observe(host)
+
     const offTheme = watchTheme(() => {
-      term.options.theme = readTermTheme();
-    });
-    term.onData((d3) => sendRef.current(d3));
-    term.onSelectionChange(() => setSelection(term.getSelection()));
+      term.options.theme = readTermTheme()
+    })
+
+    term.onData((d) => sendRef.current(d))
+    term.onSelectionChange(() => setSelection(term.getSelection()))
+
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type !== "keydown") return true;
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.shiftKey && e.key === "Enter") {
-        quoteSmart();
-        return false;
+      if (e.type !== 'keydown') return true
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && e.shiftKey && e.key === 'Enter') {
+        quoteSmart()
+        return false
       }
-      if (mod && !e.shiftKey && e.key.toLowerCase() === "c") {
-        if (term.getSelection()) return false;
-        sendRef.current("");
-        return false;
+      if (mod && !e.shiftKey && e.key.toLowerCase() === 'c') {
+        if (term.getSelection()) return false // 有选区交给浏览器复制
+        sendRef.current('\x03') // 无选区 = SIGINT
+        return false
       }
-      if (mod && !e.shiftKey && e.key.toLowerCase() === "v") return false;
-      return true;
-    });
-    const onKeyDown = (e) => {
-      e.stopPropagation();
-    };
-    host.addEventListener("keydown", onKeyDown);
+      if (mod && !e.shiftKey && e.key.toLowerCase() === 'v') return false // 交给 paste 事件
+      return true
+    })
+
+    const onKeyDown = (e: KeyboardEvent) => e.stopPropagation()
+    host.addEventListener('keydown', onKeyDown)
+
     void (async () => {
-      const r4 = await getTransport().ptyTicket(ptyId);
-      if (disposed) return;
-      if (!r4.ok || !r4.url || !r4.ticket) {
-        apply5({ t: "error", error: r4.error ?? tRef.current("term.failed").replace("{error}", "ticket") });
-        return;
+      const r = await getTransport().ptyTicket(ptyId)
+      if (disposed) return
+      if (!r.ok || !r.url || !r.ticket) {
+        apply({
+          t: 'error',
+          error: r.error ?? tRef.current('term.failed').replace('{error}', 'ticket'),
+        })
+        return
       }
-      apply5({ t: "ticket", ticket: r4.ticket });
-      const sock = new WebSocket(`${r4.url}?ticket=${encodeURIComponent(r4.ticket)}`);
-      sock.binaryType = "arraybuffer";
-      sockRef.current = sock;
-      sendRef.current = (d3) => {
-        if (sock.readyState === WebSocket.OPEN) sock.send(d3);
-      };
-      sock.onopen = () => apply5({ t: "ws-open" });
+      apply({ t: 'ticket', ticket: r.ticket })
+      const sock = new WebSocket(`${r.url}?ticket=${encodeURIComponent(r.ticket)}`)
+      sock.binaryType = 'arraybuffer'
+      sockRef.current = sock
+      sendRef.current = (d) => {
+        if (sock.readyState === WebSocket.OPEN) sock.send(d)
+      }
+      sock.onopen = () => apply({ t: 'ws-open' })
       sock.onmessage = (ev) => {
-        const { ctrl, data: data6 } = decodeFrame(ev.data);
+        const { ctrl, data } = decodeFrame(ev.data)
         if (ctrl) {
           switch (ctrl.t) {
-            case "hello":
-              apply5({ t: "hello" });
-              break;
-            case "reset":
-              apply5({ t: "reset" });
-              break;
-            case "gap":
-              term.writeln(`\x1B[2m${tRef.current("term.truncated")}\x1B[0m`);
-              break;
-            case "exit":
-              apply5({ t: "exit", code: ctrl.code });
-              break;
+            case 'hello':
+              apply({ t: 'hello' })
+              break
+            case 'reset':
+              apply({ t: 'reset' })
+              break
+            case 'gap':
+              term.writeln(`\x1b[2m${tRef.current('term.truncated')}\x1b[0m`)
+              break
+            case 'exit':
+              apply({ t: 'exit', code: ctrl.code })
+              break
             default:
-              break;
+              break
           }
-          return;
+          return
         }
-        if (data6 && data6.length) {
-          writer.push(data6);
-          apply5({ t: "output" });
+        if (data && data.length) {
+          writer.push(data)
+          apply({ t: 'output' })
         }
-      };
+      }
       sock.onerror = () => {
-        if (!disposed) apply5({ t: "error", error: tRef.current("term.failed").replace("{error}", "socket") });
-      };
+        if (!disposed) {
+          apply({ t: 'error', error: tRef.current('term.failed').replace('{error}', 'socket') })
+        }
+      }
       sock.onclose = () => {
-        if (disposed) return;
-        if (stateRef.current.s === "exited") return;
-        apply5({ t: "error", error: tRef.current("term.failed").replace("{error}", "closed") });
-      };
-    })();
-    return () => {
-      disposed = true;
-      if (timer3) clearTimeout(timer3);
-      ro.disconnect();
-      offTheme();
-      host.removeEventListener("keydown", onKeyDown);
-      writer.clear();
-      sockRef.current?.close();
-      sockRef.current = null;
-      term.dispose();
-      termRef.current = null;
-    };
-  }, [ptyId, apply5, quoteSmart]);
-  const reopen = (0, import_react27.useCallback)(() => {
-    useAppStore.getState().termClose(tabId);
-    useAppStore.getState().termEnsure(tabId);
-  }, [tabId]);
-  const overlay = state4.s === "failed" ? { kind: "failed", text: state4.error } : state4.s === "exited" ? { kind: "exited", text: t4("term.exit").replace("{code}", String(state4.code ?? "?")) } : state4.s === "live" ? null : { kind: "loading", text: state4.s === "replaying" ? t4("term.replaying") : t4("term.starting") };
-  return /* @__PURE__ */ (0, import_jsx_runtime29.jsxs)("div", { className: "term-pane", "data-tab": tabId, "data-state": state4.s, onContextMenu: openMenu, children: [
-    /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("div", { className: "term-host", ref: hostRef }),
-    selection2.trim() !== "" && state4.s === "live" && /* @__PURE__ */ (0, import_jsx_runtime29.jsxs)("button", { type: "button", className: "term-insert", onClick: quoteSelection, children: [
-      inserted ? t4("term.inserted") : t4("term.insert"),
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("kbd", { children: "\u2318\u21E7\u21B5" })
-    ] }),
-    menu2 && // 右键菜单：快捷键之外的「操作」入口（触控板/不记快捷键的人靠它）
-    /* @__PURE__ */ (0, import_jsx_runtime29.jsxs)("div", { className: "term-menu", role: "menu", style: { left: menu2.x, top: menu2.y }, onMouseDown: (e) => e.stopPropagation(), children: [
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsxs)("button", { role: "menuitem", disabled: !selection2.trim(), onClick: () => {
-        setMenu(null);
-        quoteSelection();
-      }, children: [
-        t4("term.menu.selection"),
-        /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("kbd", { children: "\u2318\u21E7\u21B5" })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("button", { role: "menuitem", onClick: () => {
-        setMenu(null);
-        quoteScreen();
-      }, children: t4("term.menu.screen") }),
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("div", { className: "term-menu-sep", role: "separator" }),
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("button", { role: "menuitem", disabled: !selection2.trim(), onClick: () => {
-        setMenu(null);
-        void copyText(selection2);
-      }, children: t4("term.menu.copy") }),
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("button", { role: "menuitem", onClick: () => {
-        setMenu(null);
-        void paste();
-      }, children: t4("term.menu.paste") }),
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("button", { role: "menuitem", onClick: () => {
-        setMenu(null);
-        termRef.current?.clear();
-      }, children: t4("term.menu.clear") }),
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("button", { role: "menuitem", onClick: () => {
-        setMenu(null);
-        reopen();
-      }, children: t4("term.menu.reopen") })
-    ] }),
-    overlay && /* @__PURE__ */ (0, import_jsx_runtime29.jsxs)("div", { className: `term-overlay ${overlay.kind}`, role: "status", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("span", { className: "term-overlay-text", children: overlay.text }),
-      (overlay.kind === "exited" || overlay.kind === "failed") && /* @__PURE__ */ (0, import_jsx_runtime29.jsx)("button", { type: "button", className: "btn btn-xs", onClick: reopen, children: t4("term.reopen") })
-    ] })
-  ] });
-}
+        if (disposed) return
+        if (stateRef.current.s === 'exited') return
+        apply({ t: 'error', error: tRef.current('term.failed').replace('{error}', 'closed') })
+      }
+    })()
 
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+      ro.disconnect()
+      offTheme()
+      host.removeEventListener('keydown', onKeyDown)
+      writer.clear()
+      sockRef.current?.close()
+      sockRef.current = null
+      term.dispose()
+      termRef.current = null
+    }
+  }, [ptyId, apply, quoteSmart])
+
+  const reopen = useCallback(() => {
+    useAppStore.getState().termClose(tabId)
+    useAppStore.getState().termEnsure(tabId)
+  }, [tabId])
+
+  const overlay =
+    state.s === 'failed'
+      ? { kind: 'failed' as const, text: state.error }
+      : state.s === 'exited'
+        ? { kind: 'exited' as const, text: t('term.exit').replace('{code}', String(state.code ?? '?')) }
+        : state.s === 'live'
+          ? null
+          : {
+              kind: 'loading' as const,
+              text: state.s === 'replaying' ? t('term.replaying') : t('term.starting'),
+            }
+
+  return (
+    <div
+      className="term-pane"
+      data-tab={tabId}
+      data-state={state.s}
+      onContextMenu={openMenu}
+    >
+      <div className="term-host" ref={hostRef} />
+
+      {selection.trim() !== '' && state.s === 'live' && (
+        <button type="button" className="term-insert" onClick={quoteSelection}>
+          {inserted ? t('term.inserted') : t('term.insert')}
+          <kbd>⌘⇧↵</kbd>
+        </button>
+      )}
+
+      {menu && (
+        <div
+          className="term-menu"
+          role="menu"
+          style={{ left: menu.x, top: menu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            role="menuitem"
+            disabled={!selection.trim()}
+            onClick={() => {
+              setMenu(null)
+              quoteSelection()
+            }}
+          >
+            {t('term.menu.selection')}
+            <kbd>⌘⇧↵</kbd>
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => {
+              setMenu(null)
+              quoteScreen()
+            }}
+          >
+            {t('term.menu.screen')}
+          </button>
+          <div className="term-menu-sep" role="separator" />
+          <button
+            role="menuitem"
+            disabled={!selection.trim()}
+            onClick={() => {
+              setMenu(null)
+              void copyText(selection)
+            }}
+          >
+            {t('term.menu.copy')}
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => {
+              setMenu(null)
+              void paste()
+            }}
+          >
+            {t('term.menu.paste')}
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => {
+              setMenu(null)
+              termRef.current?.clear()
+            }}
+          >
+            {t('term.menu.clear')}
+          </button>
+          <button
+            role="menuitem"
+            onClick={() => {
+              setMenu(null)
+              reopen()
+            }}
+          >
+            {t('term.menu.reopen')}
+          </button>
+        </div>
+      )}
+
+      {overlay && (
+        <div className={`term-overlay ${overlay.kind}`} role="status">
+          <span className="term-overlay-text">{overlay.text}</span>
+          {(overlay.kind === 'exited' || overlay.kind === 'failed') && (
+            <button type="button" className="btn btn-xs" onClick={reopen}>
+              {t('term.reopen')}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
