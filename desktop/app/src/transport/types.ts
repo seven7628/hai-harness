@@ -433,6 +433,41 @@ export interface OfficePreviewRequest {
   approximate?: boolean
 }
 
+// ─── 右栏终端（PTY，docs/TERMINAL_DESIGN.md §5.1 / docs/TERMINAL_BRIDGE_SPEC.md §1.3–1.5）───
+//
+// 控制面三条命令（pty_create / pty_ticket / pty_close）走既有 NDJSON 命令通道；
+// 数据面是一条独立 WS（`ws://127.0.0.1:<随机端口>/pty?ticket=…`），由 pty_ticket 发一次性票据。
+//
+// 这里的方法**不抛**：形状不对 / 业务失败对面板来说是同一件事 —— 显示一句错误
+// （term.failed），别把整块右栏炸掉（见 transport/electron.ts 的 ptyInfoOf 注释）。
+
+/** pty_create 成功后的进程描述（字段名由 Go 桥决定，见 desktop/bridge/pty.go）。 */
+export interface PtyInfo {
+  pty_id: string
+  cwd: string
+  shell: string
+  pid: number
+  cols: number
+  rows: number
+}
+
+export interface PtyCreateInput {
+  /** 终端的工作目录（= 会话所属工作区；空则连 PTY 都起不来，见 store 的 termEnsure）。 */
+  workspace: string
+  /** 归属会话（Go 侧只做记账/事件归因，不影响 shell 本身）。 */
+  session_id?: string
+  cols: number
+  rows: number
+}
+
+export type PtyCreateResult = { ok: true; pty: PtyInfo } | { ok: false; error: string }
+
+export type PtyTicketResult =
+  | { ok: true; url: string; ticket: string; expiresIn: number }
+  | { ok: false; error: string }
+
+export type PtyCloseResult = { ok: boolean; error?: string }
+
 export interface ExternalSkillsStatusResult {
   ok: boolean
   status?: ExternalSkillsStatus
@@ -594,6 +629,11 @@ export interface Transport {
   // 语音转写：把录音音频（wav 字节）发到 OpenAI 兼容 /audio/transcriptions，返回文本。
   // 由主进程转发（net.fetch）——避开渲染层 CORS 限制、API key 不进网页层。
   sttTranscribe(audio: ArrayBuffer, mimeType: string): Promise<{ ok: boolean; text?: string; error?: string }>
+  // —— 右栏终端（docs/TERMINAL_DESIGN.md §5.1）：控制面三条 ——
+  // 数据面（WS）由组件自己开：票据在这里换，帧协议见 components/terminal/frame.ts。
+  ptyCreate(input: PtyCreateInput): Promise<PtyCreateResult>
+  ptyTicket(ptyId: string): Promise<PtyTicketResult>
+  ptyClose(ptyId: string): Promise<PtyCloseResult>
   send(cmd: BridgeCommand): Promise<{ ok: boolean; error?: string }>
   onEvent(cb: (line: string) => void): () => void
   onExit(cb: (info: BridgeExitInfo) => void): () => void

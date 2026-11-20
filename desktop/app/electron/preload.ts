@@ -287,6 +287,12 @@ const api = {
   // 只是主进程侧换 bridge 命令（mammoth / python-pptx）。调用方见 store 的 previewOfficeFile。
   watchDocx: (req: { path: string; workspace: string; approximate?: boolean }) => ipcRenderer.invoke('docx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
   watchPptx: (req: { path: string; workspace: string; approximate?: boolean }) => ipcRenderer.invoke('pptx:preview', req) as Promise<{ ok: boolean; html_path?: string; error?: string; renderer?: 'libreoffice' | 'approximate' }>,
+  // 右栏终端（PTY）控制面（docs/TERMINAL_DESIGN.md §5.1）：三条都**主进程直发** bridge 命令
+  // 并把 command_response 的 data 带回来（渲染层 command 通道只结算 ok/error，拿不到
+  // pty_id / url / ticket）。WS 数据面不过 IPC —— 渲染层拿 url 自己开 WebSocket。
+  ptyCreate: (p: { workspace: string; session_id?: string; cols: number; rows: number }) => ipcRenderer.invoke('pty:create', p) as Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>,
+  ptyTicket: (p: { pty_id: string }) => ipcRenderer.invoke('pty:ticket', p) as Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>,
+  ptyClose: (p: { pty_id: string }) => ipcRenderer.invoke('pty:close', p) as Promise<{ ok: boolean; error?: string }>,
   // 音视频（R08c）：`<video src>` 用 `hai-media://`（主进程按 Range 回 206，不把文件读进内存）。
   // mediaUrl 只对工作区内的媒体扩展名给 URL；mediaProbe 是 ffprobe 元信息（缺 ffprobe 时
   // 仍是 ok:true + available:false —— 降级不算错误）；mediaStats 是协议计数器（e2e 判据）。

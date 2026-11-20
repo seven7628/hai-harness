@@ -457,6 +457,13 @@ export function mobileTransport(deps: MobileDeps = {}): MobileTransport {
     inputHistoryGet: async () => ({ ok: true, items: [] }),
     inputHistorySet: async () => ({ ok: true, items: [] }),
     inputHistoryForget: async () => ({ ok: true }),
+    // 右栏终端（docs/TERMINAL_DESIGN.md §5.1）：PTY 只活在桌面的 Go 桥里，手机连的是
+    // /api/cmd 面（没有 pty_* 命令，也没有 /pty 的 WS 端点）。这里显式给失败原因，不靠
+    // Proxy 兜成 `unsupported: ptyCreate` —— 手机面板要显示一句人话。
+    // [recovered] 依据 docs/TERMINAL_MODULE_SWEEP.md §3.3
+    ptyCreate: async () => ({ ok: false, error: '终端仅在桌面端可用' }),
+    ptyTicket: async () => ({ ok: false, error: '终端仅在桌面端可用' }),
+    ptyClose: async () => ({ ok: false, error: '终端仅在桌面端可用' }),
     pickWorkspace: async () => null,
     pickFsFile: async () => null,
     pickFsFiles: async () => [],

@@ -129,6 +129,13 @@ export type DesktopApi = {
   // python-pptx 不能渲染），故文档/UI 措辞都要带「近似」，别在前端许诺保真。
   watchDocx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string }>
   watchPptx: (req: { path: string; workspace: string }) => Promise<{ ok: boolean; html_path?: string; error?: string }>
+  // 右栏终端（PTY）控制面（docs/TERMINAL_DESIGN.md §5.1）：三条都是「主进程直发 bridge 命令
+  // + 把 command_response 的 data 原样带回」，因为渲染层的 command 通道只结算 ok/error，
+  // 拿不到 data（pty_create 的 pty_id、pty_ticket 的 url/ticket 都在 data 里）。
+  // WS 数据面不过 IPC：渲染层直接用 pty_ticket 给的 url 开 WebSocket。
+  ptyCreate: (p: { workspace: string; session_id?: string; cols: number; rows: number }) => Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>
+  ptyTicket: (p: { pty_id: string }) => Promise<{ ok: boolean; error?: string; data?: Record<string, unknown> }>
+  ptyClose: (p: { pty_id: string }) => Promise<{ ok: boolean; error?: string }>
   // R08c 媒体：协议 URL / ffprobe 元信息 / 协议计数器（类型见 src/lib/mediaProbe.ts）
   mediaUrl: (p: { path: string; workspace: string }) => Promise<{ ok: boolean; url?: string; abs?: string; error?: string }>
   mediaProbe: (p: { path: string; workspace: string }) => Promise<{ ok: boolean; error?: string; data?: unknown }>
