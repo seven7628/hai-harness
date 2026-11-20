@@ -1964,6 +1964,52 @@ function registerIpc(): void {  // renderer 启动打点回传（TEMP-STARTUP：
     const renderer = response.data?.renderer === 'libreoffice' ? 'libreoffice' : 'approximate'
     return { ok: true, html_path: htmlPath, renderer }
   })
+  // —— 右栏终端（PTY，docs/TERMINAL_DESIGN.md §5.1 / docs/TERMINAL_BRIDGE_SPEC.md §1.3）——
+  //
+  // 三条控制面命令（pty_create / pty_ticket / pty_close）都走主进程直发
+  //（sendBridgeRequest，负 id），理由与 xlsx/docx/pptx 那三条同构：
+  //   ① 渲染层的 command 通道只结算 ok/error，而这里**必须**拿到 data
+  //      （pty_id / url / ticket 全在 data 里）；
+  //   ② 一问一答、自带超时，不该广播进事件流。
+  // 超时用缺省 30s：pty_create 只是 fork 一个 shell（实测 <50ms），pty_ticket 是内存里发一张票；
+  // 只有「bridge 还没起好」会慢，而那正是要报「bridge 启动中/未运行」让前端退避重试的情形。
+  //
+  // 数据面（WS `/pty`）**不过 IPC**：渲染层拿 pty_ticket 的 url 自己开 WebSocket。
+  // 权限：与其它 invoke 一致，只允许主窗口主 frame（isTrustedIpcSender）。
+  ipcMain.handle('pty:create', async (e, input: { workspace?: string; session_id?: string; cols?: number; rows?: number } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, error: '不受信任的调用来源' }
+    const workspace = String(input?.workspace ?? '')
+    if (!workspace) return { ok: false, error: 'pty_create: 缺少 workspace' }
+    const started = await ensureBridgeBin()
+    if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 未运行' }
+    if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
+    const response = await sendBridgeRequest('pty_create', {
+      workspace,
+      ...(input?.session_id ? { session_id: String(input.session_id) } : {}),
+      cols: Number(input?.cols ?? 80) || 80,
+      rows: Number(input?.rows ?? 24) || 24,
+    })
+    return { ok: response.ok, error: response.error, data: response.data }
+  })
+  ipcMain.handle('pty:ticket', async (e, p: { pty_id?: string } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, error: '不受信任的调用来源' }
+    const ptyId = String(p?.pty_id ?? '')
+    if (!ptyId) return { ok: false, error: 'pty_ticket: 缺少 pty_id' }
+    const started = await ensureBridgeBin()
+    if (!started.ok || !started.bin) return { ok: false, error: started.error ?? 'bridge 未运行' }
+    if (!spawnBridge(started.bin)) return { ok: false, error: 'bridge 启动失败' }
+    const response = await sendBridgeRequest('pty_ticket', { pty_id: ptyId })
+    return { ok: response.ok, error: response.error, data: response.data }
+  })
+  ipcMain.handle('pty:close', async (e, p: { pty_id?: string } = {}) => {
+    if (!isTrustedIpcSender(e)) return { ok: false, error: '不受信任的调用来源' }
+    const ptyId = String(p?.pty_id ?? '')
+    if (!ptyId) return { ok: false, error: 'pty_close: 缺少 pty_id' }
+    // 桥都没了 ⇒ 子进程早已随之收掉；关标签是常态操作，别把它变成一条报错。
+    if (!bridge || bridge.killed) return { ok: true }
+    const response = await sendBridgeRequest('pty_close', { pty_id: ptyId })
+    return { ok: response.ok, error: response.error }
+  })
   // —— 媒体预览（R08c）：URL 通道 + 探测 ——
   //
   // 两条门禁（评审裁决 1），缺一条都能让协议退化成任意目录的读取通道：

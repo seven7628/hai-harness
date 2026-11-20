@@ -58,6 +58,13 @@ const (
 	// CmdMeshPing 主动 ping 一个已连/出站节点（连接检测；设置页「检测连接」按钮）。
 	CmdMeshPing Command = "mesh_ping"
 
+	// —— 右栏终端（PTY 控制面；docs/TERMINAL_BRIDGE_SPEC.md §1.4） ——
+	// 数据面不走 NDJSON，而是 pty_ticket 返回的一次性 ticket + /pty WebSocket
+	// （见 pty.go）。三条命令只负责「建/取票/关」，字节流全在 WS 上。
+	CmdPtyCreate Command = "pty_create"
+	CmdPtyTicket Command = "pty_ticket"
+	CmdPtyClose  Command = "pty_close"
+
 	// —— Agent Hub（P1：智能体 CRUD） ——
 	// 命令面按 docs/AGENT_HUB_TECH_PLAN.md §7.1.2 命名；hub_* 一律由 dispatchHub 分派。
 	CmdHubAgentCreate  Command = "hub_agent_create"

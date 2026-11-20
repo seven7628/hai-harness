@@ -1604,6 +1604,10 @@ type manager struct {
 	// mobile 手机端接入（HTTP 命令代理 + WS 事件流；nil = 未启动）。
 	// 见 mobile_server.go / docs/mobile-remote/TECH_PLAN.md。
 	mobile *mobileServer
+	// pty 右栏终端（PTY 控制面 + /pty WS 数据面；懒初始化，见 pty.go）。
+	// ptyMu 只保护指针本身；会话/ticket 表由 ptyManager.mu 保护。
+	ptyMu sync.Mutex
+	pty   *ptyManager
 	// respTap 命令响应拦截：手机端 HTTP 请求等同一个 id 的响应。
 	// 返回 true = 已被消费，不再写 stdout（桌面端看不到这条响应，符合预期）。
 	respTap func(map[string]any) bool
@@ -2697,6 +2701,10 @@ func (m *manager) respCode(c command, ok bool, errMsg, code string, data map[str
 }
 
 func (m *manager) dispatch(c command) {
+	// 右栏终端控制面（pty_create/pty_ticket/pty_close；见 pty.go）。
+	if m.handlePtyCommand(c) {
+		return
+	}
 	// Hub 命令分派集中在新文件里（命令面会持续变长，不往这个 switch 里再塞 20 个 case）。
 	if m.dispatchHub(c) {
 		return
@@ -4968,6 +4976,13 @@ func (m *manager) shutdownAll() {
 		m.meshGW.Stop()
 		m.meshGW = nil
 		m.hub.SetRemote(false, nil)
+	}
+	// 右栏终端收尾：杀掉全部 PTY 子进程并关 /pty WS 服务器（不留孤儿 shell）。
+	m.ptyMu.Lock()
+	pm := m.pty
+	m.ptyMu.Unlock()
+	if pm != nil {
+		pm.shutdown()
 	}
 }
 

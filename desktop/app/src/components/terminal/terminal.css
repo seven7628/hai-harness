@@ -1,0 +1,163 @@
+/* [implemented] 终端样式 —— 原始 CSS 文件随仓库删除丢失（bundle 只含 JS，不含 CSS，
+ * /private/tmp 下无任何 .css 命中 .term-*）。此文件是**按契约重建**，不是逐字恢复，
+ * 依据：
+ *   - 类名与状态：components/terminal/{TerminalPane,TerminalTab}.tsx（还原自 bundle）
+ *   - 视觉：/private/tmp/term-*.png 截图（见 docs/TERMINAL_VISUAL_SPEC.md）
+ *   - 设计令牌：theme.ts 读取的 --code-block-bg/--ink/--cinnabar 等
+ * 逐字原文：缺失。重建的规则均在行首用注释标注（reconstructed）。
+ *
+ * 选择器清单（来自源码，可信）：.term-pane / .term-host / .term-overlay
+ *   （.failed/.exited/.loading）/ .term-overlay-text / .term-insert / .term-menu / .term-menu-sep
+ */
+
+/* [reconstructed] 满幅容器：right-body.full-mode 已去内边距，这里自己管溢出。 */
+.term-pane {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  /* 截图观感：终端底色比面板更深，接近代码块底 */
+  background: var(--code-block-bg, var(--paper-3, #1e1b19));
+  color: var(--ink, #e9e3dd);
+}
+
+/* [reconstructed] xterm 挂载点：撑满，四周留一点呼吸边（截图约 8–10px）。 */
+.term-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  padding: 8px 10px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* xterm 自身要 100% 高，否则底部留空带 */
+.term-host .xterm {
+  height: 100%;
+}
+
+.term-host .xterm-viewport {
+  background: transparent !important;
+  scrollbar-width: thin;
+}
+
+/* [reconstructed] 状态覆盖层：居中、可读、半透明遮住已有输出。
+ * loading 用于「启动中/恢复中」，failed / exited 额外带按钮。 */
+.term-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: color-mix(in oklab, var(--code-block-bg, var(--paper, #171412)) 82%, transparent);
+  backdrop-filter: blur(1.5px);
+  z-index: 2;
+}
+
+.term-overlay.loading {
+  color: var(--ink-3, #857a73);
+}
+
+.term-overlay.exited {
+  color: var(--ink-2, #b7ada6);
+}
+
+.term-overlay.failed {
+  color: var(--crimson, #e4746a);
+}
+
+.term-overlay-text {
+  max-width: 80%;
+  font: 400 12.5px/1.55 var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* [reconstructed] 选区旁「引用到对话」浮出按钮：
+ * 截图（term-insert-btn.png）为右下角小圆角按钮，含文案 + ⌘⇧↵ 提示。 */
+.term-insert {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--line, color-mix(in oklab, var(--ink, #e9e3dd) 18%, transparent));
+  border-radius: var(--r-md, 8px);
+  background: var(--card-2, var(--paper-3, #2e2622));
+  color: var(--ink, #e9e3dd);
+  font: 500 11.5px/1 var(--sans, system-ui, sans-serif);
+  cursor: pointer;
+  box-shadow: var(--shadow-card, 0 6px 18px rgba(0, 0, 0, 0.28));
+}
+
+.term-insert:hover {
+  border-color: var(--cinnabar-2, #d97a66);
+}
+
+.term-insert kbd {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--ink, #e9e3dd) 12%, transparent);
+  font: 400 10px/1.4 var(--mono, ui-monospace, monospace);
+  color: var(--ink-3, #857a73);
+}
+
+/* [reconstructed] 右键菜单：浮层卡片，项高约 30px，分隔线一条。
+ * 顺序见 TerminalPane.tsx（引用选中/引用屏幕 / 复制/粘贴/清屏/重新打开）。 */
+.term-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 176px;
+  padding: 4px;
+  border: 1px solid var(--line, color-mix(in oklab, var(--ink, #e9e3dd) 16%, transparent));
+  border-radius: var(--r-md, 10px);
+  background: var(--card-2, var(--paper-3, #2e2622));
+  box-shadow: var(--shadow-card, 0 10px 28px rgba(0, 0, 0, 0.4));
+  color: var(--ink, #e9e3dd);
+}
+
+.term-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: 400 12px/1.4 var(--sans, system-ui, sans-serif);
+  text-align: left;
+  cursor: pointer;
+}
+
+.term-menu button:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--cinnabar-2, #d97a66) 16%, transparent);
+}
+
+.term-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.term-menu button kbd {
+  font: 400 10px/1 var(--mono, ui-monospace, monospace);
+  color: var(--ink-3, #857a73);
+}
+
+.term-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line-soft, color-mix(in oklab, var(--ink, #e9e3dd) 10%, transparent));
+}

@@ -1,4 +1,4 @@
-import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, IMConfig, IMChat, IMRouteCfg, OfficeKitStatus } from './types'
+import type { Transport, BridgeExitInfo, AppSettings, ProviderSaveInput, ProviderCfg, MCPServerCfg, ExternalSkillsStatus, ExternalSkillsImportResult, OAuthStatus, InputHistoryItem, InputHistoryReply, IMConfig, IMChat, IMRouteCfg, OfficeKitStatus, PtyCreateResult, PtyTicketResult, PtyCloseResult } from './types'
 import type { BridgeCommand } from '../store/events'
 import type { MCPProjectInfo, MCPProjectServer, HookSectionView } from '../store/useAppStore'
 import currentProjectReadmeZh from '../../../../README.zh-CN.md?raw'
@@ -2519,6 +2519,21 @@ class MockTransport implements Transport {
   // 路径时注入 fake 的 watchPptx。
   async watchPptx(): Promise<{ ok: boolean; html_path?: string; error?: string }> {
     return { ok: false, error: '浏览器预览模式不支持 pptx 转换（需桌面端受管运行时）' }
+  }
+
+  // 右栏终端（mock）：浏览器探针里既没有 PTY 也没有桥的 WS 端点 —— 三条一律给失败结果并
+  // 说明原因。比「假成功后连不上」更诚实：面板会显示「终端仅在桌面端可用」，不会卡在转圈。
+  // [recovered] 依据 docs/TERMINAL_MODULE_SWEEP.md §3.3
+  async ptyCreate(): Promise<PtyCreateResult> {
+    return { ok: false, error: '终端仅在桌面端可用' }
+  }
+
+  async ptyTicket(): Promise<PtyTicketResult> {
+    return { ok: false, error: '终端仅在桌面端可用' }
+  }
+
+  async ptyClose(): Promise<PtyCloseResult> {
+    return { ok: false, error: '终端仅在桌面端可用' }
   }
 
   private genSid(wsPath: string, n: number): string {

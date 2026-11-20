@@ -1,5 +1,18 @@
-import type { Transport, ExternalSkillsStatus, ExternalSkillsImportResult, FsImageResult, OAuthStatus, OfficeKitStatus } from './types'
+import type { Transport, ExternalSkillsStatus, ExternalSkillsImportResult, FsImageResult, OAuthStatus, OfficeKitStatus, PtyInfo } from './types'
 import { bridge } from '../lib/bridge'
+
+// [recovered] 依据 docs/TERMINAL_MODULE_SWEEP.md §3.1（bundle `src/transport/electron.ts` 切片）
+// + docs/TERMINAL_BRIDGE_SPEC.md §1.3：pty_create 的 data 是 JSON 直通的 Record，字段名由
+// bridge 决定。形状校验放这里（而不是让 store 收窄）：坏 data 与业务失败对面板是同一件事，
+// 都该显示一句错误，绝不能把整个右栏炸掉。
+function ptyInfoOf(data: unknown): PtyInfo | null {
+  if (!data) return null
+  const d = data as Partial<PtyInfo>
+  if (typeof d.pty_id !== 'string' || d.pty_id === '') return null
+  if (typeof d.cwd !== 'string' || typeof d.shell !== 'string') return null
+  if (typeof d.pid !== 'number' || typeof d.cols !== 'number' || typeof d.rows !== 'number') return null
+  return { pty_id: d.pty_id, cwd: d.cwd, shell: d.shell, pid: d.pid, cols: d.cols, rows: d.rows }
+}
 
 // Electron 真实 transport：走 preload 暴露的 IPC → 主进程 → Go bridge stdio
 export function electronTransport(): Transport {
@@ -92,6 +105,32 @@ export function electronTransport(): Transport {
     watchDocx: (req) => d.watchDocx(req),
     watchPptx: (req) => d.watchPptx(req),
     sttTranscribe: (audio, mimeType) => d.sttTranscribe({ audio, mimeType }),
+    // 右栏终端（docs/TERMINAL_DESIGN.md §5.1）：控制面三条。这里只做「桥 data → 结构化
+    // 结果」的映射；**不抛** —— 形状不对与业务失败对面板来说是同一件事。
+    ptyCreate: async (input) => {
+      const r = await d.ptyCreate(input)
+      if (!r.ok) return { ok: false, error: r.error ?? 'pty_create 失败' }
+      const pty = ptyInfoOf(r.data)
+      return pty ? { ok: true, pty } : { ok: false, error: 'pty_create 返回形状异常' }
+    },
+    ptyTicket: async (ptyId) => {
+      const r = await d.ptyTicket({ pty_id: ptyId })
+      if (!r.ok) return { ok: false, error: r.error ?? 'pty_ticket 失败' }
+      const data = r.data
+      if (
+        !data
+        || typeof data.url !== 'string'
+        || typeof data.ticket !== 'string'
+        || typeof data.expires_in !== 'number'
+      ) {
+        return { ok: false, error: 'pty_ticket 返回形状异常' }
+      }
+      return { ok: true, url: data.url, ticket: data.ticket, expiresIn: data.expires_in }
+    },
+    ptyClose: async (ptyId) => {
+      const r = await d.ptyClose({ pty_id: ptyId })
+      return { ok: r.ok, error: r.error }
+    },
     send: (cmd) => d.command(cmd),
     onEvent: (cb) =>
       d.onEvent((payload: string | { lines: string[] }) => {

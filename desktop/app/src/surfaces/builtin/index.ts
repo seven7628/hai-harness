@@ -4,3 +4,5 @@ import './gitSurface'
 import './fileSurface'
 import './webSurface'
 import './activitySurface'
+// 右栏终端（docs/TERMINAL_DESIGN.md §4）：与其它四个同一条副作用注册路径。
+import './termSurface'
