@@ -12,7 +12,7 @@
 > - `【调研】` 通用调研设计的结论
 > - `【方案】` 本文的决策（含对前两者的修订）
 >
-> **版本** v2.2 · 2026-11-19 · 状态：决策已定
+> **版本** v2.4 · 2026-11-19 · 状态：决策已定（含交互契约）
 >
 > **三项关键决策（§24）**：存储 = 文件 + 三层索引（不是 SQLite）；传输 = 统一 HTTP（不做自定义协议双通道）；
 > 编辑落盘 = Phase 1 仅静态资源，`.tsx/.jsx` 明确返回 `UNSUPPORTED`。
@@ -322,9 +322,13 @@ type ArtifactVersion struct {
 
 | 层 | 结构 | 复杂度 | 用途 |
 |---|---|---|---|
-| L1 内存索引 | `map[ArtifactID]*Artifact` + `map[wsKey][]ArtifactID` + `map[relPath]ArtifactID` | **O(1)** | 所有热路径查询（列表、按路径找产物、按 wsKey 过滤） |
-| L2 反向索引分片 | `idx/bypath/<sha1(rel)%256>.json` | O(1) 文件读 | 冷启动/跨进程只查单个分片，**不扫全目录** |
+| L1 内存索引 | `map[ArtifactID]*Artifact` + `map[wsKey][]ArtifactID` + `map[wsKey+"\x00"+relPath]ArtifactID` | **O(1)** | 所有热路径查询（列表、按路径找产物、按 wsKey 过滤） |
+| L2 反向索引分片 | `idx/bypath/<sha1(wsKey+"\x00"+rel)%256>.json` | O(1) 文件读 | 冷启动/跨进程只查单个分片，**不扫全目录** |
 | L3 追加日志 | `index.journal`（每行一条 JSON） | O(1) append | 写放大恒定；启动时「快照 + 回放」重建 L1 |
+
+> ⚠️ **键必须含 `wsKey`**：`artifacts/index.html` 在所有工作区里都叫这个名字。
+> 只用 `relPath` 做键会让后打开的工作区覆盖前一个——这正是风险 R1 在**进程内**的形态。
+> 分隔符用 `\x00` 而非 `/`，避免与路径里的字符冲突。
 
 **写入路径**（publish / promote / 新版本）：
 
@@ -401,7 +405,7 @@ func versionID(files map[string]string) string {
 
 ## 6. A 层：Agent Tool 协议
 
-### 6.1 工具清单（8 个）
+### 6.1 工具清单（9 个；Phase 1 交付 8 个）
 
 | 工具 | 读写 | 挂载条件 | 入参 | 成功返回 | 失败码 |
 |---|---|---|---|---|---|
@@ -428,13 +432,27 @@ func versionID(files map[string]string) string {
 
 ```
 1. 校验 entry 在产物区（前缀 artifacts/）且文件存在       → 否则 ENTRY_OUTSIDE / ENTRY_MISSING
-2. 解析依赖闭包（见 §13.4）
+2. 解析依赖闭包（见 §13.4），任一依赖逃出工作区 → ENTRY_OUTSIDE
 3. 计算 VersionID = versionID(files)（见 §5.5）
+3.5 幂等短路：若 VersionID == 该 artifact 的 Latest.VersionID
+        → 直接返回现有 {version, version_id}，**不新建版本**（避免脚本重复 publish 刷版本号）
 4. 若同 ArtifactID 已存在：Version = Latest + 1，否则 Version = 1
-5. 写 .artifacts/<id>/v<N>/manifest.json + blobs/
-6. 返回 artifact_id / version / version_id
-7. 触发 SSE reload（若该 artifact 的预览正打开）
+5. 写 blobs/（同 hash 已存在则跳过）→ 写 v<N>/manifest.json（tmp + rename 原子）
+6. append index.journal → 更新 L1 内存索引
+7. 返回 artifact_id / version / version_id
+8. 触发 SSE reload（若该 artifact 的预览正打开）
 ```
+
+**失败原子性**（任一步失败都不能留下半成品）：
+
+| 失败点 | 回滚动作 |
+|---|---|
+| 步骤 5 写 blob 失败 | 已写的 blob 保留（内容寻址，可被后续引用），**不建版本目录** |
+| manifest 写失败 | 删除 `v<N>/` 临时目录，`Latest` 不变 |
+| journal append 失败 | 版本已落盘但索引未更新 → 下次启动回放时由**目录扫描补偿**（仅启动时，不在请求路径） |
+
+> 目录扫描补偿是 O(n) 的，所以**只在启动时且仅当 journal 校验失败**才触发；
+> 请求路径永远不扫目录（§5.6 禁令 1）。
 
 ### 6.4 `artifact_edit` 的冲突语义
 
@@ -610,6 +628,22 @@ func previewSig(secret []byte, wsKey, id string, v int, p string) string {
 > 第 7 条是自定义协议"独立 origin"的等价物：`sandbox` 无 `allow-same-origin` 时，
 > iframe 获得**不透明 origin**，同样无法读写宿主 DOM/存储。
 > 代价：不透明 origin 下 `localStorage` 不可用——这正好符合"预览页不持久化任何东西"的定位。
+> 连带约束：`postMessage` 的 `targetOrigin` 只能传 `"*"`（不透明 origin 无法匹配具体 origin），
+> 因此**安全性完全依赖 MessageChannel 的 nonce 校验**（§7.1），不能再靠 origin 比对。
+
+### 10.5 服务生命周期与硬限制
+
+| 项 | 规则 |
+|---|---|
+| 端口分配 | `net.Listen("tcp","127.0.0.1:0")`；**冲突不可能**（内核分配），但端口耗尽需重试 3 次后报错 |
+| 启动时机 | 首个产物 publish 时懒启动；无产物不占端口 |
+| 关闭 | 应用退出 / 工作区关闭时 `Close()`；SSE 连接全部断开，等待 ≤2s 后强制 |
+| 单连接超时 | 读写各 15s；SSE 心跳 20s（`: ping`） |
+| SSE 并发上限 | 每 artifact 最多 4 条连接，超出返回 429 |
+| 单文件响应上限 | **50MB**；超出 413（与 `TOO_LARGE` 对齐） |
+| Range 请求 | **Phase 1 不支持**，返回 200 全量；视频/大二进制请走导出 |
+| HTML 注入上限 | 单页 **2MB**；超出则跳过 `data-src` 注入（只注入 Inspector），并在响应头 `X-Artifact-Injected: partial` |
+| 页面自带 CSP | 若页面 `<meta http-equiv="Content-Security-Policy">` 禁 `script-src 'self'`，注入的 Inspector 会被拦 → 响应头标记 `X-Artifact-Inspector: blocked`，前端禁用选区并提示（**预览本身仍可用**） |
 
 ---
 
@@ -656,6 +690,47 @@ func (s *Store) lockID(id ArtifactID) func() {
 | 单产物文件数 | 50 | 截断，`warnings` 里说明 |
 | 单文件字节 | 50MB（导出）/ 1MB（`artifact_create` 语义，本期不启用） | `TOO_LARGE` |
 | 单产物总字节 | 200MB | `TOO_LARGE` |
+
+### 11.4 每个工具的 CodeMode 形态（**全部可编排**）
+
+CodeMode 脚本内可直接调用下列工具。**脚本拿到的是对象，不是 JSON 字符串**（§11.1 #2）。
+
+| 工具 | 脚本内名 | 返回（对象） | CodeMode 专有限制 | 降级行为 |
+|---|---|---|---|---|
+| `artifact_publish` | `artifact_publish` | `{artifact_id, version, version_id, files, total_bytes}` | 默认 `auto_open=false`（脚本内不抢用户视线） | 失败抛 `PublishError`，脚本可捕获 |
+| `artifact_promote` | `artifact_promote` | 同上 | 同上 | 同上 |
+| `artifact_edit` | `artifact_edit` | `{version, version_id}` | `base_version` 必填；persistent 写锁 | 冲突抛 `VersionConflict{current, hint}` |
+| `artifact_export` | `artifact_export` | `{path, warnings[]}` | 单次 ≤ 50MB；不支持 Range | `UNSUPPORTED` 抛 `ExportError` |
+| `source_get` | `source_get` | `{snippet}` | `context_lines ≤ 20` | `OUT_OF_RANGE` 抛错 |
+| `source_find` | `source_find` | `{candidates[]}` | 最多 5 条 | 返回空数组，不抛 |
+| `preview_screenshot` | `preview_screenshot` | `{blob_ref, bytes, width, height}` | **降级为元信息**（脚本里不返回二进制，只给 `blob_ref` 与尺寸） | 超时抛 `RenderTimeout` |
+| `preview_inspect` | `preview_inspect` | `{node}` | `outer_html ≤ 8KB` | `NODE_GONE` 抛错 |
+
+**脚本调用示例**：
+
+```python
+# CodeMode 脚本内
+r = artifact_publish(entry="artifacts/dashboard/index.html", title="Dashboard v2")
+print(r.artifact_id, r.version)          # 对象属性，不是 r["artifact_id"]
+
+# 批量导出：失败可捕获，不中断后续
+for fmt in ["html", "pdf"]:
+    try:
+        e = artifact_export(artifact_id=r.artifact_id, format=fmt)
+        log(e.path, e.warnings)
+    except ExportError as ex:
+        log("skip", fmt, ex.code)
+```
+
+**四条 CodeMode 硬约束**：
+
+1. **per-artifact 串行**：同一 `ArtifactID` 上的 publish/edit 由 `Store.perID` 锁串行（§11.2）。
+2. **不自动打开**：脚本内 `auto_open` 默认 `false`，避免脚本批量发布时把用户界面刷爆。
+3. **错误以异常暴露**：脚本语言需要 `try/except`；错误码在 `ex.code`。
+4. **`preview_screenshot` 降级**：脚本不接收二进制，只拿 `blob_ref`（避免脚本上下文塞满 base64）。
+
+> 为什么必须支持 CodeMode：Agent 常需要"生成 5 个页面 → 逐个 publish → 导出 PDF"这类批量流程，
+> 走模型逐个工具调用会消耗 10+ 次往返；脚本一次调用即可。
 
 ---
 
@@ -967,8 +1042,9 @@ openHtmlInBrowser(path: string): void
 artifactPreview(artifactId: string, version?: number): Promise<boolean>
 ```
 
-实现插在 `:12720 openHtmlInBrowser` 之后，调用 `bridge?.artifactPreview({artifact_id, version})` 拿
-URL，再复用既有 `web` 标签打开。
+实现插在 `:12720 openHtmlInBrowser` 之后：调用 `bridge?.artifactPreview({artifact_id, version})` 拿
+短期 URL，然后按 §14.11 打开/复用 **`kind:"artifact"`** 标签（不是 `web` 标签——
+`artifact` 标签只持久化 `{artifactId, version}`，URL 每次重签）。
 
 #### F2 `desktop/app/src/components/ArtifactCard.tsx:149-155` —— 主按钮改走预览宿主
 
@@ -1066,6 +1142,56 @@ func resolveDeps(root, entryRel string) (files map[string]string, err error) {
 }
 ```
 
+#### N2 `artifacts/store.go` —— 索引与日志（D1 文件方案的核心）
+
+```go
+// artifacts/store.go
+type Store struct {
+    dir    string                    // <ws>/.artifacts
+    mu     sync.RWMutex
+    byID   map[ArtifactID]*Artifact
+    byWS   map[string][]ArtifactID            // wsKey → 产物列表
+    byPath map[string]ArtifactID              // wsKey + "\x00" + relPath → id（⚠️ 必须含 wsKey）
+    perID  map[ArtifactID]*sync.Mutex         // per-artifact 串行写（§11.2）
+    jw     *journalWriter                     // 追加日志，批量 fsync（200ms 或 64 条）
+    lru    *lruCache                          // 64MB blob 缓存
+    lock   *os.File                           // .artifacts/LOCK（flock，防跨进程并发写）
+}
+
+// Open 启动加载：读 index.json 快照 → 回放 index.journal → 必要时目录补偿。
+// 只读打开（flock 失败）时 writable=false：预览可用，publish 返回 READONLY。
+func Open(dir string) (s *Store, err error)
+
+// Put 写入一个新版本：校验 → 幂等短路 → blob（跳过已存在）→ manifest 原子写 → journal append → 更新 L1。
+func (s *Store) Put(wsKey string, v *ArtifactVersion, files map[string][]byte) (Artifact, error)
+
+func (s *Store) Get(id ArtifactID) (*Artifact, bool)            // L1，O(1)
+func (s *Store) ByPath(wsKey, rel string) (ArtifactID, bool)    // L1，O(1)
+func (s *Store) List(wsKey string) []Artifact                   // L1，O(k)
+func (s *Store) Blob(hash string) ([]byte, error)               // 先 LRU，未命中再读 blobs/<h[0:2]>/<h>
+func (s *Store) CompactIfNeeded()                               // journal 行数 > 4096 → 快照 + 清空
+func (s *Store) GC(retain int)                                  // 后台：保留最近 retain 版 + 被引用版；单次 ≤200ms，可中断
+func (s *Store) Close() error                                   // 关 flock、flush journal
+```
+
+**journal 记录格式与崩溃恢复**（写一半的行必须能识别）：
+
+```
+{"op":"put","id":"art_3f9a2c1b","ws":"ws_a1b2","path":"artifacts/landing/index.html",
+ "v":3,"vid":"9c1e…","ts":1795155351067}
+```
+
+```
+回放算法：
+  for each line:
+      if !json.Valid(line) → 视为「崩溃时写了一半」，truncate 到上一行末尾并停止回放
+      apply(line)
+  若 journal 存在但无任何有效行且目录非空 → 触发一次目录补偿（仅启动时，O(n) 可接受）
+```
+
+> 三个关键点：**① 键含 wsKey**（防进程内串台）；**② 尾行截断**（崩溃恢复）；
+> **③ 只在启动时允许 O(n)**（请求路径永远 O(1)）。
+
 #### N9 `desktop/bridge/artifact_commands.go`
 
 ```go
@@ -1093,6 +1219,7 @@ func (m *manager) dispatchArtifact(c command) bool {
 
 | # | 文件:行 | 类型 | 一句话 | 依赖 |
 |---|---|---|---|---|
+| N2a | `artifacts/store.go`（新增） | 新增 | L1/L2/L3 索引 + journal 回放与压缩 | — |
 | M1 | `agents/artifacts.go:32` | 新增常量 | 快照阈值 | — |
 | M2 | `agents/artifacts.go:64` | 改 + 新方法 | 子 agent 产物继承 | M7 |
 | M3 | `agents/artifacts.go:183` | 改语义 | 噪声打标不丢弃 | — |
@@ -1316,11 +1443,125 @@ AST 改写（`ts-morph`：定位 JSX 字面量/className，改节点后回写）
   └─ 不满意 → 回滚到上一版本（版本目录本就不可变，回滚=指回旧 VersionID）
 ```
 
+### 14.9 选择方式矩阵（8 种触发 → 8 类引用）
+
+用户在预览页上把内容"选出来引用给 Agent"，支持以下方式。**每种方式都有明确的 kind 与手势**：
+
+| # | 交互方式 | 触发 | Inspector 行为 | 产出 kind | Chat 里显示 |
+|---|---|---|---|---|---|
+| 1 | **单击元素** | 左键单击 | capture 阶段拦截、`preventDefault`；语义提升后上报 | `element` | 图标 `</>` + 标签名或文本前 24 字 |
+| 2 | **多选（追加）** | `Shift` + 单击 | 加入集合；≤20，超出 `truncated` | `elements` | 图标 ⧉ + 「N 个元素」 |
+| 3 | **层叠循环** | `Alt` + 单击同一点 | `elementsFromPoint` 轮换上层/下层 | `element` | 同上（每次替换当前选中） |
+| 4 | **框选（有 DOM）** | 在页面空白或内容上拖矩形 | 默认「完全包含」；`Alt` 拖 = 「相交」；LCA 判组 | `elements` | 图标 ⧉ + 「N 个元素」 |
+| 5 | **框选（无 DOM）** | 在 canvas / 跨域 iframe / closed shadow DOM 上拖 | 采样 `elementsFromPoint`，仅存 rect 与候选 | `region` | 图标 ▭ + 区域尺寸 + 截图缩略 |
+| 6 | **文字选区** | 拖选文字后松手 | 取 `Range`，记录起止与所属节点 | `text` | 图标 " " + 引用文本前 24 字 |
+| 7 | **批注** | 右键 →「批注」→ 输入意见 | 锚点绑定 selector，位置回退 rect | `comment` | 图标 ✎ + 意见文本 |
+| 8 | **整页/画板** | 工具栏「引用整页」或 `Cmd/Ctrl+A` | —— | `page` | 图标 ▤ + 页面标题 |
+
+**键盘与快捷键**（与终端保持一致的手感）：
+
+| 键 | 行为 |
+|---|---|
+| `Enter` | 引用当前选中（覆盖 chip 里的现有同源引用） |
+| `Shift` + `Enter` | 追加到已有引用 |
+| `Esc` | 取消选中 / 关闭浮动输入框 |
+| `Cmd/Ctrl` + `Shift` + `Enter` | 引用当前屏幕（无 DOM 时退化为 `region` 全屏） |
+| `↑` / `↓`（选中时） | 面包屑上溯父节点 / 下钻子节点 |
+| `Alt`（悬停时） | 显示层叠节点列表 |
+
+**触控（移动端 / 触控板）**：
+
+| 手势 | 行为 |
+|---|---|
+| 长按 400ms | 同「单击元素」 |
+| 双击 | 进入层叠循环（等价 `Alt`+单击） |
+| 双指缩放 | 画布缩放（在 `region` 模式下改为框选缩小） |
+| 三指下滑 | 引用当前屏幕 |
+
+**上限与去重**：
+
+- 单次发送最多 **8** 个引用；超出 toast「最多引用 8 个选区」
+- 去重键 `(artifact_id, version_id, kind, selector|range|rect)`；重复选择**替换**而非叠加
+- 单引用 payload ≤ **2KB**（`outer_html` 截断、`text ≤ 300 字`），超出在 chip 上标「已裁剪」
+
+### 14.10 从页面引用到 Agent Chat 的完整链路
+
+```
+① 用户在上面任一方式选中
+     Inspector → selection.changed（临时高亮，尚未提交）
+② 用户按 Enter / 点「引用」
+     Inspector → selection.commit{refs}
+     Host：建 SelectionRef（裁剪 ≤2KB、带 version_id、生成 label）
+③ Chat Composer 出现 chip
+     [</> Hero 标题 ×]  [▭ 区域 320×180 ×]
+④ 用户输入指令 → 发送
+⑤ 发送时（main.go CmdAsk 分支，见 M10）
+     chips → 按 created_at 升序拼 <selection> 块 → 前置到 <user_instruction>
+⑥ 发送后
+     chips 清空；refs 标记 sent（同一版本内不重复注入）
+     引用仍留在会话历史，可再次引用（重新生成 ref，新 version_id）
+⑦ 版本变化
+     旧 ref 标「已过期」→ 发送前提示「将按新版本重定位」或「选区已失效」
+```
+
+**chip 的交互细则**：
+
+| 操作 | 行为 |
+|---|---|
+| hover | 浮层显示来源（产物名 + 版本 + `data-src` 路径）与 payload 预览 |
+| 点 `×` | 移除该引用 |
+| 「清空全部」 | 移除所有引用（不影响已发送的历史） |
+| 点击 chip 主体 | 在预览里**高亮并滚动到**该元素（locate 操作） |
+| 引用超 2KB 被裁剪 | chip 尾部标「已裁剪」，hover 显示原始大小 |
+
+> 为什么用 chip 而不是"在输入框里插入文本"：文本插入会让用户误以为可以编辑选区内容，
+> 而选区是**不可编辑的数据**；chip 的"不可编辑、可删除"语义更准确（沿用终端引用同一套组件）。
+
+### 14.11 右栏自动展开（publish 触发）
+
+**契约**：`artifact_publish` 成功 → **自动展开右侧边栏 + 切到该产物的预览标签**。
+
+| 环节 | 实现 |
+|---|---|
+| 触发 | `artifact_publish` 返回前发 `artifact.ready{artifact_id, version, url}` |
+| 标签 | 新增标签类型 `kind:"artifact"`（只持久化 `{id, kind, artifactId, version}`；URL 每次重新签名生成，**不落盘**） |
+| 复用 | 同 `artifactId` 已有标签 → 原地切到该标签并刷新，**不新建** |
+| 展开 | `setRightExpanded(true)`；已展开则只切标签 |
+| 不抢焦点 | 不动左栏、不滚动主对话、不抢输入框焦点（用户正在打字时不打断） |
+| 用户手动关过 | 同一 artifact 后续版本不再自动开（记 `dismissed: true`，卡片点击可重置） |
+| 开关 | `artifact.autoOpenPanel` 默认 `true`；关闭后只发事件、卡片显示"有新版本" |
+| 批量 publish（CodeMode） | 默认 `auto_open=false`，只开**最后一次**（见 §11.4） |
+
+> 为什么选"自动展开"：publish 的语义就是"我给用户看这个"。不展开等于把成果藏起来，
+> 用户还得自己去找。但**只在应用内展开**，不碰外部浏览器（§19.4）。
+
+### 14.12 预览标签的状态机与兜底
+
+```
+idle ──打开──► loading ──ready──► live ──失败/超时──► failed
+                  │                 │
+                  └──超时(10s)──────┴─► failed（带原因 + 重试按钮）
+
+live 的子状态：
+  · inspector-blocked（页面 CSP 拦截注入）：预览可用、选区禁用、底部条提示
+  · stale（有新版本未刷新）：标签显示"有新版本"小点，点击刷新
+```
+
+| 状态 | UI | 兜底 |
+|---|---|---|
+| `loading` | 骨架 + 「正在准备预览…」 | 10s 超时 → `failed` |
+| `live` | 页面 | — |
+| `failed` | 错误文案 + 「重试」+ 「在浏览器打开」 | 重试重签 URL；仍失败提供导出源码路径 |
+| `inspector-blocked` | 页面 + 底部条 + 选区按钮置灰 | 提示改用 `source_get` 或源码面板 |
+| `stale` | 页面 + 角标 | 点角标或等 SSE 自动刷新 |
+
+
+
 ---
 
 ## 15. 自检闭环（Verifier）
 
-### 15.1 检查项（固定 6 项）
+### 15.1 检查项（固定 7 项）
 
 | # | 检查 | 判定 |
 |---|---|---|
@@ -1329,15 +1570,22 @@ AST 改写（`ts-morph`：定位 JSX 字面量/className，改节点后回写）
 | 3 | 失败请求（4xx/5xx 或网络错误） | 任一 → 失败 |
 | 4 | 空白页 | `document.body.innerText.trim() == "" && 无可见元素` → 失败 |
 | 5 | 横向溢出 | `documentElement.scrollWidth > clientWidth + 2` → 告警（不阻断） |
-| 6 | 双视口截图 | 桌面 1280×800、移动 390×844，各一张（≤1MB） |
+| 6 | 文字对比度 | 抽样 20 个可见文本节点，`contrast(text, bg) < 4.5:1` 的占比 > 20% → 告警 |
+| 7 | 双视口截图 | 桌面 1280×800、移动 390×844，各一张（≤1MB） |
+
+> 对比度只做**告警**不做失败：设计类产物本就可能用低对比配色，硬拦会误伤。
+> 检测方式：读 `getComputedStyle` 的 `color`/`backgroundColor`，向上回溯到第一个非透明背景。
 
 ### 15.2 循环规则
 
 ```
-AgentEnd → Verifier 加载
+AgentEnd 且本轮**有 versioned artifact**
   ├─ 全通过 → artifact.ready
-  └─ 有失败 且 round < 2 → verify.report 回灌 Agent → 回到 loop（Agent 自动修）
-        └─ round == 2 仍有失败 → 仍发 artifact.ready，但带 warnings（不静默丢弃）
+  ├─ 有失败 且 round < 2 → verify.report 回灌 Agent → 回到 loop（Agent 自动修）
+  └─ round == 2 仍有失败 → 仍发 artifact.ready，但带 warnings（不静默丢弃）
+
+AgentEnd 但本轮**无 artifact**（只有文件清单卡片 / 未达判定阈值）
+  └─ 跳过自检（无入口页可加载），行为与现状一致
 ```
 
 ### 15.3 实现位置与依赖
@@ -1378,6 +1626,7 @@ AgentEnd → Verifier 加载
 | 5 | 单文件上限 **50MB**，超出 `TOO_LARGE` |
 | 6 | PDF 前等待字体与图片加载完成，冻结动画；渲染窗口 sandbox，不执行 Node 能力 |
 | 7 | 导出前先跑自检闭环；失败则写进 `warnings`，**不静默输出空文件** |
+| 8 | 输出目录固定为 `<ws>/.artifacts/exports/`，文件名 `<title>-<versionShort>.<ext>`；返回**绝对路径**给调用方 |
 
 ---
 
@@ -1455,14 +1704,30 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 | 需要构建的项目（Vite/Next） | **不自动起 dev server**，先让用户确认；只自动打开纯静态产物 |
 | 远程 / 容器内 Agent | 本地服务不可达：要么端口转发，要么把变更文件同步到本机再起服务 |
 
-### 19.4 打开策略
+### 19.4 打开策略（区分「应用内」与「外部」）
 
-| 项 | 规则 |
-|---|---|
-| `autoOpen` | `always / ask / never`，默认 `ask` |
-| 并发 | 一次运行最多自动打开**一个**标签页 |
-| 无头环境 | CI / 无显示 → 跳过打开，只发事件 |
-| 入口变化 | 只推新的 `artifact.ready` 并在 UI 提示，**不强行跳转**用户当前标签 |
+| 场景 | 行为 | 可配置 |
+|---|---|---|
+| **publish 成功 → 应用内右栏** | 自动**展开右侧边栏**并切到该产物的预览标签（同一 artifact 复用已有标签） | `artifact.autoOpenPanel`，默认 `true` |
+| 外部浏览器打开 | 默认 **不自动**，卡片上点「在浏览器打开」 | `artifact.autoOpenExternal`，默认 `false` |
+| 一次运行多个产物 | 只自动打开**最后一个 publish 的**入口；其余留在卡片里 | — |
+| 入口变化（同 id 新版本） | 已有标签原地刷新（SSE），**不新建标签、不抢焦点** | — |
+| 用户手动关闭了该标签 | 同一 artifact 后续版本**不再自动打开**（尊重用户意图，直到卡片再次点击） | — |
+| 无头 / CI | 跳过所有自动打开 | — |
+
+> 关键区分：**右栏展开是应用内行为**（用户的注意力本来就在应用里，展开是"把成果递到手边"）；
+> **外部浏览器是会抢焦点的行为**（可能打断用户在别的窗口的工作），所以默认关。
+
+### 19.5 交互反馈（用户始终知道发生了什么）
+
+| 时刻 | 用户看到 | 实现 |
+|---|---|---|
+| publish 开始 | 右栏展开 + 标签显示 loading（`正在准备预览…`） | `artifact_preview` 返回前先插标签 |
+| 预览就绪 | loading 消失，页面可交互；标签标题 = `title` | SSE `ready` |
+| 自检失败 | 页面照常显示 + 顶部细条「自检发现 N 个问题，已自动修复」/「仍有问题」 | `verify.report` 摘要 |
+| 注入被 CSP 拦 | 底部条「页面限制了脚本注入，选区暂不可用」+ 选区按钮置灰 | `X-Artifact-Inspector: blocked` |
+| 选区成功 | Composer 出现 chip（带 kind 图标 + 标签 + 来源） | §14.10 |
+| 引用超限 | toast「最多引用 8 个选区」 | 上限保护 |
 
 ---
 
@@ -1534,8 +1799,8 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 
 | # | 交付 | 依赖 | 验收 | 预估 |
 |---|---|---|---|---|
-| P0 | N1+N2+N3（版本库） | — | 哈希稳定 + wsKey 隔离测试绿 | 3d |
-| P1 | N10+N11+N12（预览宿主） | P0 | 入口页与全部依赖 200；注入只在响应 | 4d |
+| P0 | N1+N2+N3（版本库 + **索引与日志**：L1/L2/L3 + journal 回放与压缩） | — | 哈希稳定；`(wsKey,relPath)` 隔离；**崩溃回放**（写一半的 journal 行被丢弃）；写放大不随总量增长 | 4d |
+| P1 | N10+N11+N12（预览宿主） | P0 | 入口页与全部依赖 200；注入只在响应；端口冲突自动重试 | 4d |
 | P2 | N8+N9 + M7+M8+M9（工具面与命令） | P0 | `artifact_publish` 后版本 +1 | 3d |
 | P3 | N6+N7 + M1/M3/M5/M6（快照与判定） | P0 | bash 产出能被发现；评分边界齐 | 3d |
 | P4 | N13+N14 + M10/M11（选区与守卫） | P1 | 引用注入正确；越界写入被拒 | 5d |
@@ -1564,6 +1829,9 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 | R10 | `ArtifactsBlock` 只改渲染 | 「只有 bundle」的轮次整块消失 | 空判同时看 `bundles?.length` | 组件测试 |
 | R11 | 快照只看 mtime+size | 同大小快速改写被漏 | 小文件补内容 hash | 单测：mtime 变即捕获 |
 | R12 | 归因路径未归一 | 产物来源全部落成 shell | `displayPath` 统一 `filepath.ToSlash` | 单测：Windows 分隔符 |
+| R13 | **跨进程并发写**（两个应用实例打开同一工作区） | journal 行交错、版本号重复 | `.artifacts/LOCK` 文件锁（`flock`）：首个实例独占写；第二个实例**只读打开**（预览可用，publish 返回 `READONLY`） | 双进程集成测试 |
+| R14 | 页面自带 CSP 阻断 Inspector 注入 | 选区不可用 | 响应头 `X-Artifact-Inspector: blocked` → 前端禁用选区并提示；**预览本身不受影响** | 带 CSP 的 fixture 页 |
+| R15 | 入口改名/移动 | `ArtifactID` 变化，旧产物残留 | 文档化为既定行为（改名即新产物）；旧产物仍可打开，不自动迁移 | 改名后 publish 生成新 id |
 
 ---
 
@@ -1630,3 +1898,39 @@ if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
 ---
 
 _文档结束。实现与本文不一致处，必须回写本文对应章节。_
+
+---
+
+## 26. 修订记录（含本轮自审修复）
+
+| 版本 | 变更 | 触发 |
+|---|---|---|
+| v2.0 | 首版：五硬伤、架构、协议 A/B/C/D、判定四层、P0–P8 | 初始需求 |
+| v2.1 | 收敛为唯一文档：吸收元设计、历史 §21–§24、实施清单、代码片段；补自检闭环 / 导出规范 / 画布与 Design type / 两条修改路径 / 落点表 / React 规则；§12 改为文件:行级 | 「只保留 V2 一份」+「不要含糊、要文件行号」 |
+| v2.2 | 决策落定：D1 文件存储（新增 §5.6 三层索引）、D2 统一 HTTP（§10.4 八条加固）、D3 Phase 1 仅静态资源；另定 13 项实施参数（§24.1） | 用户拍板 |
+| v2.3 | **本轮自审修复 10 处**（见下表） | 「再来一次 Review，确保细节到位」 |
+
+| v2.4 | **补齐四类交互契约**：① 用户交互（§14.9 八种选择方式矩阵 + §14.10 引用到 Chat 全链路 + §14.12 标签状态机 + §19.5 反馈）；② 与 Agent 交互（8 种选择 → 8 类 kind 的映射与快捷键/触控手势）；③ publish 自动展开右栏（§14.11 + §19.4 区分应用内/外部）；④ 新工具全部可进 CodeMode（§11.4 逐工具形态 + 四条硬约束） | 用户追加要求 |
+
+### 26.1 v2.3 修复清单
+
+| # | 问题 | 严重度 | 修复 |
+|---|---|---|---|
+| 1 | **L1/L2 索引键只有 `relPath`** | 🔴 真 bug | 改为 `wsKey + "\x00" + relPath`（同一进程多工作区会串台，是 R1 的进程内形态） |
+| 2 | 工具清单标题写「8 个」但表内 9 行 | 🟠 不一致 | 标题改「9 个；Phase 1 交付 8 个」 |
+| 3 | 自检缺**文字对比度**（元设计明确要求） | 🟠 漏项 | 加为第 6 项（告警级，不阻断），共 7 项 |
+| 4 | P0 未包含索引/日志与崩溃回放 | 🔴 计划缺口 | P0 加「L1/L2/L3 + journal 回放与压缩」，验收加「崩溃回放、写放大不随总量增长」，3d→4d |
+| 5 | `artifact_publish` 重复调用会刷版本号 | 🟠 语义缺失 | 加步骤 3.5 幂等短路（同 `VersionID` 直接返回现有版本） |
+| 6 | 失败原子性未定义（可能留半版本） | 🔴 正确性 | 新增失败回滚表；明确「目录补偿只在启动时」 |
+| 7 | 预览服务生命周期与硬限制缺失 | 🟠 实施会卡 | 新增 §10.5（端口/懒启动/关闭/超时/SSE 上限/50MB/Range/2MB 注入上限/页面自带 CSP） |
+| 8 | 沙箱 iframe 不透明 origin 下 `postMessage` 约束未写 | 🟠 易踩 | §10.4 补明：`targetOrigin` 只能 `"*"`，安全性完全依赖 MessageChannel nonce |
+| 9 | 跨进程并发写、CSP 阻断注入、入口改名未登记 | 🟠 未覆盖 | §22 新增 R13/R14/R15 及其验证方式 |
+| 10 | 导出输出目录与命名未定 | 🟠 实施会随意发挥 | §16.2 第 8 条：固定 `<ws>/.artifacts/exports/`，返回绝对路径 |
+| 11 | 无 artifact 时是否跑自检未定义 | 🟡 边界 | §15.2 明确：无 versioned artifact 则跳过 |
+
+### 26.2 结论
+
+- **一致性**：章节编号无重复；交叉引用（§5.5/§5.6/§10.4/§13.4/§15.1/§24）均存在；无「待拍板」「待评审冻结」等悬空状态。
+- **可实施性**：§12 每条改动均给出 `文件:行 → 现状 → 改为`，新增文件给可编译骨架（含索引与 journal 的崩溃恢复算法）。
+- **已知剩余风险**：性能数字（启动 ≤150ms、写放大 ≤3 文件）是按结构推导的量级估算，**未做压测**；
+  P0 落地后应以真实 1k/1w 产物数据集复测，若偏差 > 2 倍则回到本节记录并调整索引策略。
