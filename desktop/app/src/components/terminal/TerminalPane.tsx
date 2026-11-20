@@ -366,7 +366,7 @@ export function TerminalPane({ tabId, ptyId }: { tabId: string; ptyId: string })
                 'echo ".zshrc     : $([ -r ~/.zshrc ] && echo 存在 || echo 缺失)   .zprofile: $([ -r ~/.zprofile ] && echo 存在 || echo 缺失)"',
                 'echo ".p10k.zsh  : $([ -r ~/.p10k.zsh ] && echo 存在 || echo 缺失)   ZSH_THEME: ${ZSH_THEME:-（未设置）}"',
                 'echo "p10k 已加载: $(typeset -f p10k >/dev/null 2>&1 && echo yes || echo no)"',
-                'echo "字体(私用区): \\uE0B0 \\uF126 （若显示为方框=缺 Nerd Font）"',
+                'echo "字体(私用区):   （若显示为方框=缺 Nerd Font）"',
                 'echo "── 完 ──"',
               ].join('; ')
               sendRef.current(script + '\n')
