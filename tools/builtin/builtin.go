@@ -294,6 +294,11 @@ func (f *FileTools) resolveFor(ctx context.Context, raw string, op PathOp) (stri
 	return p, nil
 }
 
+// WorkdirState 暴露本工具集使用的会话级 cwd 状态（tools.WorkdirAware）。
+//
+// 装配层用它证明「bash / 文件工具 / run_python 共用同一份」—— 见 tools.WorkdirAware。
+func (f *FileTools) WorkdirState() *workdir.State { return f.wd }
+
 // cwd 当前工作目录（**会话级**）：有 workdir 状态时按调用方分区取；否则 = 工作区根。
 func (f *FileTools) cwd(ctx context.Context) string {
 	if f.wd != nil {

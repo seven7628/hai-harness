@@ -144,6 +144,34 @@ const (
 	maxRunPythonOutputs = 10
 )
 
+// runPythonDescription 是 run_python 的描述正文（**不含**工作目录那一行）。
+//
+// ⚠️ 别在这里写"当前目录"：那一行是**每请求重算**的（见 DescribeFor），写死就等于
+// 告诉模型一个过期的目录（与 bash 的 bashDescription 同一口径）。
+const runPythonDescription = "Execute a Python script and return its output (stdout+stderr merged). This is the execution channel for office documents and data work: python-docx, openpyxl, python-pptx, pypdf, pypdfium2 and mammoth are preinstalled. " +
+	"The interpreter is fixed (you cannot choose a binary or command-line switches) and the script runs inside the OS sandbox with the working directory set to the session's current working directory (the workspace root until the session changes it); under the default policy the workspace, $HOME and /tmp are writable, go-code's own config directory (~/.go-code, except its managed plugins/ and runtime/ subtrees) is denied for read and write, and writes to any other host path are rejected — but that policy does not cover credential files under $HOME (e.g. ~/.ssh/.aws) unless the user listed them in sandbox.sensitive_paths, so never read or copy them. Obviously destructive literals (wiping the workspace, home or root itself) are rejected before execution. " +
+	"Network access must not be assumed: outbound connections follow the same host policy as bash (currently allowed), but nothing guarantees reachability — do not design a task around downloads, and do not run pip install on your own. Python can still call subprocess internally, so treat this as a policy boundary rather than a hard isolation. " +
+	"PROCESS LIFETIME: processes the script leaves behind (including subprocesses) are killed when it finishes; for anything that must keep running, start it from bash with run_in_background. " +
+	"Provide exactly one of script (source) or script_path (a .py file in the workspace). script is written to a temporary file that is deleted after the run, so write outputs with paths relative to the working directory (the current one), not next to the script. " +
+	"Declare what the script writes in outputs (up to 10 paths resolved against the working directory, or absolute, most important first): the declared files that exist after the run are reported to the user as this run's artifacts, and the result tells you which declared paths did not materialize. List only files this call writes — not inputs, not files you merely read. " +
+	"The first call can take minutes while the managed runtime installs itself (tens of MB, one time only; the venv measures about 70 MB)."
+
+// runPythonDescribe 拼工具描述：固定格式 + 该调用方当前的工作目录。
+//
+// 为什么 cwd 也要出现在 run_python 的描述里（bash 之外第二个 D' 载体）：
+// 脚本的工作目录**同时是** outputs / script_path 的相对路径锚点，而锚点会随 cd 变
+// ——「产物落在哪」对模型就是隐式信息。写进每条请求都重算的 schema 后，模型不必
+// 回翻 bash 的回执就知道相对路径落在哪（§15.2 的载体取舍，与 bashDescribe 同款）。
+//
+// cwd 为空（NewRunPythonTool("") 这类没有工作区的退化装配）⇒ 不输出那行，
+// 免得给模型一条 "Working directory: " 的空事实。
+func runPythonDescribe(cwd string) string {
+	if cwd == "" {
+		return runPythonDescription
+	}
+	return "Working directory: " + cwd + "\n" + runPythonDescription
+}
+
 // NewRunPythonTool 创建 run_python 工具。
 // workspace = 工作区根（cwd + script_path 相对路径锚点，与 FileTools 同口径）。
 // py = 受管运行时（nil = 未装配，调用时返回可恢复的结构化错误，不 panic）。
@@ -151,20 +179,14 @@ const (
 func NewRunPythonTool(workspace string, py PythonRuntime, sbx sandbox.Sandbox) *RunPythonTool {
 	return &RunPythonTool{
 		BaseTool: tools.BaseTool{
-			Name_: "run_python",
-			Description_: "Execute a Python script and return its output (stdout+stderr merged). This is the execution channel for office documents and data work: python-docx, openpyxl, python-pptx, pypdf, pypdfium2 and mammoth are preinstalled. " +
-				"The interpreter is fixed (you cannot choose a binary or command-line switches) and the script runs inside the OS sandbox with the working directory set to the session's current working directory (the workspace root until the session changes it); under the default policy the workspace, $HOME and /tmp are writable, go-code's own config directory (~/.go-code, except its managed plugins/ and runtime/ subtrees) is denied for read and write, and writes to any other host path are rejected — but that policy does not cover credential files under $HOME (e.g. ~/.ssh/.aws) unless the user listed them in sandbox.sensitive_paths, so never read or copy them. Obviously destructive literals (wiping the workspace, home or root itself) are rejected before execution. " +
-				"Network access must not be assumed: outbound connections follow the same host policy as bash (currently allowed), but nothing guarantees reachability — do not design a task around downloads, and do not run pip install on your own. Python can still call subprocess internally, so treat this as a policy boundary rather than a hard isolation. " +
-				"PROCESS LIFETIME: processes the script leaves behind (including subprocesses) are killed when it finishes; for anything that must keep running, start it from bash with run_in_background. " +
-				"Provide exactly one of script (source) or script_path (a .py file in the workspace). script is written to a temporary file that is deleted after the run, so write outputs with paths relative to the working directory (the current one), not next to the script. " +
-				"Declare what the script writes in outputs (up to 10 workspace-relative or absolute paths, most important first): the declared files that exist after the run are reported to the user as this run's artifacts, and the result tells you which declared paths did not materialize. List only files this call writes — not inputs, not files you merely read. " +
-				"The first call can take minutes while the managed runtime installs itself (tens of MB, one time only; the venv measures about 70 MB).",
+			Name_:        "run_python",
+			Description_: runPythonDescribe(workspace),
 			Params_: tools.Obj(map[string]any{
 				"script":      tools.Str("Python source code to execute (provide exactly one of script / script_path)"),
 				"script_path": tools.Str("Path to a Python script: relative to the current working directory (the workspace root until the session changes it), or absolute (provide exactly one of script / script_path)"),
 				"timeout":     tools.Map{"type": "number", "minimum": 1, "maximum": 3600, "default": 120, "description": "Script timeout in seconds (optional); default 120, range 1-3600"},
 				"outputs": tools.Map{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": maxRunPythonOutputs,
-					"description": "Files this script writes, most important first (up to 10; workspace-relative like out/report.xlsx, or absolute). Declared paths that exist after the run show up as this run's artifacts for the user; a line in the result reports the ones that did not materialize. List only files this call writes."},
+					"description": "Files this script writes, most important first (up to 10; relative to the current working directory like out/report.xlsx, or absolute). Declared paths that exist after the run show up as this run's artifacts for the user; a line in the result reports the ones that did not materialize. List only files this call writes."},
 			}),
 			CanParallel_: false, // 执行类工具：与 bash 一致不并行
 			ReadOnly_:    false, // 能写文件（脚本可落盘产物）
@@ -193,6 +215,23 @@ func NewRunPythonToolWithWorkdir(wd *workdir.State, py PythonRuntime, sbx sandbo
 	t.ft = NewFileToolsWithWorkdir(wd)
 	return t
 }
+
+// WorkdirState 暴露本工具使用的会话级 cwd 状态（tools.WorkdirAware）。
+func (t *RunPythonTool) WorkdirState() *workdir.State { return t.wd }
+
+// DescribeFor 按调用方给出描述（含**该调用方当前的工作目录**，实现 tools.ContextDescriber）。
+//
+// 必须按 ctx 取分区键：主 agent 与子 agent 各有自己的分区，脚本的相对路径锚点
+// （outputs / script_path）随之不同 —— 静态描述给不出正确的锚点。
+func (t *RunPythonTool) DescribeFor(ctx context.Context) string {
+	return runPythonDescribe(t.cwd(ctx))
+}
+
+// Description 静态版（无调用方上下文时用）：带构造时的目录（工作区根）。
+//
+// 引擎在工具实现 tools.ContextDescriber 时会优先用 DescribeFor(ctx)；
+// 这里给「没有调用方」的场景（工具清单展示、审批文案等）。
+func (t *RunPythonTool) Description() string { return runPythonDescribe(t.Cwd) }
 
 // cwd 脚本工作目录（会话级）：有 workdir 状态时按调用方分区取；否则 = 构造时的目录。
 func (t *RunPythonTool) cwd(ctx context.Context) string {

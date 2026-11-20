@@ -51,6 +51,16 @@ type BashTool struct {
 	mu     sync.Mutex
 	curCwd map[string]string // 当前工作目录，**按调用方分区**（见 cwdKey）；cd 命令成功后更新
 
+	// resetNotified 记录「该分区上一次的越界提示已经给过」。
+	//
+	// 为什么需要：越界会**重置**回根 ⇒ 分区 cwd 变回根，于是"再越界一次"看起来
+	// 与"从根第一次越界"完全一样。但两者对模型的信息量不同：
+	//   · 第一次越界 ⇒ 必须提示（模型以为自己在外面，其实被拉回来了）；
+	//   · 连续越界（中间没成功 cd 到根内任何地方）⇒ **再提示一遍是纯噪音**
+	//     （claude_s17 §17.5 的不变式：连续越界只提示一次）。
+	// 成功 cd 到根内目录 ⇒ 清标记（"真变化后再提示"）。
+	resetNotified map[string]bool
+
 	// wd 会话级 cwd 状态（nil = 用上面的实例内 curCwd，见 NewBashToolWithWorkdir）。
 	//
 	// 为什么两套并存：wd != nil（生产装配）时 cwd 记忆放在**共享**的状态里 ⇒
@@ -116,6 +126,39 @@ const bashModelSpillThreshold = bashModelOutputLimit
 // bashSpillDirPrefix 落盘目录前缀（os.MkdirTemp 在系统临时目录下建，见 ensureSpillDir）。
 const bashSpillDirPrefix = "hai-harness-bash-spill-"
 
+// bashDescription 是 bash 工具的描述正文（**不含**工作目录那一行）。
+//
+// ⚠️ 别在这里写"当前目录"：那一行是**每请求重算**的（见 DescribeFor），
+// 写死就等于告诉模型一个过期的目录。
+const bashDescription = "Execute a bash/shell command and return its output (including stderr). For file operations (read/search/edit/find files), prefer the dedicated tools (read_file/grep/edit_file/glob) — they return more refined results; use bash for command execution, builds, tests, git, and scripts. Keep a whole shell step in ONE call (commands joined with &&, loops, heredocs) rather than one command per call — and don't wrap a single command in a codemode script: a single-call script only adds a process spawn and hands the output back as JSON instead of text. The working directory persists across calls within this session: after a command like `cd /some/dir && make`, subsequent commands start in /some/dir (no need to re-cd); use `cd` to change it again, or use absolute paths to escape. Each command runs as an isolated process (env/state other than the directory does not persist). PROCESS LIFETIME: processes a command leaves behind are killed when it finishes. A trailing `&` or run_in_background: true starts a background process instead (it returns a pid and a log file, and survives later commands). Access outside the workspace via absolute paths still works (installed Python/Node/Go packages, desktop apps). High-risk commands (rm clearing, sudo, disk operations, curl|sh, etc.) are statically blocked — be explicit about the exact subdirectory when deleting; when approval is enabled, commands require user confirmation before running."
+
+// bashDescribe 拼工具描述：固定格式 + 该调用方当前的工作目录。
+//
+// 为什么 cwd 要放进**工具描述**（而不是靠一条额外消息）：
+//
+//	· 模型每个请求都看得到工具 schema ⇒ 这是**最稳的 cwd 载体**
+//	· 上下文压缩不动 schema ⇒ 压缩后模型仍然知道自己在哪
+//	· 会话恢复后每请求重算 ⇒ 恢复后不会拿着历史里的旧目录
+//	· 首轮就有 ⇒ 模型第一次 cd 之前就知道起点（不必先 cd 一次探路）
+func bashDescribe(cwd string) string {
+	return "Working directory: " + cwd + "\n" + bashDescription
+}
+
+// describe 本实例的描述（静态版：按构造 cwd = 工作区根）。
+func (t *BashTool) describe(cwd string) string { return bashDescribe(cwd) }
+
+// DescribeFor 按调用方给出描述（含**该调用方当前的工作目录**，实现 tools.ContextDescriber）。
+//
+// 必须按 ctx 取分区键：主 agent 与子 agent 各有自己的 cwd
+// （语义对齐 Claude Code：子 agent 不继承父级的 cd）。
+func (t *BashTool) DescribeFor(ctx context.Context) string {
+	cwd := t.Cwd
+	if t.wd != nil {
+		cwd = t.wd.Current(CwdKey(ctx))
+	}
+	return t.describe(cwd)
+}
+
 // NewBashTool 创建 bash 工具（FileTools.Tools() 默认注册）。
 // cwd 命令初始工作目录：推荐传工作区根 —— bash 相对路径与文件工具同锚（Current
 // Workspace 即命令真实起点）；绑定仅决定起点不锁访问面（命令内可 `cd 任意目录`、
@@ -127,20 +170,21 @@ func NewBashTool(cwd string, timeout time.Duration, sbx sandbox.Sandbox, appAllo
 	t := &BashTool{
 		BaseTool: tools.BaseTool{
 			Name_:        "bash",
-			Description_: "Execute a bash/shell command and return its output (including stderr). For file operations (read/search/edit/find files), prefer the dedicated tools (read_file/grep/edit_file/glob) — they return more refined results; use bash for command execution, builds, tests, git, and scripts. Keep a whole shell step in ONE call (commands joined with &&, loops, heredocs) rather than one command per call — and don't wrap a single command in a codemode script: a single-call script only adds a process spawn and hands the output back as JSON instead of text. The working directory persists across calls within this session: after a command like `cd /some/dir && make`, subsequent commands start in /some/dir (no need to re-cd); use `cd` to change it again, or use absolute paths to escape. Each command runs as an isolated process (env/state other than the directory does not persist). PROCESS LIFETIME: processes a command leaves behind are killed when it finishes. A trailing `&` or run_in_background: true starts a background process instead (it returns a pid and a log file, and survives later commands). Access outside the workspace via absolute paths still works (installed Python/Node/Go packages, desktop apps). High-risk commands (rm clearing, sudo, disk operations, curl|sh, etc.) are statically blocked — be explicit about the exact subdirectory when deleting; when approval is enabled, commands require user confirmation before running.",
+			Description_: bashDescribe(cwd),
 			Params_: tools.Obj(map[string]any{
-				"command": tools.Str("Command to execute (bash syntax)"),
-				"timeout": tools.Map{"type": "number", "minimum": 1, "maximum": 3600, "default": 300, "description": "Command timeout in seconds (optional); default 300, range 1-3600"},
+				"command":           tools.Str("Command to execute (bash syntax)"),
+				"timeout":           tools.Map{"type": "number", "minimum": 1, "maximum": 3600, "default": 300, "description": "Command timeout in seconds (optional); default 300, range 1-3600"},
 				"run_in_background": tools.Bool("Run the command as a background process and return immediately (optional; default false). Use it for anything that must keep running (dev server, watcher); it returns a pid and a log file, and survives later commands."),
 			}, "command"),
 			CanParallel_: false,
 		},
-		Cwd:      cwd,
-		Timeout:  timeout,
-		sbx:      sbx,
-		appAllow: appAllow,
-		curCwd:   map[string]string{},
-		spill:    newSpillStore(bashSpillDirPrefix),
+		Cwd:           cwd,
+		Timeout:       timeout,
+		sbx:           sbx,
+		appAllow:      appAllow,
+		curCwd:        map[string]string{},
+		resetNotified: map[string]bool{},
+		spill:         newSpillStore(bashSpillDirPrefix),
 	}
 	return t
 }
@@ -162,6 +206,12 @@ func NewBashToolWithWorkdir(wd *workdir.State, timeout time.Duration, sbx sandbo
 	t.wd = wd
 	return t
 }
+
+// Description 静态版（无调用方上下文时用）：带构造时的 cwd（工作区根）。
+//
+// 引擎在工具实现 tools.ContextDescriber 时会优先用 DescribeFor(ctx)；
+// 这里的返回值给「没有调用方」的场景（工具清单展示、审批文案等）。
+func (t *BashTool) Description() string { return t.describe(t.Cwd) }
 
 // ToolTimeout 实现 tools.ToolTimeoutProvider：声明工具级默认时限
 // （NewBashTool 传入；<=0 → 5 分钟）。引擎据 TimeoutForArgs 可再按本次参数覆盖。
@@ -274,15 +324,6 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	//   - 目标不存在/非目录 → 不更新记忆，原样执行让 shell 报错（模型可见后修正）。
 	cmd := a.Command
 	cwd := t.currentCwd(ctx)
-	if target, rest, ok := t.splitCd(a.Command, cwd); ok {
-		if info, err := os.Stat(target); err == nil && info.IsDir() {
-			t.setCurrentCwd(ctx, target)
-			cwd = target
-			if rest != "" {
-				cmd = rest // cd 前缀已由 spec.Cwd 兑现，只跑剩余命令
-			}
-		}
-	}
 	// 后台意图的两种表达，统一收敛到后台模式：
 	//   - 显式参数 run_in_background=true（模型主动声明）；
 	//   - **命令末尾的 `&`**（shell 惯例）⇒ 自动改写。
@@ -290,11 +331,44 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 	//     起来了、其实已经死了（命令返回 0、输出为空 ⇒ 静默失败，最难查）。
 	//     改写后语义更好：独立进程组 + 立即返回 pid 与日志路径。
 	// 显式参数优先（模型明确说了要后台 ⇒ 别动它的命令文本）。
+	//
+	// 2026-11-19（R5）：后台识别**先于** cd 拆分。顺序反了的话 `cd X && job &`
+	// 会把**会话 cwd** 改到 X —— 而后台进程在自己的进程组里跑，那个 cd 只是它自己
+	// 那个 shell 的事（Claude Code 读的是命令的**结束 cwd**，后台命令没有结束 cwd
+	// ⇒ 不改会话 cwd）。现实影响极小（实测真·后台命令 3/494,060），但顺序错就是错。
 	background := a.RunInBackground
 	if !background {
-		if stripped, ok := splitTrailingBackground(cmd); ok {
+		if stripped, ok := splitTrailingBackground(a.Command); ok {
 			cmd = stripped
 			background = true
+		}
+	}
+	// 会话 cwd 变更回执（§15.3 B 载体）：cd 生效时在**最终交给模型的那份文本**
+	// 末尾追加一行（spill/slim 之后追加 ⇒ 输出被落盘时回执仍可见）。
+	cwdNotice := ""
+	// cd 生效：更新会话 cwd + 回执。后台命令**不**改会话 cwd（见上）。
+	if target, rest, ok := t.splitCd(cmd, cwd); ok && !background {
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			outside := false
+			if root := t.projectRoot(); root != "" && !pathWithinRoot(root, target) {
+				// 越界（出工作区根）⇒ 记忆重置回根 + 回执（Q2 = 重置而非报错）。
+				// 命令本身仍原样交给 shell 跑到那个目录，只是**后续命令的起点**回到根。
+				t.resetCurrentCwd(ctx)
+				cwd = t.currentCwd(ctx)
+				if t.markResetNotified(ctx) {
+					cwdNotice = cwdResetNotice(root)
+				}
+				outside = true
+			} else {
+				prev := cwd
+				t.setCurrentCwd(ctx, target)
+				t.clearResetNotified(ctx)
+				cwd = target
+				cwdNotice = cwdChangeNotice(prev, target)
+			}
+			if rest != "" && !outside {
+				cmd = rest // cd 前缀已由 spec.Cwd 兑现，只跑剩余命令
+			}
 		}
 	}
 	// 宿主钩子（BeforeExec）：真实执行前通知（命令 = 剥离 cd 后的最终文本）。
@@ -416,6 +490,10 @@ func (t *BashTool) Call(ctx context.Context, _, arguments string) (string, error
 			sink.Set(t.buildStructured(ctx, out, exitCode, wall, spill))
 		}
 	}
+	// cwd 回执追加在**模型路径**上（结构化 output 必须保持逐字节纯净，见上）。
+	if cwdNotice != "" {
+		modelOut += cwdNotice
+	}
 	return modelOut, nil
 }
 
@@ -513,9 +591,9 @@ func (t *BashTool) startBackground(ctx context.Context, sbx sandbox.Sandbox, cmd
 		return "", errors.New("bash: this execution backend does not support background runs")
 	}
 	proc, err := starter.StartBackground(ctx, sandbox.ExecSpec{
-		Command:      cmd,
-		Cwd:          cwd,
-		Timeout:      -1, // 后台不限时（活到自己退出）
+		Command:       cmd,
+		Cwd:           cwd,
+		Timeout:       -1, // 后台不限时（活到自己退出）
 		BackgroundLog: logPath,
 	})
 	if err != nil {
@@ -556,19 +634,104 @@ func (t *BashTool) setCurrentCwd(ctx context.Context, dir string) {
 	t.curCwd[key] = dir
 }
 
-// cdPrefixRe 匹配命令开头的 cd：`cd <target>`（target 可带引号/空格）。
-var cdPrefixRe = regexp.MustCompile(`^cd\s+(.+)$`)
+// WorkdirState 暴露本工具使用的会话级 cwd 状态（tools.WorkdirAware）。
+func (t *BashTool) WorkdirState() *workdir.State { return t.wd }
+
+// projectRoot 返回工作区根（cd 越界判据 + 重置目标）。
+//
+// 没接会话级状态时用构造 cwd（改造前的口径：cwd 即工作区根）。
+func (t *BashTool) projectRoot() string {
+	if t.wd != nil {
+		return t.wd.Root()
+	}
+	return t.Cwd
+}
+
+// resetCurrentCwd 把本调用方分区复位回工作区根（cd 越界时用）。
+func (t *BashTool) resetCurrentCwd(ctx context.Context) {
+	key := cwdKey(ctx)
+	if t.wd != nil {
+		t.wd.Reset(key)
+		return
+	}
+	t.mu.Lock()
+	delete(t.curCwd, key)
+	t.mu.Unlock()
+}
+
+// markResetNotified 记录本次越界提示并返回**是否该提示**（false = 上一次已是连续越界）。
+//
+// 只用实例内 map：与 curCwd 同生命周期（同一会话的工具实例）。wd != nil 时也放在
+// 实例上 —— 它表达的是「提示过没有」，是**工具行为**的状态，不是 cwd 真值。
+func (t *BashTool) markResetNotified(ctx context.Context) bool {
+	key := cwdKey(ctx)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.resetNotified == nil {
+		t.resetNotified = map[string]bool{}
+	}
+	if t.resetNotified[key] {
+		return false
+	}
+	t.resetNotified[key] = true
+	return true
+}
+
+// clearResetNotified 清掉该分区的「已提示过越界」标记（成功 cd 后调用）。
+func (t *BashTool) clearResetNotified(ctx context.Context) {
+	key := cwdKey(ctx)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.resetNotified, key)
+}
+
+// pathWithinRoot 判定 p 是否落在 root 内（含 root 自身）。
+func pathWithinRoot(root, p string) bool {
+	root, p = filepath.Clean(root), filepath.Clean(p)
+	return p == root || strings.HasPrefix(p, root+string(os.PathSeparator))
+}
+
+// cwdChangeNotice cd 生效时的回执（空 = 无变化，不需要追加）。
+//
+// 措辞对齐 Claude Code 的 "Shell cwd was reset to <dir>"（重置那条），但正常切换
+// 不叫 "shell cwd" —— shell 的其它状态确实不保持，只有 cwd 保持，避免误导。
+func cwdChangeNotice(prev, cur string) string {
+	if cur == "" || cur == prev {
+		return ""
+	}
+	return "\nWorking directory is now " + cur
+}
+
+// cwdResetNotice 越界重置的回执。
+func cwdResetNotice(root string) string {
+	return "\nWorking directory was reset to " + root +
+		" (the requested path is outside the workspace root)"
+}
+
+// cdPrefixRe 匹配「命令以 cd <目标> 开头」。
+//
+// 2026-11-19 修正（R1）：**必须能匹配多行命令**（heredoc）。
+// 原式 `^cd\s+(.+)$` 在 Go 里 `.` 不匹配 \n、`$` 只在文本末尾 ⇒
+// 「cd X && python3 - <<'EOF' … EOF」这类命令**匹配不上** ⇒ cd 记忆对它静默失效
+// （实测：真实数据里 23.55% 的 cd 命令是这种形态）。
+// `(?s)` + `([^\n]+)` ⇒ 只吃**第一行**的 cd 目标，后续正文原样保留。
+var cdPrefixRe = regexp.MustCompile(`(?s)^cd\s+([^\n]+)`)
 
 // splitCd 解析命令开头的 `cd <目标>`：返回 (目标绝对路径, 剩余命令, true)。
 // 剩余命令 = `cd X && cmd` 的 cmd（无 && 则为 ""）。`cd` 无参/非 cd 开头 → ("","",false)。
 // 目标支持：绝对路径 / 相对路径（相对 cwd）/ ~ / ~/xxx（展开 home）。
 func (t *BashTool) splitCd(command, cwd string) (target, rest string, ok bool) {
-	m := cdPrefixRe.FindStringSubmatch(strings.TrimSpace(command))
+	trimmed := strings.TrimSpace(command)
+	// 正则只吃**第一行**（见 cdPrefixRe），第一行之后的正文必须原样接回来：
+	// 否则 heredoc 的正文会被整段丢掉（2026-11-19 R1 配套，§16.3 #2）。
+	m := cdPrefixRe.FindStringSubmatch(trimmed)
 	if m == nil {
 		return "", "", false
 	}
+	tail := strings.TrimSpace(trimmed[len(m[0]):])
 	after := strings.TrimSpace(m[1])
-	// 分离目标与剩余命令（`cd X && cmd` 或 `cd X; cmd` 均支持 && 形态；; 不特殊处理）
+	// 分离目标与剩余命令：`cd X && cmd` 的 cmd。`;` 刻意**不做**分隔符
+	//（引号路径里出现 `;` 比换行常见）。
 	if i := strings.Index(after, "&&"); i >= 0 {
 		rest = strings.TrimSpace(after[i+2:])
 		after = strings.TrimSpace(after[:i])
@@ -589,20 +752,30 @@ func (t *BashTool) splitCd(command, cwd string) (target, rest string, ok bool) {
 	}
 	switch {
 	case after == "~":
-		if h, err := os.UserHomeDir(); err == nil {
-			return h, rest, true
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", false
 		}
-		return "", "", false
+		target = h
 	case strings.HasPrefix(after, "~/"):
-		if h, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(h, after[2:]), rest, true
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", false
 		}
-		return "", "", false
+		target = filepath.Join(h, after[2:])
 	case filepath.IsAbs(after):
-		return filepath.Clean(after), rest, true
+		target = filepath.Clean(after)
 	default:
-		return filepath.Clean(filepath.Join(cwd, after)), rest, true
+		target = filepath.Clean(filepath.Join(cwd, after))
 	}
+	// 第一行之后的正文接回剩余命令（换行分隔 ⇒ 用 \n 拼）。
+	if tail != "" {
+		if rest != "" {
+			rest += "\n"
+		}
+		rest += tail
+	}
+	return target, rest, true
 }
 
 // checkHighRisk 静态高风险命令检查：先识别危险命令/可执行词，再按其类型做深度二次判断，

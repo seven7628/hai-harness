@@ -15,6 +15,7 @@ import (
 	"github.com/seven7628/hai-harness/skills"
 	"github.com/seven7628/hai-harness/todo"
 	"github.com/seven7628/hai-harness/tools"
+	"github.com/seven7628/hai-harness/workdir"
 	"os"
 	"path/filepath"
 	"strings"
@@ -478,6 +479,13 @@ type AgentContext struct {
 	// 直接归组，而不必先扫 agent_start 走 run 树。
 	// 语义与命名理由见 events/agentlabel.go（`task_id` 在 events 里已是三义，不能复用）。
 	AgentTaskId string
+
+	// workKey 是本次运行的 **cwd 分区键**（workdir.Key）。
+	//
+	// 与 AgentTaskId 不同：AgentTaskId 是「子智能体身份」（空 = 主会话运行 / 同步子运行），
+	// workKey 是「哪个 agent 的目录」—— 同步子运行也要有**独立**分区，否则它的 cd
+	// 会改掉主 agent 的目录（键为空 = 主 agent 的分区）。
+	workKey string
 
 	Handler events.EventHandler // 本次运行的事件消费者
 
@@ -2035,7 +2043,9 @@ func (a *AgentLoop) streamOnce(ac *AgentContext, r *roundResult) (bool, error) {
 		},
 		SessionID: a.cfg.SessionID, // Responses prompt cache key + session affinity（空 = 不启用）
 		Messages:  requestMessages,
-		Tools:     a.toolSchemas(streamCtx, ac.Mode),
+		// schema 装配带上 cwd 分区键：bash 的描述里要输出**本调用方**的当前目录
+		//（tools.ContextDescriber）。挂个 ctx value 对 toolSchemas 内部无副作用。
+		Tools: a.toolSchemas(workdir.WithKey(streamCtx, ac.workKey), ac.Mode),
 	}
 
 	err := a.cfg.Provider.Stream(streamCtx, req, func(e provider.StreamEvent) error {
@@ -2643,6 +2653,8 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 		taskID = opts.TaskId // 本次运行的后台任务 id（空 = 主 Agent 运行）：子 agent 派子 agent时
 		// spawn 工具据此把孙任务结果投回本 loop 的 inbox，而非主会话（见 subagent.Tool.runBackground）
 	}
+	taskID = cwdPartitionKey(taskID, ac.RunId, ac.Depth)
+	ac.workKey = taskID
 	ctx := events.WithToolContextForRunTask(ac.ctx, ac.RunId, ac.ParentRunId, taskID, ac.Depth, ac.Handler, ac.Approver, hooks)
 	ctx = todo.WithStore(ctx, ac.Todo)
 	// 待办快照的属主 = 本运行（ac.Todo）：主 run 是会话清单，子 agent 是它自己那份。
@@ -2795,6 +2807,23 @@ func (a *AgentLoop) runTools(ac *AgentContext, opts *RunOptions, calls []core.To
 //   - 只读桶（ReadOnlyTool 声明）恒在前、修改桶在后 —— plan/normal 共享只读前缀，
 //     模式切换的缓存失配点被压到修改桶（+ 尾部 SystemHint）；
 //   - mode.AllowTool 返回 false 的工具整体不注入（LLM 不可见）。
+//
+// cwdPartitionKey 计算本次运行的 **cwd 分区键**（R6，2026-11-19）。
+//
+// 两条路：
+//   - 后台子运行 / 主运行：直接用 opts.TaskId（主运行为空 = workdir.MainKey）；
+//   - **同步子运行**（subagent.runSync 不设 opts.TaskId，但 Depth > 0）必须合成一个
+//     唯一键，否则键为空 = 主 agent 的分区 ⇒ 子 agent 的 cd 会改掉主 agent 的目录。
+//
+// 键用 RunId+Depth：RunId 每次 Run 唯一（够区分不同同步子运行），Depth 区分嵌套层；
+// 该子运行内稳定（同步子运行只跑一个 Run）。
+func cwdPartitionKey(taskID, runID string, depth int) string {
+	if taskID == "" && depth > 0 {
+		return fmt.Sprintf("sync:%s:%d", runID, depth)
+	}
+	return taskID
+}
+
 func (a *AgentLoop) toolSchemas(ctx context.Context, mode *Mode) []core.ToolSchema {
 	if a.cfg.ToolEngine == nil {
 		return nil

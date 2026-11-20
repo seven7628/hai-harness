@@ -635,9 +635,15 @@ func (e *Engine) ToolParams(ctx context.Context) ([]core.ToolSchema, error) {
 		if !DeclaredToModel(t) {
 			continue
 		}
+		desc := t.Description()
+		if cd, ok := t.(ContextDescriber); ok {
+			// 按调用方上下文给描述（如 bash 的当前工作目录）。
+			// schema 每请求重建 ⇒ 这里的值总是**当前**的。
+			desc = cd.DescribeFor(ctx)
+		}
 		schemas = append(schemas, core.ToolSchema{
 			Name:        t.Name(),
-			Description: t.Description(),
+			Description: desc,
 			Parameters:  t.Parameters(),
 		})
 		if _, ok := t.(LoadoutProvider); ok {

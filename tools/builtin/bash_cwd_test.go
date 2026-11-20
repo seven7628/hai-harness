@@ -26,7 +26,13 @@ func bashCtx(runID, taskID string) context.Context {
 // TestBashCwdIsolatedPerCaller 子 agent 的 cd 不影响主 agent。
 func TestBashCwdIsolatedPerCaller(t *testing.T) {
 	root := t.TempDir()
-	sub := t.TempDir()
+	// 2026-11-19：cd 目标必须在**工作区根内**（cd 越界现在会重置回根，
+	// 见 bash 的 projectRoot/cwdResetNotice）。改造前这里用 t.TempDir() 造的是
+	// 根的**兄弟目录**，新语义下会被重置 ⇒ 断言自然失败（不是本测试要测的东西）。
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	tool := NewBashTool(root, 0, nil, nil)
 
 	mainCtx := bashCtx("run-main", "")       // 主 agent 直调
@@ -49,7 +55,11 @@ func TestBashCwdIsolatedPerCaller(t *testing.T) {
 // TestBashCwdPersistsForSameCaller 同一调用方的 cwd 跨调用记忆照旧。
 func TestBashCwdPersistsForSameCaller(t *testing.T) {
 	root := t.TempDir()
-	sub := t.TempDir()
+	// 同上：cd 目标必须在工作区根内（越界会重置）。
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	tool := NewBashTool(root, 0, nil, nil)
 	ctx := bashCtx("run-main", "")
 
