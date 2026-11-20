@@ -216,3 +216,28 @@ docs/tunnel-identifier.md    (被引用 3 次)
 4. `AGENT_CWD_DESIGN` 的 §0–§6、§10、§13
 5. `ARTIFACT_SYSTEM_TECH_PLAN` 的全部散文与章节结构
 6. 两个 worktree 的 git 历史（分支从未推送）
+
+---
+
+## 补充（00:55）：bundle 汇总扫描把终端还原范围扩大 2.4 倍
+
+首轮只解析了 `builtin-surfaces.test.cjs` 一个 bundle（9 模块 / 526 行）。
+改为扫描 `/private/tmp` 下**全部 46 个**含 `// src/` 标记的构建产物（223MB，
+depth≤2，排除 node_modules 与 go module 缓存）后，按路径取最完整版本：
+
+| | 首轮 | 汇总后 |
+|---|---|---|
+| 模块数 | 9 | **16** |
+| 行数 | 526 | **1,273** |
+
+**新增模块**（首轮没有的）：
+- `commandContext.ts`（67 行）+ 测试（100 行）—— 从 PTY 字节流还原「用户提交了
+  哪条命令」：回车提交、退格、`Ctrl-U/C` 清行、`Tab`/`Esc` 视为补全转义 ⇒ 标记
+  dirty 不算用户输入。用于给 AI 提供终端上下文
+- `paneMachine-test.ts`（120 行）、`writer-test.ts`（147 行）、
+  `frame-test.ts`（50 行）、`formatSelection-test.ts`（80 行）
+- `src/p8-host-seams-entry.tsx`（105 行，host seams 测试入口）
+
+**补全**：`termSurface.tsx` 20 → 195 行（首轮拿到的是残缺版本）。
+
+对应提交：worktree `terminal-panel` 的 `cf86725`。
