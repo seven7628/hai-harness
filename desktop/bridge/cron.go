@@ -135,7 +135,12 @@ func (m *manager) cronTick(now time.Time) {
 	// 一次性兜底落盘（各 Advance 内已落盘；此处保险）
 	m.cron.Persist()
 	// 自动清理超龄派生会话文件
-	if cs.autoCleanOn() {
+	//
+	// 2026-11-20：随 disableAllDiskSweep 一并停用 —— 应用不再自行删除磁盘文件。
+	// cronClean 只删 ~/.go-code/cron_sessions/<wsKey>/<jobID>/ 下的派生会话文件
+	// （不碰工作区源码），但「后台自动删文件」这件事本身已按用户要求整体停用。
+	// 函数本身保留（将来可显式调用），只是不再自动触发。
+	if cs.autoCleanOn() && !disableAllDiskSweep {
 		m.cronClean(now)
 	}
 }

@@ -790,9 +790,21 @@ func checkHighRisk(command string) string {
 	structural := stripShellLiterals(command)
 
 	// 1. rm 递归强制删除：识别到 rm -rf 后逐个检查目标，仅危险目标拒绝
-	//   （. .. / ~ $HOME *.* 全局/根/家/上级）；显式安全子目录（/tmp/foo、dist/、./build）放行。
+	//   （. .. / ~ $HOME *.* 全局/根/家/上级 + 家目录一级子目录 + 仓库根）；
+	//   显式安全子目录（/tmp/foo、dist/、./build、~/.cache/x）放行。
 	if rmTarget := dangerousRmTarget(command); rmTarget != "" {
 		return "rm -rf target is " + rmTarget + " (would wipe the workspace/parent/root/home directory)"
+	}
+	// 1b. find 的删除旁路（2026-11-20 事故后新增）。
+	//
+	// 为什么单列：`dangerousRmTarget` 按 token 流解析 `rm`，遇到 `find` 时 inRm=false，
+	// 于是 `find ... -exec rm -rf {} +` 这段**根本没被当作 rm 调用看待** —— 纯绕过。
+	// 同理 `-delete` 是 find 自己的删除动作，完全不经过 rm 的判定。
+	//
+	// 判据：命令里出现 find 且带 -delete / -exec rm / -exec unlink，
+	// 且搜索根落在**家目录**或**工作区根**（或根目录）⇒ 拦。
+	if findTarget := dangerousFindTarget(command); findTarget != "" {
+		return "find delete target is " + findTarget + " (would wipe the workspace/home directory)"
 	}
 	// 2. 命令位危险可执行词（shutdown/reboot/sudo/mkfs 等）：须以「命令身份」出现
 	//   （前导为命令分隔符），后随单词边界 —— echo shutdown、python x.sh 这类文本/文件名不命中。
@@ -833,12 +845,143 @@ func dangerousRmTarget(command string) string {
 			applyRmFlags(tok, &hasR, &hasF)
 		case inRm:
 			// 目标候选：具备递归+强制 且 危险路径 → 拦截
-			if hasR && hasF && isDangerousPath(tok) {
+			if hasR && hasF && (isDangerousPath(tok) || isGitRepoRoot(tok)) {
 				return tok
 			}
 		}
 	}
 	return ""
+}
+
+// isGitRepoRoot 目标是不是一个 git 仓库的根（目录下有 .git）。
+//
+// 为什么单独判：删掉仓库根 = 丢掉 .git ⇒ 本地未推送提交与未提交改动**永久消失**，
+// 且无法靠"重新 clone"还原（这正是 2026-11-19 事故的核心损失）。
+// 路径形态上看它只是"某个子目录"，但语义上它是最不可恢复的一类目标。
+//
+// 判定用**文件系统事实**（目标下有无 .git），不猜路径 —— 任何位置的仓库根都算。
+func isGitRepoRoot(tok string) bool {
+	q := strings.Trim(tok, `"'`)
+	// 先展开 ~ / $HOME（家目录锚定）
+	if q == "~" || q == "$HOME" {
+		return false // 家目录本身由 isDangerousPath 负责
+	}
+	if strings.HasPrefix(q, "~/") || strings.HasPrefix(q, "$HOME/") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return false
+		}
+		q = filepath.Join(home, q[strings.Index(q, "/")+1:])
+	}
+	if !filepath.IsAbs(q) {
+		// 相对路径：相对进程 cwd 解析（bash 工具的工作区根）
+		abs, err := filepath.Abs(q)
+		if err != nil {
+			return false
+		}
+		q = abs
+	}
+	fi, err := os.Stat(filepath.Join(q, ".git"))
+	if err != nil {
+		return false
+	}
+	// .git 可能是目录（普通仓库）或文件（worktree / submodule 的 gitlink）
+	return fi.IsDir() || fi.Mode().IsRegular()
+}
+
+// dangerousFindTarget 识别 find 的删除动作（-delete / -exec rm / -exec unlink），
+// 当搜索根落在家目录 / 工作区根 / 根目录这类「过宽范围」时返回该根（否则空串）。
+//
+// 为什么要单独判：find 的删除**不经过 rm 的判定**（见 checkHighRisk 里的 1b）。
+// 事故形状：`find /Users/admin -maxdepth 2 -name go-code -exec rm -rf {} +`
+// 这类命令在事故前是完全放行的。
+//
+// 放行的：搜索根是**具体子目录**（find ./dist -name '*.map' -delete）—— 那是
+// 正常的构建清理；根是 /tmp 下的临时目录也放行。
+func dangerousFindTarget(command string) string {
+	tokens := strings.Fields(command)
+	inFind := false
+	deletes := false
+	execIsDelete := false
+	var root string
+	haveRoot := false
+	// find 的「吃下一个 token」的 flag：-name / -path / -type / -maxdepth / -mindepth …
+	// 这些的参数**不是**搜索根，不能误当路径。
+	consumesArg := map[string]bool{
+		"-name": true, "-path": true, "-type": true, "-maxdepth": true,
+		"-mindepth": true, "-user": true, "-group": true, "-size": true,
+		"-newer": true, "-regex": true, "-iregex": true, "-inum": true,
+		"-samefile": true, "-links": true, "-printf": true, "-print0": true,
+	}
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		switch {
+		case isCommandSeparator(tok):
+			inFind = false
+			deletes = false
+			execIsDelete = false
+		case tok == "find":
+			inFind = true
+			deletes = false
+			execIsDelete = false
+			haveRoot = false
+		case !inFind:
+			continue
+		case tok == "-delete":
+			deletes = true
+		case tok == "-exec" || tok == "-execdir":
+			// -exec 后面紧跟的是**被执行的命令**；只有 rm / unlink / rmdir 才算删除
+			execIsDelete = true
+		case execIsDelete:
+			// -exec 的命令词：rm / unlink / rm -rf … ⇒ 判定为删除
+			if tok == "rm" || tok == "unlink" || tok == "rmdir" || tok == "sh" || tok == "bash" {
+				deletes = true
+			}
+			execIsDelete = false
+		case consumesArg[tok]:
+			// 跳过这个 flag 的参数（下一个 token）——它不是搜索根
+			i++
+		case strings.HasPrefix(tok, "-"):
+			// 其他 flag（不影响判定，也不吃参数）
+		default:
+			if !haveRoot {
+				root = tok
+				haveRoot = true
+			}
+		}
+	}
+	if !deletes || !haveRoot {
+		return ""
+	}
+	if isBroadSearchRoot(root) {
+		return root
+	}
+	return ""
+}
+
+// isBroadSearchRoot 搜索根是否「过宽」—— 家目录 / 根目录 / 工作区根。
+//
+// 工作区根怎么知道：bash 工具的 Cwd 就是工作区根（装配时绑定），所以
+// "." / "" 视为工作区根 —— 但 find . -name x -delete 只删当前目录下的匹配项，
+// 范围有限 ⇒ **不拦**（那是正常的构建清理）。真正过宽的是家目录与根。
+func isBroadSearchRoot(root string) bool {
+	q := strings.Trim(root, `"'`)
+	switch q {
+	case "/", "~", "$HOME", "$HOME/":
+		return true
+	}
+	if rel, ok := homeRelativePath(q); ok {
+		// 家目录本身（含绝对路径形式的家目录）
+		if rel == "" {
+			return true
+		}
+		// 家目录一级子目录（~/Desktop、~/.go-code、~/workspace …）——
+		// 白名单里的缓存目录放行。
+		if !strings.Contains(rel, "/") && !strings.ContainsAny(rel, "*?") {
+			return !isSafeToDeleteUnderHome(q)
+		}
+	}
+	return false
 }
 
 // isCommandSeparator 命令分隔符（重置 rm 判断的独立命令片段边界）。
@@ -889,7 +1032,119 @@ func isDangerousPath(tok string) bool {
 	return strings.HasPrefix(q, "../") || // 上级目录
 		strings.HasPrefix(q, "*/") || // 通配引导的跨目录删除
 		// 家目录通配（~/*、$HOME/* 及更深的通配段）仍危险
-		hasHomeGlob(q)
+		hasHomeGlob(q) ||
+		// 2026-11-20 事故后新增：家目录 / 工作区下的**具体子路径**也危险。
+		//
+		// 事故形状：`rm -rf ~/Desktop ~/.go-code /path/to/repo` 这类**具体路径**
+		// 全部通过了本检查（只拦 `~`/`*` 本身）⇒ 2026-11-19 一台机器上的
+		// 整个 git 仓库 + ~/.go-code + 桌面目录被删（见 docs/RECOVERY_2026-11-19.md）。
+		//
+		// 为什么"具体子路径"也危险：`rm -rf dist/`（工作区内的可重建产物）与
+		// `rm -rf ~/workspace/go-code`（含 .git 的项目仓库）在**可恢复性**上完全不是一回事。
+		// 后者丢了 = 本地未推送提交与未提交改动**永久消失**。
+		//
+		// 放行的例外（白名单）：明确的缓存/临时性质目录 —— 删了可重建、无用户资产。
+		isHomeFirstLevel(q) && !isSafeToDeleteUnderHome(q)
+}
+
+// isHomeFirstLevel 目标是不是「家目录下的**一级**子目录」（~/Desktop、~/.go-code、
+// ~/workspace 这类用户放东西的地方）。
+//
+// 为什么只看一级：二级及更深（~/.config/foo、~/Library/Caches/x）多半是应用自己的
+// 缓存/配置，删了可重建；一级目录（Desktop/Documents/Downloads/workspace/.go-code）
+// 才是用户资产聚集地。
+//
+// 只认家目录**直接子目录**：~/Documents/old-report 属于二级 → 不拦（用户可能就想
+// 清理一个旧文件夹）；~/Documents 是家目录本身的一级 → 拦。
+func isHomeFirstLevel(q string) bool {
+	rel, ok := homeRelativePath(q)
+	if !ok {
+		return false
+	}
+	if rel == "" {
+		return false // 家目录本身（已由前面的 switch 拦）
+	}
+	// 一级 = 恰好一段（不含通配）
+	if strings.ContainsAny(rel, "*?") {
+		return false
+	}
+	return !strings.Contains(rel, "/")
+}
+
+// homeRelativePath 把 ~/x、$HOME/x、/Users/<me>/x 解析成相对家目录的路径。
+// 不是家目录下的 → ok=false。
+func homeRelativePath(q string) (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", false
+	}
+	home = filepath.Clean(home)
+	var abs string
+	switch {
+	case q == "~" || q == "$HOME":
+		abs = home
+	case strings.HasPrefix(q, "~/"), strings.HasPrefix(q, "$HOME/"):
+		abs = filepath.Join(home, q[strings.Index(q, "/")+1:])
+	case strings.HasPrefix(q, home+"/"):
+		abs = filepath.Clean(q)
+	case q == home:
+		abs = home
+	default:
+		return "", false
+	}
+	rel, err := filepath.Rel(home, abs)
+	if err != nil {
+		return "", false
+	}
+	if rel == "." {
+		rel = "" // 家目录本身
+	}
+	return rel, true
+}
+
+// isSafeToDeleteUnderHome 家目录下的白名单目录：删了可重建、无用户资产。
+//
+// 白名单来源：这些是**应用/系统自己的缓存**，删了立刻重建，不含用户数据。
+// 刻意**不含** Desktop/Documents/Downloads/Pictures/Music（用户资产）、
+// workspace（项目目录）、.go-code（本应用的会话数据）。
+var safeToDeleteUnderHome = []string{
+	".cache",
+	".npm",
+	".npmrc",
+	".cargo",
+	".rustup",
+	".gradle",
+	".m2",
+	".nuget",
+	".yarn",
+	".pnpm-store",
+	".composer",
+	".pyenv",
+	".virtualenvs",
+	".venv",
+	".conda",
+	".gem",
+	".cocoapods",
+	".pub-cache",
+	".go",
+	"go/pkg/mod/cache",
+	"Library/Caches",
+	"Library/Logs",
+	".Trash",
+}
+
+// isSafeToDeleteUnderHome 目标是否落在白名单目录里（含其子路径）。
+func isSafeToDeleteUnderHome(q string) bool {
+	rel, ok := homeRelativePath(q)
+	if !ok || rel == "" {
+		return false
+	}
+	for _, safe := range safeToDeleteUnderHome {
+		if rel == safe || strings.HasPrefix(rel, safe+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // hasHomeGlob 家目录路径里是否含通配段（~/*、~/foo/*、$HOME/* 等）。

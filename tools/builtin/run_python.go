@@ -989,10 +989,19 @@ func pyRootTarget(arg string, lits []string) bool {
 }
 
 // checkPythonHighRisk 高危脚本静态检查：命中返回原因（非空即拦截），未命中返回 ""。
-// 两类命中：
+//
+// 四类命中：
 //  1. 递归删除「根/家/工作区根本身」的字面量或家目录表达式目标；
-//  2. os.system/subprocess 里字面量拼出的 `rm [-r -f] 危险目标`（复用 bash 的 dangerousRmTarget，
-//     与 `bash` 工具同口径：明确子目录如 rm -rf dist/ 放行）。
+//  2. 递归删除**具体的高价值路径**（家目录一级子目录、含 .git 的仓库根）——
+//     与 bash 工具同口径（复用 isDangerousPath / isGitRepoRoot / isHomeFirstLevel），
+//     见 2026-11-20 事故修复；
+//  3. 递归删除**家目录锚定但静态还原不出确切值**的目标（f-string / Path.home() 拼接）——
+//     保守拒绝：递归删除不可逆，误拦代价 << 漏删代价；
+//  4. os.system/subprocess 里字面量拼出的 `rm [-r -f] 危险目标`（复用 bash 的 dangerousRmTarget）。
+//
+// 2026-11-20 事故后收紧的原因：原先只拦「目标 == 家目录本身」，于是
+// `shutil.rmtree("~/Documents")` / `shutil.rmtree("/Users/admin/workspace/go-code")`
+// 这类**具体资产路径**全部放行 —— 与 bash 侧同一个缺口（bash 侧已修，见 bash.go）。
 func checkPythonHighRisk(script string) string {
 	if strings.TrimSpace(script) == "" {
 		return ""
@@ -1004,10 +1013,36 @@ func checkPythonHighRisk(script string) string {
 			if isDangerousPath(v) {
 				return "recursive delete of " + strconv.Quote(v) + " (root/home/workspace itself or a whole-glob target)"
 			}
+			// 与 bash 侧同口径：仓库根 / 家目录一级子目录也危险
+			if isGitRepoRoot(v) {
+				return "recursive delete of the git repository root " + strconv.Quote(v) +
+					" (losing .git permanently loses unpushed commits and uncommitted work)"
+			}
+			if isHomeFirstLevel(v) && !isSafeToDeleteUnderHome(v) {
+				return "recursive delete of " + strconv.Quote(v) +
+					" (a top-level home directory holds user assets; not recoverable)"
+			}
 			continue
 		}
 		if pyRootTarget(target, lits) {
 			return "recursive delete of the home/working directory itself (" + strings.TrimSpace(target) + ")"
+		}
+		// 拼接出来的路径（f-string / 变量 / os.path.join(…)）：能还原出绝对路径就判；
+		// 还原不出但**看得出是家目录锚定**的 ⇒ 保守拒绝。
+		if resolved, ok := pyResolvedTarget(target, lits); ok {
+			if isGitRepoRoot(resolved) {
+				return "recursive delete of the resolved git repository root " + strconv.Quote(resolved) +
+					" (losing .git permanently loses unpushed commits and uncommitted work)"
+			}
+			if isHomeFirstLevel(resolved) && !isSafeToDeleteUnderHome(resolved) {
+				return "recursive delete of the resolved path " + strconv.Quote(resolved) +
+					" (a top-level home directory holds user assets; not recoverable)"
+			}
+			continue
+		}
+		if pyTargetLooksLikeHomePath(target, lits) {
+			return "recursive delete of a home-anchored path (" + strings.TrimSpace(target) +
+				") that could not be statically resolved (cannot verify it is safe to delete)"
 		}
 	}
 	for _, m := range pyShellCallRe.FindAllStringIndex(code, -1) {
@@ -1017,4 +1052,60 @@ func checkPythonHighRisk(script string) string {
 		}
 	}
 	return ""
+}
+
+// pyResolvedTarget 尝试把删除目标还原成一个绝对路径。
+//
+// 覆盖形态：字符串拼接（"~/Documents"、"$HOME/workspace/go-code"）、
+// os.path.join(…)、以及不含插值的 f-string。
+//
+// 还原不出 → ( "", false )：调用方据此走「保守拒绝」分支（仅当看得出是家目录锚定）。
+func pyResolvedTarget(arg string, lits []string) (string, bool) {
+	// f-string 里带插值 ⇒ 还原不出确切值（f"{home}/Documents" 的 home 是运行时才知道的）
+	if strings.Contains(arg, "{") {
+		return "", false
+	}
+	joined := strings.Join(pyTokenValues(arg, lits), "")
+	if joined == "" {
+		return "", false
+	}
+	// 展开 ~ / $HOME 前缀
+	if strings.HasPrefix(joined, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", false
+		}
+		joined = filepath.Join(home, strings.TrimPrefix(joined, "~"))
+	}
+	if strings.HasPrefix(joined, "$HOME/") {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", false
+		}
+		joined = filepath.Join(home, strings.TrimPrefix(joined, "$HOME/"))
+	}
+	if !filepath.IsAbs(joined) {
+		return "", false
+	}
+	return filepath.Clean(joined), true
+}
+
+// pyTargetLooksLikeHomePath 目标里**看得出**是家目录锚定的路径，但静态还原不出确切值。
+//
+// 典型：f"{Path.home()}/Documents"、os.path.join(os.environ["HOME"], "workspace")、
+// pathlib.Path("~") / "Documents"。
+//
+// 这类目标无法静态判定具体是哪一级 ⇒ 保守拒绝（宁可误拦，不可漏删）。
+func pyTargetLooksLikeHomePath(arg string, lits []string) bool {
+	code := strings.Join(strings.Fields(arg), "")
+	if pyHomeFuncRe.MatchString(code) {
+		return true
+	}
+	for _, v := range pyTokenValues(arg, lits) {
+		switch v {
+		case "~", "$HOME", "HOME":
+			return true
+		}
+	}
+	return false
 }

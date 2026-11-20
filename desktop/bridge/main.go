@@ -94,6 +94,31 @@ const (
 	workPrompt   = prompt.DesktopWork
 )
 
+// disableAllDiskSweep 全局关停「应用自行在后台删除磁盘文件」的所有自动清扫。
+//
+// 2026-11-20 起置 true（用户决定，不再保留）。
+//
+// 背景：2026-11-19 一次误删事故（整个 git 仓库 + ~/.go-code + 用户桌面目录被删）
+// 后，用户要求「把自动清理的脚本清除掉，不要保留了」。
+//
+// 审计结论（见 docs/RECOVERY_2026-11-19.md）：被关停的这些清扫，其 root 都锚在
+// ~/.go-code/* 与 $TMPDIR/*，**不会**触及工作区源码。但「应用在后台悄悄删磁盘文件」
+// 本身不可预期 —— 用户无法预知它删了什么、何时删、删掉是否可逆。
+// 明文事件日志 → .gz 封存（eventslog.Archive 会 os.Remove 明文）尤其如此：
+// 内容虽在 .gz 里，但明文文件确实消失了，且此前**没有独立开关**。
+//
+// 这里只关**触发器**：删除函数本身留在代码里（将来需要时可显式调用），
+// 便于复查与回滚。影响范围：
+//   - sweepSessionFilesInBackground（会话清扫 + events gzip 封存 + sidecar 死字节回收 + record 清扫）
+//   - sweepPreviewCache（预览缓存过期/LRU，启动时一次）
+//   - startPreviewCacheSweeper（预览缓存，每 30 分钟）
+//   - cron.autoClean（cron 派生会话 30 天保留期清理，见 cron.go）
+//   - sweepSpillResources（工具输出 spill 的 TTL 回收，见 main.go）
+//
+// 不受影响（不删磁盘文件）：applyMemoryLimit（纯内存软上限）、
+// sandbox.StartOrphanSweeper（只杀逃逸进程）、cron 调度本身（跑任务，不删文件）。
+const disableAllDiskSweep = true
+
 // computerPromptGuide Computer Use 插件启用时追加的系统提示词段（§8 落地）。
 // 真机 LLM E2E 教训（2026-09）：模型自由决策时会固执重试失败调用、用 bash 越界
 // 自救（open/osascript/killall）、不听任务里的路径提示、点添加按钮后不知键入——
@@ -6277,6 +6302,12 @@ func toolSpillRoot() string {
 // 触发点挂在**会话**上（不是挂在 Engine 上，也不是挂在「产生资源的那次调用」上）：
 // 后者只会在「又写了一个新文件」时才触发 ⇒ 会话一死，最后一次清扫永远不发生。
 func sweepSpillResources() {
+	// 2026-11-20：随 disableAllDiskSweep 一并停用 spill 的 TTL 回收。
+	// spill 目录在 $TMPDIR 下（不经 appDataDir），原本由系统临时目录机制兜底清理，
+	// 不回收的代价只是占用一点临时空间 —— 换来的是「应用不自行删文件」的一致性。
+	if disableAllDiskSweep {
+		return
+	}
 	tools.SweepSpillRoot(toolSpillRoot())
 	builtin.SweepToolSpillDirs()
 }
@@ -7545,13 +7576,29 @@ func serve() error {
 	// 堆软上限必须在清扫**之前**设好：清扫那 5 分钟的 IO 风暴会把堆冲到
 	// 3 GB（2026-11-12 实测），其中 2.8 GB 被系统换出到 swap 且再也回不来。
 	applyMemoryLimit()
-	if loadCheckpointSettings().sweepJournals() {
+	// 2026-11-20：磁盘自动清扫**全部停用**。
+	//
+	// 为什么：2026-11-19 一次误删事故后，用户要求「把自动清理的脚本清除掉，不要保留」。
+	// 审计结论（docs/RECOVERY_2026-11-19.md）：这些清扫的 root 虽然都锚在
+	// ~/.go-code/* 与 $TMPDIR/*（不会碰工作区源码），但「应用在后台自行删除磁盘文件」
+	// 这件事本身就是不可预期的风险源 —— 用户无法预知它删了什么、什么时候删。
+	//
+	// 停用的是**触发器**，不是删除函数本身：
+	//   - sweepSessionFilesInBackground（会话清扫 + events gzip 封存 + sidecar 死字节回收）
+	//   - sweepPreviewCache（预览缓存过期/LRU，启动时一次）
+	//   - startPreviewCacheSweeper（预览缓存，每 30 分钟）
+	// 这些函数仍留在代码里（便于将来需要时手动调用），只是不再自动跑。
+	//
+	// 保留的：applyMemoryLimit（纯内存，不删文件）、sandbox.StartOrphanSweeper（只杀进程）。
+	if loadCheckpointSettings().sweepJournals() && !disableAllDiskSweep {
 		go sweepSessionFilesInBackground()
 	}
-	go m.sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU），见 (*manager).sweepPreviewCache
-	// 运行期周期清扫（2026-11-18 第 3 步）：启动那一次扫完就**再也不扫**⇒
-	// 512MiB 的预算在运行期从不生效 ⇒ 桌面端连开一天，磁盘只增不减。
-	m.previewSweeper = startPreviewCacheSweeper(m.sweepPreviewCache)
+	if !disableAllDiskSweep {
+		go m.sweepPreviewCache() // R08a：预览产物缓存清扫（过期 + LRU）
+		// 运行期周期清扫（2026-11-18 第 3 步）：启动那一次扫完就**再也不扫**⇒
+		// 512MiB 的预算在运行期从不生效 ⇒ 桌面端连开一天，磁盘只增不减。
+		m.previewSweeper = startPreviewCacheSweeper(m.sweepPreviewCache)
+	}
 	// 逃逸者兜底清扫（第 5 步）：setsid / 双重 fork 逃出进程组的残留 ⇒ 组杀够不着
 	// ⇒ 靠「执行标记 + 父进程已死」认领并收掉（周期 60s）。
 	m.orphanSweeper = sandbox.StartOrphanSweeper()
